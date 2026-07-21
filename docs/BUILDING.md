@@ -31,6 +31,11 @@ python scripts/build_sidecar.py    # Bundle Python into sidecar binary
 cargo tauri build                   # Build Vireo.app and .dmg
 ```
 
+The sidecar build downloads the pinned ExifTool portable distribution,
+verifies its SHA-256 checksum, and bundles the runtime and upstream license
+README. Release CI runs the finished sidecar's `--check-exiftool` smoke check
+before packaging the app.
+
 Output:
 - `src-tauri/target/release/bundle/macos/Vireo.app`
 - `src-tauri/target/release/bundle/dmg/Vireo_X.Y.Z_aarch64.dmg`

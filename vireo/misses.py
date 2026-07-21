@@ -178,10 +178,14 @@ def _fetch_workspace_miss_rows(db, detector_confidence=None):
     return [dict(r) for r in rows]
 
 
-def _target_ids_from_scope(rows, collection_id=None, db=None, since=None):
-    target_ids = None
+def _target_ids_from_scope(rows, collection_id=None, db=None, since=None,
+                           photo_ids=None):
+    target_ids = set(photo_ids) if photo_ids is not None else None
     if collection_id is not None:
-        target_ids = db.collection_photo_ids(collection_id)
+        collection_ids = db.collection_photo_ids(collection_id)
+        target_ids = (
+            collection_ids if target_ids is None else target_ids & collection_ids
+        )
     if since is not None:
         since_ids = {
             r["id"] for r in rows
@@ -294,7 +298,7 @@ def _attach_primary_detections(db, photos):
 
 
 def preview_misses_for_workspace(db, pipeline_config, detector_confidence=None,
-                                 since=None):
+                                 since=None, photo_ids=None):
     """Return dynamically derived misses without writing DB flags."""
     if not pipeline_config.get("miss_enabled", True):
         return {"no_subject": [], "clipped": [], "oof": []}
@@ -303,7 +307,9 @@ def preview_misses_for_workspace(db, pipeline_config, detector_confidence=None,
     rows = _fetch_workspace_miss_rows(
         db, detector_confidence=detector_confidence
     )
-    target_ids = _target_ids_from_scope(rows, since=since)
+    target_ids = _target_ids_from_scope(
+        rows, since=since, photo_ids=photo_ids
+    )
     _, flags_by_id = _derive_miss_updates(
         rows, pipeline_config, target_ids=target_ids
     )
@@ -348,7 +354,7 @@ def preview_misses_for_workspace(db, pipeline_config, detector_confidence=None,
 
 def compute_misses_for_workspace(
     db, pipeline_config, collection_id=None, exclude_photo_ids=None, now=None,
-    detector_confidence=None, since=None,
+    detector_confidence=None, since=None, photo_ids=None,
 ):
     """Compute and persist miss flags for photos in the active workspace.
 
@@ -366,6 +372,9 @@ def compute_misses_for_workspace(
     not touched — so a partial pipeline run does not stamp
     `miss_computed_at` on photos outside its scope, which would
     otherwise defeat the `/misses?since=` review-window filter.
+
+    `photo_ids` accepts an already-resolved intersection of Misses-page
+    filters. It composes with `collection_id` and `since` when supplied.
 
     `exclude_photo_ids` mirrors the preview-deselection filter applied by
     earlier pipeline stages (`params.exclude_photo_ids`). Those photos
@@ -400,7 +409,8 @@ def compute_misses_for_workspace(
         db, detector_confidence=detector_confidence
     )
     target_ids = _target_ids_from_scope(
-        rows, collection_id=collection_id, db=db, since=since
+        rows, collection_id=collection_id, db=db, since=since,
+        photo_ids=photo_ids,
     )
 
     # Microsecond precision: the /misses?since=... review window uses

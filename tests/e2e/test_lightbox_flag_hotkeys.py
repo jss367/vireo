@@ -246,9 +246,14 @@ def test_lightbox_newer_failed_write_falls_back_to_older_success(live_server, pa
     page.route("**/api/batch/flag", handle_flag_write)
 
     page.keyboard.press("x")
-    deadline = time.time() + 3
+    # The flag write is dispatched asynchronously after the keypress. Keep
+    # pumping Playwright while waiting so its sync API can deliver the route
+    # callback; time.sleep() here can block that callback until after the
+    # assertion, depending on whether the request started before press()
+    # returned.
+    deadline = time.time() + 10
     while "route" not in held and time.time() < deadline:
-        time.sleep(0.05)
+        page.wait_for_timeout(50)
     assert "route" in held, "expected first flag write to be held"
 
     page.keyboard.press("p")

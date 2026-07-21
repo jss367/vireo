@@ -425,6 +425,15 @@ async function loadCollections() {
       var opt = document.createElement('option');
       opt.value = c.id;
       opt.textContent = c.name;
+      // count_error means /api/collections couldn't resolve this collection's
+      // rules — scoping the cull to it would just 400 the downstream /photos
+      // fetch. Show it disabled so the state is visible instead of offering
+      // a source that can't run.
+      if (c.count_error) {
+        opt.disabled = true;
+        opt.textContent = c.name + ' (unavailable — edit rules to fix)';
+        opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+      }
       sel.appendChild(opt);
     });
     sel.addEventListener('change', onCullCollectionChange);

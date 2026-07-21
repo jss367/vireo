@@ -62,8 +62,22 @@ def run(session):
     session.assert_that(added == 1, f"expected 1 source, got {added}")
 
     session.fill("#destInput", archive)
-    session.eval(
-        "document.getElementById('afterImportSelect').value = 'quick_look'"
+    # The After Import dropdown lists saved processes by id; pick "Quick look"
+    # by its visible label and fire the change event so the page treats it as
+    # a user choice (startImport() only forwards actively-picked options).
+    picked = session.eval(
+        "(() => {"
+        "  const sel = document.getElementById('afterImportSelect');"
+        "  const opt = Array.from(sel.options).find("
+        "    o => (o.textContent || '').trim() === 'Quick look');"
+        "  if (!opt) return false;"
+        "  sel.value = opt.value;"
+        "  sel.dispatchEvent(new Event('change'));"
+        "  return true;"
+        "})()"
+    )
+    session.assert_that(
+        picked, "expected a 'Quick look' saved process in the After Import menu"
     )
 
     _start_and_wait(session, "import-first-run")

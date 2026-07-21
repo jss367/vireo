@@ -26,12 +26,49 @@ body {
 /* ---------- Sidebar ---------- */
 .sidebar {
   width: 260px;
-  min-width: 260px;
+  min-width: 200px;
+  max-width: 600px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-primary);
   overflow-y: auto;
   padding: 12px 0;
   flex-shrink: 0;
+}
+.sidebar-resizer,
+.detail-panel-resizer {
+  width: 7px;
+  flex: 0 0 7px;
+  position: relative;
+  z-index: 3;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.sidebar-resizer { margin-left: -4px; }
+.detail-panel-resizer { margin-right: -4px; }
+.sidebar-resizer::after,
+.detail-panel-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+.sidebar-resizer.dragging::after,
+.detail-panel-resizer:hover::after,
+.detail-panel-resizer:focus-visible::after,
+.detail-panel-resizer.dragging::after {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .sidebar-section { padding: 0 14px; margin-bottom: 16px; }
 .sidebar-title {
@@ -110,6 +147,23 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
+/* Collections whose rules can't be resolved (count_error). We keep the row
+   visible + right-clickable so the user can edit or delete it, but the
+   left-click filter path bails out with a toast — filtering to it would
+   400 /api/collections/<id>/photos. */
+.tree-item.unavailable { color: var(--text-faint); cursor: not-allowed; }
+.tree-item.unavailable .collection-name { text-decoration: line-through; }
+.tree-item .collection-unavailable-badge {
+  margin-left: auto;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--warning-bg, #fef3c7);
+  color: var(--warning-fg, #92400e);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 .tree-indent { width: 16px; flex-shrink: 0; }
 .tree-toggle {
   width: 16px;
@@ -131,6 +185,11 @@ body {
 }
 
 /* ---------- Filter Bar ---------- */
+.browse-filter-shell { display: block; }
+.browse-filter-shell .vf-bar { width: 100%; }
+.browse-view-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.browse-view-controls input[type=text] { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 5px 10px; font-size: 12px; flex: 1; min-width: 200px; }
+.browse-view-controls select { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 5px 8px; font-size: 12px; }
 .filter-bar {
   background: var(--bg-primary);
   padding: 10px 20px;
@@ -280,6 +339,36 @@ body {
   text-transform: uppercase;
   pointer-events: none;
 }
+.pair-source-badge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  background: rgba(10, 14, 17, 0.84);
+  color: #f4f7f8;
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 3px 6px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.detail-source-control {
+  display: none;
+  width: 100%;
+  margin: -4px 0 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.detail-source-control:hover {
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-secondary));
+}
 .grid-card-info {
   padding: 8px 10px;
 }
@@ -297,6 +386,22 @@ body {
   margin-top: 4px;
 }
 .grid-card-rating { font-size: 12px; color: var(--warning); }
+.grid-location-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.grid-location-status.exif { color: var(--accent); }
+.grid-location-status.assigned { color: var(--info); }
+.grid-location-status.none { color: var(--text-ghost); }
 .grid-card-flag {
   font-size: 10px;
   padding: 1px 5px;
@@ -314,11 +419,11 @@ body {
 .grid-card-color[data-color="blue"] { background: #3498db; }
 .grid-card-color[data-color="purple"] { background: #9b59b6; }
 
-/* Placeholder cells for photos that exist but haven't loaded yet. The grid
-   reserves the full dataset's scroll height up front so scrolling never
-   hits a hard wall; placeholders fill in as pages arrive. Deliberately NOT
-   .grid-card — selection/keyboard/summary code queries that class and must
-   only ever see real photos. */
+/* Placeholder cells for the next photos that haven't loaded yet. The grid
+   keeps a bounded runway after the loaded cards so users can scroll smoothly
+   while the next pages arrive without implying that arbitrary unloaded
+   positions support random access. Deliberately NOT .grid-card — selection,
+   keyboard, and summary code queries that class and must only see real photos. */
 .skel-card {
   background: var(--bg-secondary);
   border-radius: 6px;
@@ -345,12 +450,12 @@ body {
   margin-top: 2px;
 }
 @keyframes skelPulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
-.grid-tail-spacer { grid-column: 1 / -1; }
 
 /* ---------- Detail Panel ---------- */
 .detail-panel {
   width: 340px;
-  min-width: 340px;
+  min-width: 280px;
+  max-width: 600px;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border-primary);
   overflow-y: auto;
@@ -918,6 +1023,21 @@ body {
   font-size: 11px;
   color: var(--warning);
 }
+.coordinate-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0 0 8px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 5px;
+  padding: 7px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.coordinate-status.exif { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-secondary)); }
+.coordinate-status.assigned { border-color: color-mix(in srgb, var(--info) 45%, var(--border-secondary)); }
+.coordinate-status.none { color: var(--text-ghost); }
 /* Google Places autocomplete dropdown z-index — must sit above the detail panel. */
 .pac-container { z-index: 10000 !important; }
 .detail-summary {
@@ -1189,16 +1309,50 @@ body {
 .browse-compare-image-wrap {
   flex: 1;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 18px;
+  cursor: zoom-in;
+  touch-action: none;
+  user-select: none;
+}
+.browse-compare-image-wrap.zoomed {
+  cursor: grab;
+}
+.browse-compare-image-wrap.zoomed:active {
+  cursor: grabbing;
 }
 .browse-compare-image {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   display: block;
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.browse-compare-zoom-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  min-width: 44px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+  pointer-events: none;
+}
+.browse-compare-hint {
+  color: var(--text-dim);
+  font-size: 11px;
 }
 .browse-compare-meta {
   flex-shrink: 0;
@@ -1296,50 +1450,6 @@ body {
 .modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
-.gps-resolve-summary {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
-  line-height: 1.4;
-}
-.gps-resolve-list {
-  max-height: 280px;
-  overflow-y: auto;
-  border: 1px solid var(--border-primary);
-  border-radius: 4px;
-  margin-bottom: 12px;
-}
-.gps-resolve-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-primary);
-}
-.gps-resolve-row:last-child { border-bottom: 0; }
-.gps-resolve-place {
-  min-width: 0;
-  color: var(--text-primary);
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.gps-resolve-samples {
-  color: var(--text-dim);
-  font-size: 11px;
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.gps-resolve-count {
-  flex-shrink: 0;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-}
 .export-var-pill {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1394,7 +1504,7 @@ body {
 <div class="main-layout">
 
   <!-- Sidebar -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="browseSidebar">
     <div class="sidebar-section">
       <div class="sidebar-title">Folders</div>
       <div id="folderTree"></div>
@@ -1408,77 +1518,45 @@ body {
     </div>
   </aside>
 
+  <div class="sidebar-resizer" id="browseSidebarResizer" role="separator"
+       aria-label="Resize Browse sidebar" aria-orientation="vertical"
+       aria-controls="browseSidebar" aria-valuemin="200" aria-valuemax="600"
+       aria-valuenow="260" tabindex="0"
+       title="Drag to resize the sidebar"></div>
+
   <!-- Content -->
   <div class="content-area">
 
-    <!-- Filter Bar -->
-    <div class="filter-bar">
-      <div class="search-control">
-        <input type="text" id="searchInput" placeholder="Search keywords or filenames..."
-               autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
-               onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
-        <button id="keywordMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('match_case')" title="Match case">Aa</button>
-        <button id="keywordWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('whole_word')" title="Match whole word">ab</button>
+    <!-- Universal filter bar (shared module) + Browse view controls -->
+    <div class="filter-bar browse-filter-shell">
+      {% include '_filterbar.html' %}
+      <div class="browse-view-controls">
+        <select id="sortSelect" onchange="applyFilters()" title="Sort order">
+          <option value="date">Capture date (oldest)</option>
+          <option value="date_desc">Capture date (newest)</option>
+          <option value="name">Filename (A-Z)</option>
+          <option value="name_desc">Filename (Z-A)</option>
+          <option value="rating">Rating (highest)</option>
+          <option value="quality">Quality (best)</option>
+          <option value="sharpness">Sharpness (sharpest)</option>
+          <option value="sharpness_asc">Sharpness (softest)</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
+          <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
+                 style="width:80px;accent-color:var(--accent);"
+                 oninput="updateThumbSize(this.value)">
+          <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
+        </label>
+        <button id="detBoxToggle" onclick="toggleDetectionBoxes()" title="Show/hide detection boxes"
+                style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+          &#9634; Boxes
+        </button>
+        <button id="calToggle" onclick="toggleTimelineMode()" title="Calendar heatmap"
+                style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+          &#128197; Calendar
+        </button>
+        <span class="filter-summary" id="filterSummary"></span>
       </div>
-      <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
-             style="flex:1;min-width:200px;"
-             onkeydown="if(event.key==='Enter')runClipSearch()">
-      <button id="clipSearchBtn" onclick="runClipSearch()"
-              style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap;">
-        Search
-      </button>
-      <button id="clipClearBtn" onclick="clearClipSearch()" style="display:none;background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;">
-        Clear
-      </button>
-      <label title="EXIF capture date (DateTimeOriginal)">Captured from</label>
-      <input type="date" id="dateFrom" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
-      <label>to</label>
-      <input type="date" id="dateTo" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
-      <div class="rating-filter">
-        <label title="Minimum star rating">Min:</label>
-        <span class="rating-star" data-val="1" onclick="setFilterRating(1)">&#9733;</span>
-        <span class="rating-star" data-val="2" onclick="setFilterRating(2)">&#9733;</span>
-        <span class="rating-star" data-val="3" onclick="setFilterRating(3)">&#9733;</span>
-        <span class="rating-star" data-val="4" onclick="setFilterRating(4)">&#9733;</span>
-        <span class="rating-star" data-val="5" onclick="setFilterRating(5)">&#9733;</span>
-      </div>
-      <div class="flag-filter" aria-label="Flag filters">
-        <button id="pickFilterBtn" class="flag-filter-btn" type="button" onclick="setFlagFilter('flagged')" title="Show only picks">P Picks</button>
-        <button id="rejectFilterBtn" class="flag-filter-btn" type="button" onclick="setFlagFilter('rejected')" title="Show only rejects">X Rejects</button>
-      </div>
-      <select id="colorFilter" onchange="applyFilters()" title="Filter by color label" style="font-size:12px;">
-        <option value="">Color: Any</option>
-        <option value="red">Red</option>
-        <option value="yellow">Yellow</option>
-        <option value="green">Green</option>
-        <option value="blue">Blue</option>
-        <option value="purple">Purple</option>
-      </select>
-      <select id="sortSelect" onchange="applyFilters()" title="Sort order">
-        <option value="date">Capture date (oldest)</option>
-        <option value="date_desc">Capture date (newest)</option>
-        <option value="name">Filename (A-Z)</option>
-        <option value="name_desc">Filename (Z-A)</option>
-        <option value="rating">Rating (highest)</option>
-        <option value="quality">Quality (best)</option>
-        <option value="sharpness">Sharpness (sharpest)</option>
-        <option value="sharpness_asc">Sharpness (softest)</option>
-      </select>
-      <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
-        <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
-               style="width:80px;accent-color:var(--accent);"
-               oninput="updateThumbSize(this.value)">
-        <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
-      </label>
-      <button id="detBoxToggle" onclick="toggleDetectionBoxes()" title="Show/hide detection boxes"
-              style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
-        &#9634; Boxes
-      </button>
-      <button id="calToggle" onclick="toggleTimelineMode()" title="Calendar heatmap"
-              style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
-        &#128197; Calendar
-      </button>
-      <span class="filter-summary" id="filterSummary"></span>
     </div>
 
     <!-- Calendar Heatmap (Timeline Mode) -->
@@ -1506,11 +1584,12 @@ body {
       <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
-      <button id="resolveGpsSelectedBtn" onclick="openGpsResolveForSelection()" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Resolve GPS</button>
+      <button id="resolveGpsSelectedBtn" onclick="reviewLocationsForSelection()" title="Review selected photo coordinates on a map and assign friendly place names" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review on Map</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
       <button id="bestBatchBtn" onclick="openBestBatch()" title="Find and rank neighboring frames around the selected photo" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Best Batch</button>
       <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
+      <button id="prepareFullResolutionBtn" onclick="prepareFullResolutionSelection()" title="Cache originals and full-resolution renders before inspecting detail" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Prepare Full Resolution</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
       <button onclick="makeAvailableOffline()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Make Offline</button>
@@ -1590,13 +1669,19 @@ body {
         <div style="margin-bottom:16px;font-size:18px;color:var(--text-primary);font-weight:600;">Welcome to Vireo</div>
         <p style="max-width:460px;margin:0 auto 20px;line-height:1.6;color:var(--text-muted);">
           To get started, import your photos. You can scan a folder of images
-          (with or without existing XMP sidecars).
+          (with or without existing XMP sidecars), or import keywords from a Lightroom catalog.
         </p>
         <a href="/import" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
       </div>
       <div class="loading-state" id="loadingState">Loading...</div>
     </div>
   </div>
+
+  <div class="detail-panel-resizer" id="detailPanelResizer" role="separator"
+       aria-label="Resize detail sidebar" aria-orientation="vertical"
+       aria-controls="detailPanel" aria-valuemin="280" aria-valuemax="600"
+       aria-valuenow="340" tabindex="0"
+       title="Drag to resize the detail sidebar"></div>
 
   <!-- Detail Panel -->
   <div class="detail-panel" id="detailPanel">
@@ -1631,7 +1716,7 @@ body {
         <div class="selection-action-hint" id="pasteEditHint"></div>
       </div>
       <div class="detail-section">
-        <div class="detail-section-title">Fill Missing Keywords</div>
+        <div class="detail-section-title">Keywords</div>
         <div class="selection-keyword-list" id="selectionKeywordSuggestions"></div>
       </div>
     </div>
@@ -1641,6 +1726,7 @@ body {
       <button class="detail-close" onclick="closeDetail()">&times;</button>
       <img class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
       <div class="detail-filename single-only" id="detailFilename"></div>
+      <button class="detail-source-control single-only" id="detailSourceControl" type="button" onclick="event.stopPropagation(); vireoTogglePairSource(window._detailPhotoId);"></button>
 
       <div class="detail-section">
         <div class="detail-section-title">Rating <span class="batch-mixed" id="ratingMixed" hidden>· Mixed</span></div>
@@ -1674,6 +1760,7 @@ body {
 
       <div class="detail-section location-section" id="locationSection">
         <div class="detail-section-title">Location</div>
+        <div id="locationCoordinateStatus" class="coordinate-status none"></div>
         <div id="locationFilled" class="single-only" hidden></div>
         <div id="locationEmpty">
           <div class="keyword-autocomplete">
@@ -1774,20 +1861,6 @@ body {
   </div>
 </div>
 
-<!-- Resolve GPS Locations Modal -->
-<div class="modal-overlay" id="gpsResolveModal">
-  <div class="modal" style="width:560px;max-width:calc(100vw - 32px);">
-    <h3>Resolve GPS Locations</h3>
-    <div id="gpsResolveSummary" class="gps-resolve-summary">Loading...</div>
-    <div id="gpsResolveGroups" class="gps-resolve-list"></div>
-    <div class="modal-preview" id="gpsResolveNote"></div>
-    <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" id="gpsResolveApplyBtn" onclick="applyGpsResolve()">Apply</button>
-      <button class="modal-btn modal-btn-cancel" onclick="hideGpsResolveModal()">Cancel</button>
-    </div>
-  </div>
-</div>
-
 <!-- Best Batch Modal -->
 <div class="modal-overlay" id="bestBatchModal">
   <div class="modal best-batch-modal">
@@ -1844,15 +1917,18 @@ body {
   <div class="browse-compare-toolbar" onclick="event.stopPropagation()">
     <span class="browse-compare-title">Compare</span>
     <span class="browse-compare-count" id="browseCompareCount"></span>
+    <span class="browse-compare-hint">Scroll to zoom · drag to pan · double-click to toggle</span>
     <span class="browse-compare-spacer"></span>
+    <button class="browse-compare-btn" onclick="resetBrowseCompareViews()" title="Fit both photos to their panes">Reset views</button>
     <button class="browse-compare-btn" id="browseComparePrev" onclick="browseCompareStep(-1)" title="Previous pair">Previous</button>
     <button class="browse-compare-btn" id="browseCompareNext" onclick="browseCompareStep(1)" title="Next pair">Next</button>
     <button class="browse-compare-close" onclick="closeBrowseCompare(event)" title="Close">&times;</button>
   </div>
   <div class="browse-compare-stage" onclick="event.stopPropagation()">
     <div class="browse-compare-pane">
-      <div class="browse-compare-image-wrap">
-        <img class="browse-compare-image" id="browseCompareImgA" src="" alt="">
+      <div class="browse-compare-image-wrap" id="browseCompareWrapA" data-pane="A" title="Scroll to zoom, then drag to pan">
+        <span class="browse-compare-zoom-badge" id="browseCompareZoomA">Fit</span>
+        <img class="browse-compare-image" id="browseCompareImgA" src="" alt="" draggable="false">
       </div>
       <div class="browse-compare-meta">
         <div class="browse-compare-name" id="browseCompareNameA"></div>
@@ -1860,8 +1936,9 @@ body {
       </div>
     </div>
     <div class="browse-compare-pane">
-      <div class="browse-compare-image-wrap">
-        <img class="browse-compare-image" id="browseCompareImgB" src="" alt="">
+      <div class="browse-compare-image-wrap" id="browseCompareWrapB" data-pane="B" title="Scroll to zoom, then drag to pan">
+        <span class="browse-compare-zoom-badge" id="browseCompareZoomB">Fit</span>
+        <img class="browse-compare-image" id="browseCompareImgB" src="" alt="" draggable="false">
       </div>
       <div class="browse-compare-meta">
         <div class="browse-compare-name" id="browseCompareNameB"></div>
@@ -1888,7 +1965,7 @@ var allLoaded = false;
 var selectedPhotoId = null;
 var selectedIndex = -1;
 var anchorRestoreEpoch = 0;
-var collectionAnchorScanDepth = 0;
+var anchorScanDepth = 0;
 var selectedPhotos = new Set(); // multi-select
 var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
@@ -1896,7 +1973,7 @@ var selectionKeywordMissingById = {};
 var selectionKeywordPresentById = {};
 var selectionKeywordNameById = {};
 var showDetectionBoxes = false;
-var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
+var cardFields = ["filename", "location_status", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 // Which photo ids we've confirmed color-label state for. `colorLabels[id]`
@@ -1907,20 +1984,21 @@ var colorLabelsFetched = new Set();
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
 var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
-var filterRating = 0;
-var flagFilter = '';
+// rating/flag/color/date/keyword filter state now lives in VireoFilter
+// (the universal filter bar); Browse keeps only page-scope state.
 var activeFolderId = null;
 var activeKeyword = null;
 var activeCollectionId = null;
-var keywordSearchMatchCase = false;
-var keywordSearchWholeWord = false;
+// A Dashboard deep link can combine a collection with date/keyword filters.
+// Normal collection clicks keep the historical collection-only behavior.
+var dashboardCollectionScope = false;
+
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
-var clipSearchActive = false;
-var clipSearchSeq = 0;
-var searchFilterTimer = null;
+// CLIP search is now the filter bar's visual clause (VireoFilter.getVisual).
+
 var bestBatchData = null;
 var keywordAutocompleteCache = null;
 var keywordAutocompletePromise = null;
@@ -1932,6 +2010,228 @@ var browseCompareIds = [];
 var browseCompareOffset = 0;
 var browseCompareSeq = 0;
 var browseCompareEscToken = null;
+var browseCompareViews = {
+  A: { zoom: 1, panX: 0, panY: 0 },
+  B: { zoom: 1, panX: 0, panY: 0 }
+};
+var browseComparePointer = null;
+
+/* ---------- Resizable sidebar ---------- */
+var BROWSE_SIDEBAR_DEFAULT_WIDTH = 260;
+var BROWSE_SIDEBAR_MIN_WIDTH = 200;
+var BROWSE_SIDEBAR_MAX_WIDTH = 600;
+var BROWSE_SIDEBAR_STORAGE_KEY = 'vireo.browse.sidebarWidth';
+var BROWSE_DETAIL_PANEL_DEFAULT_WIDTH = 340;
+var BROWSE_DETAIL_PANEL_MIN_WIDTH = 280;
+var BROWSE_DETAIL_PANEL_MAX_WIDTH = 600;
+var BROWSE_DETAIL_PANEL_STORAGE_KEY = 'vireo.browse.detailPanelWidth';
+// Room the resize cap must leave for the rest of the Browse layout: the
+// other adjustable sidebar, both resize handles, and a minimum photo/content
+// column so the grid stays usable.
+var BROWSE_SIDEBAR_HANDLE_WIDTH = 7;
+var BROWSE_MIN_CONTENT_WIDTH = 360;
+
+function currentBrowseSidebarWidth() {
+  var sidebar = document.getElementById('browseSidebar');
+  return sidebar ? sidebar.getBoundingClientRect().width : BROWSE_SIDEBAR_DEFAULT_WIDTH;
+}
+
+function currentBrowseDetailPanelWidth() {
+  var detailPanel = document.getElementById('detailPanel');
+  return detailPanel ? detailPanel.getBoundingClientRect().width : BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
+}
+
+function browseSidebarMaxWidth() {
+  return Math.max(
+    BROWSE_SIDEBAR_MIN_WIDTH,
+    Math.min(
+      BROWSE_SIDEBAR_MAX_WIDTH,
+      window.innerWidth
+        - currentBrowseDetailPanelWidth()
+        - (2 * BROWSE_SIDEBAR_HANDLE_WIDTH)
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
+  );
+}
+
+function browseDetailPanelMaxWidth() {
+  return Math.max(
+    BROWSE_DETAIL_PANEL_MIN_WIDTH,
+    Math.min(
+      BROWSE_DETAIL_PANEL_MAX_WIDTH,
+      window.innerWidth
+        - currentBrowseSidebarWidth()
+        - (2 * BROWSE_SIDEBAR_HANDLE_WIDTH)
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
+  );
+}
+
+function updateBrowsePanelResizeLimits() {
+  var sidebarResizer = document.getElementById('browseSidebarResizer');
+  var detailResizer = document.getElementById('detailPanelResizer');
+  if (sidebarResizer) sidebarResizer.setAttribute('aria-valuemax', String(browseSidebarMaxWidth()));
+  if (detailResizer) detailResizer.setAttribute('aria-valuemax', String(browseDetailPanelMaxWidth()));
+}
+
+function setBrowseSidebarWidth(width, persist) {
+  var sidebar = document.getElementById('browseSidebar');
+  var resizer = document.getElementById('browseSidebarResizer');
+  if (!sidebar || !resizer) return;
+  var nextWidth = Math.round(Math.max(
+    BROWSE_SIDEBAR_MIN_WIDTH,
+    Math.min(browseSidebarMaxWidth(), Number(width) || BROWSE_SIDEBAR_DEFAULT_WIDTH)
+  ));
+  sidebar.style.width = nextWidth + 'px';
+  sidebar.style.flexBasis = nextWidth + 'px';
+  resizer.setAttribute('aria-valuenow', String(nextWidth));
+  updateBrowsePanelResizeLimits();
+  if (persist) {
+    try { localStorage.setItem(BROWSE_SIDEBAR_STORAGE_KEY, String(nextWidth)); } catch (e) {}
+  }
+  requestAnimationFrame(updateGridTail);
+}
+
+function initBrowseSidebarResize() {
+  var sidebar = document.getElementById('browseSidebar');
+  var resizer = document.getElementById('browseSidebarResizer');
+  if (!sidebar || !resizer) return;
+
+  var storedWidth = BROWSE_SIDEBAR_DEFAULT_WIDTH;
+  try { storedWidth = Number(localStorage.getItem(BROWSE_SIDEBAR_STORAGE_KEY)) || storedWidth; } catch (e) {}
+  setBrowseSidebarWidth(storedWidth, false);
+
+  resizer.addEventListener('pointerdown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX;
+    var startWidth = sidebar.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+    resizer.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+
+    function onPointerMove(moveEvent) {
+      setBrowseSidebarWidth(startWidth + moveEvent.clientX - startX, false);
+    }
+    function stopDragging(upEvent) {
+      setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, true);
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('sidebar-resizing');
+      resizer.removeEventListener('pointermove', onPointerMove);
+      resizer.removeEventListener('pointerup', stopDragging);
+      resizer.removeEventListener('pointercancel', stopDragging);
+      if (resizer.hasPointerCapture(upEvent.pointerId)) {
+        resizer.releasePointerCapture(upEvent.pointerId);
+      }
+    }
+    resizer.addEventListener('pointermove', onPointerMove);
+    resizer.addEventListener('pointerup', stopDragging);
+    resizer.addEventListener('pointercancel', stopDragging);
+  });
+
+  resizer.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      var direction = e.key === 'ArrowRight' ? 1 : -1;
+      var step = e.shiftKey ? 50 : 10;
+      setBrowseSidebarWidth(sidebar.getBoundingClientRect().width + direction * step, true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseSidebarWidth(BROWSE_SIDEBAR_MIN_WIDTH, true);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseSidebarWidth(browseSidebarMaxWidth(), true);
+    }
+  });
+
+  resizer.addEventListener('dblclick', function() {
+    setBrowseSidebarWidth(BROWSE_SIDEBAR_DEFAULT_WIDTH, true);
+  });
+}
+
+function setBrowseDetailPanelWidth(width, persist) {
+  var detailPanel = document.getElementById('detailPanel');
+  var resizer = document.getElementById('detailPanelResizer');
+  if (!detailPanel || !resizer) return;
+  var nextWidth = Math.round(Math.max(
+    BROWSE_DETAIL_PANEL_MIN_WIDTH,
+    Math.min(browseDetailPanelMaxWidth(), Number(width) || BROWSE_DETAIL_PANEL_DEFAULT_WIDTH)
+  ));
+  detailPanel.style.width = nextWidth + 'px';
+  detailPanel.style.flexBasis = nextWidth + 'px';
+  resizer.setAttribute('aria-valuenow', String(nextWidth));
+  updateBrowsePanelResizeLimits();
+  if (persist) {
+    try { localStorage.setItem(BROWSE_DETAIL_PANEL_STORAGE_KEY, String(nextWidth)); } catch (e) {}
+  }
+  requestAnimationFrame(updateGridTail);
+}
+
+function initBrowseDetailPanelResize() {
+  var detailPanel = document.getElementById('detailPanel');
+  var resizer = document.getElementById('detailPanelResizer');
+  if (!detailPanel || !resizer) return;
+
+  var storedWidth = BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
+  try { storedWidth = Number(localStorage.getItem(BROWSE_DETAIL_PANEL_STORAGE_KEY)) || storedWidth; } catch (e) {}
+  setBrowseDetailPanelWidth(storedWidth, false);
+
+  resizer.addEventListener('pointerdown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX;
+    var startWidth = detailPanel.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+    resizer.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+
+    function onPointerMove(moveEvent) {
+      setBrowseDetailPanelWidth(startWidth + startX - moveEvent.clientX, false);
+    }
+    function stopDragging(upEvent) {
+      setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, true);
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('sidebar-resizing');
+      resizer.removeEventListener('pointermove', onPointerMove);
+      resizer.removeEventListener('pointerup', stopDragging);
+      resizer.removeEventListener('pointercancel', stopDragging);
+      if (resizer.hasPointerCapture(upEvent.pointerId)) {
+        resizer.releasePointerCapture(upEvent.pointerId);
+      }
+    }
+    resizer.addEventListener('pointermove', onPointerMove);
+    resizer.addEventListener('pointerup', stopDragging);
+    resizer.addEventListener('pointercancel', stopDragging);
+  });
+
+  resizer.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      var direction = e.key === 'ArrowLeft' ? 1 : -1;
+      var step = e.shiftKey ? 50 : 10;
+      setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width + direction * step, true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseDetailPanelWidth(BROWSE_DETAIL_PANEL_MIN_WIDTH, true);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseDetailPanelWidth(browseDetailPanelMaxWidth(), true);
+    }
+  });
+
+  resizer.addEventListener('dblclick', function() {
+    setBrowseDetailPanelWidth(BROWSE_DETAIL_PANEL_DEFAULT_WIDTH, true);
+  });
+}
+
+initBrowseSidebarResize();
+initBrowseDetailPanelResize();
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -2114,21 +2414,11 @@ function bindKeywordAutocomplete(inputId, dropdownId, submitFn) {
 }
 
 function hasActiveBrowseFilter() {
-  var searchInput = document.getElementById('searchInput');
-  var colorFilter = document.getElementById('colorFilter');
-  var dateFrom = document.getElementById('dateFrom');
-  var dateTo = document.getElementById('dateTo');
   return !!(
     activeFolderId ||
     activeKeyword ||
     activeCollectionId ||
-    clipSearchActive ||
-    filterRating > 0 ||
-    flagFilter ||
-    (searchInput && searchInput.value.trim()) ||
-    (colorFilter && colorFilter.value) ||
-    (dateFrom && dateFrom.value) ||
-    (dateTo && dateTo.value)
+    (window.VireoFilter && VireoFilter.hasFilters())
   );
 }
 
@@ -2171,10 +2461,34 @@ function formatFileSize(bytes) {
   return (bytes / 1073741824).toFixed(1) + ' GB';
 }
 
+function renderSpeciesBadges(species, inline) {
+  if (!Array.isArray(species) || species.length === 0) return '';
+  var maxShow = 3;
+  var style = inline ? ' style="position:static;padding:0;"' : '';
+  var html = '<div class="species-badges"' + style + '>';
+  species.slice(0, maxShow).forEach(function(name) {
+    html += '<span class="species-badge">' + escapeHtml(name) + '</span>';
+  });
+  if (species.length > maxShow) {
+    html += '<span class="species-badge-overflow">+' + (species.length - maxShow) + ' more</span>';
+  }
+  return html + '</div>';
+}
+
 function renderCardField(field, p) {
   switch (field) {
     case 'filename':
       return '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>';
+    case 'location_status':
+      var locationStatus = p.location_status || 'none';
+      var locationLabels = {
+        exif: ['📍', 'EXIF GPS', 'Embedded GPS coordinates from the photo'],
+        assigned: ['●', 'Assigned map location', 'Map coordinates from an assigned Vireo location'],
+        none: ['⊘', 'No coordinates', 'No EXIF GPS or assigned map coordinates']
+      };
+      var locationLabel = locationLabels[locationStatus] || locationLabels.none;
+      return '<span class="grid-location-status ' + locationStatus + '" title="' + escapeAttr(locationLabel[2]) + '">' +
+        locationLabel[0] + ' ' + locationLabel[1] + '</span>';
     case 'rating':
       if (p.rating > 0) {
         var stars = '';
@@ -2190,19 +2504,7 @@ function renderCardField(field, p) {
       if (p.sharpness != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>';
       return '';
     case 'species':
-      if (p.species && p.species.length > 0) {
-        var maxShow = 3;
-        var html = '<div class="species-badges" style="position:static;padding:0;">';
-        p.species.slice(0, maxShow).forEach(function(s) {
-          html += '<span class="species-badge">' + escapeHtml(s) + '</span>';
-        });
-        if (p.species.length > maxShow) {
-          html += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
-        }
-        html += '</div>';
-        return html;
-      }
-      return '';
+      return renderSpeciesBadges(p.species, true);
     case 'dimensions':
       if (p.width && p.height) return '<span style="font-size:10px;color:var(--text-ghost);">' + p.width + ' \u00d7 ' + p.height + '</span>';
       return '';
@@ -2240,6 +2542,13 @@ function renderCardInfo(p) {
 
 function renderPhotoCard(p, idx) {
   var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  var isRawJpegPair = typeof window.vireoPhotoIsRawJpegPair === 'function'
+    ? window.vireoPhotoIsRawJpegPair(p)
+    : false;
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(p);
+  }
+  var pairSource = _vireoPairSource(p.id) || 'jpeg';
   if (
     typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
@@ -2249,8 +2558,11 @@ function renderPhotoCard(p, idx) {
     });
   }
   var hideDetectionOverlays = (
-    typeof window.vireoPhotoHasOrientationEdit === 'function' &&
-    window.vireoPhotoHasOrientationEdit(p.id)
+    (isRawJpegPair && pairSource === 'jpeg') ||
+    (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(p.id)
+    )
   );
 
   // Detection box overlays — render one per detection in the photo
@@ -2273,20 +2585,16 @@ function renderPhotoCard(p, idx) {
   var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
   var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
+  var pairBadge = isRawJpegPair
+    ? '<span class="pair-source-badge" data-pair-source-id="' + p.id + '">'
+      + (pairSource === 'raw' ? 'RAW · JPEG pair' : 'JPEG · RAW pair')
+      + '</span>'
+    : '';
 
   // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
   var speciesBadgeHtml = '';
-  if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
-    var maxShow = 3;
-    var shown = p.species.slice(0, maxShow);
-    speciesBadgeHtml = '<div class="species-badges">';
-    shown.forEach(function(s) {
-      speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
-    });
-    if (p.species.length > maxShow) {
-      speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
-    }
-    speciesBadgeHtml += '</div>';
+  if (cardFields.indexOf('species') === -1) {
+    speciesBadgeHtml = renderSpeciesBadges(p.species, false);
   }
 
   var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
@@ -2298,6 +2606,7 @@ function renderPhotoCard(p, idx) {
       inatBadge +
       wildlifeBadge +
       representativeBadge +
+      pairBadge +
       speciesBadgeHtml +
     '</div>' +
     '<div class="grid-card-info">' +
@@ -2310,8 +2619,14 @@ document.addEventListener('lightbox:renderchanged', function(e) {
   var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
   ids.forEach(function(id) {
     var hideDetectionOverlays = (
-      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
-      window.vireoPhotoHasOrientationEdit(id)
+      (
+        _vireoPairKnownByPhoto[String(id)] &&
+        _vireoPairSource(id) === 'jpeg'
+      ) ||
+      (
+        typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+        window.vireoPhotoHasOrientationEdit(id)
+      )
     );
     document.querySelectorAll('.grid-card[data-id="' + id + '"] .det-box').forEach(function(box) {
       box.style.display = hideDetectionOverlays ? 'none' : '';
@@ -2332,21 +2647,19 @@ function appendGridPhotos(newPhotos, startIdx) {
   updateGridTail();
 }
 
-/* The grid tail reserves scroll space for photos that haven't loaded yet:
-   a pool of skeleton cells at the loading boundary, a spacer sized to the
-   estimated rows in between, and a second pool at the very end so dragging
-   the scrollbar to the bottom lands on placeholder cells rather than a
-   blank region. Rebuilt after every page append. Lives in a
+/* The grid tail reserves a bounded amount of scroll space for the next photos
+   that haven't loaded yet. It must not reserve the entire dataset: Browse
+   loads a contiguous prefix, so an absolute-bottom jump in a large library
+   would otherwise force every preceding page to load before the viewport
+   could show a real card. Rebuilt after every page append. Lives in a
    display:contents wrapper so its children participate in the grid layout
    but real cards can be inserted before it as a unit. */
 var SKEL_POOL = 300;
-var SKEL_END_POOL = 100;
-var GRID_GAP_PX = 12; // keep in sync with .grid { gap }
 
 function updateGridTail() {
   var grid = document.getElementById('grid');
   var tail = document.getElementById('gridTail');
-  var remaining = (allLoaded || clipSearchActive) ? 0 : totalPhotos - photos.length;
+  var remaining = allLoaded ? 0 : totalPhotos - photos.length;
   var cards = grid.getElementsByClassName('grid-card');
   var lastCard = cards.length ? cards[cards.length - 1] : null;
   if (remaining <= 0 || !lastCard) {
@@ -2361,22 +2674,10 @@ function updateGridTail() {
     grid.style.setProperty('--skel-info-h', infoEl.offsetHeight + 'px');
   }
 
-  var front = Math.min(remaining, SKEL_POOL);
-  var end = Math.min(remaining - front, SKEL_END_POOL);
-  var beyond = remaining - front - end;
-
-  var spacerH = 0;
-  if (beyond > 0) {
-    var cols = (getComputedStyle(grid).gridTemplateColumns || '').split(' ').length || 1;
-    var rowH = lastCard.getBoundingClientRect().height + GRID_GAP_PX;
-    spacerH = Math.round(Math.ceil(beyond / cols) * rowH);
-  }
-
   var skel = '<div class="skel-card"><div class="skel-thumb"></div><div class="skel-info"><div class="skel-line"></div></div></div>';
   var html = '';
-  for (var i = 0; i < front; i++) html += skel;
-  if (beyond > 0) html += '<div class="grid-tail-spacer" style="height:' + spacerH + 'px"></div>';
-  for (var j = 0; j < end; j++) html += skel;
+  var visible = Math.min(remaining, SKEL_POOL);
+  for (var i = 0; i < visible; i++) html += skel;
 
   if (!tail) {
     tail = document.createElement('div');
@@ -2399,6 +2700,17 @@ function refreshGridCards(photoIds) {
     // when async metadata arrives after the card was appended.
     var wrap = card.querySelector('.grid-card-img-wrap');
     if (wrap) {
+      var speciesBadges = wrap.querySelector('.species-badges');
+      var speciesBadgeHtml = cardFields.indexOf('species') === -1
+        ? renderSpeciesBadges(p.species, false)
+        : '';
+      if (speciesBadges && speciesBadgeHtml) {
+        speciesBadges.outerHTML = speciesBadgeHtml;
+      } else if (speciesBadges) {
+        speciesBadges.remove();
+      } else if (speciesBadgeHtml) {
+        wrap.insertAdjacentHTML('beforeend', speciesBadgeHtml);
+      }
       var existing = wrap.querySelector('.inat-badge');
       var shouldShow = !!inatSubmitted[String(id)];
       if (shouldShow && !existing) {
@@ -2521,7 +2833,33 @@ async function bootstrapBrowse() {
   var bootstrapSucceeded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
-    var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
+    var pageParams = new URLSearchParams(window.location.search);
+    var initialFolderId = parseInt(pageParams.get('folder_id'), 10);
+    if (!isNaN(initialFolderId)) activeFolderId = initialFolderId;
+    var initialCollectionId = parseInt(pageParams.get('collection_id'), 10);
+    if (!isNaN(initialCollectionId)) {
+      activeCollectionId = initialCollectionId;
+      dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
+    }
+    // Legacy filter deep-link params (rating_min/flag/keyword/dates/…) are
+    // compiled into an initial rule tree by VireoFilter.init below. Forward
+    // the capture-date bounds to the bootstrap endpoint as well so Dashboard
+    // drill-downs do not briefly paint the entire collection while the filter
+    // registry is still loading.
+    var initParams = new URLSearchParams();
+    initParams.set('sort', document.getElementById('sortSelect').value);
+    if (activeFolderId) initParams.set('folder_id', activeFolderId);
+    ['date_from', 'date_to'].forEach(function(name) {
+      var value = pageParams.get(name);
+      if (value) initParams.set(name, value);
+    });
+    // Collection-only deep links keep their historical endpoint behavior,
+    // while Dashboard links opt into composable filters via dashboard_scope.
+    // The combined init endpoint still needs the collection id for first paint
+    // in either case.
+    if (activeCollectionId) initParams.set('collection_id', activeCollectionId);
+    initParams.set('per_page', perPage);
+    var data = await safeFetch('/api/browse/init?' + initParams.toString());
 
     // Populate everything from a single response
     photos = data.photos || [];
@@ -2542,14 +2880,84 @@ async function bootstrapBrowse() {
     // Lazy-load collection photo counts to avoid N+1 on init
     loadCollectionCounts();
     bootstrapSucceeded = true;
+
+    // Universal filter bar: registry + persisted/deep-linked state load
+    // async; when it comes up with active filters the unfiltered first
+    // paint above is stale, so reload through the rules path.
+    VireoFilter.init({
+      page: 'browse',
+      root: document.getElementById('vireoFilterBar'),
+      scopeLabel: 'Workspace \u00b7 All available photos',
+      onChange: function(info) {
+        if (timelineMode) loadCalendarData();
+        if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+        // A cleared quick search is the one filter edit where the previously
+        // selected photo is expected to reappear in the wider result set \u2014
+        // preserve the anchor so the detail panel and scroll position don't
+        // reset. Every other filter change usually excludes the previously
+        // selected photo, and loadUntilPhotoRendered would then keep paging
+        // through the whole matching set (potentially many /api/photos/query
+        // requests) just to prove the anchor is gone.
+        var preserveAnchor = info && info.reason === 'quickSearchCleared';
+        resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
+        // Summary panel (photo count, classified, top species) is a separate
+        // endpoint from the grid; without this the filter changes the grid
+        // but leaves the summary showing pre-filter numbers.
+        loadSummary();
+      },
+      // Typeahead counts otherwise ignore the folder/collection restriction
+      // the grid uses via /api/photos/query, so picking a suggestion inside
+      // a folder or dashboard-scoped collection can yield fewer visible
+      // grid results than the advertised count. Dashboard-scoped collection
+      // Browse composes collection + rules; the legacy collection view
+      // clears activeCollectionId on filter apply, so this is a no-op there.
+      getScope: function() {
+        return {
+          folder_id: activeFolderId,
+          collection_id: (activeCollectionId && dashboardCollectionScope)
+            ? activeCollectionId : null,
+        };
+      },
+    }).then(function() {
+      VireoFilter.setResultTotal(totalPhotos);
+      // Collection deep links must open showing exactly that collection \u2014
+      // whether plain (?collection_id=..., historical endpoint behavior) or
+      // dashboard-scoped (?dashboard_scope=1&collection_id=..., composable).
+      // A restored persisted Browse filter overrides both: for plain links
+      // the resetAndLoad below clears activeCollectionId (see line ~3901
+      // \u2014 non-dashboard scopes); for dashboard links it silently
+      // intersects the drill-down collection with unrelated saved
+      // rules. If the URL itself didn't supply any legacy filter params,
+      // treat the collection link as URL-scoped and drop the persisted
+      // state so the link is honored.
+      var urlParams = new URLSearchParams(window.location.search);
+      var LEGACY_FILTER_PARAMS = ['rating_min', 'flag', 'color_label',
+        'date_from', 'date_to', 'location_status', 'missing_gps', 'keyword'];
+      var hasExplicitFilterParams = LEGACY_FILTER_PARAMS.some(function(p) {
+        return urlParams.has(p);
+      });
+      var collectionLink = !!urlParams.get('collection_id');
+      if (collectionLink && !hasExplicitFilterParams && VireoFilter.hasFilters()) {
+        VireoFilter.clearAll(true);
+        // Plain collection: /api/browse/init already painted the collection
+        // and there are no filters left to apply, so skip the reload
+        // entirely. Dashboard-scoped: same story \u2014 the init call included
+        // collection_id, so the just-painted grid already matches.
+        return;
+      }
+      if (VireoFilter.hasFilters()) {
+        resetAndLoad();
+        loadSummary();
+      }
+    }).catch(function() {});
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
   loading = false;
   if (bootstrapSucceeded) {
     rearmInfiniteScrollObserver();
-    // The sentinel sits below the full-height tail now, so it may never
-    // intersect — make sure a tall viewport still gets its second page.
+    // Make sure a tall viewport still gets its second page even when the
+    // sentinel callback does not fire after the initial layout.
     requestAnimationFrame(ensureViewportHydrated);
   }
 }
@@ -2559,18 +2967,31 @@ function renderCollectionList(collections) {
   var html = '';
   collections.forEach(function(c) {
     collectionsById[c.id] = c;
-    var count = c.photo_count != null ? c.photo_count : '';
     var canAddPhotos = collectionAcceptsManualPhotos(c);
     var kind = canAddPhotos ? 'manual' : 'smart';
     var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
-    var resolveBtn = (c.name === 'GPS Without Location Keyword')
-      ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
+    // count_error: /api/collections couldn't resolve this collection's rules,
+    // so filtering to it would 400 the /photos endpoint. Show it as
+    // unavailable (with edit still reachable via right-click) instead of
+    // rendering a clickable filter that silently fails.
+    var unavailable = !!c.count_error;
+    // Suppress location review on unavailable collections because the review
+    // page resolves the same collection rules when it builds its queue.
+    var resolveBtn = (c.name === 'GPS Without Location Keyword' && !unavailable)
+      ? '<button class="collection-resolve-btn" type="button" title="Review photo locations on a map" onclick="event.stopPropagation(); reviewLocationsForCollection(' + c.id + ')">Review on Map</button>'
       : '';
-    html += '<div class="tree-item" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" onclick="filterByCollection(' + c.id + ')">' +
+    var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '');
+    var titleAttr = unavailable
+      ? ' title="This collection\'s rules could not be resolved. Right-click → Edit Rules to fix it."'
+      : '';
+    var trailing = unavailable
+      ? '<span class="collection-unavailable-badge">unavailable</span>'
+      : '<span class="count">' + (c.photo_count != null ? c.photo_count : '') + '</span>';
+    html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
       '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       resolveBtn +
-      '<span class="count">' + count + '</span></div>';
+      trailing + '</div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
 }
@@ -2640,24 +3061,34 @@ function toggleTree(e, el) {
 }
 
 function filterByFolder(folderId) {
-  var previousKeyword = activeKeyword;
   if (activeFolderId === folderId) {
     activeFolderId = null;
   } else {
     activeFolderId = folderId;
   }
+  // If the current keyword highlight came from a sidebar click,
+  // filterByKeyword also installed a VireoFilter 'keyword' rule — that
+  // rule is now the sidebar's stored state, not activeKeyword. Clearing
+  // just activeKeyword drops the highlight but leaves the rule in place,
+  // so the folder reload silently applies folder ∩ keyword. Drop the
+  // rule before the reload; VireoFilter.removeField fires onChange,
+  // which runs the reload path (including timelineMode + summary), so
+  // skip the plain reloadBrowseResults() branch only when removeField
+  // actually removed something. If the user already dropped the rule
+  // via the filter chip, activeKeyword lingers but there's no keyword
+  // rule left to remove — removeField returns false and we still need
+  // to run our own reload for the folder change.
+  var hadSidebarKeyword = activeKeyword !== null;
   activeKeyword = null;
-  var searchInput = document.getElementById('searchInput');
-  if (previousKeyword && searchInput && searchInput.value.trim() === previousKeyword) {
-    searchInput.value = '';
-  }
   activeCollectionId = null;
-  if (timelineMode) loadCalendarData();
-  reloadBrowseResults();
-  // Update active state
   document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
   });
+  if (hadSidebarKeyword && window.VireoFilter && VireoFilter.isReady()) {
+    if (VireoFilter.removeField('keyword')) return;
+  }
+  if (timelineMode) loadCalendarData();
+  reloadBrowseResults();
 }
 
 /* ---------- Keyword Tree ---------- */
@@ -2710,6 +3141,12 @@ function renderKeywordTree(keywords) {
 }
 
 function filterByKeyword(name) {
+  // The sidebar tree is rendered from the /photos init payload, so a
+  // slow /api/filters/fields (or workspace) round-trip leaves clickable
+  // keywords in the DOM before VireoFilter.init resolves. Without this
+  // guard, addRule -> makeRule dereferences state.fields (still null)
+  // and throws, leaving activeKeyword toggled but no rule/reload applied.
+  if (!VireoFilter.isReady()) return;
   if (activeKeyword === name) {
     activeKeyword = null;
   } else {
@@ -2717,9 +3154,9 @@ function filterByKeyword(name) {
   }
   activeFolderId = null;
   activeCollectionId = null;
-  document.getElementById('searchInput').value = activeKeyword || '';
-  if (timelineMode) loadCalendarData();
-  reloadBrowseResults();
+  // The rule toggles: adding an identical keyword rule removes it. The
+  // filter bar's onChange handles the reload.
+  VireoFilter.addRule('keyword', 'is', name);
   document.querySelectorAll('#keywordTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', el.dataset.keyword === activeKeyword);
   });
@@ -2740,8 +3177,8 @@ async function loadCollectionCounts() {
     if (gen !== collectionCountLoadGen) return;
     if (!data) return;
     var items = document.querySelectorAll('#collectionList .tree-item');
-    var countsById = {};
-    data.forEach(function(c) { countsById[c.id] = c.photo_count; });
+    var metaById = {};
+    data.forEach(function(c) { metaById[c.id] = c; });
     items.forEach(function(el) {
       var id = parseInt(el.dataset.collectionId, 10);
       if (isNaN(id)) {
@@ -2750,9 +3187,36 @@ async function loadCollectionCounts() {
         var m = onclick.match(/filterByCollection\((\d+)\)/);
         if (m) id = parseInt(m[1], 10);
       }
-      if (!isNaN(id)) {
+      var meta = !isNaN(id) ? metaById[id] : null;
+      if (!meta) return;
+      // Keep our in-memory copy in sync so filterByCollection's guard fires
+      // for collections that transitioned to (or out of) unavailable.
+      collectionsById[id] = meta;
+      var wasUnavailable = el.classList.contains('unavailable');
+      var isUnavailable = !!meta.count_error;
+      if (wasUnavailable !== isUnavailable) {
+        el.classList.toggle('unavailable', isUnavailable);
+        var trailing = el.querySelector('.count, .collection-unavailable-badge');
+        if (trailing) {
+          if (isUnavailable) {
+            trailing.className = 'collection-unavailable-badge';
+            trailing.textContent = 'unavailable';
+          } else {
+            trailing.className = 'count';
+            trailing.textContent = meta.photo_count != null ? meta.photo_count : '';
+          }
+        }
+        if (isUnavailable) {
+          el.setAttribute(
+            'title',
+            "This collection's rules could not be resolved. Right-click → Edit Rules to fix it."
+          );
+        } else {
+          el.removeAttribute('title');
+        }
+      } else if (!isUnavailable) {
         var span = el.querySelector('.count');
-        if (span && countsById[id] != null) span.textContent = countsById[id];
+        if (span && meta.photo_count != null) span.textContent = meta.photo_count;
       }
     });
   } catch(e) {}
@@ -2792,25 +3256,14 @@ function refreshActiveKeywordAfterRemoval(removedName) {
   // `resetAndLoad`, which clears `activeCollectionId` and drops the user
   // into the global keyword search.
   if (activeCollectionId) return;
-  var searchInput = document.getElementById('searchInput');
-  var query = searchInput ? searchInput.value.trim() : '';
-  if (!query) return;
-  // The backend keyword filter tokenizes `keyword=<query>` and satisfies
-  // each token independently — a token can match via a different keyword
-  // or the filename. So a photo can appear in the grid because
-  // `removedName` satisfied one token while other tokens matched
-  // elsewhere. Reload whenever any query token still matches the removed
-  // keyword name; requiring the whole query to match would miss those
-  // multi-token cases.
-  var opts = {
-    matchCase: keywordSearchMatchCase,
-    wholeWord: keywordSearchWholeWord,
-  };
-  var tokens = query.split(/\s+/);
-  var anyTokenMatches = tokens.some(function(token) {
-    return token && VireoTextSearch.tokenMatches(removedName, token, opts);
-  });
-  if (anyTokenMatches) {
+  // The universal filter expression may reference the removed keyword via
+  // keyword/species rules or the quick-search group; a name substring test
+  // over the serialized expression over-reloads at worst (reloading is
+  // safe), never under-reloads.
+  var rules = getBrowseRules();
+  if (!rules) return;
+  var needle = String(removedName).toLowerCase();
+  if (JSON.stringify(rules).toLowerCase().indexOf(needle) !== -1) {
     reloadBrowseResults();
   }
 }
@@ -2822,24 +3275,30 @@ function refreshBrowseSidebarCounts() {
 }
 
 async function filterByCollection(id, options) {
-  cancelScheduledSearchFilter();
+  // Guard: degraded (count_error) collections would 400 /api/collections/<id>/photos.
+  // Surface the reason instead of silently reloading into an error state. The
+  // sidebar renders these rows as `.tree-item.unavailable` and the context menu
+  // suppresses "Filter by this Collection", so this branch also catches any
+  // programmatic caller (deep-link, membership-change refresh) that pre-dates
+  // the guard.
+  var collectionMeta = collectionsById[id];
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
+  }
   var preserveAnchor = !(options && options.preserveAnchor === false);
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
-  if (clipSearchActive && getClipSearchQuery()) {
-    selectedPhotos.clear();
-    selectedPhotoId = null;
-    selectedIndex = -1;
-    closeDetail();
-    refreshCardSelectionVisuals();
-    updateBatchBar();
-    document.getElementById('gridContainer').scrollTop = 0;
-    await runClipSearch();
-    return;
-  }
+  dashboardCollectionScope = false;
   photos = [];
   currentPage = 1;
   allLoaded = false;
@@ -2864,7 +3323,7 @@ async function filterByCollection(id, options) {
   function anchorScanShouldContinue() {
     return collectionRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
   }
-  if (anchor) collectionAnchorScanDepth++;
+  if (anchor) anchorScanDepth++;
   try {
     await loadPhotos();
     if (!collectionRequestIsCurrent()) return;
@@ -2890,12 +3349,12 @@ async function filterByCollection(id, options) {
     });
   } finally {
     if (anchor) {
-      collectionAnchorScanDepth = Math.max(0, collectionAnchorScanDepth - 1);
+      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
       // Auto-hydration was suppressed for every loadPhotos() call while a scan
       // was open (including ones from unrelated folder/keyword switches). When
       // the last scan ends, resume the normal path so the current grid fills
       // its viewport instead of stalling on skeletons until a manual scroll.
-      if (collectionAnchorScanDepth === 0) {
+      if (anchorScanDepth === 0) {
         rearmInfiniteScrollObserver();
         requestAnimationFrame(ensureViewportHydrated);
       }
@@ -2931,6 +3390,7 @@ var FIELD_OPS = {
   noise_estimate: ['is', 'is not', '>=', '<='],
   crop_complete: ['is', 'is not', '>=', '<='],
   has_mask: ['equals'],
+  has_jpeg_companion: ['equals'],
   active_mask_variant: ['is', 'is not', 'contains'],
   has_gps: ['equals'],
   has_location_keyword: ['equals'],
@@ -2958,6 +3418,7 @@ var FIELD_LABELS = {
   noise_estimate: 'Noise',
   crop_complete: 'Crop Complete',
   has_mask: 'Has Mask',
+  has_jpeg_companion: 'Has JPEG Companion',
   active_mask_variant: 'Mask Variant',
   has_gps: 'Has GPS',
   has_location_keyword: 'Has Location Keyword',
@@ -3000,7 +3461,7 @@ function defaultValueForRule(field, op) {
   if (field === 'active_mask_variant') return 'sam2-large';
   if (field === 'prediction_status') return 'pending';
   if (field === 'wildlife_excluded') return 0;
-  if (['has_mask', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
+  if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
        'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
   return '';
 }
@@ -3232,7 +3693,7 @@ function renderRuleValueInput(r, i) {
   if (r.field === 'all') {
     return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
   }
-  if (['has_mask', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
+  if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
        'location_keyword_missing', 'inat_submitted', 'is_duplicate',
        'needs_review'].indexOf(r.field) !== -1) {
     var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
@@ -3392,7 +3853,7 @@ function coerceRuleForSave(node) {
        'noise_estimate', 'crop_complete', 'prediction_confidence'].indexOf(node.field) !== -1) {
     val = parseFloat(val);
     if (isNaN(val)) val = 0;
-  } else if (['has_mask', 'has_gps', 'has_location_keyword',
+  } else if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword',
               'location_keyword_missing', 'inat_submitted', 'is_duplicate',
               'needs_review', 'all'].indexOf(node.field) !== -1) {
     val = (val === true || val === 1 || val === '1' || val === 'true') ? 1 : 0;
@@ -3439,17 +3900,14 @@ async function saveCollection() {
 }
 
 /* ---------- Photo Loading ---------- */
-function resetAndLoad() {
-  cancelScheduledSearchFilter();
-  if (clipSearchActive) {
-    clipSearchActive = false;
-    document.getElementById('clipSearchInput').value = '';
-    document.getElementById('clipClearBtn').style.display = 'none';
-  }
+async function resetAndLoad(options) {
+  var preserveAnchor = !!(options && options.preserveAnchor);
+  var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
+  var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   photos = [];
   currentPage = 1;
   allLoaded = false;
-  loadEpoch++;
+  var resetLoadEpoch = ++loadEpoch;
   selectAllRequestSeq++;
   loading = false;
   // Dataset is about to change; any prior selection (multi-select Set or
@@ -3461,59 +3919,75 @@ function resetAndLoad() {
   selectedIndex = -1;
   // Leaving collection mode when applying non-collection filters (sort, rating,
   // date, keyword, folder) so the summary stays in sync with the visible grid.
-  activeCollectionId = null;
-  closeDetail();
+  // Dashboard-scoped collections are the exception: there the collection is an
+  // explicit composable restriction that filters combine WITH, so it must
+  // survive filter-driven reloads (dashboard drill-down deep links).
+  if (!dashboardCollectionScope) activeCollectionId = null;
+  if (anchor) hideDetailPanel();
+  else closeDetail();
   document.getElementById('grid').innerHTML = '';
-  loadPhotos();
+  document.getElementById('gridContainer').scrollTop = 0;
+
+  function resetRequestIsCurrent() {
+    return resetLoadEpoch === loadEpoch &&
+      (activeCollectionId == null || dashboardCollectionScope);
+  }
+  function anchorScanShouldContinue() {
+    return resetRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
+  }
+
+  if (anchor) anchorScanDepth++;
+  try {
+    await loadPhotos();
+    if (!resetRequestIsCurrent() || !anchor) return;
+
+    var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
+    if (!resetRequestIsCurrent()) return;
+    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
+    if (!card) {
+      clearActiveSelectionAndDetail();
+      return;
+    }
+
+    selectedPhotoId = anchor.photoId;
+    selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+    if (anchor.detailVisible) loadDetail(anchor.photoId);
+    requestAnimationFrame(function() {
+      if (!resetRequestIsCurrent()) return;
+      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
+      restorePhotoAnchor(anchor);
+      updateScrollPosition();
+    });
+  } finally {
+    if (anchor) {
+      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
+      if (anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
+}
+
+function getBrowseRules() {
+  if (!window.VireoFilter || !VireoFilter.getRules) return null;
+  var rules = VireoFilter.getRules();
+  var count = Array.isArray(rules) ? rules.length : (rules.rules || []).length;
+  return count ? rules : null;
 }
 
 function buildCurrentBrowseParams() {
   var params = new URLSearchParams();
   params.set('sort', document.getElementById('sortSelect').value);
-
   if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
-  if (flagFilter) params.set('flag', flagFilter);
-
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
-
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo = document.getElementById('dateTo').value;
-  if (dateFrom) params.set('date_from', dateFrom);
-  if (dateTo) params.set('date_to', dateTo);
-
-  appendKeywordSearchParams(params);
-  return params;
-}
-
-function appendKeywordSearchParams(params) {
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
-  if (params.has('keyword')) {
-    VireoTextSearch.appendParams(
-      params,
-      { matchCase: keywordSearchMatchCase, wholeWord: keywordSearchWholeWord },
-      'keyword_match_case',
-      'keyword_whole_word'
-    );
+  if (activeCollectionId && dashboardCollectionScope) {
+    params.set('collection_id', activeCollectionId);
   }
-}
-
-function renderKeywordSearchOptions() {
-  VireoTextSearch.renderOptions('keyword', {
-    matchCase: keywordSearchMatchCase,
-    wholeWord: keywordSearchWholeWord,
-  });
-}
-
-function toggleKeywordSearchOption(option) {
-  VireoTextSearch.toggle('keyword', option, function(options) {
-    keywordSearchMatchCase = options.matchCase;
-    keywordSearchWholeWord = options.wholeWord;
-    applySearchFilterNow();
-  });
+  var rules = getBrowseRules();
+  if (rules) params.set('rules', JSON.stringify(rules));
+  return params;
 }
 
 async function loadPhotos(options) {
@@ -3546,22 +4020,42 @@ async function loadPhotos(options) {
   var reqPerPage = perPage * chunk;
 
   var url;
-  if (activeCollectionId) {
+  var fetchOptions = {};
+  if (activeCollectionId && !dashboardCollectionScope) {
     var cparams = new URLSearchParams();
     cparams.set('page', reqPage);
     cparams.set('per_page', reqPerPage);
     url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
   } else {
-    var params = buildCurrentBrowseParams();
-    params.set('page', reqPage);
-    params.set('per_page', reqPerPage);
-    url = '/api/photos?' + params.toString();
+    url = '/api/photos/query';
+    var body = {
+      rules: getBrowseRules() || [],
+      sort: document.getElementById('sortSelect').value,
+      page: reqPage,
+      per_page: reqPerPage,
+    };
+    var loadVisual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+    if (loadVisual) body.visual = loadVisual;
+    if (activeFolderId) body.folder_id = activeFolderId;
+    if (activeCollectionId && dashboardCollectionScope) body.collection_id = activeCollectionId;
+    fetchOptions = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    };
   }
 
   try {
-    var data = await safeFetch(url);
+    var data = await safeFetch(url, fetchOptions);
     if (epoch !== loadEpoch) return;  // grid was reset mid-flight; drop stale response
     totalPhotos = data.total;
+    if (window.VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(totalPhotos);
+    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+      VireoFilter.setVisualInfo(data.visual || null);
+    }
+    (data.photos || []).forEach(function(p) {
+      if (p.similarity != null) p._similarity = p.similarity;
+    });
     var firstNewIdx = photos.length;
 
     if (data.photos.length === 0) {
@@ -3603,7 +4097,7 @@ async function loadPhotos(options) {
       // scan can drain during our fetch, and its own hydration rAF then
       // bails on loading=true. In that overlap this load is the current
       // view's only chance to re-arm.
-      if (loadSucceeded && collectionAnchorScanDepth === 0) {
+      if (loadSucceeded && anchorScanDepth === 0) {
         rearmInfiniteScrollObserver();
         // Chain: keep loading while the viewport is at or past the loading
         // boundary (rAF so the freshly appended cards have a layout first).
@@ -3634,14 +4128,35 @@ async function loadCalendarData() {
   var params = new URLSearchParams();
   params.set('year', calendarYear);
   if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
-  if (flagFilter) params.set('flag', flagFilter);
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
-  appendKeywordSearchParams(params);
+  // Dashboard-scoped Browse composes the collection with active filters —
+  // without this the calendar shows counts from the whole workspace/folder
+  // and a day-click applies a date chip based on photos not in the collection.
+  if (activeCollectionId && dashboardCollectionScope) {
+    params.set('collection_id', activeCollectionId);
+  }
+  // Strip any root-level `timestamp` rule from the calendar's own request.
+  // selectCalendarDay adds/replaces exactly such a rule, and the filter
+  // bar's onChange calls loadCalendarData() synchronously — feeding the
+  // just-selected day back into the heatmap zeros out every other day and
+  // makes it impossible to click through to another one. The heatmap is a
+  // date picker: it should always show all days matching the non-date
+  // filters (the visible grid still applies the date rule).
+  var rules = getBrowseRulesWithoutTimestamp();
+  if (rules) params.set('rules', JSON.stringify(rules));
+  appendVisualScopeParams(params);
 
   calendarData = await safeFetch('/api/photos/calendar?' + params.toString());
   renderCalendar();
+}
+
+function getBrowseRulesWithoutTimestamp() {
+  var rules = getBrowseRules();
+  if (!rules || !rules.rules) return rules;
+  var kept = rules.rules.filter(function(r) {
+    return !(r && !Array.isArray(r.rules) && r.field === 'timestamp');
+  });
+  if (!kept.length) return null;
+  return { mode: rules.mode || 'all', rules: kept };
 }
 
 function renderCalendar() {
@@ -3743,30 +4258,51 @@ function renderCalendar() {
 }
 
 function selectCalendarDay(dateStr, count) {
+  // /api/photos/calendar can resolve before VireoFilter.init() has
+  // loaded /api/filters/fields, so a click that lands in that window
+  // would reach addRule -> makeRule with state.fields still null and
+  // throw \u2014 silently swallowing the day pick and leaving the calendar
+  // in a half-selected state (chip up, no filter applied). Bail out
+  // until the filter registry is ready; the click will succeed on the
+  // next attempt once the field payload lands.
+  if (!window.VireoFilter || !VireoFilter.isReady()) return;
   selectedDay = dateStr;
   var dateObj = new Date(dateStr + 'T12:00:00');
   var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   document.getElementById('calSelectionText').textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
   document.getElementById('calSelection').classList.add('active');
 
-  // Update date inputs and reload. #dateTo is <input type="date">, which
-  // rejects datetime strings (the value would silently blank and the filter
-  // would lose its upper bound). A bare date is correct: the backend pads
-  // date_to to end-of-day (_inclusive_date_to in db.py).
-  document.getElementById('dateFrom').value = dateStr;
-  document.getElementById('dateTo').value = dateStr;
-  activeCollectionId = null;
-  reloadBrowseResults();
+  // Day selection is a capture-date rule in the filter bar (single-day
+  // between; the backend pads the upper bound to end-of-day).
+  // Clear the collection scope BEFORE addRule() — its onChange fires the
+  // reload synchronously, so mutating scope after would only take effect
+  // for later requests (infinite scroll, select-all, summary, calendar).
+  // Dashboard-scoped collection Browse composes collection + rules and
+  // must keep activeCollectionId.
+  if (!dashboardCollectionScope) activeCollectionId = null;
+  VireoFilter.addRule('timestamp', 'between', [dateStr, dateStr]);
   renderCalendar(); // update selected state
 }
 
 function clearCalendarSelection() {
+  // Only drop collection scope when a day was actually selected — that
+  // scope is what selectCalendarDay cleared, and its removal here pairs
+  // with the removeField('timestamp') reload. Toggling the calendar off
+  // (or clearing selection twice) with no day picked hits this path with
+  // nothing to remove: removeField would return early without firing
+  // onChange, so a silent activeCollectionId=null would leave the grid
+  // showing the collection while infinite-scroll/summary/select-all
+  // silently widened to the whole workspace.
+  //
+  // The removeField('timestamp') is also gated on hadSelection: a user
+  // with a manual capture-date rule from a deep link or the filter
+  // popover (never entered via the calendar) toggling the calendar on
+  // and back off would otherwise silently clear their date filter.
+  var hadSelection = selectedDay !== null;
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
-  document.getElementById('dateFrom').value = '';
-  document.getElementById('dateTo').value = '';
-  activeCollectionId = null;
-  reloadBrowseResults();
+  if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
+  if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
   if (calendarData) renderCalendar();
 }
 
@@ -3774,67 +4310,25 @@ function calendarChangeYear(delta) {
   if (delta < 0 && calendarData && calendarYear <= calendarData.min_year) return;
   if (delta > 0 && calendarData && calendarYear >= calendarData.max_year) return;
   calendarYear += delta;
+  // Same guards as clearCalendarSelection: only touch collection scope
+  // and only removeField('timestamp') when a day was actually picked
+  // (that day-pick is what dropped scope and set the timestamp rule).
+  // Without them, switching year in a collection view before ever
+  // selecting a day silently widens later requests to the workspace,
+  // and stepping through years with a manual timestamp rule active
+  // would silently clear the user's date filter.
+  var hadSelection = selectedDay !== null;
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
-  document.getElementById('dateFrom').value = '';
-  document.getElementById('dateTo').value = '';
+  if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
+  if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
   loadCalendarData();
-  activeCollectionId = null;
-  reloadBrowseResults();
 }
 
 function applyFilters() {
   if (timelineMode) loadCalendarData();
-  activeCollectionId = null;
+  if (!dashboardCollectionScope) activeCollectionId = null;
   reloadBrowseResults();
-}
-
-function scheduleSearchFilter() {
-  cancelScheduledSearchFilter();
-  searchFilterTimer = setTimeout(function() {
-    searchFilterTimer = null;
-    applyFilters();
-  }, 250);
-}
-
-function cancelScheduledSearchFilter() {
-  if (searchFilterTimer) {
-    clearTimeout(searchFilterTimer);
-    searchFilterTimer = null;
-  }
-}
-
-function applySearchFilterNow() {
-  cancelScheduledSearchFilter();
-  applyFilters();
-}
-
-function setFilterRating(val) {
-  if (filterRating === val) {
-    filterRating = 0;
-  } else {
-    filterRating = val;
-  }
-  document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
-    el.classList.toggle('active', parseInt(el.dataset.val) <= filterRating);
-  });
-  activeCollectionId = null;
-  reloadBrowseResults();
-}
-
-function setFlagFilter(flag) {
-  flagFilter = flagFilter === flag ? '' : flag;
-  updateFlagFilterButtons();
-  if (timelineMode) loadCalendarData();
-  activeCollectionId = null;
-  reloadBrowseResults();
-}
-
-function updateFlagFilterButtons() {
-  var pick = document.getElementById('pickFilterBtn');
-  var reject = document.getElementById('rejectFilterBtn');
-  if (pick) pick.classList.toggle('active-pick', flagFilter === 'flagged');
-  if (reject) reject.classList.toggle('active-reject', flagFilter === 'rejected');
 }
 
 function updateFilterSummary() {
@@ -3854,124 +4348,19 @@ function toggleDetectionBoxes() {
   renderGrid();
 }
 
-function getClipSearchQuery() {
-  var input = document.getElementById('clipSearchInput');
-  return input ? input.value.trim() : '';
+function appendVisualScopeParams(params) {
+  // Summary/calendar/typeahead counts must describe the same photos the
+  // visually-filtered grid shows; the backend narrows to the matched set
+  // when the clause is healthy and leaves rules untouched otherwise.
+  var visual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+  if (visual) params.set('visual', JSON.stringify(visual));
 }
 
-function appendClipSearchScopeParams(params) {
-  if (activeCollectionId) {
-    params.set('collection_id', activeCollectionId);
-    return;
-  }
-  if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
-  if (flagFilter) params.set('flag', flagFilter);
-
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
-
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo = document.getElementById('dateTo').value;
-  if (dateFrom) params.set('date_from', dateFrom);
-  if (dateTo) params.set('date_to', dateTo);
-
-  appendKeywordSearchParams(params);
-}
-
-function reloadBrowseResults() {
-  if (clipSearchActive && getClipSearchQuery()) {
-    runClipSearch();
-  } else {
-    resetAndLoad();
-  }
-}
-
-async function runClipSearch() {
-  var query = getClipSearchQuery();
-  if (!query) {
-    if (clipSearchActive) clearClipSearch();
-    return;
-  }
-
-  var searchSeq = ++clipSearchSeq;
-  loadEpoch++;
-  selectAllRequestSeq++;
-  var epoch = loadEpoch;
-  loading = false;
-  photos = [];
-  allLoaded = true;
-  selectedPhotos.clear();
-  selectedPhotoId = null;
-  selectedIndex = -1;
-  closeDetail();
-  document.getElementById('grid').innerHTML = '';
-  document.getElementById('loadingState').style.display = 'block';
-  document.getElementById('loadingState').textContent = 'Searching...';
-  clipSearchActive = true;
-  document.getElementById('clipClearBtn').style.display = '';
-  var keepLoadingMessage = false;
-
-  try {
-    var params = new URLSearchParams();
-    params.set('q', query);
-    params.set('limit', 100);
-    params.set('threshold', 0.15);
-    appendClipSearchScopeParams(params);
-    var data = await safeFetch('/api/photos/search?' + params.toString());
-    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
-
-    if (data.reason) {
-      var msg = {
-        'model_no_text_search': 'Text search is not supported by ' + (data.model_used || 'this model') + '. Switch to a BioCLIP model in Settings.',
-        'no_embeddings': 'No search index found for ' + (data.model_used || 'this model') + '. Run classification first to enable text search.',
-        'no_model': 'No model available. Download one in Settings.'
-      }[data.reason] || 'Search returned no results.';
-      document.getElementById('loadingState').textContent = msg;
-      keepLoadingMessage = true;
-      return;
-    }
-
-    photos = data.results.map(function(r) {
-      var p = r.photo;
-      p._similarity = r.similarity;
-      return p;
-    });
-    totalPhotos = data.total_matches;
-    allLoaded = true;
-
-    renderGrid();
-    var refreshIds = photos.map(function(p) { return p.id; });
-    loadInatStatus(refreshIds).then(function() {
-      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
-    });
-    fetchColorLabels(refreshIds).then(function() {
-      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
-    });
-    var summary = document.getElementById('filterSummary');
-    summary.textContent = data.total_matches + ' matches' + (data.model_used ? ' (' + data.model_used + ')' : '');
-  } catch(e) {
-    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
-    document.getElementById('loadingState').textContent = 'Search failed: ' + (e.message || e);
-    keepLoadingMessage = true;
-    return;
-  } finally {
-    if (searchSeq === clipSearchSeq && epoch === loadEpoch && !keepLoadingMessage) {
-      document.getElementById('loadingState').style.display = 'none';
-    }
-  }
-}
-
-function clearClipSearch() {
-  clipSearchSeq++;
-  clipSearchActive = false;
-  document.getElementById('clipSearchInput').value = '';
-  document.getElementById('clipClearBtn').style.display = 'none';
-  resetAndLoad();
+function reloadBrowseResults(options) {
+  resetAndLoad(options);
 }
 
 function updateScrollPosition() {
-  if (clipSearchActive) return;
   var el = document.getElementById('filterSummary');
   if (photos.length === 0) {
     el.textContent = totalPhotos + ' photos';
@@ -3988,12 +4377,14 @@ function updateScrollPosition() {
   var viewHeight = container.clientHeight;
 
   // Viewport entirely below every loaded card (placeholder territory):
-  // reporting the loaded range would be a lie, so estimate the position
-  // from the scroll fraction until real cards catch up.
+  // reporting the loaded range would be a lie, so estimate within the
+  // bounded runway represented by the rendered skeleton cells.
   var lastCard = cards[cards.length - 1];
   if (lastCard.offsetTop + lastCard.offsetHeight < scrollTop) {
     var frac = Math.min(1, (scrollTop + viewHeight / 2) / Math.max(1, container.scrollHeight));
-    var approx = Math.max(1, Math.min(totalPhotos, Math.round(frac * totalPhotos)));
+    var skeletonCount = document.querySelectorAll('#gridTail .skel-card').length;
+    var representedPhotos = Math.min(totalPhotos, photos.length + skeletonCount);
+    var approx = Math.max(1, Math.min(representedPhotos, Math.round(frac * representedPhotos)));
     el.textContent = '≈' + approx.toLocaleString() + ' of ' + totalPhotos.toLocaleString();
     return;
   }
@@ -4136,7 +4527,7 @@ observer.disconnect = function() {
 observer.observe(document.getElementById('scrollSentinel'));
 
 function rearmInfiniteScrollObserver() {
-  // With the 1200px root margin, the sentinel can remain intersecting after
+  // With the 3200px root margin, the sentinel can remain intersecting after
   // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
   // a fresh callback for the current layout instead of waiting for a scroll
   // transition that may never occur.
@@ -4148,14 +4539,12 @@ function rearmInfiniteScrollObserver() {
   observer.observe(sentinel);
 }
 
-/* Scroll-driven page loading. The grid now reserves the full dataset's
-   height, so the bottom sentinel only intersects near the absolute end —
-   the primary load trigger is proximity to the loading boundary (the
-   first skeleton cell). Fires on scroll and chains after each successful
-   page load until the viewport is covered by real cards. */
+/* Scroll-driven page loading. The primary trigger is proximity to the loading
+   boundary (the first skeleton cell). Fires on scroll and chains after each
+   successful page load until the viewport is covered by real cards. */
 function ensureViewportHydrated() {
   if (infiniteScrollObserverDisconnected || !infiniteScrollObserverIsNative) return;
-  if (loading || allLoaded || clipSearchActive || collectionAnchorScanDepth > 0) return;
+  if (loading || allLoaded || anchorScanDepth > 0) return;
   if (photos.length === 0) return;
   var tail = document.getElementById('gridTail');
   if (!tail || !tail.firstElementChild) return;
@@ -4165,6 +4554,10 @@ function ensureViewportHydrated() {
 }
 
 window.addEventListener('resize', function() {
+  var sidebar = document.getElementById('browseSidebar');
+  if (sidebar) setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, false);
+  var detailPanel = document.getElementById('detailPanel');
+  if (detailPanel) setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, false);
   // Column count and card heights change with width — re-estimate the tail
   requestAnimationFrame(updateGridTail);
 });
@@ -4269,42 +4662,35 @@ async function selectAllMatchingPhotos() {
   var requestSeq = ++selectAllRequestSeq;
   var requestEpoch = loadEpoch;
 
-  if (clipSearchActive) {
-    var query = document.getElementById('clipSearchInput').value.trim();
-    if (!query) return;
-    var searchParams = new URLSearchParams();
-    searchParams.set('q', query);
-    searchParams.set('threshold', 0.15);
-    searchParams.set('ids_only', '1');
-    appendClipSearchScopeParams(searchParams);
-    showToast('Selecting all matching search results...');
-    try {
-      var searchData = await safeFetch('/api/photos/search?' + searchParams.toString(), {}, { toast: false });
-      if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
-      selectedPhotos.clear();
-      (searchData.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
-      renderGrid();
-      updateBatchBar();
-      showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' search result' + (selectedPhotos.size === 1 ? '' : 's'));
-    } catch(e) {
-      showToast('Could not select all search results: ' + (e.message || e), 'error');
-    }
-    return;
-  }
 
   var url;
-  if (activeCollectionId) {
+  var fetchOpts = {};
+  if (activeCollectionId && !dashboardCollectionScope) {
     url = '/api/collections/' + activeCollectionId + '/photo-ids';
   } else {
-    url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();
+    url = '/api/photos/query';
+    var idsBody = {
+      rules: getBrowseRules() || [],
+      sort: document.getElementById('sortSelect').value,
+      ids_only: true,
+    };
+    var idsVisual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+    if (idsVisual) idsBody.visual = idsVisual;
+    if (activeFolderId) idsBody.folder_id = activeFolderId;
+    if (activeCollectionId && dashboardCollectionScope) idsBody.collection_id = activeCollectionId;
+    fetchOpts = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(idsBody),
+    };
   }
 
   showToast('Selecting all matching photos...');
   try {
-    var data = await safeFetch(url, {}, { toast: false });
+    var data = await safeFetch(url, fetchOpts, { toast: false });
     if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
     selectedPhotos.clear();
-    (data.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+    (data.photo_ids || data.ids || []).forEach(function(id) { selectedPhotos.add(id); });
     renderGrid();
     updateBatchBar();
     showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' photo' + (selectedPhotos.size === 1 ? '' : 's'));
@@ -4714,6 +5100,165 @@ function browseCompareStep(delta) {
   renderBrowseCompare();
 }
 
+function browseCompareElements(prefix) {
+  return {
+    wrap: document.getElementById('browseCompareWrap' + prefix),
+    img: document.getElementById('browseCompareImg' + prefix),
+    badge: document.getElementById('browseCompareZoom' + prefix)
+  };
+}
+
+function clampBrowseComparePan(prefix) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap || !els.img) return;
+  if (view.zoom <= 1.001) {
+    view.panX = 0;
+    view.panY = 0;
+    return;
+  }
+  var maxX = Math.max(0, (els.img.clientWidth * view.zoom - els.wrap.clientWidth) / 2);
+  var maxY = Math.max(0, (els.img.clientHeight * view.zoom - els.wrap.clientHeight) / 2);
+  view.panX = Math.max(-maxX, Math.min(maxX, view.panX));
+  view.panY = Math.max(-maxY, Math.min(maxY, view.panY));
+}
+
+function applyBrowseCompareView(prefix) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap || !els.img) return;
+  clampBrowseComparePan(prefix);
+  els.img.style.transform = 'translate(' + view.panX + 'px, ' + view.panY + 'px) scale(' + view.zoom + ')';
+  els.wrap.classList.toggle('zoomed', view.zoom > 1.001);
+  if (els.badge) els.badge.textContent = view.zoom <= 1.001 ? 'Fit' : Math.round(view.zoom * 100) + '%';
+}
+
+function ensureBrowseCompareOriginal(prefix) {
+  var els = browseCompareElements(prefix);
+  if (!els.img || !els.img.dataset.photoId) return;
+  var loadState = els.img.dataset.originalLoaded;
+  if (loadState === 'true' || loadState === 'loading' || loadState === 'failed') return;
+  var photoId = els.img.dataset.photoId;
+  els.img.dataset.originalLoaded = 'loading';
+  var original = new Image();
+  els.img._browseCompareOriginalProbe = original;
+  original.onload = function() {
+    if (els.img.dataset.photoId !== photoId) return;
+    els.img.dataset.originalLoaded = 'true';
+    els.img.src = original.src;
+    els.img._browseCompareOriginalProbe = null;
+  };
+  original.onerror = function() {
+    if (els.img.dataset.photoId !== photoId) return;
+    els.img.dataset.originalLoaded = 'failed';
+    els.img._browseCompareOriginalProbe = null;
+  };
+  original.src = '/photos/' + photoId + '/original';
+}
+
+function setBrowseCompareZoom(prefix, zoom, clientX, clientY) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap) return;
+  var oldZoom = view.zoom;
+  var nextZoom = Math.max(1, Math.min(8, zoom));
+  if (nextZoom > 1.001 && oldZoom > 0 && clientX != null && clientY != null) {
+    var rect = els.wrap.getBoundingClientRect();
+    var cursorX = clientX - (rect.left + rect.width / 2);
+    var cursorY = clientY - (rect.top + rect.height / 2);
+    var ratio = nextZoom / oldZoom;
+    view.panX = cursorX - ratio * (cursorX - view.panX);
+    view.panY = cursorY - ratio * (cursorY - view.panY);
+  }
+  view.zoom = nextZoom;
+  if (nextZoom <= 1.001) {
+    view.panX = 0;
+    view.panY = 0;
+  } else {
+    ensureBrowseCompareOriginal(prefix);
+  }
+  applyBrowseCompareView(prefix);
+}
+
+function resetBrowseCompareView(prefix) {
+  var view = browseCompareViews[prefix];
+  if (!view) return;
+  view.zoom = 1;
+  view.panX = 0;
+  view.panY = 0;
+  applyBrowseCompareView(prefix);
+}
+
+function resetBrowseCompareViews() {
+  resetBrowseCompareView('A');
+  resetBrowseCompareView('B');
+}
+
+function browseComparePaneFromEvent(e) {
+  var wrap = e.target && e.target.closest ? e.target.closest('.browse-compare-image-wrap') : null;
+  return wrap && wrap.dataset ? wrap.dataset.pane : null;
+}
+
+(function installBrowseCompareZoomHandlers() {
+  document.addEventListener('wheel', function(e) {
+    if (!isBrowseCompareOpen()) return;
+    var prefix = browseComparePaneFromEvent(e);
+    if (!prefix || !browseCompareViews[prefix]) return;
+    e.preventDefault();
+    var sensitivity = e.ctrlKey ? 0.02 : 0.0015;
+    var factor = Math.exp(-e.deltaY * sensitivity);
+    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom * factor, e.clientX, e.clientY);
+  }, { passive: false });
+
+  document.addEventListener('dblclick', function(e) {
+    if (!isBrowseCompareOpen()) return;
+    var prefix = browseComparePaneFromEvent(e);
+    if (!prefix || !browseCompareViews[prefix]) return;
+    e.preventDefault();
+    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom > 1.001 ? 1 : 2, e.clientX, e.clientY);
+  });
+
+  document.addEventListener('pointerdown', function(e) {
+    if (!isBrowseCompareOpen() || e.button !== 0) return;
+    var prefix = browseComparePaneFromEvent(e);
+    var view = prefix && browseCompareViews[prefix];
+    if (!view || view.zoom <= 1.001) return;
+    browseComparePointer = {
+      pointerId: e.pointerId,
+      prefix: prefix,
+      startX: e.clientX,
+      startY: e.clientY,
+      panX: view.panX,
+      panY: view.panY
+    };
+    if (e.target.setPointerCapture) e.target.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  document.addEventListener('pointermove', function(e) {
+    var drag = browseComparePointer;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    var view = browseCompareViews[drag.prefix];
+    view.panX = drag.panX + e.clientX - drag.startX;
+    view.panY = drag.panY + e.clientY - drag.startY;
+    applyBrowseCompareView(drag.prefix);
+    e.preventDefault();
+  });
+
+  function stopBrowseComparePan(e) {
+    if (browseComparePointer && (e.pointerId == null || browseComparePointer.pointerId === e.pointerId)) {
+      browseComparePointer = null;
+    }
+  }
+  document.addEventListener('pointerup', stopBrowseComparePan);
+  document.addEventListener('pointercancel', stopBrowseComparePan);
+  window.addEventListener('resize', function() {
+    if (!isBrowseCompareOpen()) return;
+    applyBrowseCompareView('A');
+    applyBrowseCompareView('B');
+  });
+})();
+
 function findBrowsePhoto(id) {
   return photos.find(function(p) { return p.id === id; }) || null;
 }
@@ -4743,7 +5288,10 @@ function setBrowseComparePane(prefix, photo) {
   var name = document.getElementById('browseCompareName' + prefix);
   var meta = document.getElementById('browseCompareMeta' + prefix);
   if (img) {
+    img._browseCompareOriginalProbe = null;
     img.alt = photo.filename || '';
+    img.dataset.photoId = photo.id;
+    img.dataset.originalLoaded = 'false';
     img.src = '/photos/' + photo.id + '/full';
   }
   if (name) name.textContent = photo.filename || ('Photo ' + photo.id);
@@ -4756,6 +5304,7 @@ async function renderBrowseCompare() {
   var leftId = browseCompareIds[browseCompareOffset];
   var rightId = browseCompareIds[browseCompareOffset + 1];
   if (leftId == null || rightId == null) return;
+  resetBrowseCompareViews();
 
   var count = document.getElementById('browseCompareCount');
   if (count) {
@@ -4796,7 +5345,7 @@ async function loadSelectionKeywordSuggestions(ids) {
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
     if (seq !== selectionKeywordRequestSeq) return;
-    renderSelectionKeywordSuggestions(data.suggestions || [], data.selected_count || ids.length);
+    renderSelectionKeywordSuggestions(data.keywords || [], data.selected_count || ids.length);
   } catch(e) {
     if (seq === selectionKeywordRequestSeq && list) {
       list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
@@ -4853,6 +5402,7 @@ async function applySelectionKeyword(keywordId) {
       body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
     });
   } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
@@ -4873,6 +5423,7 @@ async function removeSelectionKeyword(keywordId) {
       body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
     });
   } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
   _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
@@ -4965,6 +5516,45 @@ function _keywordNameFromCache(keywordId) {
     if (k && k.id === keywordId) return k.name;
   }
   return null;
+}
+
+// Keyword edits update the detail panel from /api/photos/:id, but Browse card
+// badges render from the separate `photos` cache populated by /api/photos.
+// Refresh the loaded rows from the authoritative batch endpoint after every
+// keyword mutation so taxonomy badges and representative state cannot drift.
+async function _refreshBrowseKeywordState(photoIds) {
+  if (!Array.isArray(photoIds) || !photoIds.length) return;
+  var loadedIds = new Set(photos.map(function(photo) { return photo.id; }));
+  var ids = Array.from(new Set(photoIds)).filter(function(id) {
+    return loadedIds.has(id);
+  });
+  if (!ids.length) return;
+
+  var refreshed = [];
+  try {
+    for (var offset = 0; offset < ids.length; offset += 500) {
+      var data = await safeFetch('/api/photos/by-ids', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: ids.slice(offset, offset + 500)}),
+      }, {toast: false});
+      (data.photos || []).forEach(function(updated) {
+        var local = photos.find(function(photo) { return photo.id === updated.id; });
+        if (!local) return;
+        local.species = Array.isArray(updated.species) ? updated.species : [];
+        local.life_list = Array.isArray(updated.life_list) ? updated.life_list : [];
+        local.species_representatives = Array.isArray(updated.species_representatives)
+          ? updated.species_representatives
+          : local.life_list;
+        local.is_species_representative = !!updated.is_species_representative;
+        refreshed.push(updated.id);
+      });
+    }
+  } catch (e) {
+    // The keyword save already succeeded; a later page reload remains a safe
+    // fallback if this non-critical card refresh is interrupted.
+  }
+  if (refreshed.length) refreshGridCards(refreshed);
 }
 
 // Server-side eligibility requires the photo to still carry the species
@@ -5077,6 +5667,7 @@ async function confirmBatchKeyword() {
       body: JSON.stringify(payload),
     });
   } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
   if (!selectedKeyword) invalidateKeywordAutocompleteCache();
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(ids);
@@ -5237,139 +5828,57 @@ async function confirmBatchCollection() {
   clearSelection();
 }
 
-var _gpsResolveSource = null;
-var _gpsResolvePreview = null;
-
-function gpsResolveReasonLabel(reason) {
-  var labels = {
-    missing_gps: 'No GPS',
-    invalid_gps: 'Invalid GPS',
-    no_api_key: 'No Google Maps key',
-    no_match: 'No place found',
-    transient_error: 'Temporary lookup failure',
-    already_has_location: 'Already has location',
-  };
-  return labels[reason] || reason || 'Unresolved';
-}
-
-function renderGpsResolvePreview(data) {
-  _gpsResolvePreview = data || {};
-  var total = _gpsResolvePreview.total || 0;
-  var resolvable = _gpsResolvePreview.resolvable || 0;
-  var groups = _gpsResolvePreview.groups || [];
-  var unresolved = _gpsResolvePreview.unresolved || [];
-  var skipped = _gpsResolvePreview.skipped || [];
-  var summary = document.getElementById('gpsResolveSummary');
-  var groupEl = document.getElementById('gpsResolveGroups');
-  var note = document.getElementById('gpsResolveNote');
-  var applyBtn = document.getElementById('gpsResolveApplyBtn');
-
-  summary.textContent = resolvable.toLocaleString() + ' of ' + total.toLocaleString()
-    + ' photos can be assigned across ' + groups.length.toLocaleString()
-    + ' place' + (groups.length === 1 ? '' : 's') + '.';
-
-  groupEl.innerHTML = groups.map(function(g) {
-    var samples = (g.sample_filenames || []).join(', ');
-    return '<div class="gps-resolve-row">' +
-      '<div style="min-width:0;">' +
-        '<div class="gps-resolve-place">' + escapeHtml(g.summary || g.name || g.place_id || 'Unknown place') + '</div>' +
-        (samples ? '<div class="gps-resolve-samples">' + escapeHtml(samples) + '</div>' : '') +
-      '</div>' +
-      '<div class="gps-resolve-count">' + (g.count || 0).toLocaleString() + '</div>' +
-    '</div>';
-  }).join('') || '<div class="gps-resolve-row"><div class="gps-resolve-place">No resolvable GPS locations</div></div>';
-
-  var notes = [];
-  if (unresolved.length) {
-    var reasonCounts = {};
-    unresolved.forEach(function(item) {
-      var reason = item.reason || 'unresolved';
-      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
-    });
-    var reasonText = Object.keys(reasonCounts).map(function(reason) {
-      return reasonCounts[reason].toLocaleString() + ' ' + gpsResolveReasonLabel(reason);
-    }).join(', ');
-    notes.push(unresolved.length.toLocaleString() + ' unresolved: ' + reasonText);
+function reviewLocationsForCollection(collectionId) {
+  // Same guard as filterByCollection: degraded collections would just
+  // re-hit the unresolvable rules while building the review queue.
+  var collectionMeta = collectionsById[collectionId];
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
   }
-  if (skipped.length) {
-    notes.push(skipped.length.toLocaleString() + ' skipped because they already have a location.');
-  }
-  note.textContent = notes.join(' ');
-  applyBtn.disabled = resolvable === 0;
-  applyBtn.style.opacity = resolvable === 0 ? '0.55' : '';
+  sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
+  sessionStorage.setItem('vireoLocationReviewSource', JSON.stringify({collection_id: collectionId}));
+  window.location.href = '/locations/review?collection_id=' + encodeURIComponent(collectionId);
 }
 
-async function openGpsResolve(source) {
-  _gpsResolveSource = source;
-  _gpsResolvePreview = null;
-  document.getElementById('gpsResolveSummary').textContent = 'Loading...';
-  document.getElementById('gpsResolveGroups').innerHTML = '';
-  document.getElementById('gpsResolveNote').textContent = '';
-  document.getElementById('gpsResolveApplyBtn').disabled = true;
-  document.getElementById('gpsResolveModal').classList.add('open');
-  try {
-    var data = await safeFetch('/api/batch/location/from-exif', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(Object.assign({apply: false}, source)),
-    });
-    renderGpsResolvePreview(data);
-  } catch(e) {
-    hideGpsResolveModal();
-  }
-}
-
-function openGpsResolveForCollection(collectionId) {
-  openGpsResolve({collection_id: collectionId});
-}
-
-function openGpsResolveForSelection() {
+function reviewLocationsForSelection() {
   var ids = getActiveSelection();
   if (!ids.length) return;
-  openGpsResolve({photo_ids: ids});
-}
-
-function hideGpsResolveModal() {
-  document.getElementById('gpsResolveModal').classList.remove('open');
-  _gpsResolveSource = null;
-  _gpsResolvePreview = null;
-  window._vireoNativeMenuPhotoIdsOverride = null;
-}
-
-async function applyGpsResolve() {
-  if (!_gpsResolveSource || !_gpsResolvePreview || !_gpsResolvePreview.resolvable) return;
-  var btn = document.getElementById('gpsResolveApplyBtn');
-  btn.disabled = true;
-  btn.textContent = 'Applying...';
+  var payload;
   try {
-    var data = await safeFetch('/api/batch/location/from-exif', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(Object.assign({apply: true}, _gpsResolveSource)),
-    });
-    var updated = data.updated || 0;
-    var updatedIds = [];
-    (data.groups || []).forEach(function(g) {
-      (g.photo_ids || []).forEach(function(id) { updatedIds.push(id); });
-    });
-    hideGpsResolveModal();
-    invalidateKeywordAutocompleteCache();
-    loadKeywords();
-    scheduleCollectionCountsRefresh();
-    refreshPendingSyncBanner();
-    var detailPhotoId = updatedIds.indexOf(selectedPhotoId) !== -1 ? selectedPhotoId : null;
-    await _afterLocationMutation(updatedIds, detailPhotoId);
-    var errors = (data.group_errors || []).length;
-    showToast(
-      'Resolved GPS locations for ' + updated.toLocaleString() + ' photo' + (updated === 1 ? '' : 's')
-      + (errors ? '; ' + errors + ' place group' + (errors === 1 ? '' : 's') + ' failed' : '')
-    );
-    if (updated > 0) showUndoToast();
-  } catch(e) {
-    btn.disabled = false;
-  } finally {
-    btn.textContent = 'Apply';
+    payload = JSON.stringify({photo_ids: ids});
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast('Could not open location review for this selection.', 'error');
+    }
+    return;
   }
+  try {
+    sessionStorage.setItem('vireoLocationReviewSource', payload);
+  } catch (e) {
+    // sessionStorage has a per-origin quota (typically ~5MB). Very large
+    // selections (e.g. "Select all matching photos" on a big library) can
+    // exceed it, in which case setItem throws synchronously. Guide the
+    // user to the collection-based flow, which passes an id in the URL
+    // and never touches sessionStorage for the id list.
+    if (typeof showToast === 'function') {
+      showToast(
+        'Selection is too large to open location review directly (' +
+          ids.length.toLocaleString() +
+          ' photos). Save the selection as a collection first, then use Review on Map from the collection menu.',
+        'error'
+      );
+    }
+    return;
+  }
+  sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
+  window.location.href = '/locations/review?source=selection';
 }
 
 var captureTimePreviewSeq = 0;
@@ -5666,9 +6175,16 @@ function renderDetail(photo) {
       skipIfLocallyWritten: true,
     });
   }
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(photo);
+  }
+  if (typeof window.vireoUpdatePairSourceControls === 'function') {
+    window.vireoUpdatePairSourceControls(photo.id);
+  }
   var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
   document.getElementById('detailImg').src = detailThumb;
   document.getElementById('detailFilename').textContent = photo.filename;
+  renderCoordinateStatus(photo);
 
   // Rating stars
   var ratingHtml = '';
@@ -5949,15 +6465,9 @@ function closeDetail() {
 async function loadSummary() {
   var params = new URLSearchParams();
   if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
-  if (flagFilter) params.set('flag', flagFilter);
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo = document.getElementById('dateTo').value;
-  if (dateFrom) params.set('date_from', dateFrom);
-  if (dateTo) params.set('date_to', dateTo);
-  appendKeywordSearchParams(params);
+  var rules = getBrowseRules();
+  if (rules) params.set('rules', JSON.stringify(rules));
+  appendVisualScopeParams(params);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
 
   try {
@@ -6196,6 +6706,27 @@ function renderBatchInspector(ids, opts) {
   opts = opts || {};
   var known = _batchAllLoaded(ids);
 
+  var coordinateEl = document.getElementById('locationCoordinateStatus');
+  if (coordinateEl) {
+    if (!known) {
+      coordinateEl.className = 'coordinate-status none';
+      coordinateEl.textContent = 'Coordinate sources are mixed or still loading for this selection.';
+    } else {
+      var counts = {exif: 0, assigned: 0, none: 0};
+      ids.forEach(function(id) {
+        var p = photos.find(function(photo) { return photo.id === id; });
+        var status = p && counts[p.location_status] != null ? p.location_status : 'none';
+        counts[status]++;
+      });
+      coordinateEl.className = 'coordinate-status';
+      coordinateEl.textContent = [
+        counts.exif + ' EXIF GPS',
+        counts.assigned + ' assigned map location' + (counts.assigned === 1 ? '' : 's'),
+        counts.none + ' without coordinates'
+      ].join(' · ');
+    }
+  }
+
   var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
   var r = rs.unanimous ? rs.value : 0;
   var ratingHtml = '';
@@ -6270,6 +6801,7 @@ async function addKeyword(keyword) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    await _refreshBrowseKeywordState(ids);
     input.value = '';
     state.selectedKeyword = null;
     hideKeywordSuggestions('addKeywordInput');
@@ -6301,6 +6833,7 @@ async function removeKeyword(photoId, keywordId) {
     await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
     });
+    await _refreshBrowseKeywordState([photoId]);
     _clearRepresentativeStateAfterKeywordRemoval(
       [photoId],
       _keywordNameFromCache(keywordId),
@@ -6466,7 +6999,28 @@ async function _afterLocationMutation(photoIds, detailPhotoId) {
     await filterByCollection(activeCollectionId);
     return;
   }
-  if (photoIds && photoIds.length) refreshGridCards(photoIds);
+  if (window.VireoFilter && VireoFilter.hasFilters()) {
+    resetAndLoad();
+    return;
+  }
+  if (photoIds && photoIds.length) {
+    var loadedIds = new Set(photos.map(function(photo) { return photo.id; }));
+    var idsToRefresh = photoIds.filter(function(id) { return loadedIds.has(id); });
+    try {
+      for (var offset = 0; offset < idsToRefresh.length; offset += 500) {
+        var statusData = await safeFetch('/api/photos/by-ids', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: idsToRefresh.slice(offset, offset + 500)})
+        }, {toast: false});
+        (statusData.photos || []).forEach(function(updated) {
+          var local = photos.find(function(photo) { return photo.id === updated.id; });
+          if (local) local.location_status = updated.location_status || 'none';
+        });
+      }
+    } catch (e) {}
+    refreshGridCards(idsToRefresh);
+  }
   // If a multi-selection is still active, keep the batch inspector rendered.
   // Falling through to loadDetail(anchor) would strip .batch-mode and rewire
   // the rating stars to setRating(anchorId, i) — collapsing the panel to the
@@ -6577,7 +7131,7 @@ async function _submitLocationPlace(placeId, placeDetails) {
     }
     await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
-    _showLocationError('Could not save location.');
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
   }
 }
 
@@ -6604,7 +7158,7 @@ async function _submitLocationKeyword(keyword) {
     }
     await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
-    _showLocationError('Could not save location.');
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
   }
 }
 
@@ -6631,7 +7185,7 @@ async function _submitLocationText(name) {
       await _afterLocationMutation(ids, detailPhotoId);
     }
   } catch(e) {
-    _showLocationError('Could not save location.');
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
   }
 }
 
@@ -6644,7 +7198,7 @@ async function clearPhotoLocation() {
     renderLocationEmpty();
     await _afterLocationMutation([photoId], photoId);
   } catch(e) {
-    _showLocationError('Could not clear location.');
+    _showLocationError(e && e.message ? e.message : 'Could not clear location.');
   }
 }
 
@@ -6658,6 +7212,31 @@ function clearExifSuggestion() {
   sugg.hidden = true;
   sugg.innerHTML = '';
   if (sugg.dataset) delete sugg.dataset.photoId;
+}
+
+function formatCoordinatePair(latitude, longitude) {
+  if (latitude == null || longitude == null) return '';
+  return Number(latitude).toFixed(5) + ', ' + Number(longitude).toFixed(5);
+}
+
+function renderCoordinateStatus(photo) {
+  var el = document.getElementById('locationCoordinateStatus');
+  if (!el) return;
+  var status = photo && photo.location_status ? photo.location_status : 'none';
+  var text;
+  if (status === 'exif') {
+    text = '📍 EXIF GPS — ' + formatCoordinatePair(photo.latitude, photo.longitude) +
+      '. Embedded in the original photo and used on the map.';
+  } else if (status === 'assigned') {
+    var loc = photo.location || {};
+    var coords = formatCoordinatePair(loc.latitude, loc.longitude);
+    text = '● Assigned map location' + (coords ? ' — ' + coords : '') +
+      '. The original photo does not contain a complete EXIF GPS pair.';
+  } else {
+    text = '⊘ No coordinates — this photo has no complete EXIF GPS pair or assigned map location.';
+  }
+  el.className = 'coordinate-status ' + status;
+  el.textContent = text;
 }
 
 function renderLocationFilled(loc) {
@@ -6838,7 +7417,7 @@ async function acceptExifSuggestion(placeId) {
     clearExifSuggestion();
     await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
-    _showLocationError('Could not save location.');
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
   }
 }
 
@@ -6951,6 +7530,7 @@ async function setKeywordType(kwId, newType, el) {
     var dropdown = el.closest('.keyword-type-dropdown');
     if (dropdown) dropdown.classList.remove('open');
     // Refresh detail panel and keyword tree
+    await _refreshBrowseKeywordState(photos.map(function(photo) { return photo.id; }));
     if (selectedPhotoId) loadDetail(selectedPhotoId);
     loadKeywords();
   } catch(e) {}
@@ -7350,6 +7930,8 @@ function buildPhotoContextMenu(photoIds) {
       onClick: function() { openBestBatchForIds(photoIds, photoIds[0]); } },
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
+    { label: 'Prepare Full Resolution',
+      onClick: function() { prepareFullResolutionSelection(photoIds); } },
     { separator: true },
     { label: 'Edit Photo', disabled: !one, disabledHint: hint,
       onClick: function() { openPhotoEditor(photoIds[0]); } },
@@ -7435,6 +8017,10 @@ async function copyFolderPath(fid) {
   }
 }
 
+function moveFolder(fid) {
+  window.location.href = '/move?folder_id=' + encodeURIComponent(fid);
+}
+
 async function rescanFolder(fid) {
   showToast('Starting folder rescan...', 'info');
   try {
@@ -7465,6 +8051,7 @@ document.addEventListener('contextmenu', function(e) {
     { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealFolder(fid); } },
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { separator: true },
+    { label: 'Move\u2026', onClick: function() { moveFolder(fid); } },
     { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
   ]);
 });
@@ -7532,18 +8119,24 @@ document.addEventListener('contextmenu', function(e) {
   if (isNaN(cid)) return;
   var nameEl = ti.querySelector('.collection-name');
   var name = nameEl ? nameEl.textContent : '';
-  var items = [
-    { label: 'Filter by this Collection',
-      onClick: function() { filterByCollection(cid); } },
-  ];
-  if (name === 'GPS Without Location Keyword') {
-    items.push({
-      label: 'Resolve GPS Locations',
-      onClick: function() { openGpsResolveForCollection(cid); },
-    });
+  var meta = collectionsById[cid];
+  var isUnavailable = !!(meta && meta.count_error);
+  // Degraded collections can't be filtered (the /photos endpoint would 400)
+  // and location review reads from the same collection rules — hide both while
+  // keeping the edit/rename/duplicate/delete actions reachable so the user
+  // can fix or discard the row.
+  var items = [];
+  if (!isUnavailable) {
+    items.push({ label: 'Filter by this Collection',
+      onClick: function() { filterByCollection(cid); } });
+    if (name === 'GPS Without Location Keyword') {
+      items.push({
+        label: 'Review Photo Locations',
+        onClick: function() { reviewLocationsForCollection(cid); },
+      });
+    }
   }
-  items = items.concat([
-    { separator: true },
+  var editActions = [
     { label: 'Edit Rules',
       onClick: function() { editCollection(cid); } },
     { label: 'Rename',
@@ -7553,7 +8146,11 @@ document.addEventListener('contextmenu', function(e) {
     { separator: true },
     { label: 'Delete Collection',
       onClick: function() { deleteCollectionById(cid, name); } },
-  ]);
+  ];
+  // Only emit a leading separator when there are filter/review actions above it
+  // to divide from — for degraded rows the menu starts at Edit Rules.
+  if (items.length) items.push({ separator: true });
+  items = items.concat(editActions);
   openContextMenu(e, items);
 });
 
@@ -7626,6 +8223,38 @@ document.addEventListener('contextmenu', function(e) {
         el.style.outline = '';
         el.style.outlineOffset = '';
       }, 2000);
+    }
+
+    // bootstrapBrowse (which owns VireoFilter.init) short-circuits when
+    // ?photo_id=... is present, so without this the filter bar renders but
+    // has no event handlers: quick-search does nothing, chips can't be
+    // added, and the total stays at "–". Initialize here so the bar is
+    // live once the deep-link has finished loading. Drop any persisted
+    // workspace filter — the explicit ?photo_id link should not be
+    // silently overridden by whatever the user had saved on Browse.
+    if (window.VireoFilter && !VireoFilter.isReady()) {
+      VireoFilter.init({
+        page: 'browse',
+        root: document.getElementById('vireoFilterBar'),
+        scopeLabel: 'Workspace · All available photos',
+        onChange: function(info) {
+          if (timelineMode) loadCalendarData();
+          if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+          var preserveAnchor = info && info.reason === 'quickSearchCleared';
+          resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
+          loadSummary();
+        },
+        getScope: function() {
+          return {
+            folder_id: activeFolderId,
+            collection_id: (activeCollectionId && dashboardCollectionScope)
+              ? activeCollectionId : null,
+          };
+        },
+      }).then(function() {
+        VireoFilter.setResultTotal(totalPhotos);
+        if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
+      }).catch(function() {});
     }
   } catch(e) { /* ignore deep-link errors silently */ }
   loading = false;
@@ -7813,6 +8442,93 @@ async function makeAvailableOffline() {
     showToast('Offline caching started (' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's') + ')');
   } catch(err) {
     showToast('Offline cache failed: ' + err.message, 'error');
+  }
+}
+
+var _prepareFullResolutionJobId = null;
+
+function _setPrepareFullResolutionButton(running, current, total) {
+  var btn = document.getElementById('prepareFullResolutionBtn');
+  if (!btn) return;
+  btn.disabled = !!running;
+  if (running && current != null && total) {
+    btn.textContent = 'Preparing ' + current + '/' + total;
+  } else if (running) {
+    btn.textContent = 'Preparing…';
+  } else {
+    btn.textContent = 'Prepare Full Resolution';
+  }
+}
+
+async function prepareFullResolutionSelection(photoIds) {
+  var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
+  if (!activeIds.length || _prepareFullResolutionJobId) return;
+  _setPrepareFullResolutionButton(true);
+  try {
+    var data = await safeFetch('/api/jobs/prepare-full-resolution', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: activeIds}),
+    });
+    _prepareFullResolutionJobId = data.job_id;
+    showToast(
+      'Preparing ' + activeIds.length.toLocaleString() +
+      ' photo' + (activeIds.length === 1 ? '' : 's') +
+      ' for full-resolution inspection…'
+    );
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(progress) {
+        _setPrepareFullResolutionButton(
+          true, progress.current || 0, progress.total || activeIds.length
+        );
+      },
+      onComplete: function(done) {
+        _prepareFullResolutionJobId = null;
+        _setPrepareFullResolutionButton(false);
+        var result = done.result || {};
+        if (done.status === 'cancelled') {
+          showToast('Full-resolution preparation was stopped.', 'error');
+          return;
+        }
+        if (done.status === 'failed' && !done.result) {
+          var errors = done.errors || [];
+          var failureMessage = errors.length
+            ? errors[0]
+            : 'The preparation job ended before producing a result.';
+          showToast(
+            'Full-resolution preparation failed: ' + failureMessage,
+            'error'
+          );
+          return;
+        }
+        var ready = result.ready || 0;
+        var failed = result.failed || 0;
+        var copied = result.copied || 0;
+        var summary = ready.toLocaleString() + ' ready';
+        if (copied) summary += ', ' + copied.toLocaleString() + ' copied locally';
+        if (failed) summary += ', ' + failed.toLocaleString() + ' failed';
+        showToast(
+          'Full-resolution preparation complete: ' + summary,
+          failed ? 'error' : 'success'
+        );
+        try {
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {
+            detail: {job_id: data.job_id}
+          }));
+        } catch (_) {}
+      },
+      onError: function() {
+        _prepareFullResolutionJobId = null;
+        _setPrepareFullResolutionButton(false);
+      },
+    });
+  } catch(err) {
+    _prepareFullResolutionJobId = null;
+    _setPrepareFullResolutionButton(false);
+    showToast(
+      'Could not start full-resolution preparation: ' + err.message,
+      'error'
+    );
   }
 }
 

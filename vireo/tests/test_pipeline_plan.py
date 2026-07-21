@@ -1891,6 +1891,50 @@ def test_eye_keypoints_plan_will_skip_when_preflight_fails(tmp_path, monkeypatch
     assert "disabled in config" in eye["summary"]
 
 
+def test_eye_keypoints_plan_honors_per_run_override_against_config_disabled(
+    tmp_path, monkeypatch,
+):
+    """When Settings has ``eye_detect_enabled=False`` but the caller opted
+    in via ``eye_detect_override=True`` (Process-page checkbox on), the
+    plan must show the stage as ``will-run``, not ``will-skip — Disabled
+    in config``. The pill has to match what the job would actually do —
+    which is toggle the config on for the run and execute the stage.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    # Give the stage some eligible work so it lands on will-run (not
+    # done-prior). eye_keypoint_stage_preflight is exercised with the
+    # REAL implementation — no monkeypatch — so the override must reach
+    # its config lookup.
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,),
+    )
+    db.conn.execute(
+        """INSERT INTO predictions
+            (detection_id, classifier_model, labels_fingerprint,
+             species, confidence)
+           VALUES (?, ?, ?, ?, ?)""",
+        (did, "BioCLIP-2", "fp1", "robin", 0.9),
+    )
+    db.conn.commit()
+
+    plan_no_override = compute_plan(
+        db, _params(), str(tmp_path / "test.db"),
+    )
+    assert plan_no_override["stages"]["EyeKeypoints"]["state"] == "will-skip"
+
+    plan_with_override = compute_plan(
+        db, _params(eye_detect_override=True), str(tmp_path / "test.db"),
+    )
+    eye = plan_with_override["stages"]["EyeKeypoints"]
+    assert eye["state"] != "will-skip", (
+        f"eye_detect_override=True must let the plan pill show what the "
+        f"job would actually do (run the stage), not the stale Settings "
+        f"disabled reason: got {eye!r}"
+    )
+
+
 def test_eye_keypoints_plan_done_prior_when_all_processed(tmp_path, monkeypatch):
     """The headline bug case: every eligible photo has eye_tenengrad set
     (with the current fingerprint, so it isn't stale), so the next run is
@@ -2285,6 +2329,80 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
 
 
 
+def test_regroup_plan_will_run_when_eye_detect_override_differs_from_workspace(
+    tmp_path, monkeypatch,
+):
+    """Cache is fresh against workspace settings, but the run carries a
+    ``eye_detect_override`` that flips ``eye_detect_enabled`` for THIS
+    press. Because ``compute_group_fingerprint`` doesn't hash
+    ``eye_detect_enabled``, the fingerprint match alone would let the
+    plan report ``done-prior`` — hiding the fact that ``regroup_stage``
+    will actually rescore with different eye behavior. The plan must
+    call this out as will-run instead.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
+    from labels_fingerprint import TOL_SENTINEL
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    cache_path = os.path.join(
+        str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(cache_path, "w") as f:
+        f.write('{"photos": []}')
+
+    # Workspace's own effective config: eye off (the new default). Stamp
+    # fingerprint so the fingerprint check would pass without the override.
+    import config as cfg
+    from pipeline import compute_group_fingerprint
+    effective = db.get_effective_config(cfg.load())
+    db.set_workspace_group_state(
+        db._active_workspace_id,
+        fingerprint=compute_group_fingerprint(effective),
+        when_ts=1714579200,
+    )
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    # Sanity check: no override → plan is done-prior.
+    plan_no_override = compute_plan(
+        db,
+        _params(model_ids=["m1"], skip_eye_keypoints=True),
+        str(tmp_path / "test.db"),
+    )
+    assert plan_no_override["stages"]["Group"]["state"] == "done-prior"
+
+    # Same state + eye_detect_override=True (Process-page checkbox) → the
+    # eye override differs from the workspace's eye-off setting, so
+    # regroup will rescore with different eye behavior; must be will-run.
+    plan_with_override = compute_plan(
+        db,
+        _params(
+            model_ids=["m1"], skip_eye_keypoints=True,
+            eye_detect_override=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    group = plan_with_override["stages"]["Group"]
+    assert group["state"] == "will-run", (
+        "eye_detect_override differs from workspace eye_detect_enabled — "
+        "regroup will rescore with different eye behavior, so the plan "
+        "must report will-run instead of the cache-fresh done-prior: "
+        f"got {group!r}"
+    )
+    assert group.get("detail", {}).get("eye_override_differs") is True
+
+
 def test_regroup_plan_will_run_when_cache_exists_but_fingerprint_invalidated(
     tmp_path, monkeypatch,
 ):
@@ -2376,15 +2494,16 @@ def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
     assert data["stages"]["Group"]["state"] == "will-skip"
 
 
-def test_api_pipeline_plan_expands_identify_strategy_to_species_review(
+def _plan_process_id(db, name):
+    return next(p["id"] for p in db.get_saved_processes() if p["name"] == name)
+
+
+def test_api_pipeline_plan_identify_flags_show_species_review(
     app_and_db, monkeypatch,
 ):
-    """Frontend sends the strategy name so the plan endpoint expands it the
-    same way /api/jobs/pipeline does. Before this route knew about the
-    ``identify`` preset, the plan reported Group as "Disabled — stage will
-    be skipped" because the frontend sent ``skip_regroup=true`` without the
-    ``review_mode`` that identify actually runs — a lie about the plan
-    summary for the default workflow.
+    """The process page sends explicit skip flags + review_mode='species' for
+    the Identify-birds shape. The plan must show Group as species review, not
+    "Disabled — stage will be skipped" (a lie about the default workflow).
 
     An active model must resolve for the plan to promise species review —
     on no-model installs the job auto-skips; see the paired plan-side
@@ -2399,13 +2518,12 @@ def test_api_pipeline_plan_expands_identify_strategy_to_species_review(
     resp = client.post(
         "/api/pipeline/plan",
         json={
-            "strategy": "identify",
-            # Mirror what applyStrategyPreset() sets when identify is picked:
-            # classify on, extract/eyes/group off.
+            # classify on, extract/eyes/group off, species-review path.
             "skip_classify": False,
             "skip_extract_masks": True,
             "skip_eye_keypoints": True,
             "skip_regroup": True,
+            "review_mode": "species",
         },
     )
     assert resp.status_code == 200
@@ -2415,42 +2533,41 @@ def test_api_pipeline_plan_expands_identify_strategy_to_species_review(
     assert "species review" in group["summary"].lower(), group
 
 
-def test_api_pipeline_plan_strategy_only_body_merges_skip_flags(app_and_db):
-    """A body of just ``{"strategy": "quick_look"}`` (no explicit skip
+def test_api_pipeline_plan_process_id_only_body_merges_skip_flags(app_and_db):
+    """A body of just ``{"process_id": <Quick look>}`` (no explicit skip
     flags) must plan the same run ``/api/jobs/pipeline`` would run — every
-    stage that quick_look disables must report skipped/disabled, not the
-    ``skip_* = false`` defaults the raw ``PipelinePlanParams`` would use.
+    stage Quick look disables must report skipped, not the ``skip_* = false``
+    defaults the raw ``PipelinePlanParams`` would use.
 
-    Before the plan route merged the full strategy expansion, it copied
-    only ``review_mode`` from the expansion and left every ``skip_*``
-    field at its default False, so an API caller sending strategy-only
-    got a plan that promised Classify/Extract/Group work the actual
-    strategy job would skip.
+    Before the plan route merged the full process expansion, it copied only
+    ``review_mode`` and left every ``skip_*`` field at its default False, so
+    a caller sending process-id-only got a plan that promised
+    Classify/Extract/Group work the actual job would skip.
     """
-    app, _ = app_and_db
+    app, db = app_and_db
+    pid = _plan_process_id(db, "Quick look")
     client = app.test_client()
     resp = client.post(
         "/api/pipeline/plan",
-        json={"strategy": "quick_look"},
+        json={"process_id": pid},
     )
     assert resp.status_code == 200
     data = resp.get_json()
-    # quick_look: skip_classify + skip_extract + skip_eyes + skip_regroup
+    # Quick look: skip_classify + skip_extract + skip_eyes + skip_regroup
     for stage in ("Classify", "Extract", "EyeKeypoints", "Group"):
         assert data["stages"][stage]["state"] == "will-skip", (stage, data)
 
 
-def test_api_pipeline_plan_strategy_only_identify_runs_species_review(
+def test_api_pipeline_plan_process_id_only_identify_runs_species_review(
     app_and_db, monkeypatch,
 ):
-    """Strategy-only identify must still surface the species-review branch.
-
-    Pairs with the quick_look case above: identify sets skip_regroup=True
-    *and* review_mode="species", and the plan must reflect that the Group
-    stage will prepare species review even though skip_regroup came from
-    the expansion (not an explicit body key).
+    """Process-id-only Identify birds must still surface the species-review
+    branch: it sets skip_regroup=True *and* review_mode="species", and the
+    plan must reflect that Group prepares species review even though
+    skip_regroup came from the expansion (not an explicit body key).
     """
-    app, _ = app_and_db
+    app, db = app_and_db
+    pid = _plan_process_id(db, "Identify birds")
     import models as models_mod
     monkeypatch.setattr(models_mod, "get_active_model", lambda: {
         "id": "m1", "name": "BioCLIP-2", "downloaded": True,
@@ -2458,15 +2575,15 @@ def test_api_pipeline_plan_strategy_only_identify_runs_species_review(
     client = app.test_client()
     resp = client.post(
         "/api/pipeline/plan",
-        json={"strategy": "identify"},
+        json={"process_id": pid},
     )
     assert resp.status_code == 200
     data = resp.get_json()
     group = data["stages"]["Group"]
     assert group["state"] == "will-run", group
     assert "species review" in group["summary"].lower(), group
-    # Extract/EyeKeypoints must still report skipped — the strategy's
-    # skip flags applied even though the body sent only ``strategy``.
+    # Extract/EyeKeypoints must still report skipped — the process's skip
+    # flags applied even though the body sent only ``process_id``.
     assert data["stages"]["Extract"]["state"] == "will-skip", data
     assert data["stages"]["EyeKeypoints"]["state"] == "will-skip", data
 
@@ -2474,42 +2591,41 @@ def test_api_pipeline_plan_strategy_only_identify_runs_species_review(
 def test_api_pipeline_plan_identify_no_model_mirrors_job_auto_skip(app_and_db):
     """On installs with no active model, ``/api/jobs/pipeline`` calls
     ``_apply_no_model_auto_skip`` and flips ``skip_classify`` +
-    ``skip_regroup`` to True, so the identify run only shows the
+    ``skip_regroup`` to True, so the Identify-birds run only shows the
     no-model warning and skips regroup. The plan endpoint must mirror
     that degradation instead of promising "Will prepare species review"
     for the default workflow on a fresh install.
     """
-    app, _ = app_and_db
+    app, db = app_and_db
+    pid = _plan_process_id(db, "Identify birds")
     # `app_and_db` already redirects models.DEFAULT_MODELS_DIR/CONFIG_PATH
     # to tmp_path, so `get_active_model()` returns None here without any
     # extra monkeypatching — a clean fresh install.
     client = app.test_client()
     resp = client.post(
         "/api/pipeline/plan",
-        json={"strategy": "identify"},
+        json={"process_id": pid},
     )
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["stages"]["Group"]["state"] == "will-skip", data
 
 
-def test_api_pipeline_plan_explicit_body_key_wins_over_strategy(app_and_db):
-    """Strategy expansion supplies *defaults*: an explicit body key must
-    still override, mirroring ``/api/jobs/pipeline``. Without this an
-    Advanced/Custom caller can't pin one flag on top of a preset.
+def test_api_pipeline_plan_explicit_body_key_wins_over_process(app_and_db):
+    """Process expansion supplies *defaults*: an explicit body key must still
+    override, mirroring ``/api/jobs/pipeline``. Without this a Custom caller
+    can't pin one flag on top of a process.
 
-    quick_look sets ``skip_regroup=True`` — a body that pins
-    ``skip_regroup=False`` alongside the strategy must produce a Group
-    plan for a real run, not the "Disabled" summary skip_regroup=True
-    would emit. The summary text distinguishes the two branches so the
-    assertion is robust to unrelated environmental reasons a stage might
-    also report will-skip (missing models, no eligible photos, etc.).
+    Quick look sets ``skip_regroup=True`` — a body that pins
+    ``skip_regroup=False`` alongside the process must produce a Group plan for
+    a real run, not the "Disabled" summary skip_regroup=True would emit.
     """
-    app, _ = app_and_db
+    app, db = app_and_db
+    pid = _plan_process_id(db, "Quick look")
     client = app.test_client()
     resp = client.post(
         "/api/pipeline/plan",
-        json={"strategy": "quick_look", "skip_regroup": False},
+        json={"process_id": pid, "skip_regroup": False},
     )
     assert resp.status_code == 200
     data = resp.get_json()
@@ -2520,17 +2636,47 @@ def test_api_pipeline_plan_explicit_body_key_wins_over_strategy(app_and_db):
     assert "disabled" not in group["summary"].lower(), group
 
 
-def test_api_pipeline_plan_rejects_unknown_strategy(app_and_db):
-    """A bad strategy name must 400 — otherwise the plan silently falls back
-    to the raw skip flags and disagrees with what /api/jobs/pipeline would
-    do (which 400s the same input)."""
+def test_api_pipeline_plan_rejects_unknown_process_id(app_and_db):
+    """A nonexistent process id must 404 — otherwise the plan silently falls
+    back to the raw skip flags and disagrees with what /api/jobs/pipeline
+    would do (which 404s the same input)."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.post(
         "/api/pipeline/plan",
-        json={"strategy": "does_not_exist"},
+        json={"process_id": 999999},
+    )
+    assert resp.status_code == 404
+
+
+def test_api_pipeline_plan_rejects_null_process_id(app_and_db):
+    """A present-but-null process_id must 400, matching /api/jobs/pipeline —
+    key presence, not truthiness. Otherwise previewing and starting the same
+    body disagree: the plan treats null as omitted and returns a Custom plan
+    while the job route rejects the identical body."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"process_id": None},
     )
     assert resp.status_code == 400
+    assert "process_id" in resp.get_json()["error"]
+
+
+def test_api_pipeline_plan_rejects_legacy_strategy(app_and_db):
+    """The plan route must reject the previous strategy-name shape too, so
+    an old caller sending `{"strategy": "quick_look"}` fails here rather
+    than silently producing a full-pipeline plan the job route would then
+    reject."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "quick_look"},
+    )
+    assert resp.status_code == 400
+    assert "strategy" in resp.get_json()["error"]
 
 
 def test_api_pipeline_plan_collection_scope(app_and_db):

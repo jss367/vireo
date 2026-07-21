@@ -204,14 +204,140 @@ def test_pipeline_labels_get_more_opens_download_modal(live_server, page):
     expect(page.locator("#pipelineTaxonCheckboxes")).to_contain_text("Birds")
 
 
-def test_pipeline_toggling_classify_off_marks_downstream_will_skip(live_server, page):
+def test_pipeline_save_process_as_new_uses_in_page_dialog(live_server, page):
+    """Desktop webviews can suppress window.prompt(), so process management
+    must use a visible in-page dialog and persist through the API."""
+    url = live_server["url"]
+    db = live_server["db"]
+    page.goto(f"{url}/pipeline")
+
+    page.locator("#btnProcessSaveNew").click()
+    modal = page.locator("#processEditorModal")
+    expect(modal).to_have_class(re.compile(r"\bopen\b"))
+    expect(modal.get_by_role("heading", name="Save process as new")).to_be_visible()
+
+    page.locator("#processEditorName").fill("Bird review")
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#strategySelect")).to_have_value(
+        str(next(p["id"] for p in db.get_saved_processes()
+                 if p["name"] == "Bird review"))
+    )
+    expect(page.locator("#processEditorStatus")).to_have_text("Saved “Bird review”.")
+
+
+def test_pipeline_rename_process_uses_in_page_dialog(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    process_id = db.create_saved_process("Old process name")
+    page.goto(f"{url}/pipeline")
+    page.locator("#strategySelect").select_option(str(process_id))
+
+    page.locator("#btnProcessRename").click()
+    modal = page.locator("#processEditorModal")
+    expect(modal).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#processEditorName")).to_have_value("Old process name")
+
+    page.locator("#processEditorName").fill("Renamed process")
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#strategySelect option:checked")).to_have_text(
+        "Renamed process"
+    )
+    assert db.get_saved_process(process_id)["name"] == "Renamed process"
+
+
+def test_pipeline_delete_process_uses_in_page_confirmation(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    process_id = db.create_saved_process("Disposable process")
+    page.goto(f"{url}/pipeline")
+    page.locator("#strategySelect").select_option(str(process_id))
+
+    page.locator("#btnProcessDelete").click()
+    modal = page.locator("#processEditorModal")
+    expect(modal).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#processEditorModalDescription")).to_contain_text(
+        "Delete “Disposable process”?"
+    )
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#strategySelect")).to_have_value("__custom__")
+    assert db.get_saved_process(process_id) is None
+
+
+def test_pipeline_delete_dialog_keeps_original_process_target(live_server, page):
+    """Changing the page selection behind the open modal must not change
+    which process the confirmation deletes."""
+    url = live_server["url"]
+    db = live_server["db"]
+    original_id = db.create_saved_process("Delete this process")
+    other_id = db.create_saved_process("Keep this process")
+    page.goto(f"{url}/pipeline")
+    page.locator("#strategySelect").select_option(str(original_id))
+
+    page.locator("#btnProcessDelete").click()
+    expect(page.locator("#processEditorModalDescription")).to_contain_text(
+        "Delete “Delete this process”?"
+    )
+
+    # Model keyboard/assistive-technology focus escaping the modal and
+    # changing the underlying picker while its confirmation remains open.
+    page.evaluate(
+        """(processId) => {
+          const select = document.getElementById('strategySelect');
+          select.value = String(processId);
+          onProcessSelect();
+        }""",
+        other_id,
+    )
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(page.locator("#processEditorModal")).not_to_have_class(
+        re.compile(r"\bopen\b")
+    )
+    assert db.get_saved_process(original_id) is None
+    assert db.get_saved_process(other_id)["name"] == "Keep this process"
+
+
+def test_pipeline_process_dialog_validates_name_and_closes_with_escape(
+    live_server, page
+):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    save_new = page.locator("#btnProcessSaveNew")
+    save_new.click()
+
+    page.locator("#processEditorSubmitBtn").click()
+    expect(page.locator("#processEditorError")).to_have_text(
+        "Enter a process name."
+    )
+    expect(page.locator("#processEditorModal")).to_have_class(
+        re.compile(r"\bopen\b")
+    )
+
+    page.keyboard.press("Escape")
+    expect(page.locator("#processEditorModal")).not_to_have_class(
+        re.compile(r"\bopen\b")
+    )
+    expect(save_new).to_be_focused()
+
+
+def test_pipeline_toggling_classify_off_keeps_group_available(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-classify .stage-header")
     page.uncheck("#enableClassify")
-    for suffix in ["Classify", "Extract", "Group"]:
+    for suffix in ["Classify", "Extract"]:
         pill = page.locator(f"#pill{suffix}")
         expect(pill).to_contain_text("Will skip")
+    group = page.locator("#enableGroup")
+    expect(group).to_be_checked()
+    expect(group).to_be_enabled()
+    expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
     # Indexing stages are unaffected.
     expect(page.locator("#pillScan")).to_contain_text("Will run")
 
@@ -239,10 +365,13 @@ def test_pipeline_plan_summary_updates_on_toggle(live_server, page):
     page.click("#card-classify .stage-header")
     page.uncheck("#enableClassify")
     summary = page.locator("[data-testid='pipeline-plan-summary']")
-    for label in ("Classify", "Extract Features", "Group & Score"):
+    for label in ("Classify", "Extract Features"):
         expect(
             summary.locator(".plan-stage-row.will-skip", has_text=label)
         ).to_be_visible()
+    expect(
+        summary.locator(".plan-stage-row.will-run", has_text="Group & Score")
+    ).to_be_visible()
 
 
 def test_pipeline_concurrent_running_stages_keep_running_pill(live_server, page):
@@ -327,32 +456,72 @@ def test_pipeline_failed_status_clears_running_pill(live_server, page):
     expect(page.locator("#pillClassify")).not_to_contain_text("Running")
 
 
-def test_pipeline_eye_keypoints_pill_will_run_by_default(live_server, page):
-    """SuperAnimal weights are auto-downloaded by pipeline_job on first run,
-    so the pill defaults to 'Will run' even on a fresh fixture with no
-    keypoint models on disk — the user is no longer expected to click a
-    Download button before starting the pipeline."""
+def test_pipeline_eye_keypoints_pill_will_skip_by_default(live_server, page):
+    """Eye-keypoint detection is opt-in, so a fresh fixture skips it.
+
+    Model readiness does not control this state: SuperAnimal weights are
+    downloaded automatically if the user explicitly enables the stage.
+    """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+    # Wait for /api/pipeline/page-init to settle so the checkbox reflects
+    # cfg.eye_detect_enabled (not the HTML default), then wait for the
+    # initial /api/pipeline/plan. Without the page-init wait the checkbox
+    # could still flip during the assertions; without the plan wait the
+    # pill could read "Will skip" from the fallback (checkbox unchecked)
+    # even if the server-side plan has flipped Eye Keypoints back to
+    # opt-in-by-default — the very regression this test guards.
+    page.wait_for_function("() => window._pageInitPending === false")
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-skip' "
+        "&& !window._planRefreshPending"
+    )
+    expect(page.locator("#enableEyeKeypoints")).not_to_be_checked()
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
 
 
 def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
-    """Unchecking the Eye Keypoints enable checkbox flips its pill to
-    'Will skip' without affecting Group, which doesn't depend on it."""
+    """Explicitly enabling then disabling Eye Keypoints updates its pill.
+
+    Group remains runnable because it does not depend on eye keypoints.
+    """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+    # Wait for /api/pipeline/page-init to settle first. Its success handler
+    # assigns enableEyeKeypoints.checked from cfg.eye_detect_enabled; if it
+    # ran after page.check() below, it would silently overwrite the opt-in
+    # and the later "will-run" wait would time out.
+    page.wait_for_function("() => window._pageInitPending === false")
     page.click("#card-eyekeypoints .stage-header")
+    page.check("#enableEyeKeypoints")
+    # Wait for the debounced plan refresh to confirm 'will-run'. Reading
+    # only the pill would pass from the null-plan fallback in
+    # _stageStateFor, so a broken eye_detect_override wiring (plan comes
+    # back "will-skip" after opt-in) would be masked here.
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-run' "
+        "&& !window._planRefreshPending"
+    )
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
     page.uncheck("#enableEyeKeypoints")
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-skip' "
+        "&& !window._planRefreshPending"
+    )
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
     # Group does not depend on eye keypoints — it must still be runnable.
     expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
 
 
-def test_pipeline_disabling_extract_cascades_to_eye_keypoints(live_server, page):
+def test_pipeline_disabling_extract_keeps_group_available(live_server, page):
     """Eye Keypoints needs masks from Extract, so toggling Extract off must
-    uncheck and disable the Eye Keypoints checkbox alongside Group."""
+    disable Eye Keypoints while leaving cached-feature grouping available."""
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-extract .stage-header")
@@ -361,6 +530,10 @@ def test_pipeline_disabling_extract_cascades_to_eye_keypoints(live_server, page)
     expect(ek).not_to_be_checked()
     expect(ek).to_be_disabled()
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
+    group = page.locator("#enableGroup")
+    expect(group).to_be_checked()
+    expect(group).to_be_enabled()
+    expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
 
 
 def test_pipeline_previews_pill_shows_pending_count(live_server, page):

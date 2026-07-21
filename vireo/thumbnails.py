@@ -12,11 +12,11 @@ from image_loader import (
     load_image,
 )
 from render_source import (
-    image_is_smaller_than_expected,
-    recipe_render_source,
+    photo_value as _photo_value,
 )
 from render_source import (
-    photo_value as _photo_value,
+    recipe_render_source,
+    thumbnail_source_dimensions_are_acceptable,
 )
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
@@ -132,7 +132,7 @@ def _retry_thumbnail_with_working_copy(
     if os.path.splitext(source_path or "")[1].lower() not in RAW_EXTENSIONS:
         return None
     wc_path = _working_copy_path_if_satisfies(
-        photo, recipe, size, vireo_dir, rel_slack=0.01,
+        photo, recipe, size, vireo_dir, thumbnail_tolerance=True,
     )
     if not wc_path or os.path.abspath(wc_path) == os.path.abspath(source_path):
         return None
@@ -167,7 +167,7 @@ def _retry_thumbnail_with_working_copy(
 
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
-    raw_decode=None, min_source_size=None, native_size=None,
+    raw_decode=None, min_source_size=None, native_size=None, cache_name=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -192,11 +192,15 @@ def generate_thumbnail(
             of the photo (see ``render_source.recipe_source_dimensions``),
             used to scale the recipe's detail pass (sharpen/NR kernels) to
             this render's resolution.
+        cache_name: optional cache filename. The default remains
+            ``{photo_id}.jpg``; paired-source views use a distinct filename
+            so switching between RAW and JPEG can never return pixels cached
+            for the other source.
 
     Returns:
         path to the thumbnail file, or None on failure
     """
-    thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+    thumb_path = os.path.join(cache_dir, cache_name or f"{photo_id}.jpg")
 
     if os.path.exists(thumb_path):
         return thumb_path
@@ -209,7 +213,9 @@ def generate_thumbnail(
         return None
     if min_source_size:
         expected_w, expected_h = min_source_size
-        if image_is_smaller_than_expected(img, expected_w, expected_h):
+        if not thumbnail_source_dimensions_are_acceptable(
+            img.size[0], img.size[1], expected_w, expected_h,
+        ):
             log.info(
                 "Thumbnail source for photo %s is undersized (%dx%d, "
                 "expected %dx%d): %s",

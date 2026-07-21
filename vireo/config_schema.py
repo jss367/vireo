@@ -186,7 +186,7 @@ SCHEMA = {
     "browse_card_fields": {
         "type": "list_string",
         "items_enum": [
-            "filename", "rating", "flag", "sharpness", "species",
+            "filename", "location_status", "rating", "flag", "sharpness", "species",
             "dimensions", "file_size", "capture_date", "extension",
             "quality_score",
         ],
@@ -370,34 +370,27 @@ SCHEMA = {
     },
 
     # --- Pipeline (scoring weights & rejection thresholds) ---------------
-    "pipeline.default_strategy": {
-        # Workspace-scoped: the stored value the future import→process
-        # chaining hook will read via db.get_effective_config(cfg.load()).
-        # None (import only) is the DEFAULTS value; `nullable` here lets a
-        # workspace override the global default back to null via
-        # /api/settings/workspace, and the settings UI renders the null
-        # option so users can pick it. This PR (the import/process split
-        # phase 1) ships the storage, validation, and UI surfaces only —
-        # the chaining hook that actually enqueues the run at import
-        # completion is added in a follow-up PR, so today the setting is
-        # a stored preference and imports do not auto-chain regardless of
-        # the value.
-        "type": "enum",
-        "enum": ["identify", "full", "cull_ready", "quick_look"],
-        "enum_labels": {
-            "identify": "Identify birds",
-            "full": "Full",
-            "cull_ready": "Cull-ready",
-            "quick_look": "Quick look",
-        },
+    "pipeline.default_process_id": {
+        # Workspace-scoped pointer to a saved_processes row: the process the
+        # import→process chaining hook runs after import (read via
+        # db.get_effective_config(cfg.load())). None = "import only" (the
+        # DEFAULTS value); `nullable` lets a workspace override back to null
+        # and the settings UI renders that option.
+        #
+        # Stored/validated as an ``int`` so config_schema stays DB-agnostic:
+        # existence of the id is checked at the endpoint against the DB, not
+        # here. For DISPLAY, ``api_settings_schema`` swaps this entry to an
+        # ``enum`` and injects the live saved-process list as
+        # ``enum``/``enum_labels`` so the widget renders as a picker.
+        "type": "int",
         "nullable": True,
         "null_label": "Import only (no processing)",
         "category": "Pipeline", "scope": "workspace",
-        "label": "Default process strategy",
+        "label": "Default process (after import)",
         "desc": (
-            "Default strategy for post-import processing on this workspace. "
-            "Stored preference only in this release — automatic "
-            "import→process chaining is wired in a follow-up update."
+            "Which saved process runs automatically after an import on this "
+            "workspace. Manage processes on the Process page; “Import only” "
+            "means no automatic processing."
         ),
     },
     "pipeline.w_focus": {
@@ -531,6 +524,24 @@ SCHEMA = {
             "no_subject. Set to 1.01 to disable."
         ),
     },
+    "pipeline.weak_detection_rescue_enabled": {
+        "type": "bool",
+        "category": "Pipeline", "scope": "both",
+        "label": "Rescue weak detections in sequences",
+        "desc": (
+            "Classify and group weak animal detections only when strong "
+            "detections bracket the same short photo sequence."
+        ),
+    },
+    "pipeline.weak_detection_confidence": {
+        "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
+        "category": "Pipeline", "scope": "both",
+        "label": "Weak-detection confidence",
+        "desc": (
+            "Lower confidence floor used only for contextually rescued "
+            "frames; the normal detector threshold is unchanged."
+        ),
+    },
     "pipeline.eye_detect_enabled": {
         "type": "bool",
         "category": "Pipeline", "scope": "both",
@@ -652,6 +663,18 @@ SCHEMA = {
         "category": "Pipeline", "scope": "both",
         "label": "Encounter: soft-cut score",
         "desc": "Similarity below which encounters are likely to split.",
+    },
+    "pipeline.species_hard_cut_confidence": {
+        "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
+        "category": "Pipeline", "scope": "both",
+        "label": "Encounter: species split confidence",
+        "desc": "Minimum mean classifier confidence required to split adjacent photos that strongly indicate different species.",
+    },
+    "pipeline.species_hard_cut_margin": {
+        "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
+        "category": "Pipeline", "scope": "both",
+        "label": "Encounter: species split margin",
+        "desc": "Minimum confidence lead over the runner-up species required for an automatic species boundary.",
     },
     "pipeline.merge_score": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,

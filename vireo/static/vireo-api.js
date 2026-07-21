@@ -40,18 +40,39 @@
   }
 
   async function json(input, init, options) {
-    var response = await browserFetch(input, init);
+    var response;
+    try {
+      response = await browserFetch(input, init);
+    } catch (cause) {
+      var networkMessage = (
+        'Couldn’t reach Vireo. Check that the app is still running, then try again.'
+      );
+      if ((!options || options.toast !== false) && typeof global.showToast === 'function') {
+        global.showToast(networkMessage, 'error');
+      }
+      var networkError = new Error(networkMessage);
+      networkError.code = 'network_error';
+      networkError.cause = cause;
+      throw networkError;
+    }
     if (!response.ok) {
       var body = {};
       try { body = await response.json(); } catch (e) {}
-      var message = body.error || 'Request failed (' + response.status + ')';
+      // APIs may provide a stable machine-readable error code alongside a
+      // sentence intended for people. Never put the code in the toast when a
+      // friendly message is available.
+      var requestId = body.request_id || response.headers.get('X-Request-ID');
+      var message = body.message || body.error || 'Request failed (' + response.status + ')';
+      if (body.code === 'internal_error' && requestId) {
+        message += ' If it keeps happening, report request ID ' + requestId + '.';
+      }
       if ((!options || options.toast !== false) && typeof global.showToast === 'function') {
         global.showToast(message, 'error');
       }
       var error = new Error(message);
       error.status = response.status;
       error.code = body.code;
-      error.requestId = body.request_id || response.headers.get('X-Request-ID');
+      error.requestId = requestId;
       error.body = body;
       throw error;
     }

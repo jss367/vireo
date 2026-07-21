@@ -118,6 +118,20 @@ jobs:
           codesign --display --verbose=2 "$SIDECAR" 2>&1 || echo "Not signed (expected — Tauri will sign during bundling)"
           echo "::endgroup::"
 
+      - name: Smoke-test bundled ExifTool
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          TRIPLE=$(rustc --print host-tuple)
+          SIDECAR="src-tauri/binaries/vireo-server-${TRIPLE}"
+          if [ "$RUNNER_OS" = "Windows" ]; then SIDECAR="${SIDECAR}.exe"; fi
+          # Windows Python's print() emits CRLF and bash command
+          # substitution strips only the trailing LF, leaving a stray \r
+          # that would break the exact string comparison below.
+          VERSION_OUTPUT=$("$SIDECAR" --check-exiftool | tr -d '\r')
+          echo "Bundled ExifTool: $VERSION_OUTPUT"
+          test "$VERSION_OUTPUT" = "13.59"
+
       - name: Smoke-test sidecar binary
         shell: bash
         run: |
@@ -190,26 +204,39 @@ jobs:
             libayatana-appindicator3-dev
 
       # ── Swap & resource monitor (Linux only) ────────────────
-      # Rust/Tauri release builds can exceed the 7GB RAM on GitHub runners
-      # during linking. A swap file prevents the OOM killer from cancelling
-      # the build.
-      - name: Create swap file
+      # Keep enough virtual memory for smaller runners without consuming the
+      # disk space that Cargo and linuxdeploy need for AppImage staging.
+      - name: Ensure bounded swap capacity
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          # Newer ubuntu-22.04 runner images ship with an active /swapfile,
-          # so fallocate would fail with "Text file busy". Disable and remove
-          # any existing one before creating our larger 10G swap.
-          if [ -e /swapfile ]; then
-            sudo swapoff /swapfile || true
-            sudo rm -f /swapfile
+          target_swap_kib=$((4 * 1024 * 1024))
+          minimum_free_disk_kib=$((8 * 1024 * 1024))
+          current_swap_kib=$(free -k | awk '/^Swap:/ { print $2 }')
+          available_disk_kib=$(df --output=avail -k / | tail -1)
+
+          needed_swap_kib=$((target_swap_kib - current_swap_kib))
+          allocatable_disk_kib=$((available_disk_kib - minimum_free_disk_kib))
+
+          if (( needed_swap_kib > 0 && allocatable_disk_kib >= 1024 * 1024 )); then
+            swap_size_kib=$needed_swap_kib
+            if (( swap_size_kib > allocatable_disk_kib )); then
+              swap_size_kib=$allocatable_disk_kib
+            fi
+
+            sudo fallocate -l "${swap_size_kib}K" /swapfile-vireo
+            sudo chmod 600 /swapfile-vireo
+            sudo mkswap /swapfile-vireo
+            sudo swapon /swapfile-vireo
+          else
+            echo "Runner-provided swap is sufficient, or disk space is too constrained for supplemental swap."
           fi
-          sudo fallocate -l 10G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "Swap enabled:"
+
+          echo "Swap configuration:"
+          swapon --show
           free -h
+          echo "Disk available after swap configuration:"
+          df -h /
 
       - name: Start resource monitor
         if: runner.os == 'Linux'
@@ -222,6 +249,7 @@ jobs:
             echo "--- $(date -u '+%H:%M:%S') ---"
             free -h | grep Mem
             free -h | grep Swap
+            df -h / | tail -1
             ps -eo pid,pcpu,pmem,rss,comm --sort=-rss | head -6
             echo ""
             sleep 30
@@ -363,7 +391,14 @@ jobs:
         run: |
           echo "=== Starting Tauri build at $(date -u) ==="
           cd src-tauri
-          npx tauri build --target ${{ matrix.rust-target }} --bundles deb,appimage 2>&1
+          report_disk_usage() {
+            echo "=== Linux build disk usage at $(date -u) ==="
+            df -h /
+            du -sh target 2>/dev/null || true
+          }
+          trap report_disk_usage EXIT
+          report_disk_usage
+          npx tauri build --verbose --target ${{ matrix.rust-target }} --bundles deb,appimage 2>&1
           echo "=== Tauri build finished at $(date -u) ==="
 
       # Decide whether this Windows build is signed. A tagged release or an

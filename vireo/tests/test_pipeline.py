@@ -204,6 +204,123 @@ def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
     )
 
 
+def test_load_photo_features_rescues_bracketed_weak_grackle_run(
+    tmp_path, monkeypatch,
+):
+    """Strong matching-species anchors turn only the intervening weak boxes
+    into the explicit uncertain state, preserving one encounter without
+    lowering the workspace detector threshold.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import load_photo_features, run_grouping
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    base = datetime(2026, 7, 18, 8, 36, 35, 990000)
+    confidences = [0.229, 0.185, 0.156, 0.149, 0.172, 0.193, 0.186, 0.798]
+    photo_ids = []
+    detection_ids = []
+    for index, confidence in enumerate(confidences):
+        # The final anchor is 2.12 seconds after the preceding weak frame,
+        # matching DSC_4384 -> DSC_4385.
+        offset = index * 0.05 if index < 7 else 2.42
+        photo_id = db.add_photo(
+            folder_id, f"DSC_{4378 + index}.NEF", ".nef", 100, 1.0,
+            timestamp=(base + timedelta(seconds=offset)).isoformat(),
+            width=8280, height=5520,
+        )
+        detection_id = db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [{
+                "box": {"x": 0.05, "y": 0.0, "w": 0.87, "h": 0.96},
+                "confidence": confidence,
+                "category": "animal",
+            }],
+        )[0]
+        photo_ids.append(photo_id)
+        detection_ids.append(detection_id)
+
+    db.add_prediction(
+        detection_ids[0], "Great-tailed Grackle", 0.7846, "inat21",
+        category="match",
+    )
+    db.add_prediction(
+        detection_ids[-1], "Great-tailed Grackle", 0.9026, "inat21",
+        category="match",
+    )
+
+    photos = load_photo_features(db)
+    by_id = {photo["id"]: photo for photo in photos}
+    for photo_id in photo_ids[1:-1]:
+        photo = by_id[photo_id]
+        assert photo["subject_uncertain"] is True
+        assert photo["subject_present"] is False
+        assert photo["subject_absent"] is False
+        assert 0.12 <= photo["detection_conf"] < 0.20
+        assert photo["weak_detection_context"]["species"] == (
+            "Great-tailed Grackle"
+        )
+
+    encounters = run_grouping(
+        photos,
+        config=cfg.DEFAULTS["pipeline"],
+        emit_trace=True,
+    )
+    assert len(encounters) == 1
+    assert encounters[0]["photo_count"] == 8
+    assert encounters[0]["species"] == ("Great-tailed Grackle", 0.8436)
+    assert any(
+        row["decision"] == "kept_weak_detection"
+        for row in encounters[0]["trace"]
+    )
+
+
+def test_load_photo_features_does_not_rescue_conflicting_species_anchors(
+    tmp_path, monkeypatch,
+):
+    """A weak run between different species keeps the ordinary absent state."""
+    import config as cfg
+    from db import Database
+    from pipeline import load_photo_features
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    ids = []
+    detection_ids = []
+    for index, confidence in enumerate((0.9, 0.18, 0.9)):
+        photo_id = db.add_photo(
+            folder_id, f"photo{index}.jpg", ".jpg", 100, 1.0,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        detection_id = db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [{
+                "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                "confidence": confidence,
+                "category": "animal",
+            }],
+        )[0]
+        ids.append(photo_id)
+        detection_ids.append(detection_id)
+    db.add_prediction(detection_ids[0], "Grackle", 0.9, "inat21")
+    db.add_prediction(detection_ids[2], "Cowbird", 0.9, "inat21")
+
+    middle = {p["id"]: p for p in load_photo_features(db)}[ids[1]]
+    assert middle["subject_uncertain"] is False
+    assert middle["subject_absent"] is True
+    assert middle["detection_conf"] is None
+    assert middle["species_top5"] == []
+
+
 def test_load_photo_features_subject_absent_false_when_detector_never_ran(tmp_path):
     """A photo with no detector_runs row hasn't had the detector run yet
     (e.g. first-time regroup with skip_classify=True, or newly imported
@@ -878,7 +995,15 @@ def test_compute_review_readiness_no_masks(tmp_path):
 def test_compute_review_readiness_masks_present_no_eye(tmp_path):
     """Masks present for all photos, no eye keypoints →
     state='computable', 'eye_keypoints' in enhancing_missing."""
+    import config as cfg
     from pipeline import compute_review_readiness
+
+    # Eye readiness gaps are only surfaced when the workspace opts into
+    # eye detection (the default flipped off). Enable it explicitly so
+    # this pins the "computable but enhancing inputs missing" contract
+    # rather than the default-off suppression path.
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"pipeline": {"eye_detect_enabled": True}})
 
     # _setup_db_with_photos populates masks, embeddings, and predictions
     # for every photo but does NOT set eye_x — exactly the "computable
@@ -1214,7 +1339,15 @@ def test_compute_review_readiness_eye_target_includes_routable_above_gate(tmp_pa
     from pipeline import compute_review_readiness
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
-    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+    # ``eye_detect_enabled`` gates whether the eye-keypoint gap surfaces
+    # in ``enhancing_missing``; the target count is orthogonal but the
+    # banner check below requires the feature to be turned on.
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.5,
+            "eye_detect_enabled": True,
+        }
+    })
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -1238,7 +1371,14 @@ def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
     from pipeline import compute_review_readiness
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
-    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+    # Feature must be on for the ``enhancing_missing`` banner to appear
+    # at all; the gate/target checks are the point of this test.
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.5,
+            "eye_detect_enabled": True,
+        }
+    })
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -1247,7 +1387,12 @@ def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
     out_strict = compute_review_readiness(db)
     assert out_strict["eye_keypoint_target_photos"] == 0
 
-    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.2}})
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.2,
+            "eye_detect_enabled": True,
+        }
+    })
     out_loose = compute_review_readiness(db)
     assert out_loose["eye_keypoint_target_photos"] == 1
     assert "eye_keypoints" in out_loose["enhancing_missing"]
@@ -1270,8 +1415,15 @@ def test_compute_review_readiness_eye_target_honors_workspace_pipeline_override(
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
     # Global default gate stays at 0.5; only the active workspace lowers
-    # it, mirroring a user with a per-workspace looser threshold.
-    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+    # it, mirroring a user with a per-workspace looser threshold. Enable
+    # eye detection at the global level so the ``enhancing_missing`` gap
+    # can surface (the default is off).
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.5,
+            "eye_detect_enabled": True,
+        }
+    })
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace(
@@ -1288,6 +1440,45 @@ def test_compute_review_readiness_eye_target_honors_workspace_pipeline_override(
     out = compute_review_readiness(db)
     assert out["eye_keypoint_target_photos"] == 1
     assert "eye_keypoints" in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_suppresses_eye_gap_when_detection_disabled(tmp_path):
+    """When ``pipeline.eye_detect_enabled`` is False (the new default), the
+    readiness diagnostic must not flag ``eye_keypoints`` in
+    ``enhancing_missing`` even if eligible photos have no eye attempts.
+
+    Otherwise a default-off workspace's pipeline_review page reports the
+    result as "computed without eye keypoints — should re-run that stage"
+    for a stage the workspace has intentionally disabled, contradicting
+    the visible Settings state and the default Process flow (which
+    skips the stage). Regression for Codex thread PRRT_kwDORn8c-s6QOH4L.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.5,
+            "eye_detect_enabled": False,
+        }
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    # An Aves photo above the confidence gate would count toward the eye
+    # target if the feature were on — it's the same shape that
+    # ``test_..._eye_target_includes_routable_above_gate`` uses to
+    # deliberately surface the banner.
+    _add_eligible_photo(db, fid, "bird.jpg", 0.9, taxonomy_class="Aves")
+
+    out = compute_review_readiness(db)
+    assert "eye_keypoints" not in out["enhancing_missing"], (
+        "eye_keypoints must not appear in enhancing_missing when the "
+        "workspace has eye detection disabled — otherwise the review "
+        "page warns about a stage the user chose not to run"
+    )
 
 
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
@@ -1428,6 +1619,49 @@ def test_load_photo_features_confirmed_species(tmp_path):
     assert len(unconfirmed) == len(ids[1])
 
 
+def test_load_photo_features_includes_taxonomy_type_without_species_flag(tmp_path):
+    """Taxonomy-typed legacy rows remain confirmed species even when their
+    redundant is_species flag is unset."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    pid = ids[0][0]
+    keyword_id = db.add_keyword("Verdin")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 0 "
+        "WHERE id = ?",
+        (keyword_id,),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, keyword_id)
+
+    photo = next(p for p in load_photo_features(db) if p["id"] == pid)
+    assert photo["confirmed_species"] == "Verdin"
+
+
+def test_load_photo_features_ignores_taxonomy_ancestors_as_species(tmp_path):
+    """A family keyword may be taxonomy-typed, but only the species-rank
+    hierarchy leaf should become confirmed_species."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) VALUES "
+        "(38595, 'Remizidae', 'Penduline tits', 'family'), "
+        "(2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    birds = db.add_keyword("1Birds")
+    family = db.add_keyword("Penduline tits", parent_id=birds)
+    species = db.add_keyword("Verdin", parent_id=family)
+    pid = ids[0][0]
+    db.tag_photo(pid, family)
+    db.tag_photo(pid, species)
+
+    photo = next(p for p in load_photo_features(db) if p["id"] == pid)
+    assert photo["confirmed_species"] == "Verdin"
+
+
 def test_confirmed_species_deterministic_with_multiple_tags(tmp_path):
     """When a photo has multiple species tags, confirmed_species is deterministic (alphabetically first)."""
     from pipeline import load_photo_features
@@ -1446,6 +1680,77 @@ def test_confirmed_species_deterministic_with_multiple_tags(tmp_path):
         photos = load_photo_features(db)
         photo = next(p for p in photos if p["id"] == pid)
         assert photo["confirmed_species"] == "Blue Jay"
+
+
+def test_confirmed_species_canonicalizes_same_taxon_across_encounter(tmp_path):
+    """A photo carrying only a hierarchy leaf and a sibling still on the
+    canonical root — same taxon — must resolve to the same confirmed
+    species string, so the encounter stays confirmed after regroup.
+
+    Regression for the Codex feedback on pipeline.py:395: without
+    canonicalizing hierarchy leaves to the shared taxon root before
+    building confirmed_by_photo, ``serialize_pipeline_results`` sees a
+    mixed ``confirmed_set`` (e.g. ``{"verdin", "Verdin"}``) and marks
+    the encounter unconfirmed, so already-reviewed groups reappear.
+    """
+    from pipeline import (
+        load_photo_features,
+        run_full_pipeline,
+        serialize_results,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) VALUES "
+        "(2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+
+    # Canonical top-level root, linked to the species taxon.
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 2912 WHERE id = ?",
+        (root_kid,),
+    )
+    # Hierarchy leaf under a family container, same taxon, differently
+    # cased stored name — the shape duplicate-repair leaves behind when
+    # it detaches the redundant root association from that photo.
+    birds = db.add_keyword("Birds")
+    leaf_kid = db.add_keyword("verdin", parent_id=birds)
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+        "taxon_id = 2912 WHERE id = ?",
+        (leaf_kid,),
+    )
+    db.conn.commit()
+
+    enc_ids = ids[0]
+    assert len(enc_ids) >= 2
+    # Half the encounter still carries the root; the other half was
+    # migrated to the hierarchy leaf spelling.
+    db.tag_photo(enc_ids[0], root_kid)
+    for pid in enc_ids[1:]:
+        db.tag_photo(pid, leaf_kid)
+
+    photos = load_photo_features(db)
+    tagged = {p["id"]: p for p in photos if p["id"] in enc_ids}
+    assert set(tagged) == set(enc_ids)
+    # Every photo in the encounter reports the canonical root spelling,
+    # regardless of which keyword row is actually attached.
+    assert {p["confirmed_species"] for p in tagged.values()} == {"Verdin"}
+
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+    matching = [
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) == set(enc_ids)
+    ]
+    assert len(matching) == 1, (
+        "expected a single encounter matching the tagged photo group"
+    )
+    enc = matching[0]
+    assert enc["confirmed_species"] == "Verdin"
+    assert enc["species_confirmed"] is True
 
 
 def test_serialize_results_includes_species_predictions(tmp_path):
@@ -1503,6 +1808,66 @@ def test_load_photo_features_includes_model_in_species(tmp_path):
         for entry in p.get("species_top5", []):
             assert len(entry) == 3, f"Expected (species, confidence, model), got {entry}"
             assert isinstance(entry[2], str), f"Model should be a string, got {type(entry[2])}"
+
+
+def test_load_photo_features_preserves_subject_boxes_and_predictions(tmp_path):
+    """Each qualifying detection remains a distinct review subject.
+
+    A detected second bird must still surface when it has no prediction, and
+    later predictions must attach to that bird rather than being flattened
+    without spatial provenance.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path), name="photos")
+    photo_id = db.add_photo(
+        folder_id, "two-birds.jpg", ".jpg", 1000, 1.0,
+        width=4000, height=3000,
+    )
+    detection_ids = db.save_detections(
+        photo_id,
+        [
+            {
+                "box": {"x": 0.05, "y": 0.4, "w": 0.2, "h": 0.3},
+                "confidence": 0.9,
+                "category": "animal",
+            },
+            {
+                "box": {"x": 0.55, "y": 0.35, "w": 0.2, "h": 0.3},
+                "confidence": 0.4,
+                "category": "animal",
+            },
+        ],
+        detector_model="megadetector-v6",
+    )
+    db.add_prediction(
+        detection_ids[0], "American Wigeon", 0.98, "bioclip",
+        category="match",
+    )
+
+    photo = load_photo_features(db)[0]
+    assert [s["detection_id"] for s in photo["subjects"]] == detection_ids
+    assert photo["subjects"][0]["box"] == {
+        "x": 0.05, "y": 0.4, "w": 0.2, "h": 0.3,
+    }
+    assert photo["subjects"][0]["predictions"] == [
+        ("American Wigeon", 0.98, "bioclip"),
+    ]
+    assert photo["subjects"][1]["predictions"] == []
+
+    db.add_prediction(
+        detection_ids[1], "Blue-winged Teal", 0.91, "bioclip",
+        category="match",
+    )
+    photo = load_photo_features(db)[0]
+    assert photo["subjects"][1]["predictions"] == [
+        ("Blue-winged Teal", 0.91, "bioclip"),
+    ]
+    assert {row[0] for row in photo["species_top5"]} == {
+        "American Wigeon", "Blue-winged Teal",
+    }
 
 
 def test_load_photo_features_filters_to_latest_fingerprint(tmp_path):
@@ -1963,7 +2328,15 @@ def test_eye_keypoint_stage_preflight_enabled(tmp_path, monkeypatch):
     from pipeline import eye_keypoint_stage_preflight
 
     assert eye_keypoint_stage_preflight({"eye_detect_enabled": True}) is None
-    assert eye_keypoint_stage_preflight({}) is None
+
+
+def test_eye_keypoint_stage_preflight_missing_config_defaults_disabled(
+    tmp_path, monkeypatch
+):
+    """Missing eye_detect_enabled follows the global default: disabled."""
+    from pipeline import eye_keypoint_stage_preflight
+
+    assert eye_keypoint_stage_preflight({}) == "Disabled in config"
 
 
 def test_eye_keypoint_stage_writes_nothing_when_weights_absent(
@@ -2661,6 +3034,24 @@ def test_compute_group_fingerprint_ignores_unrelated_pipeline_keys():
         {"pipeline": {"classifier_model": "x", "detector_confidence": 0.9}},
     )
     assert unrelated == base
+
+
+def test_compute_group_fingerprint_changes_with_weak_rescue_toggle():
+    """Toggling ``pipeline.weak_detection_rescue_enabled`` must bump the
+    fingerprint. The flag flips load_photo_features between treating
+    bracketed weak frames as ``subject_uncertain`` vs ``subject_absent``,
+    which changes encounter membership and burst scoring. If the fingerprint
+    ignored it, a workspace with cached results could toggle rescue on/off
+    without any upstream stage having new work and the Process page would
+    still report the grouping cache as fresh."""
+    from pipeline import compute_group_fingerprint
+    on = compute_group_fingerprint(
+        {"pipeline": {"weak_detection_rescue_enabled": True}},
+    )
+    off = compute_group_fingerprint(
+        {"pipeline": {"weak_detection_rescue_enabled": False}},
+    )
+    assert on != off
 
 
 def test_serialize_results_counts_missing_timestamps():

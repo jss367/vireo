@@ -100,12 +100,37 @@ def _entry(data, species):
     return matches[0]
 
 
+def _add_cardinal_photos(db, ids, count, prefix="card-extra"):
+    k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    photo_ids = []
+    for i in range(count):
+        pid = db.add_photo(
+            folder_id=ids["folder"],
+            filename=f"{prefix}-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=20.0 + i,
+            timestamp=f"2024-05-01T08:{i // 60:02d}:{i % 60:02d}",
+        )
+        db.tag_photo(pid, k_card)
+        photo_ids.append(pid)
+    return photo_ids
+
+
 def test_page_renders(life_app):
     app, _, _ = life_app
     resp = app.test_client().get("/life-list")
     assert resp.status_code == 200
     assert b"Life List" in resp.data
     assert b"Export Life List" in resp.data
+    assert b"Life List numbering" in resp.data
+    assert b"Renumber for each view" in resp.data
+    assert b"Taxonomic group" in resp.data
+    assert b"Identification level" in resp.data
+    assert b'id="exportColumns"' in resp.data
+    assert b"Representative filename" in resp.data
+    assert b"Quality score" in resp.data
+    assert b"link.download = ''" in resp.data
 
 
 def test_groups_by_species_and_counts(life_app):
@@ -127,6 +152,45 @@ def test_best_photo_is_highest_scored(life_app):
     assert cardinal["best"]["id"] == ids["p2"]
     # Photos are returned best-first for the lightbox set.
     assert [p["id"] for p in cardinal["photos"]] == [ids["p2"], ids["p1"]]
+
+
+def test_life_list_defaults_to_100_and_pages_remaining_species_photos(life_app):
+    app, db, ids = life_app
+    _add_cardinal_photos(db, ids, 101)
+
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    first_page_ids = {photo["id"] for photo in cardinal["photos"]}
+    assert data["meta"]["photos_per_species"] == 100
+    assert cardinal["photo_count"] == 103
+    assert cardinal["loaded_count"] == 100
+    assert cardinal["has_more"] is True
+    assert len(first_page_ids) == 100
+
+    resp = app.test_client().get(
+        "/api/life-list/species",
+        query_string={
+            "species": "Northern Cardinal",
+            "offset": 100,
+            "limit": 100,
+        },
+    )
+    assert resp.status_code == 200
+    page = resp.get_json()
+    assert page["photo_count"] == 103
+    assert page["loaded_count"] == 103
+    assert page["has_more"] is False
+    assert len(page["photos"]) == 3
+    assert first_page_ids.isdisjoint(photo["id"] for photo in page["photos"])
+
+
+def test_life_list_species_page_validates_species(life_app):
+    app, _, _ = life_app
+    client = app.test_client()
+    assert client.get("/api/life-list/species").status_code == 400
+    assert client.get(
+        "/api/life-list/species", query_string={"species": "Missing bird"}
+    ).status_code == 404
 
 
 def test_life_list_best_ignores_pick_when_no_preference(life_app):
@@ -193,11 +257,11 @@ def test_representative_preference_promotes_existing_highlight_to_top(life_app):
     }
 
 
-def test_representative_preference_skips_highlight_when_ineligible(life_app):
-    # p3 (sparrow) is life-list eligible but has no quality_score, so it
-    # can't appear in Highlights. Setting it as representative must not
-    # create an invisible species_highlights row the user can't see or
-    # remove from the Highlights page.
+def test_representative_preference_promotes_unscored_pick_to_highlight(life_app):
+    # p3 (sparrow) has no quality_score, but Highlights now admits
+    # unscored photos at min_quality=0 so users can curate a pick before
+    # analysis. Setting an unscored photo as representative must create
+    # the species_highlights row so it shows up on the Highlights page.
     app, db, ids = life_app
 
     resp = app.test_client().post("/api/photo-preferences", json={
@@ -207,9 +271,43 @@ def test_representative_preference_skips_highlight_when_ineligible(life_app):
     })
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["highlight_rank"] is None
+    assert body["highlight_rank"] == 1
 
-    assert db.get_species_highlights("House Sparrow") == {}
+    assert db.get_species_highlights("House Sparrow") == {
+        "House Sparrow": {ids["p3"]: 1},
+    }
+
+
+def test_unscored_species_highlight_renders_as_highlighted(life_app):
+    # An unscored photo saved as a species highlight must render as a chosen
+    # highlight. get_species_highlights(eligible_only=True) — used by the
+    # render/order path — has to admit unscored rows the widened write path
+    # now accepts, otherwise the just-saved highlight is silently dropped and
+    # the highlight-selection filters misclassify it until analysis runs.
+    app, db, ids = life_app
+    client = app.test_client()
+
+    resp = client.post("/api/species-highlights", json={
+        "species": "House Sparrow",
+        "photo_id": ids["p3"],
+    })
+    assert resp.status_code == 200
+
+    # The eligibility-filtered read (what _apply_ordered_highlights uses) must
+    # include the unscored row.
+    assert db.get_species_highlights("House Sparrow", eligible_only=True) == {
+        "House Sparrow": {ids["p3"]: 1},
+    }
+
+    # And the rendered bucket marks it as a highlight.
+    data = client.get("/api/highlights?scope=workspace").get_json()
+    sparrow = next(
+        b for b in data["buckets"] if b["species"] == "House Sparrow"
+    )
+    assert sparrow["has_highlight_selection"] is True
+    p3_card = next(p for p in sparrow["photos"] if p["id"] == ids["p3"])
+    assert p3_card["is_highlighted"] is True
+    assert p3_card["highlight_rank"] == 1
 
 
 def test_representatives_are_global_but_filtered_to_workspace(life_app):
@@ -548,6 +646,403 @@ def test_taxon_names_attached(life_app):
     assert cardinal["scientific_name"] is None
 
 
+def test_taxonomic_rank_and_class_attached(life_app):
+    app, db, _ = life_app
+    aves = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Aves", "Birds", "class"),
+    ).lastrowid
+    db.conn.execute(
+        "UPDATE taxa SET parent_id = ? WHERE name = ?",
+        (aves, "Passer domesticus"),
+    )
+    db.conn.commit()
+
+    data = _get_life_list(app)
+    sparrow = _entry(data, "House Sparrow")
+    assert sparrow["taxon_rank"] == "species"
+    assert sparrow["taxonomic_class"] == {
+        "id": aves,
+        "name": "Aves",
+        "common_name": "Birds",
+    }
+
+    # A legacy species flag without a linked reference taxon remains visible
+    # and is explicitly filterable as unmatched/unknown in the List UI.
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["taxon_rank"] is None
+    assert cardinal["taxonomic_class"] is None
+
+
+def _seed_higher_rank_accipiter(db, folder_id):
+    aves = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Aves", "Birds", "class"),
+    ).lastrowid
+    accipiter = db.conn.execute(
+        "INSERT INTO taxa (name, rank, parent_id) VALUES (?, ?, ?)",
+        ("Accipiter", "genus", aves),
+    ).lastrowid
+    keyword_id = db.add_keyword("Accipiter", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (accipiter, keyword_id),
+    )
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="accipiter.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=6.0,
+        timestamp="2024-06-01T12:00:00",
+    )
+    db.tag_photo(photo_id, keyword_id)
+    db.conn.commit()
+    return {"aves": aves, "accipiter": accipiter, "photo": photo_id,
+            "keyword": keyword_id}
+
+
+def test_higher_rank_taxonomy_identification_is_listed(life_app):
+    app, db, ids = life_app
+    seed = _seed_higher_rank_accipiter(db, ids["folder"])
+    # Tag the same photo with an existing location keyword so the entry
+    # must surface its location chip / CSV value like species-rank rows do.
+    location_id = db.add_keyword("Backyard", kw_type="location")
+    db.tag_photo(seed["photo"], location_id)
+    db.conn.commit()
+
+    entry = _entry(_get_life_list(app), "Accipiter")
+    assert entry["taxon_rank"] == "genus"
+    assert entry["taxonomic_class"] == {
+        "id": seed["aves"],
+        "name": "Aves",
+        "common_name": "Birds",
+    }
+    assert entry["locations"] == ["Backyard"]
+
+
+def test_higher_rank_photo_can_be_life_list_representative(life_app):
+    """A photo tagged only with a linked higher-rank taxonomy identification
+    (genus/family/class) must expose the Life List representative row and
+    accept ``POST /api/photo-preferences`` for the entry it renders under.
+
+    Regression test for the eligibility guards in
+    :func:`get_photo_life_list_species` and
+    :func:`_photo_can_be_life_list_preference` that previously filtered to
+    ``t.rank = 'species' OR t.rank IS NULL`` — which hid the shared Set
+    Representative row on the higher-rank Life List entry and 400'd a
+    representative POST for the entry the user could actually see.
+    """
+    app, db, ids = life_app
+    seed = _seed_higher_rank_accipiter(db, ids["folder"])
+    client = app.test_client()
+
+    # The shared Set-Representative row (browse context menu / lightbox
+    # panel) reads the photo's life_list block, which comes from
+    # ``get_photo_life_list_species``. Without the broadened eligibility,
+    # this list would be empty and the affordance would not render.
+    detail = client.get(f"/api/photos/{seed['photo']}").get_json()
+    assert [entry["species"] for entry in detail["life_list"]] == ["Accipiter"]
+
+    # POST is gated by ``_photo_can_be_life_list_preference``. Without the
+    # broadened guard this returned 400 for the entry the user could see.
+    resp = client.post("/api/photo-preferences", json={
+        "purpose": "life_list",
+        "species": "Accipiter",
+        "photo_id": seed["photo"],
+    })
+    assert resp.status_code == 200
+
+    entry = _entry(_get_life_list(app), "Accipiter")
+    assert entry["best"]["id"] == seed["photo"]
+    assert entry["best"]["is_life_list_photo"] is True
+    assert entry["best"]["is_species_representative"] is True
+    assert entry["has_preferred_photo"] is True
+
+    # The just-saved representative must survive
+    # ``get_species_representative_lists(eligible_only=True)`` — which is
+    # what the lightbox / context menu re-reads via
+    # ``GET /api/photos/<id>`` to decide whether the button is current.
+    # Without the broadened eligibility EXISTS, the higher-rank row would
+    # be dropped and ``is_current_photo`` would come back false, so the
+    # UI would keep offering "Set Representative" for a save that
+    # already succeeded.
+    assert db.get_species_representative_lists(eligible_only=True) == {
+        "Accipiter": [seed["photo"]],
+    }
+    detail_after = client.get(f"/api/photos/{seed['photo']}").get_json()
+    accipiter_entry = next(
+        e for e in detail_after["life_list"] if e["species"] == "Accipiter"
+    )
+    assert accipiter_entry["is_current_photo"] is True
+
+
+def test_higher_rank_taxonomy_link_survives_mark_species_pass(life_app):
+    """A linked higher-rank taxonomy identification (genus/family/class)
+    must keep its ``taxon_id`` across the startup ``mark_species_keywords``
+    pass, so ``get_life_list_candidates`` continues to surface the entry's
+    ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class`` metadata
+    used by the new Life List rank and class filters.
+
+    Regression test for the startup marking path: previously the pass
+    cleared ``taxon_id`` on any ``type='taxonomy'`` row whose current
+    binding pointed at a non-species-rank taxon when the taxonomy lookup
+    lacked a species-rank replacement — so an ``Accipiter`` genus entry
+    would render correctly on the first request but lose its rank/class
+    metadata on the next restart.
+    """
+    app, db, ids = life_app
+    seed = _seed_higher_rank_accipiter(db, ids["folder"])
+
+    class FakeTaxonomy:
+        # Only the Accipiter genus is known; no species-rank alternative
+        # exists (matches the concrete failure scenario in the review).
+        def lookup(self, name):
+            if name.lower() == "accipiter":
+                return {"taxon_id": seed["accipiter"]}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    # The pass makes no changes because the row is already fully typed
+    # and its higher-rank binding is preserved.
+    assert db.mark_species_keywords(FakeTaxonomy()) == 0
+    row = db.conn.execute(
+        "SELECT taxon_id, type, is_species FROM keywords WHERE id = ?",
+        (seed["keyword"],),
+    ).fetchone()
+    assert row["taxon_id"] == seed["accipiter"]
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+    entry = _entry(_get_life_list(app), "Accipiter")
+    assert entry["taxon_rank"] == "genus"
+    assert entry["taxonomic_class"] == {
+        "id": seed["aves"],
+        "name": "Aves",
+        "common_name": "Birds",
+    }
+
+
+def _seed_robin_with_ancestor_keywords(db, folder_id):
+    """Seed a photo tagged with a species (``American Robin``) plus every
+    ancestor keyword up to class rank — the shape produced by a Lightroom
+    catalog imported with ``includeParents`` (see ``vireo/catalog.py``)
+    and by the classifier auto-accept path that treats ancestor tags as
+    "broader labels for the same taxon" (see
+    ``_can_auto_accept_detection_prediction`` in ``vireo/classify_job.py``).
+    """
+    aves = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Aves", "Birds", "class"),
+    ).lastrowid
+    passeriformes = db.conn.execute(
+        "INSERT INTO taxa (name, rank, parent_id) VALUES (?, ?, ?)",
+        ("Passeriformes", "order", aves),
+    ).lastrowid
+    turdidae = db.conn.execute(
+        "INSERT INTO taxa (name, rank, parent_id) VALUES (?, ?, ?)",
+        ("Turdidae", "family", passeriformes),
+    ).lastrowid
+    turdus = db.conn.execute(
+        "INSERT INTO taxa (name, rank, parent_id) VALUES (?, ?, ?)",
+        ("Turdus", "genus", turdidae),
+    ).lastrowid
+    robin = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank, parent_id) VALUES (?, ?, ?, ?)",
+        ("Turdus migratorius", "American Robin", "species", turdus),
+    ).lastrowid
+
+    def _linked(name, taxon_id):
+        kid = db.add_keyword(name, kw_type="taxonomy")
+        db.conn.execute(
+            "UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon_id, kid))
+        return kid
+
+    k_robin = _linked("American Robin", robin)
+    k_turdus = _linked("Turdus", turdus)
+    k_turdidae = _linked("Turdidae", turdidae)
+    k_aves = _linked("Aves", aves)
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="robin.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=7.0,
+        timestamp="2024-07-01T12:00:00",
+    )
+    db.tag_photo(photo_id, k_robin)
+    db.tag_photo(photo_id, k_turdus)
+    db.tag_photo(photo_id, k_turdidae)
+    db.tag_photo(photo_id, k_aves)
+    db.conn.commit()
+    return {
+        "photo": photo_id,
+        "robin_kw": k_robin, "turdus_kw": k_turdus,
+        "turdidae_kw": k_turdidae, "aves_kw": k_aves,
+        "robin_taxon": robin, "turdus_taxon": turdus,
+        "turdidae_taxon": turdidae, "aves_taxon": aves,
+    }
+
+
+def test_life_list_suppresses_ancestor_keywords_from_lightroom_import(life_app):
+    """A species-tagged photo carrying Lightroom-imported ``includeParents``
+    ancestor keywords (``Turdus`` / ``Turdidae`` / ``Aves``) must contribute
+    only to the species bucket — the ancestor tags are broader labels for
+    the same taxon, not independent Life List entries.
+
+    Regression test for the removal of the ``t.rank = 'species'``
+    hierarchy guards: without ancestor suppression, every ancestor keyword
+    would inflate the Life List's species count and CSV exports with
+    duplicate class/family/genus buckets that the classifier already
+    treats as broader labels.
+    """
+    app, db, ids = life_app
+    seed = _seed_robin_with_ancestor_keywords(db, ids["folder"])
+
+    data = _get_life_list(app)
+    species_seen = [entry["species"] for entry in data["species"]]
+    # The three ancestor keywords on this photo must not appear as their
+    # own Life List buckets alongside "American Robin".
+    for ancestor in ("Turdus", "Turdidae", "Aves"):
+        assert ancestor not in species_seen, (
+            f"{ancestor} was inflated into its own bucket even though the "
+            f"same photo is species-identified as American Robin"
+        )
+    robin_entry = _entry(data, "American Robin")
+    # The species bucket itself must still resolve to a real photo.
+    assert robin_entry["best"]["id"] == seed["photo"]
+
+
+def test_life_list_locations_omit_ancestor_buckets(life_app):
+    """The locations map returned by ``get_life_list_locations`` must not
+    attribute a species-photo's location to its ancestor keywords — the
+    classifier's broader-label ancestors should not inherit every place
+    the species was seen. Codex noted this drove inflated ancestor
+    location chips and CSV values.
+    """
+    app, db, ids = life_app
+    seed = _seed_robin_with_ancestor_keywords(db, ids["folder"])
+    location_id = db.add_keyword("Backyard", kw_type="location")
+    db.tag_photo(seed["photo"], location_id)
+    db.conn.commit()
+
+    locations = db.get_life_list_locations()
+    assert "American Robin" in locations
+    assert locations["American Robin"] == ["Backyard"]
+    for ancestor in ("Turdus", "Turdidae", "Aves"):
+        assert ancestor not in locations, (
+            f"{ancestor} received the species' location even though "
+            f"the ancestor bucket itself is suppressed from Life List"
+        )
+
+
+def test_life_list_ancestor_only_photo_still_listed(life_app):
+    """Suppression must fire only when the same photo carries a descendant
+    identification — a genus-only photo (no species tag) must still surface
+    its higher-rank bucket. Without this guarantee the fix over-corrects
+    and hides genuine higher-rank-only observations.
+    """
+    app, db, ids = life_app
+    # Existing seed already has a genus-only Accipiter photo.
+    _seed_higher_rank_accipiter(db, ids["folder"])
+
+    entry = _entry(_get_life_list(app), "Accipiter")
+    assert entry["taxon_rank"] == "genus"
+
+
+def test_life_list_ancestor_representative_write_denied_when_descendant_exists(life_app):
+    """When a photo carries both a species-rank identification and a linked
+    ancestor keyword, ``POST /api/photo-preferences`` for the ancestor
+    entry must return 400. Otherwise a Set-Representative call for
+    ``Aves`` would succeed on a photo the Life List Aves bucket does not
+    even render, leaving orphaned curation the next eligible-only reader
+    silently drops.
+    """
+    app, db, ids = life_app
+    seed = _seed_robin_with_ancestor_keywords(db, ids["folder"])
+    client = app.test_client()
+
+    # Setting the species-level representative is fine.
+    resp_ok = client.post("/api/photo-preferences", json={
+        "purpose": "life_list",
+        "species": "American Robin",
+        "photo_id": seed["photo"],
+    })
+    assert resp_ok.status_code == 200
+
+    # Setting an ancestor-level representative on the same photo must be
+    # rejected because the ancestor bucket does not include this photo.
+    for ancestor in ("Aves", "Turdidae", "Turdus"):
+        resp = client.post("/api/photo-preferences", json={
+            "purpose": "life_list",
+            "species": ancestor,
+            "photo_id": seed["photo"],
+        })
+        assert resp.status_code == 400, (
+            f"ancestor {ancestor} preference should be denied for a "
+            f"photo whose Life List bucket is a descendant identification"
+        )
+
+
+def test_species_representative_lists_suppress_ancestor_with_descendant(life_app):
+    """``get_species_representative_lists(eligible_only=True)`` must drop
+    an ancestor keyword's representative when the photo also carries a
+    descendant identification. That reader powers ``is_current_photo`` on
+    ``GET /api/photos/<id>``, so a lingering ancestor eligibility would
+    make the lightbox re-offer "Set Representative" on a photo the
+    ancestor bucket does not render.
+    """
+    app, db, ids = life_app
+    seed = _seed_robin_with_ancestor_keywords(db, ids["folder"])
+    # Manually persist a curation row targeting the ancestor to prove the
+    # eligibility reader (not the write path) drops it. Without ancestor
+    # suppression on the EXISTS this photo would remain eligible for
+    # ``Aves`` even though the Life List query hides that bucket.
+    db.set_species_representative("Aves", seed["photo"])
+    db.conn.commit()
+
+    eligible = db.get_species_representative_lists(eligible_only=True)
+    assert "Aves" not in eligible, (
+        "Aves representative eligibility must be suppressed when the "
+        "photo also carries American Robin"
+    )
+
+
+def test_life_list_keeps_unrelated_higher_rank_identifications(life_app):
+    """A photo tagged with two unrelated higher-rank keywords (a class-level
+    ``Aves`` and a class-level ``Mammalia`` where neither is an ancestor
+    of the other) must keep both Life List entries. The suppression rule
+    only fires for genuine ancestor/descendant pairs on the same photo.
+    """
+    app, db, ids = life_app
+    aves = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Aves", "Birds", "class"),
+    ).lastrowid
+    mammalia = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Mammalia", "Mammals", "class"),
+    ).lastrowid
+    k_aves = db.add_keyword("Aves", kw_type="taxonomy")
+    db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (aves, k_aves))
+    k_mam = db.add_keyword("Mammalia", kw_type="taxonomy")
+    db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (mammalia, k_mam))
+    pid = db.add_photo(
+        folder_id=ids["folder"], filename="mixed.jpg", extension=".jpg",
+        file_size=1000, file_mtime=8.0, timestamp="2024-08-01T09:00:00",
+    )
+    db.tag_photo(pid, k_aves)
+    db.tag_photo(pid, k_mam)
+    db.conn.commit()
+
+    data = _get_life_list(app)
+    species_seen = {entry["species"] for entry in data["species"]}
+    assert "Aves" in species_seen
+    assert "Mammalia" in species_seen
+
+
 def test_locations_from_location_keywords(life_app):
     app, _, _ = life_app
     data = _get_life_list(app)
@@ -651,6 +1146,58 @@ def test_life_list_export_species_csv_with_locations(life_app):
     assert cardinal["best_filename"] == "card2.jpg"
 
 
+def test_life_list_export_species_csv_selected_columns(life_app):
+    app, _, _ = life_app
+    resp = app.test_client().get(
+        "/api/life-list/export?format=csv"
+        "&columns=species,photo_count,best_filename"
+    )
+    assert resp.status_code == 200
+
+    reader = csv.DictReader(io.StringIO(resp.get_data(as_text=True)))
+    assert reader.fieldnames == ["species", "photo_count", "best_filename"]
+    rows = list(reader)
+    cardinal = next(r for r in rows if r["species"] == "Northern Cardinal")
+    assert cardinal == {
+        "species": "Northern Cardinal",
+        "photo_count": "2",
+        "best_filename": "card2.jpg",
+    }
+
+
+def test_life_list_export_photo_csv_selected_columns(life_app):
+    app, _, ids = life_app
+    resp = app.test_client().get(
+        "/api/life-list/export?format=csv&detail=photos&photos=all"
+        "&columns=species,photo_id,filename"
+    )
+    assert resp.status_code == 200
+
+    reader = csv.DictReader(io.StringIO(resp.get_data(as_text=True)))
+    assert reader.fieldnames == ["species", "photo_id", "filename"]
+    rows = list(reader)
+    assert [int(row["photo_id"]) for row in rows] == [
+        ids["p3"], ids["p2"], ids["p1"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "query, message",
+    [
+        ("format=csv&columns=", "select at least one csv column"),
+        ("format=csv&columns=species,not_a_column", "unknown csv columns"),
+        ("format=json&columns=species", "only supported for csv"),
+    ],
+)
+def test_life_list_export_rejects_invalid_column_selection(
+    life_app, query, message
+):
+    app, _, _ = life_app
+    resp = app.test_client().get("/api/life-list/export?" + query)
+    assert resp.status_code == 400
+    assert message in resp.get_json()["error"]
+
+
 def test_life_list_export_csv_escapes_formula_leading_cells(life_app):
     app, db, ids = life_app
     p_formula = db.add_photo(
@@ -698,31 +1245,20 @@ def test_life_list_export_photo_csv_all_photos(life_app):
 
 def test_life_list_export_all_photos_is_not_limited_to_page_count(life_app):
     app, db, ids = life_app
-    k_card = db.add_keyword("Northern Cardinal", is_species=True)
-    extra_ids = []
-    for i in range(13):
-        pid = db.add_photo(
-            folder_id=ids["folder"],
-            filename=f"card-extra-{i}.jpg",
-            extension=".jpg",
-            file_size=1000,
-            file_mtime=20.0 + i,
-            timestamp=f"2024-05-{i + 1:02d}T08:00:00",
-        )
-        db.tag_photo(pid, k_card)
-        extra_ids.append(pid)
+    extra_ids = _add_cardinal_photos(db, ids, 101)
 
     page_payload = _get_life_list(app)
     cardinal = _entry(page_payload, "Northern Cardinal")
-    assert cardinal["photo_count"] == 15
-    assert len(cardinal["photos"]) == 12
+    assert cardinal["photo_count"] == 103
+    assert len(cardinal["photos"]) == 100
+    assert cardinal["has_more"] is True
 
     resp = app.test_client().get(
         "/api/life-list/export?format=csv&detail=photos&photos=all"
     )
     rows = list(csv.DictReader(io.StringIO(resp.get_data(as_text=True))))
     cardinal_rows = [r for r in rows if r["species"] == "Northern Cardinal"]
-    assert len(cardinal_rows) == 15
+    assert len(cardinal_rows) == 103
     exported_ids = {int(r["photo_id"]) for r in cardinal_rows}
     assert set(extra_ids).issubset(exported_ids)
 
@@ -800,3 +1336,106 @@ def test_life_list_export_rejects_unknown_format(life_app):
     app, _, _ = life_app
     resp = app.test_client().get("/api/life-list/export?format=pdf")
     assert resp.status_code == 400
+
+
+def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypatch):
+    """After ``repair_duplicate_photo_species`` detaches a redundant root
+    keyword, a photo may only carry the hierarchy leaf whose stored
+    spelling differs from the canonical root (``verdin`` vs ``Verdin``).
+    The Life List must bucket that photo under the canonical root name so
+    curation on the root key applies and
+    ``/api/life-list/species?species=Verdin`` still returns the photo.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    taxon_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species', 'Animalia')"
+    ).lastrowid
+    db.conn.commit()
+
+    pid_hier = db.add_photo(
+        folder_id=fid, filename="verdin1.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+        timestamp="2024-01-05T09:00:00",
+    )
+    pid_root = db.add_photo(
+        folder_id=fid, filename="verdin2.jpg", extension=".jpg",
+        file_size=100, file_mtime=2.0,
+        timestamp="2024-02-10T09:00:00",
+    )
+    Image.new("RGB", (100, 100)).save(os.path.join(thumb_dir, f"{pid_hier}.jpg"))
+    Image.new("RGB", (100, 100)).save(os.path.join(thumb_dir, f"{pid_root}.jpg"))
+
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxon_id, nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon_id, root),
+    )
+    db.tag_photo(pid_hier, nested)
+    db.tag_photo(pid_hier, root)
+    db.tag_photo(pid_root, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    # The hierarchical photo now only carries the lower-cased leaf.
+    hier_names = {
+        row["name"] for row in db.get_photo_keywords(pid_hier)
+    }
+    assert "verdin" in hier_names and "Verdin" not in hier_names
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
+    client = app.test_client()
+
+    resp = client.get("/api/life-list")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    verdin_entries = [
+        e for e in data["species"]
+        if e["species"].lower() == "verdin"
+    ]
+    assert len(verdin_entries) == 1, (
+        "hierarchy leaf and root must share one bucket keyed on canonical root"
+    )
+    verdin = verdin_entries[0]
+    assert verdin["species"] == "Verdin"
+    photo_ids = {p["id"] for p in verdin["photos"]}
+    assert photo_ids == {pid_hier, pid_root}
+
+    single = client.get(
+        "/api/life-list/species", query_string={"species": "Verdin"},
+    )
+    assert single.status_code == 200
+    single_data = single.get_json()
+    assert single_data["species"] == "Verdin"
+    assert {p["id"] for p in single_data["photos"]} == {pid_hier, pid_root}
+
+    db.close()

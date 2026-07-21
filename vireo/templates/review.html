@@ -776,6 +776,10 @@
       <option value="date_desc">Date (newest)</option>
     </select>
     <button class="btn-batch-accept" id="acceptAllBtn" onclick="acceptAllPending()" style="display:none;">Accept All</button>
+    <button type="button" class="model-selector" id="toggleDetectionBoxesBtn"
+            onclick="toggleReviewDetectionBoxes()"
+            title="Toggle bounding-box overlays on review cards"
+            style="margin-left:12px;cursor:pointer;">Show Boxes</button>
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted,#888);margin-left:12px;">
       Min confidence:
       <input type="range" id="confFilter" min="0" max="90" step="5" value="0"
@@ -816,6 +820,46 @@ var availableModels = [];
 var collectionPhotoIds = null;  // null = no filter
 var thumbSize = 400;
 var mode = 'review';
+
+function _reviewStoredBool(key, fallback) {
+  try {
+    var value = localStorage.getItem(key);
+    if (value === '0') return false;
+    if (value === '1') return true;
+  } catch (e) {}
+  return fallback;
+}
+function _reviewPersistBool(key, value) {
+  try { localStorage.setItem(key, value ? '1' : '0'); } catch (e) {}
+}
+var REVIEW_BOXES_STORAGE_KEY = 'vireo.review.detectionBoxesVisible';
+var reviewDetectionBoxesVisible = _reviewStoredBool(REVIEW_BOXES_STORAGE_KEY, false);
+
+function _syncReviewDetectionBoxesBtn() {
+  var btn = document.getElementById('toggleDetectionBoxesBtn');
+  if (btn) btn.textContent = reviewDetectionBoxesVisible ? 'Hide Boxes' : 'Show Boxes';
+}
+
+function _syncReviewDetectionBoxes() {
+  document.querySelectorAll('.detection-box').forEach(function(box) {
+    var pid = parseInt(box.getAttribute('data-photo-id'), 10);
+    var hideDetectionOverlay = (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      !isNaN(pid) &&
+      window.vireoPhotoHasOrientationEdit(pid)
+    );
+    box.style.display = (reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'none';
+  });
+}
+
+function toggleReviewDetectionBoxes() {
+  reviewDetectionBoxesVisible = !reviewDetectionBoxesVisible;
+  _reviewPersistBool(REVIEW_BOXES_STORAGE_KEY, reviewDetectionBoxesVisible);
+  _syncReviewDetectionBoxesBtn();
+  _syncReviewDetectionBoxes();
+}
+
+document.addEventListener('DOMContentLoaded', _syncReviewDetectionBoxesBtn);
 
 /* Species color palette for bounding boxes */
 var _speciesColors = {};
@@ -859,6 +903,15 @@ async function loadCollectionFilter() {
       var opt = document.createElement('option');
       opt.value = c.id;
       opt.textContent = c.name;
+      // count_error means /api/collections couldn't resolve this collection's
+      // rules — selecting it would 400 the downstream /photos endpoint and
+      // (previously) silently widen the review scope back to every prediction.
+      // Show it disabled with a hint so the state is visible.
+      if (c.count_error) {
+        opt.disabled = true;
+        opt.textContent = c.name + ' (unavailable — edit rules to fix)';
+        opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+      }
       sel.appendChild(opt);
     });
   } catch(e) {}
@@ -876,7 +929,17 @@ async function switchCollection(val) {
       collectionPhotoIds = new Set(data.photos.map(function(p) { return p.id; }));
       predictions = allPredictions.filter(function(p) { return collectionPhotoIds.has(p.photo_id); });
     } catch(e) {
-      predictions = allPredictions.slice();
+      // The old catch fell back to allPredictions.slice(), which silently
+      // widened the review scope to every prediction — the opposite of what
+      // the user asked for. Keep the scope empty and surface the failure
+      // instead so a broken rule can't quietly turn "just this collection"
+      // into "everything".
+      console.error('Failed to load photos for collection ' + val + ':', e);
+      collectionPhotoIds = new Set();
+      predictions = [];
+      if (typeof showToast === 'function') {
+        showToast('Could not load photos for this collection — check its rules', 'error');
+      }
     }
   }
   renderAll();
@@ -1125,7 +1188,7 @@ document.addEventListener('lightbox:renderchanged', function(e) {
       window.vireoPhotoHasOrientationEdit(id)
     );
     document.querySelectorAll('.detection-box[data-photo-id="' + id + '"]').forEach(function(box) {
-      box.style.display = hideDetectionOverlay ? 'none' : '';
+      box.style.display = (reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'none';
     });
   });
 });
@@ -1307,7 +1370,7 @@ function renderPredictionCard(pred) {
     var bHeight = (pred.box_h * 100).toFixed(2) + '%';
     imgHtml = '<div class="card-img-wrap">' + imgTag +
       representativeBadge +
-      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + (hideDetectionOverlay ? 'display:none;' : '') + 'left:' + bLeft + ';top:' + bTop +
+      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + ((reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'display:none;') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
       ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' ' + confPct + '%</span>' +

@@ -10,6 +10,10 @@ interface Props {
 
 const { title, description = 'AI-powered wildlife photo organizer. Triage thousands of photos in minutes.' } = Astro.props;
 const base = import.meta.env.BASE_URL;
+const cloudflareAnalyticsToken = import.meta.env.PUBLIC_CLOUDFLARE_WEB_ANALYTICS_TOKEN;
+const cloudflareBeaconConfig = cloudflareAnalyticsToken
+  ? JSON.stringify({ token: cloudflareAnalyticsToken })
+  : null;
 ---
 
 <!DOCTYPE html>
@@ -34,6 +38,14 @@ const base = import.meta.env.BASE_URL;
   <meta property="og:type" content="website" />
 
   <title>{title}</title>
+
+  {cloudflareBeaconConfig && (
+    <script
+      type="module"
+      src="https://static.cloudflareinsights.com/beacon.min.js"
+      data-cf-beacon={cloudflareBeaconConfig}
+    ></script>
+  )}
 </head>
 <body>
   <Nav />

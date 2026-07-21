@@ -8,31 +8,50 @@
 <link rel="stylesheet" href="/static/vireo-base.css">
 <title>Vireo - Move</title>
 <style>
-body { padding-bottom: 36px; }
-.content { max-width: 1100px; margin: 0 auto; padding: 20px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--text-primary); margin-bottom: 20px; }
+body { padding-bottom: 48px; }
+.content { max-width: 1120px; margin: 0 auto; padding: 32px 24px; }
+.page-header { margin-bottom: 24px; }
+.page-title {
+  font-size: 26px;
+  line-height: 1.2;
+  font-weight: 720;
+  letter-spacing: -0.025em;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+.page-subtitle {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
 
 /* Tabs */
 .move-tabs {
-  display: flex;
-  gap: 0;
-  border-bottom: 1px solid var(--border-primary);
-  margin-bottom: 20px;
+  display: inline-flex;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  margin-bottom: 22px;
 }
 .move-tab {
-  padding: 10px 20px;
+  padding: 8px 15px;
   font-size: 13px;
+  font-weight: 600;
   color: var(--text-muted);
   cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: color 0.15s, border-color 0.15s;
-  background: none;
-  border-top: none;
-  border-left: none;
-  border-right: none;
+  border: 0;
+  border-radius: 7px;
+  transition: color 0.15s, background 0.15s, box-shadow 0.15s;
+  background: transparent;
 }
-.move-tab:hover { color: var(--text-primary); }
-.move-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.move-tab:hover { color: var(--text-primary); background: var(--bg-secondary); }
+.move-tab.active {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text-primary) 10%, transparent);
+}
 
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
@@ -41,8 +60,8 @@ body { padding-bottom: 36px; }
 .move-section {
   background: var(--bg-secondary);
   border: 1px solid var(--border-primary);
-  border-radius: 6px;
-  padding: 20px;
+  border-radius: 12px;
+  padding: 24px;
   margin-bottom: 16px;
 }
 .move-section h3 {
@@ -56,6 +75,141 @@ body { padding-bottom: 36px; }
   color: var(--text-muted);
   margin: 0 0 16px 0;
 }
+
+/* Guided whole-folder move */
+.quick-move-section { max-width: 980px; padding: 0; overflow: hidden; }
+.quick-move-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 19px 22px 17px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.quick-move-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-tertiary));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-primary));
+}
+.quick-move-icon svg { width: 20px; height: 20px; }
+.quick-move-header h3 { margin: 0 0 4px; font-size: 16px; }
+.quick-move-header p { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.move-flow { padding: 20px 22px; }
+.move-step { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 14px; }
+.step-number {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 750;
+}
+.step-body { min-width: 0; }
+.step-title { display: block; margin: 3px 0 12px; font-size: 14px; font-weight: 650; color: var(--text-primary); }
+.step-connector { width: 1px; height: 22px; margin: 4px 0 4px 13px; background: var(--border-primary); }
+.field-group { margin-bottom: 14px; }
+.field-group:last-child { margin-bottom: 0; }
+.destination-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+.destination-fields .field-group { margin-bottom: 0; }
+.field-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+.field-hint { margin-top: 6px; color: var(--text-dim); font-size: 11.5px; line-height: 1.45; }
+.move-control,
+.move-control-row input,
+.move-control-row select {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 7px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+.move-control:focus,
+.move-control-row input:focus,
+.move-control-row select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.move-control-row { display: flex; align-items: stretch; gap: 8px; }
+.move-control-row input, .move-control-row select { flex: 1; min-width: 0; }
+.move-control-row .btn { flex: 0 0 auto; }
+.field-error { min-height: 16px; margin-top: 5px; color: var(--danger); font-size: 11.5px; }
+.folder-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  margin-top: 7px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.folder-info:not(:empty)::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.reset-name-btn { white-space: nowrap; }
+.move-preview-card {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border-primary));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-tertiary));
+}
+.move-preview-eyebrow {
+  margin-bottom: 11px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.move-route { display: grid; grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr); align-items: center; gap: 10px; }
+.move-route-label { margin-bottom: 4px; color: var(--text-dim); font-size: 10.5px; font-weight: 650; }
+.move-route-path { color: var(--text-primary); font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.45; word-break: break-word; }
+.move-route-arrow { color: var(--accent); font-size: 20px; text-align: center; }
+.move-preview-meta { margin-top: 9px; color: var(--text-muted); font-size: 11.5px; }
+.move-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 15px 22px;
+  border-top: 1px solid var(--border-primary);
+  background: color-mix(in srgb, var(--bg-tertiary) 55%, var(--bg-secondary));
+}
+.move-safety { display: flex; align-items: flex-start; gap: 8px; color: var(--text-dim); font-size: 11.5px; line-height: 1.45; }
+.move-safety svg { width: 15px; height: 15px; flex: 0 0 15px; margin-top: 1px; color: var(--accent); }
+.quick-submit { min-height: 40px; padding: 9px 18px; border-radius: 7px; white-space: nowrap; }
+.quick-submit .button-arrow { margin-left: 7px; font-size: 15px; }
 
 /* Form row */
 .form-row {
@@ -275,17 +429,11 @@ body { padding-bottom: 36px; }
 }
 
 /* Folder info row */
-.folder-info {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-top: 4px;
-}
-
 /* Resolved-destination preview under the Move-folder destination input */
 .dest-preview {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-dim);
-  margin-top: 6px;
+  margin-top: 10px;
   word-break: break-all;
 }
 .dest-preview .dest-preview-path {
@@ -311,6 +459,142 @@ body { padding-bottom: 36px; }
   font-size: 13px;
   padding: 12px 0;
 }
+
+/* Move confirmation: keep paths, counts, and safety details scannable. */
+#confirmModal .move-confirm-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100vw - 32px));
+  max-width: 560px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24);
+}
+.confirm-content {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 24px 20px;
+}
+.confirm-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  margin-bottom: 18px;
+}
+.confirm-heading-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 10px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-primary));
+}
+.confirm-heading-icon svg { width: 19px; height: 19px; }
+.confirm-eyebrow {
+  margin: 0 0 3px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.075em;
+  text-transform: uppercase;
+}
+#confirmModal .confirm-heading h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+.confirm-message {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+.confirm-route {
+  overflow: hidden;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-primary);
+  border-radius: 9px;
+  background: var(--bg-panel);
+}
+.confirm-route-row {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  padding: 10px 12px;
+}
+.confirm-route-row + .confirm-route-row { border-top: 1px solid var(--border-subtle); }
+.confirm-route-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.confirm-route-path {
+  min-width: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.confirm-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.confirm-stat {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+}
+.confirm-stat-value {
+  display: block;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+.confirm-stat-label { display: block; margin-top: 2px; color: var(--text-dim); font-size: 11px; }
+.confirm-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-secondary));
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border-primary));
+  font-size: 12px;
+  line-height: 1.45;
+}
+.confirm-note + .confirm-note { margin-top: 8px; }
+.confirm-note-icon { flex: 0 0 auto; color: var(--accent); font-weight: 800; }
+.confirm-note strong { color: var(--text-secondary); }
+.confirm-note.warning {
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg-secondary));
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--border-primary));
+}
+.confirm-note.warning .confirm-note-icon,
+.confirm-note.warning strong { color: var(--warning); }
+#confirmModal .confirm-actions {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border-primary);
+  background: var(--bg-tertiary);
+}
+#confirmModal .confirm-actions .modal-btn { min-width: 92px; padding: 8px 17px; border-radius: 6px; }
 
 /* Folder browser modal (move-specific, reuses modal base from navbar) */
 .browser-shortcuts {
@@ -338,6 +622,20 @@ body { padding-bottom: 36px; }
   margin-bottom: 8px;
   word-break: break-all;
 }
+.browser-source {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+.browser-source-path {
+  color: var(--text-primary);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+}
+.move-summary {
+  display: none;
+}
 .browser-folder-item {
   padding: 6px 10px;
   cursor: pointer;
@@ -364,6 +662,25 @@ body { padding-bottom: 36px; }
   color: var(--text-primary);
 }
 .new-folder-row input:focus { outline: none; border-color: var(--accent); }
+
+@media (max-width: 850px) {
+  .destination-fields { grid-template-columns: 1fr; }
+  .destination-fields .field-group { margin-bottom: 14px; }
+}
+
+@media (max-width: 700px) {
+  .content { padding: 22px 14px; }
+  .move-tabs { display: flex; }
+  .move-tab { flex: 1; padding-inline: 9px; }
+  .quick-move-header, .move-flow, .move-actions { padding-left: 17px; padding-right: 17px; }
+  .move-route { grid-template-columns: 1fr; }
+  .move-route-arrow { transform: rotate(90deg); text-align: left; padding-left: 4px; }
+  .move-actions { align-items: stretch; flex-direction: column; }
+  .quick-submit { width: 100%; }
+  .confirm-content { padding: 19px 18px 17px; }
+  #confirmModal .confirm-actions { padding: 13px 18px; }
+  .confirm-stats { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -371,7 +688,10 @@ body { padding-bottom: 36px; }
 {% include '_navbar.html' %}
 
 <div class="content">
-  <h2 class="page-title">Move Photos</h2>
+  <div class="page-header">
+    <h2 class="page-title">Move Photos</h2>
+    <p class="page-subtitle">Reorganize folders and photos without losing edits, metadata, or library links.</p>
+  </div>
 
   <div class="move-tabs">
     <button class="move-tab active" onclick="switchTab('quick')">Quick Move</button>
@@ -381,37 +701,109 @@ body { padding-bottom: 36px; }
 
   <!-- Quick Move Tab -->
   <div class="tab-panel active" id="tab-quick">
-    <div class="move-section">
-      <h3>Move Entire Folder</h3>
-      <p class="desc">Move all files in a folder (including subfolders) to a new location. Files are copied first, verified, then originals are removed.</p>
-
-      <div class="form-row">
-        <label>Source Folder</label>
-        <select id="quickFolderSelect" onchange="onQuickFolderChange()">
-          <option value="">-- Select a folder --</option>
-        </select>
-      </div>
-      <div class="folder-info" id="quickFolderInfo"></div>
-
-      <div class="form-row">
-        <label>Destination</label>
-        <div class="dest-row">
-          <select id="quickDestMode" onchange="onQuickDestModeChange()">
-            <option value="local">Local path</option>
-          </select>
+    <div class="move-section quick-move-section">
+      <div class="quick-move-header">
+        <div class="quick-move-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7.5h6l2 2h10v8.75A1.75 1.75 0 0 1 19.25 20H4.75A1.75 1.75 0 0 1 3 18.25z"/>
+            <path d="M7.5 14h9M13.5 11l3 3-3 3"/>
+          </svg>
+        </div>
+        <div>
+          <h3>Move a folder or organize its photos</h3>
+          <p>Keep everything together, or split photos into capture-date folders. Companion files stay with their photos.</p>
         </div>
       </div>
-      <div class="dest-row" id="quickLocalRow" style="margin-bottom:8px;">
-        <input type="text" id="quickDestInput" placeholder="/path/to/destination" oninput="updateQuickMoveBtn()">
-        <button class="btn btn-secondary btn-small" onclick="openBrowser('quickDestInput')">Browse</button>
-      </div>
-      <div class="dest-row" id="quickRemoteRow" style="display:none; margin-bottom:8px;">
-        <input type="text" id="quickSubpathInput" placeholder="Optional subfolder under the target (e.g. USA/2026)" oninput="updateQuickMoveBtn()">
-      </div>
-      <div class="dest-preview" id="quickDestPreview"></div>
 
-      <div style="margin-top:16px;">
-        <button class="btn btn-primary" id="quickMoveBtn" onclick="startQuickMove()" disabled>Move Folder</button>
+      <div class="move-flow">
+        <div class="move-step">
+          <div class="step-number">1</div>
+          <div class="step-body">
+            <label class="step-title" for="quickFolderSelect">Choose the folder to move</label>
+            <select class="move-control" id="quickFolderSelect" onchange="onQuickFolderChange()">
+              <option value="">Select a folder…</option>
+            </select>
+            <div class="folder-info" id="quickFolderInfo"></div>
+          </div>
+        </div>
+
+        <div class="step-connector" aria-hidden="true"></div>
+
+        <div class="move-step">
+          <div class="step-number">2</div>
+          <div class="step-body">
+            <span class="step-title">Choose its new location</span>
+
+            <div class="field-group">
+              <label class="field-label" for="quickDestMode">Destination type</label>
+              <select class="move-control" id="quickDestMode" onchange="onQuickDestModeChange()">
+                <option value="local">A folder on this Mac or a mounted drive</option>
+              </select>
+            </div>
+
+            <div class="destination-fields">
+              <div class="field-group" id="quickLocalRow">
+                <label class="field-label" for="quickDestInput">Destination parent folder</label>
+                <div class="move-control-row">
+                  <input type="text" id="quickDestInput" placeholder="Choose where it will live" oninput="updateQuickMoveBtn()">
+                  <button class="btn btn-secondary" type="button" onclick="openBrowser('quickDestInput')">
+                    Browse
+                  </button>
+                </div>
+                <div class="field-hint">The moved folder will be created inside this location.</div>
+              </div>
+
+              <div class="field-group" id="quickRemoteRow" style="display:none;">
+                <label class="field-label" for="quickSubpathInput">Folder inside remote target <span style="font-weight:400;color:var(--text-dim);">Optional</span></label>
+                <input class="move-control" type="text" id="quickSubpathInput" placeholder="For example: USA/2026" oninput="updateQuickMoveBtn()">
+                <div class="field-hint">Leave blank to use the remote target’s main folder.</div>
+              </div>
+
+              <div class="field-group">
+                <label class="field-label" for="quickFolderMode">Folder organization</label>
+                <select class="move-control" id="quickFolderMode" onchange="onQuickFolderModeChange()">
+                  <option value="single">Keep as one folder</option>
+                  <option value="date">Organize photos by capture date</option>
+                </select>
+                <div id="quickSingleFolderControls" style="margin-top:8px;">
+                  <div class="move-control-row">
+                    <input type="text" id="quickFolderName" aria-label="Folder name" placeholder="Select a source folder first" oninput="updateQuickMoveBtn()" disabled>
+                    <button class="btn btn-secondary reset-name-btn" id="quickResetNameBtn" type="button" onclick="resetQuickFolderName()" disabled>Use original</button>
+                  </div>
+                  <div class="field-hint">Edit this name to rename the folder as part of the move.</div>
+                </div>
+                <div id="quickDateFolderControls" style="display:none;margin-top:8px;">
+                  <select class="move-control" id="quickFolderTemplatePreset" aria-label="Date folder format" onchange="updateQuickFolderTemplateControls()">
+                    <option value="%Y/%Y-%m-%d">%Y/%Y-%m-%d — 2026/2026-07-12</option>
+                    <option value="%Y/%m/%d">%Y/%m/%d — 2026/07/12</option>
+                    <option value="%Y/%m">%Y/%m — 2026/07</option>
+                    <option value="%Y">%Y — 2026</option>
+                    <option value="%Y-%m-%d" selected>%Y-%m-%d — 2026-07-12</option>
+                    <option value="__custom__">Custom…</option>
+                  </select>
+                  <input class="move-control" type="text" id="quickFolderTemplate" aria-label="Custom date folder format" placeholder="Enter a strftime format" oninput="updateQuickMoveBtn()" style="display:none;margin-top:8px;">
+                  <div class="field-hint">Photos can land in different folders when their capture dates differ. Photos without a capture date go to <code>unsorted</code>.</div>
+                </div>
+                <div class="field-error" id="quickFolderNameError" role="status"></div>
+              </div>
+            </div>
+
+            <div class="move-preview-card" id="quickMoveSummary" style="display:none;"></div>
+            <div class="dest-preview" id="quickDestPreview"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="move-actions">
+        <div class="move-safety">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3 4.5 6v5.5c0 4.6 3.2 7.7 7.5 9.5 4.3-1.8 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2 2 4-4"/>
+          </svg>
+          <span>Vireo copies and verifies every file before removing the originals.</span>
+        </div>
+        <button class="btn btn-primary quick-submit" id="quickMoveBtn" onclick="startQuickMove()" disabled>
+          Review move <span class="button-arrow" aria-hidden="true">→</span>
+        </button>
       </div>
     </div>
   </div>
@@ -473,6 +865,10 @@ body { padding-bottom: 36px; }
 <div class="modal-overlay" id="moveBrowserModal" style="z-index:1001;">
   <div class="modal" style="max-width:600px;width:85%;">
     <h3>Select Folder</h3>
+    <div class="browser-source" id="moveBrowserSource" style="display:none;">
+      Source folder: <span class="browser-source-path" id="moveBrowserSourcePath"></span>
+      <span id="moveBrowserSourceCount"></span>
+    </div>
     <div class="browser-shortcuts">
       <button onclick="browseTo(null)">Home</button>
       <button onclick="browseTo('__pictures__')">Pictures</button>
@@ -493,12 +889,25 @@ body { padding-bottom: 36px; }
 
 <!-- Confirm Modal -->
 <div class="modal-overlay" id="confirmModal">
-  <div class="modal" style="max-width:450px;">
-    <h3 id="confirmTitle">Confirm Move</h3>
-    <p id="confirmMessage" style="font-size:13px;color:var(--text-secondary);"></p>
-    <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" id="confirmOkBtn" onclick="confirmOk()">Move</button>
+  <div class="modal move-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="confirm-content">
+      <div class="confirm-heading" id="confirmHeading">
+        <div class="confirm-heading-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3.5 7.5h6l2 2h9v9a2 2 0 0 1-2 2h-15z"></path>
+            <path d="M3.5 7.5V5.8a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1.7"></path>
+          </svg>
+        </div>
+        <div>
+          <div class="confirm-eyebrow" id="confirmEyebrow">Please confirm</div>
+          <h3 id="confirmTitle">Confirm Move</h3>
+        </div>
+      </div>
+      <div class="confirm-message" id="confirmMessage"></div>
+    </div>
+    <div class="modal-actions confirm-actions">
       <button class="modal-btn modal-btn-cancel" onclick="closeConfirm()">Cancel</button>
+      <button class="modal-btn modal-btn-primary" id="confirmOkBtn" onclick="confirmOk()">Move</button>
     </div>
   </div>
 </div>
@@ -509,6 +918,7 @@ var allFolders = [];
 var photoList = [];
 var selectedPhotos = new Set();
 var lastSelectedIdx = -1;
+var photoLoadSeq = 0;
 var browserTargetInput = null;
 var browserPath = '';
 var browserHomePath = '';
@@ -560,6 +970,13 @@ function onQuickDestModeChange() {
   var remoteId = quickRemoteTargetId();
   document.getElementById('quickLocalRow').style.display = remoteId ? 'none' : '';
   document.getElementById('quickRemoteRow').style.display = remoteId ? '' : 'none';
+  var dateOption = document.querySelector('#quickFolderMode option[value="date"]');
+  if (dateOption) dateOption.disabled = !!remoteId;
+  if (remoteId && quickUsesDateFolders()) {
+    document.getElementById('quickFolderMode').value = 'single';
+    onQuickFolderModeChange();
+    return;
+  }
   updateQuickMoveBtn();
 }
 
@@ -607,39 +1024,233 @@ function populateFolderSelects() {
       sel.appendChild(opt);
     });
   });
+
+  var requestedFolderId = new URLSearchParams(window.location.search).get('folder_id');
+  if (requestedFolderId) {
+    var quickSelect = document.getElementById('quickFolderSelect');
+    quickSelect.value = requestedFolderId;
+    if (quickSelect.value === requestedFolderId) onQuickFolderChange();
+  }
 }
 
 /* ---------- Quick Move ---------- */
 function onQuickFolderChange() {
   var sel = document.getElementById('quickFolderSelect');
   var info = document.getElementById('quickFolderInfo');
+  var nameInput = document.getElementById('quickFolderName');
+  var resetBtn = document.getElementById('quickResetNameBtn');
   var fid = parseInt(sel.value);
   if (!fid) {
     info.textContent = '';
+    nameInput.value = '';
+    nameInput.disabled = true;
+    resetBtn.disabled = true;
     updateQuickMoveBtn();
     return;
   }
   var folder = allFolders.find(function(f) { return f.id === fid; });
   if (folder) {
-    info.textContent = (folder.photo_count || 0) + ' photos in this folder';
+    var count = folder.photo_count || 0;
+    info.textContent = folder.path + ' · ' +
+      count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '');
+    nameInput.value = sourceFolderName(folder);
+    nameInput.disabled = false;
+    resetBtn.disabled = false;
   }
   updateQuickMoveBtn();
+}
+
+function sourceFolderName(folder) {
+  var srcPath = (folder && folder.path) || '';
+  return (folder && folder.name) ||
+    srcPath.replace(/[\\\/]+$/, '').split(/[\\\/]/).pop() || '';
+}
+
+function resetQuickFolderName() {
+  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var folder = allFolders.find(function(f) { return f.id === fid; });
+  document.getElementById('quickFolderName').value = sourceFolderName(folder);
+  updateQuickMoveBtn();
+}
+
+function quickUsesDateFolders() {
+  return document.getElementById('quickFolderMode').value === 'date';
+}
+
+function onQuickFolderModeChange() {
+  var byDate = quickUsesDateFolders();
+  document.getElementById('quickSingleFolderControls').style.display = byDate ? 'none' : '';
+  document.getElementById('quickDateFolderControls').style.display = byDate ? '' : 'none';
+  updateQuickMoveBtn();
+}
+
+function selectedQuickFolderTemplate() {
+  var preset = document.getElementById('quickFolderTemplatePreset');
+  if (preset.value !== '__custom__') return preset.value;
+  return (document.getElementById('quickFolderTemplate').value || '').trim();
+}
+
+function updateQuickFolderTemplateControls() {
+  var preset = document.getElementById('quickFolderTemplatePreset');
+  var custom = document.getElementById('quickFolderTemplate');
+  custom.style.display = preset.value === '__custom__' ? '' : 'none';
+  if (preset.value === '__custom__') custom.focus();
+  updateQuickMoveBtn();
+}
+
+function quickFolderTemplateResult() {
+  if (!quickUsesDateFolders()) return {value: '', error: ''};
+  var value = selectedQuickFolderTemplate();
+  if (!value) return {value: '', error: 'Enter a date folder format.'};
+  var normalized = value.replace(/\\/g, '/');
+  if (normalized.charAt(0) === '/' || /^[A-Za-z]:/.test(normalized) ||
+      normalized.split('/').some(function(part) { return part === '..'; })) {
+    return {value: '', error: 'Use a relative folder format without “..”.'};
+  }
+  return {value: value, error: ''};
+}
+
+function quickFolderNameResult() {
+  if (quickUsesDateFolders()) return {value: '', error: '', rename: false};
+  var raw = document.getElementById('quickFolderName').value;
+  // "Unchanged from the pre-populated default" is a distinct state from
+  // "the user typed something that happens to trim to the source name":
+  // if we .trim() a source folder whose real name has leading or trailing
+  // whitespace on a no-op submit, we'd rename it to the trimmed variant
+  // (landing at /archive/Shoot instead of preserving /archive/ Shoot ).
+  // Signal "keep original" with an empty value + rename:false so callers
+  // send no destination_name and the backend uses folder.name verbatim.
+  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var folder = fid ? allFolders.find(function(f) { return f.id === fid; }) : null;
+  if (folder && raw === sourceFolderName(folder)) {
+    return {value: '', error: '', rename: false};
+  }
+  var name = raw.trim();
+  if (!name) return {value: '', error: 'Enter a name for the folder.', rename: false};
+  // Colon rejection matches the backend: on Windows, joining a parent with
+  // e.g. "C:shoot" collapses to the drive-relative "C:shoot" and escapes
+  // the selected parent, so the leaf name has to stay free of : as well.
+  if (name === '.' || name === '..' || /[\\\/:]/.test(name)) {
+    return {
+      value: '',
+      error: 'Use a single folder name without slashes or colons.',
+      rename: false,
+    };
+  }
+  return {value: name, error: '', rename: true};
+}
+
+function setQuickMoveSummary(folder, finalPath) {
+  var summary = document.getElementById('quickMoveSummary');
+  if (!folder || !finalPath) {
+    summary.replaceChildren();
+    summary.style.display = 'none';
+    return '';
+  }
+  var count = folder.photo_count || 0;
+  var text = 'Confirm moving ' + count.toLocaleString() + ' photo' +
+    (count !== 1 ? 's' : '') + ' from ' + folder.path + ' to ' + finalPath + '?';
+
+  summary.replaceChildren();
+  var eyebrow = document.createElement('div');
+  eyebrow.className = 'move-preview-eyebrow';
+  eyebrow.textContent = 'Final location';
+
+  var route = document.createElement('div');
+  route.className = 'move-route';
+  function routePoint(label, path) {
+    var point = document.createElement('div');
+    var routeLabel = document.createElement('div');
+    routeLabel.className = 'move-route-label';
+    routeLabel.textContent = label;
+    var routePath = document.createElement('div');
+    routePath.className = 'move-route-path';
+    routePath.textContent = path;
+    point.appendChild(routeLabel);
+    point.appendChild(routePath);
+    return point;
+  }
+  route.appendChild(routePoint('FROM', folder.path));
+  var arrow = document.createElement('div');
+  arrow.className = 'move-route-arrow';
+  arrow.setAttribute('aria-hidden', 'true');
+  arrow.textContent = '→';
+  route.appendChild(arrow);
+  route.appendChild(routePoint('TO', finalPath));
+
+  var meta = document.createElement('div');
+  meta.className = 'move-preview-meta';
+  var renamed = quickFolderNameResult().rename;
+  meta.textContent = count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '') +
+    ' · Includes subfolders' + (renamed ? ' · Folder will be renamed' : '');
+
+  summary.appendChild(eyebrow);
+  summary.appendChild(route);
+  summary.appendChild(meta);
+  summary.style.display = 'block';
+  return text;
+}
+
+function setQuickDateSummary(folder, data) {
+  var summary = document.getElementById('quickMoveSummary');
+  if (!folder || !data || !data.date_organized) {
+    summary.replaceChildren();
+    summary.style.display = 'none';
+    return;
+  }
+  summary.replaceChildren();
+  var eyebrow = document.createElement('div');
+  eyebrow.className = 'move-preview-eyebrow';
+  eyebrow.textContent = 'Resulting folders';
+  summary.appendChild(eyebrow);
+
+  var destinations = data.destinations || [];
+  destinations.slice(0, 8).forEach(function(item) {
+    var row = document.createElement('div');
+    row.className = 'move-preview-meta';
+    row.textContent = item.path + ' · ' + item.photo_count.toLocaleString() +
+      ' photo' + (item.photo_count !== 1 ? 's' : '') +
+      (item.exists ? ' · already exists' : '');
+    summary.appendChild(row);
+  });
+  if (destinations.length > 8) {
+    var more = document.createElement('div');
+    more.className = 'move-preview-meta';
+    more.textContent = '+ ' + (destinations.length - 8).toLocaleString() +
+      ' more folders';
+    summary.appendChild(more);
+  }
+  var meta = document.createElement('div');
+  meta.className = 'move-preview-meta';
+  meta.textContent = data.photo_count.toLocaleString() + ' photos across ' +
+    data.destination_count.toLocaleString() + ' folder' +
+    (data.destination_count !== 1 ? 's' : '') +
+    ' · Companion files move with their photos';
+  summary.appendChild(meta);
+  summary.style.display = 'block';
 }
 
 function updateQuickMoveBtn() {
   var fid = document.getElementById('quickFolderSelect').value;
   var remoteId = quickRemoteTargetId();
   var btn = document.getElementById('quickMoveBtn');
+  var nameResult = quickFolderNameResult();
+  var templateResult = quickFolderTemplateResult();
+  var nameError = document.getElementById('quickFolderNameError');
+  nameError.textContent = fid ? (nameResult.error || templateResult.error) : '';
   var ready;
   if (remoteId) {
     // Remote needs a usable GNU rsync; no destination text is required (the
     // target carries it). An optional subpath refines where under it.
-    ready = !!fid && quickRsyncAvailable;
+    ready = !!fid && quickRsyncAvailable && !nameResult.error && !templateResult.error;
   } else {
-    ready = !!(fid && document.getElementById('quickDestInput').value.trim());
+    ready = !!(fid && document.getElementById('quickDestInput').value.trim()
+      && !nameResult.error && !templateResult.error);
   }
   btn.disabled = quickMoveBusy || !ready;
-  btn.textContent = quickMoveBusy ? 'Checking...' : 'Move Folder';
+  btn.innerHTML = quickMoveBusy
+    ? 'Checking destination…'
+    : 'Review move <span class="button-arrow" aria-hidden="true">→</span>';
   updateQuickMovePreview();
 }
 
@@ -649,20 +1260,18 @@ function setQuickMoveBusy(isBusy) {
 }
 
 // Compute the final landing path, mirroring move.py move_folder():
-// the source folder is placed *inside* the destination, keeping its name.
+// the named folder is placed *inside* the destination. The editable name
+// allows a rename during the same safe move.
 // Detect Windows-style paths (containing '\') so the preview matches
 // os.path.join on a Windows backend, where 'C:\Archive\' + 'Birds' is
 // 'C:\Archive\Birds', not 'C:\Archive\/Birds'. Also lets the folder.name
 // fallback split a backslash-delimited source path.
-function resolvedMoveDest(folder, destination) {
+function resolvedMoveDest(folder, destination, destinationName) {
   var srcPath = (folder && folder.path) || '';
   var winStyle = destination.indexOf('\\') !== -1 || srcPath.indexOf('\\') !== -1;
   var sep = winStyle ? '\\' : '/';
   var trimRe = winStyle ? /[\\\/]+$/ : /\/+$/;
-  var splitRe = winStyle ? /[\\\/]/ : /\//;
-
-  var folderName = (folder && folder.name) ||
-    srcPath.replace(trimRe, '').split(splitRe).pop();
+  var folderName = destinationName || sourceFolderName(folder);
   return destination.replace(trimRe, '') + sep + folderName;
 }
 
@@ -670,12 +1279,27 @@ function updateQuickMovePreview() {
   var preview = document.getElementById('quickDestPreview');
   var fid = parseInt(document.getElementById('quickFolderSelect').value);
   var remoteId = quickRemoteTargetId();
-  if (!fid) { preview.textContent = ''; return; }
+  if (!fid) {
+    preview.textContent = '';
+    setQuickMoveSummary(null, '');
+    return;
+  }
   var folder = allFolders.find(function(f) { return f.id === fid; });
+  var nameResult = quickFolderNameResult();
+  if (nameResult.error) {
+    preview.textContent = '';
+    setQuickMoveSummary(null, '');
+    return;
+  }
+  var destinationName = nameResult.value;
 
   if (remoteId) {
     var t = quickRemoteTargets.find(function(x) { return x.id === remoteId; });
-    if (!t) { preview.textContent = ''; return; }
+    if (!t) {
+      preview.textContent = '';
+      setQuickMoveSummary(null, '');
+      return;
+    }
     // Use the same normalization the backend does, so the preview path
     // matches what move.py / sanitize_subpath will actually write. Without
     // this the UI can show e.g. "/volume1/Photo/USA" while the move
@@ -685,21 +1309,24 @@ function updateQuickMovePreview() {
       document.getElementById('quickSubpathInput').value);
     if (subResult.error) {
       preview.textContent = '';
+      setQuickMoveSummary(null, '');
       preview.appendChild(_destWarn('⚠ ' + subResult.error));
       return;
     }
     var sub = subResult.value;
-    var folderName = (folder && folder.name) ||
-      ((folder && folder.path) || '').replace(/\/+$/, '').split('/').pop();
     var base = t.remote_path.replace(/\/+$/, '') + (sub ? '/' + sub : '');
-    var finalPath = base + '/' + folderName;
+    // Fall back to the source folder's actual name when the user hasn't
+    // renamed: destinationName is intentionally empty in that case so the
+    // backend uses the untrimmed folder.name, so the preview must match.
+    var finalPath = base + '/' + (destinationName || sourceFolderName(folder));
+    var finalDestSpec = rsyncDestSpec(t.user, t.host, finalPath);
 
     preview.textContent = '';
     var line = document.createElement('div');
     line.textContent = 'Transferring over SSH to: ';
     var span = document.createElement('span');
     span.className = 'dest-preview-path';
-    span.textContent = rsyncDestSpec(t.user, t.host, finalPath);
+    span.textContent = finalDestSpec;
     line.appendChild(span);
     preview.appendChild(line);
 
@@ -722,24 +1349,37 @@ function updateQuickMovePreview() {
     rstatus.id = 'quickDestStatus';
     rstatus.className = 'dest-status';
     preview.appendChild(rstatus);
-    scheduleQuickPreflight(fid, null, remoteId, sub);
+    setQuickMoveSummary(folder, finalDestSpec);
+    scheduleQuickPreflight(fid, null, remoteId, sub, destinationName);
     return;
   }
 
   var dest = document.getElementById('quickDestInput').value.trim();
-  if (!dest) { preview.textContent = ''; return; }
-  var finalPath = resolvedMoveDest(folder, dest);
+  if (!dest) {
+    preview.textContent = '';
+    setQuickMoveSummary(null, '');
+    return;
+  }
+  var templateResult = quickFolderTemplateResult();
+  if (quickUsesDateFolders()) {
+    if (templateResult.error) {
+      preview.textContent = '';
+      setQuickMoveSummary(null, '');
+      return;
+    }
+    preview.textContent = '';
+    var dateStatus = document.createElement('div');
+    dateStatus.id = 'quickDestStatus';
+    dateStatus.className = 'dest-status';
+    dateStatus.textContent = 'Checking capture dates…';
+    preview.appendChild(dateStatus);
+    setQuickMoveSummary(null, '');
+    scheduleQuickDatePreflight(fid, dest, templateResult.value);
+    return;
+  }
+  var finalPath = resolvedMoveDest(folder, dest, destinationName);
 
-  // The resolved path is computable client-side, so show it instantly.
   preview.textContent = '';
-  var pathLine = document.createElement('div');
-  pathLine.textContent = 'Folder will be moved to: ';
-  var pathSpan = document.createElement('span');
-  pathSpan.className = 'dest-preview-path';
-  pathSpan.textContent = finalPath;
-  pathLine.appendChild(pathSpan);
-  preview.appendChild(pathLine);
-
   // Whether the destination already exists (and how much is in it) requires
   // hitting the filesystem, so fetch it from the preflight endpoint and fill
   // in this line asynchronously. Debounced so typing a path doesn't spam it.
@@ -747,7 +1387,8 @@ function updateQuickMovePreview() {
   status.id = 'quickDestStatus';
   status.className = 'dest-status';
   preview.appendChild(status);
-  scheduleQuickPreflight(fid, dest, '', '');
+  setQuickMoveSummary(folder, finalPath);
+  scheduleQuickPreflight(fid, dest, '', '', destinationName);
 }
 
 function _destWarn(text) {
@@ -809,7 +1450,52 @@ function normalizeRemoteSubpath(raw) {
 var quickPreflightSeq = 0;
 var quickPreflightTimer = null;
 
-function scheduleQuickPreflight(fid, dest, remoteId, subpath) {
+function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
+  if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
+  var seq = ++quickPreflightSeq;
+  if (!_isAbsolutePath(destination)) return;
+  quickPreflightTimer = setTimeout(async function() {
+    var data;
+    try {
+      var resp = await fetch('/api/move-folder/preflight', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          folder_id: fid,
+          destination: destination,
+          folder_template: folderTemplate,
+        }),
+      });
+      if (!resp.ok) { if (seq === quickPreflightSeq) clearQuickDestStatus(); return; }
+      data = await resp.json();
+    } catch (e) {
+      if (seq === quickPreflightSeq) clearQuickDestStatus();
+      return;
+    }
+    if (seq !== quickPreflightSeq || !quickUsesDateFolders()) return;
+    var folder = allFolders.find(function(item) { return item.id === fid; });
+    setQuickDateSummary(folder, data);
+    var status = document.getElementById('quickDestStatus');
+    if (!status) return;
+    if (!data.photo_count) {
+      status.textContent = 'No tracked photos were found in this folder.';
+      status.style.color = 'var(--warning)';
+    } else {
+      var existing = (data.destinations || []).filter(function(item) {
+        return item.exists;
+      }).length;
+      status.textContent = existing
+        ? '⚠ ' + existing.toLocaleString() + ' resulting folder' +
+          (existing !== 1 ? 's already exist' : ' already exists') +
+          '. Same-name files will not be overwritten.'
+        : '✓ ' + data.destination_count.toLocaleString() + ' date folder' +
+          (data.destination_count !== 1 ? 's' : '') + ' will be created.';
+      status.style.color = existing ? 'var(--warning)' : 'var(--text-dim)';
+    }
+  }, 350);
+}
+
+function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
   if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
   // Bump the sequence on *every* call, not just when a request starts. Any
   // change to the destination must immediately invalidate an in-flight
@@ -819,7 +1505,12 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath) {
   // exists/new-folder text for the wrong destination.
   var seq = ++quickPreflightSeq;
   if (remoteId) {
-    var body = {folder_id: fid, remote_target_id: remoteId, subpath: subpath || ''};
+    var body = {
+      folder_id: fid,
+      remote_target_id: remoteId,
+      subpath: subpath || '',
+      destination_name: destinationName,
+    };
     quickPreflightTimer = setTimeout(function() { runQuickPreflight(seq, body); }, 350);
     return;
   }
@@ -830,7 +1521,11 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath) {
   var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(dest) || /^\\\\/.test(dest);
   if (!isAbs) return;
   quickPreflightTimer = setTimeout(function() {
-    runQuickPreflight(seq, {folder_id: fid, destination: dest});
+    runQuickPreflight(seq, {
+      folder_id: fid,
+      destination: dest,
+      destination_name: destinationName,
+    });
   }, 350);
 }
 
@@ -869,7 +1564,8 @@ async function runQuickPreflight(seq, body) {
     // the user or holding up typing. Local-path only: the exact walk re-scans
     // a local dir, so for a remote target the capped "at least N" line stands.
     if (!data.remote && data.file_count_truncated) {
-      requestExactDestCount(body.folder_id, body.destination, seq);
+      requestExactDestCount(
+        body.folder_id, body.destination, body.destination_name, seq);
     }
   } else {
     status.textContent = '✓ New folder — nothing exists at this location yet.';
@@ -891,11 +1587,16 @@ function setDestExistsStatus(status, n, truncated) {
 // result landing after the user has changed the destination is discarded
 // instead of overwriting the line for the wrong path. Stays silent on failure:
 // the capped "at least N" line is already a valid answer.
-function requestExactDestCount(fid, dest, seq) {
+function requestExactDestCount(fid, dest, destinationName, seq) {
   fetch('/api/move-folder/preflight', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({folder_id: fid, destination: dest, mode: 'exact'}),
+    body: JSON.stringify({
+      folder_id: fid,
+      destination: dest,
+      destination_name: destinationName,
+      mode: 'exact',
+    }),
   }).then(function(resp) {
     return resp.ok ? resp.json() : null;
   }).then(function(data) {
@@ -916,6 +1617,16 @@ async function startQuickMove() {
   var fid = parseInt(document.getElementById('quickFolderSelect').value);
   if (!fid) return;
   var remoteId = quickRemoteTargetId();
+  var nameResult = quickFolderNameResult();
+  if (nameResult.error) {
+    showToast(nameResult.error, 'error');
+    return;
+  }
+  var templateResult = quickFolderTemplateResult();
+  if (templateResult.error) {
+    showToast(templateResult.error, 'error');
+    return;
+  }
 
   // Build the destination half of the request body — a local path or a
   // remote target + optional subpath. The same shape is reused for both the
@@ -941,15 +1652,18 @@ async function startQuickMove() {
     destBody = {
       remote_target_id: remoteId,
       subpath: subResult.value,
+      destination_name: nameResult.value,
     };
   } else {
     var dest = document.getElementById('quickDestInput').value.trim();
     if (!dest) return;
-    destBody = {destination: dest};
+    destBody = quickUsesDateFolders()
+      ? {destination: dest, folder_template: templateResult.value}
+      : {destination: dest, destination_name: nameResult.value};
   }
 
   var folder = allFolders.find(function(f) { return f.id === fid; });
-  var folderName = folder ? folder.path : 'folder #' + fid;
+  var sourcePath = folder ? folder.path : 'folder #' + fid;
   var photoCount = folder ? (folder.photo_count || 0) : '?';
 
   // Ask the backend for the resolved destination and whether it already
@@ -980,55 +1694,48 @@ async function startQuickMove() {
   }
 
   var finalPath = pf.resolved_dest;
+  if (pf.date_organized) {
+    setQuickDateSummary(folder, pf);
+    if (!pf.photo_count) {
+      showToast('No tracked photos were found in this folder.', 'error');
+      return;
+    }
+    var dateSummary = 'Move ' + pf.photo_count.toLocaleString() + ' photo' +
+      (pf.photo_count !== 1 ? 's' : '') + ' into ' +
+      pf.destination_count.toLocaleString() + ' capture-date folder' +
+      (pf.destination_count !== 1 ? 's' : '') + ' inside ' + finalPath +
+      '? Files are copied and verified before originals are removed. ' +
+      'Existing same-name files are left untouched.';
+    showConfirm('Organize by Capture Date', dateSummary, function() {
+      executeQuickMove(Object.assign({folder_id: fid, merge: false}, destBody));
+    });
+    return;
+  }
+  var moveSummary = folder
+    ? setQuickMoveSummary(folder, finalPath)
+    : 'Confirm moving photos from ' + sourcePath + ' to ' + finalPath + '?';
   var verifyText = remoteId
-    ? ' Transferred over SSH and verified by checksum before originals are removed.'
-    : ' Files will be copied and verified before originals are removed.';
+    ? '\n\nTransferred over SSH and verified by checksum before originals are removed.'
+    : '\n\nFiles will be copied and verified before originals are removed.';
   if (pf.exists) {
     var p = pf.preview || {};
     var copyN = p.will_copy;
     var skipN = p.will_skip;
     var blockN = p.will_block || 0;
-    var msg;
-    if (typeof copyN === 'number') {
-      // Truthful transfer counts. These count every file under the source
-      // (sidecars included), not just tracked photos — that's what rsync moves.
-      // Files already present are left untouched, never overwritten; a
-      // same-name file whose content differs cancels the whole merge, so only
-      // mention that caveat when there are overlapping files (skipN > 0).
-      // blockN is the count of source files whose destination entry is a
-      // symlink, a directory, or otherwise not a plain file: rsync would skip
-      // those by name, but the post-copy verifier rejects them and the merge
-      // would abort with "Verification failed". Surface the block so the
-      // dialog never says "all already present" when the move would not in
-      // fact complete.
-      var conflictNote = skipN ? ' If a same-name file differs, the merge is canceled and nothing is changed.' : '';
-      var blockNote = blockN ?
-        ' ⚠ ' + blockN.toLocaleString() + ' source file' + (blockN !== 1 ? 's have' : ' has') +
-        ' a destination entry that is a symlink or non-file — the merge will be canceled at the verify step before any originals are removed.' : '';
-      if (copyN === 0 && blockN === 0) {
-        msg = 'All ' + skipN.toLocaleString() + ' file' + (skipN !== 1 ? 's' : '') +
-          ' from "' + folderName + '" are already present at "' + finalPath +
-          '". Merging copies nothing new.' + conflictNote +
-          ' Originals are removed only after every source file is verified at the destination. Continue?';
-      } else {
-        var skipPart = skipN ? ', ' + skipN.toLocaleString() + ' already present will be left untouched' : '';
-        var blockPart = blockN ? ', ' + blockN.toLocaleString() + ' blocked by a non-file at the destination' : '';
-        msg = 'Merge "' + folderName + '" into "' + finalPath + '"? ' +
-          copyN.toLocaleString() + ' file' + (copyN !== 1 ? 's' : '') + ' will be copied' +
-          skipPart + blockPart + '.' + conflictNote + blockNote +
-          ' Originals are removed only after every source file is verified at the destination.';
-      }
-    } else {
-      // Preview unavailable (e.g. server omitted it) — fall back to the
-      // destination file count rather than inventing a transfer number.
-      var n = pf.file_count || 0;
-      var countText = pf.file_count_truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
-      msg = '"' + finalPath + '" already exists and contains ' + countText + ' file' + (n !== 1 || pf.file_count_truncated ? 's' : '') +
-        '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed. Originals are removed only after every source file is verified at the destination.';
-    }
-    showConfirm(
-      'Destination Exists — Merge & Resume',
-      msg,
+    // Truthful transfer counts include every file under the source (sidecars
+    // included), not just tracked photos. Keep each fact in its own visual
+    // region instead of flattening this safety-critical review into prose.
+    showMergeConfirm({
+      sourcePath: sourcePath,
+      destinationPath: finalPath,
+      photoCount: photoCount,
+      copyCount: typeof copyN === 'number' ? copyN : null,
+      skipCount: typeof skipN === 'number' ? skipN : null,
+      blockCount: blockN,
+      destinationFileCount: pf.file_count || 0,
+      destinationFileCountTruncated: !!pf.file_count_truncated,
+      remote: !!remoteId,
+    },
       function() {
         executeQuickMove(Object.assign({folder_id: fid, merge: true}, destBody));
       }
@@ -1036,7 +1743,7 @@ async function startQuickMove() {
   } else {
     showConfirm(
       'Move Folder',
-      'Move "' + folderName + '" (' + photoCount + ' photos) to "' + finalPath + '"?' + verifyText,
+      moveSummary + verifyText,
       function() {
         executeQuickMove(Object.assign({folder_id: fid, merge: false}, destBody));
       }
@@ -1051,7 +1758,8 @@ async function executeQuickMove(body) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
-    showToast((body.merge ? 'Merge' : 'Move') + ' started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
+    var action = body.folder_template ? 'Date organization' : (body.merge ? 'Merge' : 'Move');
+    showToast(action + ' started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
   } catch (e) {
     // safeFetch already shows error toast
   }
@@ -1062,6 +1770,8 @@ async function loadPhotosForFolder() {
   var sel = document.getElementById('photoFolderSelect');
   var fid = parseInt(sel.value);
   var container = document.getElementById('photoGridContainer');
+  var seq = ++photoLoadSeq;
+  photoList = [];
   selectedPhotos.clear();
   lastSelectedIdx = -1;
   updatePhotoSelectionUI();
@@ -1074,14 +1784,35 @@ async function loadPhotosForFolder() {
   container.innerHTML = '<div class="loading">Loading photos...</div>';
 
   try {
-    var data = await safeFetch('/api/photos?folder_id=' + fid + '&per_page=500');
-    photoList = data.photos || [];
+    var page = 1;
+    var total = null;
+    var loadedPhotos = [];
+    while (total === null || loadedPhotos.length < total) {
+      var data = await safeFetch(
+        '/api/photos?folder_id=' + encodeURIComponent(fid) +
+        '&per_page=500&page=' + page
+      );
+      if (seq !== photoLoadSeq) return;
+
+      var pagePhotos = data.photos || [];
+      loadedPhotos = loadedPhotos.concat(pagePhotos);
+      if (typeof data.total === 'number') total = data.total;
+
+      if (pagePhotos.length < 500 || (total !== null && loadedPhotos.length >= total)) break;
+      page += 1;
+      var totalText = total !== null ? ' of ' + total.toLocaleString() : '';
+      container.innerHTML = '<div class="loading">Loading photos... ' +
+        loadedPhotos.length.toLocaleString() + totalText + '</div>';
+    }
+
+    photoList = loadedPhotos;
     if (photoList.length === 0) {
       container.innerHTML = '<div class="empty-state">No photos in this folder</div>';
       return;
     }
     renderPhotoGrid();
   } catch (e) {
+    if (seq !== photoLoadSeq) return;
     container.innerHTML = '<div class="empty-state">Failed to load photos</div>';
   }
 }
@@ -1481,7 +2212,28 @@ function openBrowser(targetInputId) {
   browserPath = currentVal || '';
   document.getElementById('moveBrowserModal').classList.add('open');
   document.getElementById('newFolderName').value = '';
+  updateBrowserSource();
   browseTo(browserPath || null);
+}
+
+function updateBrowserSource() {
+  var source = document.getElementById('moveBrowserSource');
+  var folder = null;
+  if (browserTargetInput === 'quickDestInput') {
+    var fid = parseInt(document.getElementById('quickFolderSelect').value);
+    folder = allFolders.find(function(f) { return f.id === fid; });
+  }
+  if (!folder) {
+    source.style.display = 'none';
+    document.getElementById('moveBrowserSourcePath').textContent = '';
+    document.getElementById('moveBrowserSourceCount').textContent = '';
+    return;
+  }
+  var count = folder.photo_count || 0;
+  document.getElementById('moveBrowserSourcePath').textContent = folder.path;
+  document.getElementById('moveBrowserSourceCount').textContent = ' (' +
+    count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '') + ')';
+  source.style.display = 'block';
 }
 
 function closeBrowser() {
@@ -1602,8 +2354,115 @@ async function createNewFolder() {
 
 /* ---------- Confirm Modal ---------- */
 function showConfirm(title, message, callback) {
+  document.querySelector('#confirmHeading .confirm-heading-icon').style.display = 'none';
+  document.getElementById('confirmEyebrow').textContent = 'Please confirm';
   document.getElementById('confirmTitle').textContent = title;
   document.getElementById('confirmMessage').textContent = message;
+  document.getElementById('confirmOkBtn').textContent = 'Move';
+  confirmCallback = callback;
+  document.getElementById('confirmModal').classList.add('open');
+}
+
+function appendConfirmRoute(container, label, path) {
+  var row = document.createElement('div');
+  row.className = 'confirm-route-row';
+  var routeLabel = document.createElement('span');
+  routeLabel.className = 'confirm-route-label';
+  routeLabel.textContent = label;
+  var routePath = document.createElement('span');
+  routePath.className = 'confirm-route-path';
+  routePath.textContent = path;
+  row.appendChild(routeLabel);
+  row.appendChild(routePath);
+  container.appendChild(row);
+}
+
+function appendConfirmStat(container, value, label) {
+  var stat = document.createElement('div');
+  stat.className = 'confirm-stat';
+  var statValue = document.createElement('span');
+  statValue.className = 'confirm-stat-value';
+  statValue.textContent = value;
+  var statLabel = document.createElement('span');
+  statLabel.className = 'confirm-stat-label';
+  statLabel.textContent = label;
+  stat.appendChild(statValue);
+  stat.appendChild(statLabel);
+  container.appendChild(stat);
+}
+
+function appendConfirmNote(container, icon, title, detail, warning) {
+  var note = document.createElement('div');
+  note.className = 'confirm-note' + (warning ? ' warning' : '');
+  var noteIcon = document.createElement('span');
+  noteIcon.className = 'confirm-note-icon';
+  noteIcon.setAttribute('aria-hidden', 'true');
+  noteIcon.textContent = icon;
+  var copy = document.createElement('div');
+  var strong = document.createElement('strong');
+  strong.textContent = title;
+  copy.appendChild(strong);
+  copy.appendChild(document.createTextNode(' ' + detail));
+  note.appendChild(noteIcon);
+  note.appendChild(copy);
+  container.appendChild(note);
+}
+
+function showMergeConfirm(details, callback) {
+  var heading = document.getElementById('confirmHeading');
+  heading.querySelector('.confirm-heading-icon').style.display = 'grid';
+  document.getElementById('confirmEyebrow').textContent = 'Destination already exists';
+  document.getElementById('confirmTitle').textContent = 'Merge with the existing folder?';
+  document.getElementById('confirmOkBtn').textContent = 'Merge & Resume';
+
+  var message = document.getElementById('confirmMessage');
+  message.replaceChildren();
+
+  var route = document.createElement('div');
+  route.className = 'confirm-route';
+  appendConfirmRoute(route, 'From', details.sourcePath);
+  appendConfirmRoute(route, 'Into', details.destinationPath);
+  message.appendChild(route);
+
+  var stats = document.createElement('div');
+  stats.className = 'confirm-stats';
+  var photos = Number(details.photoCount) || 0;
+  appendConfirmStat(stats, photos.toLocaleString(), 'photo' + (photos !== 1 ? 's' : '') + ' in source');
+  if (details.copyCount !== null) {
+    appendConfirmStat(stats, details.copyCount.toLocaleString(),
+      'file' + (details.copyCount !== 1 ? 's' : '') + ' to copy');
+    if (details.skipCount) {
+      appendConfirmStat(stats, details.skipCount.toLocaleString(),
+        'already present and kept');
+    }
+    if (details.blockCount) {
+      appendConfirmStat(stats, details.blockCount.toLocaleString(),
+        'blocked by a non-file');
+    }
+  } else {
+    var destCount = details.destinationFileCount.toLocaleString();
+    if (details.destinationFileCountTruncated) destCount += '+';
+    appendConfirmStat(stats, destCount, 'file' +
+      (details.destinationFileCount !== 1 || details.destinationFileCountTruncated ? 's' : '') +
+      ' already at destination');
+  }
+  message.appendChild(stats);
+
+  if (details.skipCount || details.copyCount === null) {
+    appendConfirmNote(message, '↔', 'Existing files stay untouched.',
+      'Only missing files are copied. If same-name files differ, the merge is canceled and nothing is changed.', false);
+  }
+  if (details.blockCount) {
+    var blocked = details.blockCount.toLocaleString() + ' source file' +
+      (details.blockCount !== 1 ? 's have' : ' has') +
+      ' a symlink or non-file in the destination. The merge will stop at verification before any originals are removed.';
+    appendConfirmNote(message, '!', 'Merge will not complete.', blocked, true);
+  }
+  var verifyDetail = details.remote
+    ? 'Files are checksum-verified over SSH before any originals are removed.'
+    : 'Originals are removed only after every source file is verified at the destination.';
+  appendConfirmNote(message, '✓', 'Your originals stay put until verification.', verifyDetail, false);
+
   confirmCallback = callback;
   document.getElementById('confirmModal').classList.add('open');
 }

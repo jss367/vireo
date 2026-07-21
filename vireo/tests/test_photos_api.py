@@ -1,7 +1,9 @@
+import json
 import sys
 import types
 
 import numpy as np
+import pytest
 
 
 def test_api_photos_default(app_and_db):
@@ -65,6 +67,57 @@ def test_api_photos_pagination(app_and_db):
     assert len(data['photos']) == 1
 
 
+def test_api_photos_reports_and_filters_coordinate_sources(app_and_db):
+    """Browse separates embedded GPS, assigned map coordinates, and neither."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    exif_id, assigned_id, none_id = [photo["id"] for photo in photos]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET latitude = 37.7749, longitude = -122.4194 "
+            "WHERE id = ?",
+            (exif_id,),
+        )
+        cursor = db.conn.execute(
+            "INSERT INTO keywords (name, type, latitude, longitude) "
+            "VALUES ('Assigned Park', 'location', 40.7829, -73.9654)"
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (assigned_id, cursor.lastrowid),
+        )
+
+    client = app.test_client()
+    response = client.get("/api/photos?sort=name")
+    assert response.status_code == 200
+    statuses = {
+        photo["id"]: photo["location_status"]
+        for photo in response.get_json()["photos"]
+    }
+    assert statuses == {
+        exif_id: "exif",
+        assigned_id: "assigned",
+        none_id: "none",
+    }
+
+    for status, expected_id in (
+        ("exif", exif_id),
+        ("assigned", assigned_id),
+        ("none", none_id),
+    ):
+        filtered = client.get(f"/api/photos?location_status={status}&sort=name")
+        assert filtered.status_code == 200
+        body = filtered.get_json()
+        assert body["total"] == 1
+        assert [photo["id"] for photo in body["photos"]] == [expected_id]
+
+        ids = client.get(f"/api/photos/ids?location_status={status}&sort=name")
+        assert ids.status_code == 200
+        assert ids.get_json()["photo_ids"] == [expected_id]
+
+    assert client.get("/api/photos?location_status=gpsish").status_code == 400
+
+
 def test_api_photos_filter_folder(app_and_db):
     """GET /api/photos?folder_id= filters by folder."""
     app, db = app_and_db
@@ -91,6 +144,77 @@ def test_api_photo_ids_matches_browse_filters(app_and_db):
     data = resp.get_json()
     assert data["photo_ids"] == expected
     assert data["total"] == len(expected)
+
+
+def test_dashboard_and_browse_share_collection_date_scope(app_and_db):
+    """Dashboard drill-down parameters preserve collection/date intersections."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    collection_id = db.add_collection(
+        "Two dates",
+        json.dumps([{
+            "field": "photo_ids",
+            "value": [photos[0]["id"], photos[2]["id"]],
+        }]),
+    )
+    query = (
+        f"collection_id={collection_id}"
+        "&date_from=2024-06-01&date_to=2024-06-30&sort=name"
+    )
+    client = app.test_client()
+
+    stats = client.get(f"/api/stats?{query}")
+    assert stats.status_code == 200
+    assert stats.get_json()["total_photos"] == 1
+
+    coverage = client.get(f"/api/coverage?{query}")
+    assert coverage.status_code == 200
+    assert coverage.get_json()["overall"]["total"] == 1
+
+    for path in ("/api/browse/init", "/api/photos", "/api/photos/ids"):
+        response = client.get(f"{path}?{query}")
+        assert response.status_code == 200
+        body = response.get_json()
+        result_ids = body.get("photo_ids") or [photo["id"] for photo in body["photos"]]
+        assert result_ids == [photos[2]["id"]]
+
+
+def test_dashboard_options_flags_degraded_collections(app_and_db):
+    """Collections whose rules can't compile are flagged so the scope
+    picker can disable them instead of 400ing /api/stats and /api/coverage."""
+    app, db = app_and_db
+    healthy = db.add_collection("Healthy", "[]")
+    bad_json = db.add_collection("Broken JSON", "{not json")
+    bad_rules = db.add_collection(
+        "Unresolvable rules",
+        json.dumps([{"field": "no_such_field", "op": "equals", "value": 1}]),
+    )
+
+    client = app.test_client()
+    resp = client.get("/api/dashboard/options")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+    assert by_id[healthy]["degraded"] is False
+    assert by_id[bad_json]["degraded"] is True
+    assert by_id[bad_rules]["degraded"] is True
+
+    for cid in (bad_json, bad_rules):
+        assert client.get(f"/api/stats?collection_id={cid}").status_code == 400
+        assert client.get(f"/api/coverage?collection_id={cid}").status_code == 400
+
+
+def test_dashboard_scope_rejects_foreign_collection(app_and_db):
+    """Scope ids cannot cross workspace boundaries."""
+    app, db = app_and_db
+    other_workspace = db.create_workspace("Other")
+    db.set_active_workspace(other_workspace)
+    foreign_collection = db.add_collection("Foreign", "[]")
+    db.set_active_workspace(db.get_workspaces()[0]["id"])
+
+    client = app.test_client()
+    for path in ("/api/stats", "/api/coverage", "/api/photos", "/api/photos/ids"):
+        response = client.get(f"{path}?collection_id={foreign_collection}")
+        assert response.status_code == 400
 
 
 def test_api_photos_keyword_whole_word_option(app_and_db):
@@ -517,6 +641,22 @@ def test_api_photo_detail(app_and_db):
     data = resp.get_json()
     assert data['filename'] == 'bird1.jpg'
     assert 'keywords' in data
+    assert data['full_uses_original'] is False
+
+
+def test_api_photo_detail_reports_full_resolution_preview_mode(app_and_db):
+    """Photo detail tells the lightbox when /full already serves /original."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 0},
+    )
+    pid = db.get_photos()[0]['id']
+
+    resp = app.test_client().get(f'/api/photos/{pid}')
+
+    assert resp.status_code == 200
+    assert resp.get_json()['full_uses_original'] is True
 
 
 def test_api_photo_detail_includes_on_disk_path(app_and_db):
@@ -873,9 +1013,13 @@ def test_api_photos_geo_returns_geolocated(app_and_db):
     assert 'photos' in data
     assert 'total_filtered' in data
     assert 'total_with_gps' in data
+    assert 'total_geolocated' in data
+    assert 'total_without_coordinates' in data
     assert 'total_photos' in data
     assert data['total_filtered'] == 1
     assert data['total_with_gps'] == 1
+    assert data['total_geolocated'] == 1
+    assert data['total_without_coordinates'] == 2
     assert data['total_photos'] == 3
     assert len(data['photos']) == 1
     assert data['photos'][0]['latitude'] == 37.77
@@ -1064,6 +1208,61 @@ def test_add_keyword_with_type_override(app_and_db):
     assert row["type"] == "individual"
 
 
+def test_add_keyword_noop_when_already_tagged(app_and_db):
+    """POST /api/photos/<id>/keywords must be a no-op when the photo already
+    carries the keyword. Otherwise the route queues a keyword_add pending
+    change and records a keyword_add edit whose undo calls untag_photo —
+    so a repeated/stale Add click would remove the pre-existing tag on
+    undo. Mirrors the batch route's already_tagged precheck.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    # First add: real work — one pending change, one edit.
+    resp = client.post(f'/api/photos/{pid}/keywords', json={"name": "Robin"})
+    assert resp.status_code == 200
+    kid = resp.get_json()["keyword_id"]
+
+    def counts():
+        n_pending = db.conn.execute(
+            "SELECT COUNT(*) AS n FROM pending_changes "
+            "WHERE change_type = 'keyword_add' AND photo_id = ? AND value = ?",
+            (pid, "Robin"),
+        ).fetchone()["n"]
+        n_edits = db.conn.execute(
+            "SELECT COUNT(*) AS n FROM edit_history "
+            "WHERE action_type = 'keyword_add' AND new_value = ?",
+            (str(kid),),
+        ).fetchone()["n"]
+        return n_pending, n_edits
+
+    first_pending, first_edits = counts()
+
+    # Repeat the same add. Must not queue another pending change or record
+    # another edit — the response still succeeds so the client sees no
+    # error.
+    resp = client.post(f'/api/photos/{pid}/keywords', json={"name": "Robin"})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert resp.get_json()["keyword_id"] == kid
+
+    assert counts() == (first_pending, first_edits), (
+        "no-op add must not queue a new pending change or record a new edit"
+    )
+
+    # The photo still carries exactly one row for this keyword — a stale
+    # undo of the (non-)second click can't remove the tag because no new
+    # edit was recorded.
+    n_tags = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id = ?",
+        (pid, kid),
+    ).fetchone()["n"]
+    assert n_tags == 1
+
+
 def test_batch_keyword_with_type_override(app_and_db):
     """POST /api/batch/keyword with type param sets keyword type in DB."""
     app, db = app_and_db
@@ -1119,6 +1318,133 @@ def test_preview_uses_working_copy(app_and_db):
 
     resp = client.get(f"/photos/{pid}/full")
     assert resp.status_code == 200
+
+
+def test_unedited_raw_preview_uses_camera_rendered_source_not_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """Sharper lightbox tiers must not swap to the dark RAW edit source."""
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"raw bytes decoded by the test double")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (25, 25, 25)).save(
+        working_path, "JPEG",
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               working_copy_path=?, width=800, height=600
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    loaded = []
+
+    def camera_rendered_load(path, max_size=1024, **kwargs):
+        loaded.append((os.fspath(path), kwargs))
+        color = (220, 220, 220) if os.fspath(path) == raw_path else (25, 25, 25)
+        return Image.new("RGB", (800, 600), color)
+
+    monkeypatch.setattr(image_loader, "load_image", camera_rendered_load)
+
+    response = app.test_client().get(
+        f"/photos/{photo_id}/preview?size=2560"
+    )
+
+    assert response.status_code == 200
+    assert loaded == [(raw_path, {})]
+    with Image.open(io.BytesIO(response.data)) as rendered:
+        assert rendered.getpixel((400, 300))[0] > 200
+
+
+def test_unedited_raw_preview_falls_back_when_source_extraction_marked_failed(
+    client_with_photo, monkeypatch,
+):
+    """RAW+JPEG pairs with a source-failure marker keep the working-copy
+    fallback instead of 500ing on the sharper preview tier."""
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"raw bytes that libraw cannot decode")
+    companion_path = os.path.join(folder["path"], "source.JPG")
+    Image.new("RGB", (800, 600), (220, 220, 220)).save(
+        companion_path, "JPEG",
+    )
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (25, 25, 25)).save(
+        working_path, "JPEG",
+    )
+    mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='source.JPG',
+               working_copy_path=?, width=800, height=600,
+               file_mtime=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", mtime, mtime, photo_id),
+    )
+    db.conn.commit()
+
+    loaded = []
+
+    def tracking_load(path, max_size=1024, **kwargs):
+        loaded.append(os.fspath(path))
+        if os.fspath(path) == raw_path:
+            raise AssertionError(
+                "unedited RAW preview retried a source-failed RAW decode"
+            )
+        # The working copy is the pre-PR fallback for source-failed RAWs.
+        # Return its (dark) pixels so the response is a valid JPEG rather
+        # than 500ing before the fallback path can run.
+        return Image.new("RGB", (800, 600), (25, 25, 25))
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load)
+
+    response = app.test_client().get(
+        f"/photos/{photo_id}/preview?size=2560"
+    )
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert raw_path not in loaded
+    with Image.open(io.BytesIO(response.data)):
+        pass
 
 
 def test_preview_falls_back_to_original(app_and_db, tmp_path):
@@ -1251,7 +1577,86 @@ def test_original_serves_full_res_working_copy(app_and_db):
     assert resp.status_code == 200
 
 
-def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app_and_db):
+def test_unedited_raw_original_uses_camera_display_cache_not_working_copy(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """Opening an unedited RAW must not swap to the dark edit working copy."""
+    import io
+
+    import image_loader
+    from image_loader import RAW_DECODE_CAMERA_RENDERED
+    from PIL import Image
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo = db.get_photos()[0]
+    photo_id = photo["id"]
+
+    source_dir = tmp_path / "raw-source"
+    source_dir.mkdir()
+    source_path = source_dir / "source.NEF"
+    source_path.write_bytes(b"fake raw")
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(source_dir), photo["folder_id"]),
+    )
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 30, 30)).save(working_path, "JPEG")
+    working_bytes = open(working_path, "rb").read()
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef', width=800, height=600,
+               working_copy_path=?
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    calls = []
+    replacements = []
+    import app as app_module
+    real_replace = app_module.os.replace
+
+    def camera_extract(source, output, **kwargs):
+        calls.append((os.fspath(source), os.fspath(output), kwargs))
+        Image.new("RGB", (800, 600), (220, 220, 220)).save(output, "JPEG")
+        return True
+
+    def tracking_replace(source, destination):
+        replacements.append((os.fspath(source), os.fspath(destination)))
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", camera_extract)
+    monkeypatch.setattr(app_module.os, "replace", tracking_replace)
+
+    first = client.get(f"/photos/{photo_id}/original")
+    second = client.get(f"/photos/{photo_id}/original")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(calls) == 1, "second request should reuse the display cache"
+    called_source, called_output, called_kwargs = calls[0]
+    assert called_source == str(source_path)
+    assert called_output.endswith(".jpg.tmp")
+    assert called_kwargs["raw_decode"] == RAW_DECODE_CAMERA_RENDERED
+    display_path = os.path.join(
+        vireo_dir, "originals", f"{photo_id}.display.jpg",
+    )
+    assert replacements == [(called_output, display_path)]
+    assert not os.path.exists(called_output)
+    with Image.open(io.BytesIO(first.data)) as rendered:
+        assert rendered.getpixel((0, 0))[0] > 200
+    assert open(working_path, "rb").read() == working_bytes
+    assert db.get_photo(photo_id)["working_copy_path"] == f"working/{photo_id}.jpg"
+
+
+def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(
+    app_and_db, monkeypatch,
+):
     """Original endpoint trusts RAW working copy when sensor dims slightly exceed wc.
 
     Stored RAW sensor dimensions can legitimately exceed embedded-JPEG-derived
@@ -1262,6 +1667,7 @@ def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app
     just slower — and burst-review zoom would loop on every request.
     """
     import config as cfg
+    import image_loader
 
     app, db = app_and_db
     client = app.test_client()
@@ -1294,6 +1700,12 @@ def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app
         (f"working/{pid}.jpg", pid),
     )
     db.conn.commit()
+
+    def fail_missing_raw_retry(*args, **kwargs):
+        raise AssertionError("missing RAW source should use the trusted working copy")
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", fail_missing_raw_retry)
+    monkeypatch.setattr(image_loader, "load_image", fail_missing_raw_retry)
 
     resp = client.get(f"/photos/{pid}/original")
     assert resp.status_code == 200
@@ -2961,7 +3373,6 @@ def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
     app, db, photo_id = client_with_photo
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-    final_path = os.path.join(vireo_dir, "originals", f"{photo_id}.jpg")
     calls = []
     original_replace = app_module.os.replace
 
@@ -2977,9 +3388,11 @@ def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
     assert calls
     tmp_path, dst_path, tmp_existed = calls[0]
     assert tmp_existed is True
-    assert dst_path == final_path
+    assert os.path.dirname(dst_path) == os.path.join(vireo_dir, "originals")
+    assert os.path.basename(dst_path).startswith(f"{photo_id}_")
+    assert dst_path.endswith(".jpg")
     assert not os.path.exists(tmp_path)
-    assert os.path.exists(final_path)
+    assert os.path.exists(dst_path)
 
 
 def test_cropped_preview_uses_original_when_working_copy_is_too_small(
@@ -4270,6 +4683,136 @@ def test_original_refreshes_failure_marker_when_stale_retry_fails(
     assert row["age_seconds"] is not None and row["age_seconds"] < 60
 
 
+def test_original_records_raw_failure_before_working_copy_fallback(
+    client_with_photo, monkeypatch,
+):
+    """A usable fallback must not leave repeated RAW retries unthrottled."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_path = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()["path"]
+    raw_path = os.path.join(folder_path, "failed.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(working_path, "JPEG")
+    working_rel = f"working/{photo_id}.jpg"
+    file_mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='failed.NEF', extension='.nef',
+               width=800, height=600, file_mtime=?,
+               working_copy_path=?, working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (file_mtime, working_rel, photo_id),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", lambda *a, **k: False)
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **k: None)
+
+    response = app.test_client().get(f"/photos/{photo_id}/original")
+
+    assert response.status_code == 200
+    with open(working_path, "rb") as working_file:
+        assert response.data == working_file.read()
+    row = db.conn.execute(
+        """SELECT working_copy_failed_at, working_copy_failed_mtime,
+                  working_copy_failed_source
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_at"] is not None
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["working_copy_failed_source"] == "source"
+
+
+def test_original_uses_trusted_copy_when_raw_display_is_undersized(
+    client_with_photo, monkeypatch,
+):
+    """A preview-sized embedded JPEG must not become the 1:1 display cache."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_path = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()["path"]
+    raw_path = os.path.join(folder_path, "embedded.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_rel = f"working/{photo_id}.jpg"
+    working_path = os.path.join(vireo_dir, working_rel)
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(working_path, "JPEG")
+    file_mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='embedded.NEF', extension='.nef',
+               width=800, height=600, file_mtime=?,
+               companion_path=NULL, working_copy_path=?,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (file_mtime, working_rel, photo_id),
+    )
+    db.conn.commit()
+
+    extract_calls = []
+
+    def extract_embedded_preview(source, output, *args, **kwargs):
+        extract_calls.append(str(source))
+        Image.new("RGB", (320, 240), (180, 90, 40)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(
+        image_loader, "extract_working_copy", extract_embedded_preview,
+    )
+
+    client = app.test_client()
+    first = client.get(f"/photos/{photo_id}/original")
+    second = client.get(f"/photos/{photo_id}/original")
+
+    with open(working_path, "rb") as working_file:
+        working_bytes = working_file.read()
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.data == working_bytes
+    assert second.data == working_bytes
+    assert extract_calls == [raw_path]
+    assert not os.path.exists(
+        os.path.join(vireo_dir, "originals", f"{photo_id}.display.jpg")
+    )
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime, working_copy_failed_source
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["working_copy_failed_source"] == "source"
+
+
 def test_original_falls_back_to_companion_when_raw_extraction_fails(
     client_with_photo, monkeypatch,
 ):
@@ -4328,16 +4871,14 @@ def test_original_falls_back_to_companion_when_raw_extraction_fails(
     assert resp.mimetype == "image/jpeg"
 
 
-def test_original_uses_companion_when_raw_extract_returns_undersized(
+def test_unedited_raw_original_prefers_near_full_companion(
     client_with_photo, monkeypatch,
 ):
-    """``extract_working_copy`` returns True even when ``_load_raw`` falls
-    back to a small embedded JPEG, so a successful extract can still
-    produce a working copy that's a fraction of the sensor's full
-    resolution. /photos/<id>/original must detect that fallback and
-    re-extract from the companion JPEG before caching it as the
-    working copy — otherwise every later 1:1 request silently serves
-    the downscaled preview even though a full-size sidecar exists.
+    """A near-full companion is already the camera-rendered display source.
+
+    Prefer it before decoding the RAW so cameras whose embedded preview is
+    just shy of sensor dimensions do not fall through to a differently toned
+    libraw demosaic.
     """
     import io
     import os
@@ -4356,7 +4897,7 @@ def test_original_uses_companion_when_raw_extract_returns_undersized(
     with open(raw_path, "wb") as f:
         f.write(b"unsupported raw")
     companion_path = os.path.join(folder_path, "source.JPG")
-    Image.new("RGB", (6000, 4000), (90, 140, 180)).save(
+    Image.new("RGB", (5976, 3984), (90, 140, 180)).save(
         companion_path, "JPEG", quality=85,
     )
 
@@ -4377,32 +4918,21 @@ def test_original_uses_companion_when_raw_extract_returns_undersized(
     real_extract = image_loader.extract_working_copy
     extract_calls = []
 
-    def extract_with_size_fallback(source, output, *args, **kwargs):
+    def track_companion_extract(source, output, *args, **kwargs):
         extract_calls.append(str(source))
         if str(source).lower().endswith(".nef"):
-            # Stand in for `_load_raw` returning the embedded JPEG when
-            # libraw can't demosaic the RAW: write an undersized JPEG
-            # and return True (matches the current contract).
-            os.makedirs(os.path.dirname(output), exist_ok=True)
-            Image.new("RGB", (1600, 1067), (200, 50, 50)).save(
-                output, "JPEG", quality=85,
-            )
-            return True
+            raise AssertionError("unedited display should prefer companion JPEG")
         return real_extract(source, output, *args, **kwargs)
 
-    monkeypatch.setattr(image_loader, "extract_working_copy", extract_with_size_fallback)
+    monkeypatch.setattr(image_loader, "extract_working_copy", track_companion_extract)
 
     client = app.test_client()
     resp = client.get(f"/photos/{photo_id}/original")
 
     assert resp.status_code == 200, resp.get_data(as_text=True)
     assert resp.mimetype == "image/jpeg"
-    # Both sources must be tried — RAW first, then companion after the
-    # undersized output is detected.
-    assert len(extract_calls) == 2
-    assert extract_calls[0].lower().endswith(".nef")
-    assert extract_calls[1].lower().endswith(".jpg")
-    # The persisted working copy must be the full-size companion render.
+    assert extract_calls == [companion_path]
+    # The persisted display cache must be the near-full companion render.
     with Image.open(io.BytesIO(resp.data)) as img:
         assert max(img.size) >= 5400
 
@@ -4415,7 +4945,7 @@ def test_edited_original_uses_companion_when_raw_returns_undersized(
     ``preserve_highlights`` mode still falls back to the embedded
     thumb. The endpoint must compare the loaded dimensions against
     the photo's stored full-resolution dimensions and try the
-    companion JPEG before caching an undersized originals/<id>.jpg.
+    companion JPEG before caching an undersized full-resolution render.
     """
     import io
     import os
@@ -4453,7 +4983,7 @@ def test_edited_original_uses_companion_when_raw_returns_undersized(
     db.conn.commit()
     # An edit recipe routes the request through the highlight-preserving
     # decode path that the new size-validation guards.
-    db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
 
     load_calls = []
 
@@ -4921,6 +5451,81 @@ def test_preview_job_honors_raw_failure_marker_after_source_selection(
     )
 
 
+def test_preview_job_warms_unedited_raw_from_camera_rendered_source(
+    client_with_photo, monkeypatch,
+):
+    """Precompute must warm from the RAW source, not the working copy — otherwise
+    the tracked preview cache locks in the highlight-preserving dark render and
+    /photos/<id>/preview returns those cache hits before its own RAW-source
+    branch ever runs."""
+    import os
+    import time
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"raw bytes decoded by the test double")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (25, 25, 25)).save(working_path, "JPEG")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path=NULL,
+               working_copy_path=?, width=800, height=600
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    loaded = []
+
+    def tracking_load(path, max_size=1024, **kwargs):
+        loaded.append(os.fspath(path))
+        color = (220, 220, 220) if os.fspath(path) == raw_path else (25, 25, 25)
+        return Image.new("RGB", (800, 600), color)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert data["status"] == "completed"
+    # The warmer decoded the RAW source, not the dark working copy.
+    assert raw_path in loaded
+    assert working_path not in loaded
+    preview_path = os.path.join(
+        vireo_dir, "previews", f"{photo_id}_1920.jpg",
+    )
+    assert os.path.exists(preview_path)
+    with Image.open(preview_path) as warmed:
+        # Camera-rendered brightness, not the flat/dark working-copy tone.
+        assert warmed.getpixel((400, 300))[0] > 200
+
+
 def test_preview_job_does_not_adopt_untracked_edited_preview_after_unlink_failure(
     client_with_photo, monkeypatch,
 ):
@@ -5340,6 +5945,93 @@ def test_legacy_migration_preserves_preview_max_size_zero(tmp_path, monkeypatch)
     assert not (preview_dir / "42_1920.jpg").exists()
 
 
+def test_startup_invalidates_unedited_raw_previews_built_from_working_copies(
+    tmp_path, monkeypatch,
+):
+    """Existing dark RAW tiers are purged once; ordinary JPEGs are retained."""
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    raw_source = photos_dir / "source.NEF"
+    raw_source.write_bytes(b"raw bytes")
+    jpeg_source = photos_dir / "plain.jpg"
+    Image.new("RGB", (200, 150), (180, 90, 40)).save(
+        jpeg_source, "JPEG",
+    )
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    preview_dir = vireo_dir / "previews"
+    working_dir = vireo_dir / "working"
+    thumb_dir.mkdir(parents=True)
+    preview_dir.mkdir()
+    working_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    workspace_id = db.ensure_default_workspace()
+    db.set_active_workspace(workspace_id)
+    folder_id = db.add_folder(str(photos_dir), name="photos")
+    raw_id = db.add_photo(
+        folder_id=folder_id,
+        filename=raw_source.name,
+        extension=".nef",
+        file_size=raw_source.stat().st_size,
+        file_mtime=raw_source.stat().st_mtime,
+        width=200,
+        height=150,
+    )
+    jpeg_id = db.add_photo(
+        folder_id=folder_id,
+        filename=jpeg_source.name,
+        extension=".jpg",
+        file_size=jpeg_source.stat().st_size,
+        file_mtime=jpeg_source.stat().st_mtime,
+        width=200,
+        height=150,
+    )
+    for photo_id in (raw_id, jpeg_id):
+        working = working_dir / f"{photo_id}.jpg"
+        Image.new("RGB", (200, 150), (25, 25, 25)).save(working, "JPEG")
+        db.conn.execute(
+            "UPDATE photos SET working_copy_path=? WHERE id=?",
+            (f"working/{photo_id}.jpg", photo_id),
+        )
+
+    raw_preview = preview_dir / f"{raw_id}_2560.jpg"
+    jpeg_preview = preview_dir / f"{jpeg_id}_2560.jpg"
+    raw_preview.write_bytes(b"dark raw preview")
+    jpeg_preview.write_bytes(b"ordinary jpeg preview")
+    db.preview_cache_insert(raw_id, 2560, raw_preview.stat().st_size)
+    db.preview_cache_insert(jpeg_id, 2560, jpeg_preview.stat().st_size)
+    db.conn.commit()
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    assert not raw_preview.exists()
+    assert db.preview_cache_get(raw_id, 2560) is None
+    assert jpeg_preview.exists()
+    assert db.preview_cache_get(jpeg_id, 2560) is not None
+    assert db.get_meta("unedited_raw_camera_preview_source_v1") == "1"
+
+    # The source-selection fix prevents new dark entries. The migration itself
+    # remains one-shot and does not repeatedly clear healthy future previews.
+    raw_preview.write_bytes(b"new camera-rendered preview")
+    db.preview_cache_insert(raw_id, 2560, raw_preview.stat().st_size)
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert raw_preview.exists()
+    assert db.preview_cache_get(raw_id, 2560) is not None
+    db.close()
+
+
 def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkeypatch):
     """When EDIT_MATH_VERSION bumps, startup must purge cached renders for
     photos that have a non-null edit recipe — keeping them would serve the
@@ -5395,10 +6087,16 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     plain_preview = preview_dir / f"{pid_plain}_1920.jpg"
     edited_thumb = thumb_dir / f"{pid_edited}.jpg"
     plain_thumb = thumb_dir / f"{pid_plain}.jpg"
+    edited_raw_thumb = thumb_dir / f"{pid_edited}_raw.jpg"
+    edited_jpeg_thumb = thumb_dir / f"{pid_edited}_jpeg.jpg"
+    plain_raw_thumb = thumb_dir / f"{pid_plain}_raw.jpg"
     edited_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"o" * 1024)
     plain_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"p" * 1024)
     edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
     plain_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"u" * 1024)
+    edited_raw_thumb.write_bytes(b"stale raw")
+    edited_jpeg_thumb.write_bytes(b"stale jpeg")
+    plain_raw_thumb.write_bytes(b"plain raw")
     db.preview_cache_insert(pid_edited, 1920, edited_preview.stat().st_size)
     db.preview_cache_insert(pid_plain, 1920, plain_preview.stat().st_size)
     db.conn.execute(
@@ -5417,6 +6115,8 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     # Edited photo: preview and thumb gone, thumb_path cleared, no row.
     assert not edited_preview.exists()
     assert not edited_thumb.exists()
+    assert not edited_raw_thumb.exists()
+    assert not edited_jpeg_thumb.exists()
     assert db.preview_cache_get(pid_edited, 1920) is None
     edited_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_edited,),
@@ -5426,6 +6126,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     # Plain photo: cache survives because no recipe → output bytes unchanged.
     assert plain_preview.exists()
     assert plain_thumb.exists()
+    assert plain_raw_thumb.exists()
     assert db.preview_cache_get(pid_plain, 1920) is not None
     plain_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_plain,),
@@ -6380,7 +7081,13 @@ def test_post_photo_location_returns_400_on_empty_api_key(app_and_db):
         json={"place_id": "ChIJ_x"},
     )
     assert resp.status_code == 400
-    assert resp.get_json()["error"] == "no_api_key"
+    body = resp.get_json()
+    assert body["error"] == "no_api_key"
+    assert body["code"] == "invalid_request"
+    assert body["message"] == (
+        "Google Maps isn’t configured. Add an API key in Settings to use "
+        "Google place search."
+    )
 
 
 def test_post_photo_location_returns_404_when_google_returns_none(app_and_db, monkeypatch):
@@ -6401,7 +7108,13 @@ def test_post_photo_location_returns_404_when_google_returns_none(app_and_db, mo
         json={"place_id": "ChIJ_unknown"},
     )
     assert resp.status_code == 404
-    assert resp.get_json()["error"] == "place_not_found"
+    body = resp.get_json()
+    assert body["error"] == "place_not_found"
+    assert body["code"] == "not_found"
+    assert body["message"] == (
+        "Google Maps couldn’t find that place. Search again and choose another "
+        "result."
+    )
 
 
 def test_post_photo_location_returns_409_on_name_conflict(app_and_db, monkeypatch):
@@ -6448,6 +7161,11 @@ def test_post_photo_location_returns_409_on_name_conflict(app_and_db, monkeypatc
     assert resp.status_code == 409
     body = resp.get_json()
     assert body["error"] == "name_conflict"
+    assert body["code"] == "name_conflict"
+    assert body["message"] == (
+        "Couldn’t assign this location because “New York County” is already "
+        "used by another keyword. Rename that keyword in Keywords, then try again."
+    )
     assert "New York County" in body["error_detail"]
 
 
@@ -6468,7 +7186,13 @@ def test_post_photo_location_returns_404_on_missing_photo(app_and_db, monkeypatc
         json={"place_id": "ChIJ_x"},
     )
     assert resp.status_code == 404
-    assert resp.get_json()["error"] == "photo_not_found"
+    body = resp.get_json()
+    assert body["error"] == "photo_not_found"
+    assert body["code"] == "not_found"
+    assert body["message"] == (
+        "This photo is no longer available in the active workspace. Refresh "
+        "the page and try again."
+    )
 
 
 def _add_out_of_workspace_photo(db):
@@ -6746,6 +7470,34 @@ def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
     entry = db.get_edit_history()[0]
     assert entry["action_type"] == "location_set"
     assert entry["item_count"] == len(photo_ids)
+
+
+def test_batch_photo_location_text_can_remember_reviewed_map_point(app_and_db):
+    """Custom names created from map review become nearby saved suggestions."""
+    app, db = app_and_db
+    photo_ids = [p["id"] for p in db.get_photos()[:2]]
+
+    response = app.test_client().post(
+        "/api/batch/location/text",
+        json={
+            "photo_ids": photo_ids,
+            "name": "Anza-Borrego Desert State Park",
+            "latitude": 33.255,
+            "longitude": -116.405,
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    row = db.conn.execute(
+        "SELECT name, latitude, longitude FROM keywords "
+        "WHERE id = ?",
+        (response.get_json()["location"]["keyword_id"],),
+    ).fetchone()
+    assert dict(row) == {
+        "name": "Anza-Borrego Desert State Park",
+        "latitude": 33.255,
+        "longitude": -116.405,
+    }
 
 
 def test_delete_photo_location_records_edit(app_and_db):
@@ -7183,6 +7935,119 @@ def _yosemite_geocode_response():
     }
 
 
+def test_location_review_preview_groups_coordinates_without_geocoding(
+    app_and_db, monkeypatch,
+):
+    """The review queue is spatial evidence, not Google's chosen place id."""
+    import places
+
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    p1, p2, p3 = [p["id"] for p in photos]
+    db.conn.executemany(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        [
+            (33.2550, -116.4050, p1),
+            (33.2554, -116.4053, p2),  # same review area
+            (37.7456, -119.5936, p3),  # a separate area
+        ],
+    )
+    db.conn.commit()
+    monkeypatch.setattr(
+        places,
+        "reverse_geocode",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("location review must not reverse-geocode")
+        ),
+    )
+
+    response = app.test_client().post(
+        "/api/location-review/preview",
+        json={"photo_ids": [p1, p2, p3]},
+    )
+
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["total"] == 3
+    assert body["reviewable"] == 3
+    assert body["unresolved"] == []
+    assert body["skipped"] == []
+    assert [group["count"] for group in body["groups"]] == [2, 1]
+    assert body["groups"][0]["photo_ids"] == [p1, p2]
+    assert body["groups"][0]["spread_m"] > 0
+    assert body["groups"][0]["center"]["lat"] == pytest.approx(33.2552)
+
+
+def test_location_review_preview_skips_assigned_and_reports_missing_gps(
+    app_and_db,
+):
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    p1, p2, p3 = [p["id"] for p in photos]
+    db.conn.execute(
+        "UPDATE photos SET latitude = 33.255, longitude = -116.405 WHERE id = ?",
+        (p1,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = 33.256, longitude = -116.406 WHERE id = ?",
+        (p2,),
+    )
+    location_id = db.get_or_create_text_location("Already reviewed")
+    db.set_photo_location(p2, location_id)
+
+    response = app.test_client().post(
+        "/api/location-review/preview",
+        json={"photo_ids": [p1, p2, p3]},
+    )
+
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["reviewable"] == 1
+    assert body["groups"][0]["photo_ids"] == [p1]
+    assert body["skipped"] == [{
+        "filename": "bird2.jpg",
+        "photo_id": p2,
+        "reason": "already_has_location",
+    }]
+    assert body["unresolved"] == [{
+        "filename": "bird3.jpg",
+        "photo_id": p3,
+        "reason": "missing_gps",
+    }]
+
+
+def test_location_review_saved_suggestions_are_nearby_and_workspace_used(
+    app_and_db,
+):
+    app, db = app_and_db
+    p1, p2, _ = [p["id"] for p in db.get_photos(sort="name")]
+    near_id = db._upsert_one_keyword(
+        "Anza-Borrego Desert State Park", None,
+        latitude=33.255, longitude=-116.405,
+    )
+    far_id = db._upsert_one_keyword(
+        "Yosemite Valley", None,
+        latitude=37.7456, longitude=-119.5936,
+    )
+    db.conn.commit()
+    db.set_photo_location(p1, near_id)
+    db.set_photo_location(p2, far_id)
+
+    response = app.test_client().get(
+        "/api/location-review/saved-suggestions"
+        "?lat=33.2551&lng=-116.4051&radius_m=25000"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    suggestions = response.get_json()["suggestions"]
+    assert [item["name"] for item in suggestions] == [
+        "Anza-Borrego Desert State Park"
+    ]
+    assert suggestions[0]["keyword_id"] == near_id
+    assert suggestions[0]["photo_count"] == 1
+    assert suggestions[0]["distance_m"] < 20
+
+
 def test_batch_location_from_exif_preview_groups_without_linking(
     app_and_db, monkeypatch,
 ):
@@ -7233,6 +8098,44 @@ def test_batch_location_from_exif_preview_groups_without_linking(
         "JOIN keywords k ON k.id = pk.keyword_id "
         "WHERE k.type = 'location'"
     ).fetchone()[0] == 0
+
+
+def test_batch_location_from_exif_accepts_more_than_ten_thousand_photos(
+    app_and_db,
+):
+    """Large libraries are not rejected by the old arbitrary request cap."""
+    app, db = app_and_db
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ("/photos/2024",),
+    ).fetchone()["id"]
+    db.conn.executemany(
+        "INSERT INTO photos "
+        "(folder_id, filename, extension, file_size, file_mtime) "
+        "VALUES (?, ?, '.jpg', 1, 1)",
+        [
+            (folder_id, f"large-library-{index}.jpg")
+            for index in range(10_001)
+        ],
+    )
+    db.conn.commit()
+    photo_ids = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE filename LIKE 'large-library-%' "
+            "ORDER BY id"
+        ).fetchall()
+    ]
+
+    resp = app.test_client().post(
+        "/api/batch/location/from-exif",
+        json={"photo_ids": photo_ids, "apply": False},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["total"] == 10_001
+    assert body["resolvable"] == 0
+    assert len(body["unresolved"]) == 10_001
+    assert {item["reason"] for item in body["unresolved"]} == {"missing_gps"}
 
 
 def test_batch_location_from_exif_apply_assigns_per_photo_places(
@@ -7598,7 +8501,13 @@ def test_post_keyword_link_place_returns_404_on_missing_keyword(
         json={"place_id": "ChIJ_x"},
     )
     assert resp.status_code == 404
-    assert resp.get_json()["error"] == "keyword_not_found"
+    body = resp.get_json()
+    assert body["error"] == "keyword_not_found"
+    assert body["code"] == "not_found"
+    assert body["message"] == (
+        "That saved location no longer exists. Refresh the page and select "
+        "another location."
+    )
 
 
 def test_post_keyword_link_place_returns_400_on_wrong_keyword_type(
@@ -7629,6 +8538,10 @@ def test_post_keyword_link_place_returns_400_on_wrong_keyword_type(
     assert resp.status_code == 400
     body = resp.get_json()
     assert body["error"] == "wrong_keyword_type"
+    assert body["code"] == "invalid_request"
+    assert body["message"] == (
+        "Only location keywords can be linked to Google Maps places."
+    )
     assert "general" in body["error_detail"]
 
 
@@ -7725,6 +8638,9 @@ def test_post_keyword_link_place_returns_409_on_cross_type_collision(
     assert resp.status_code == 409, resp.get_json()
     body = resp.get_json()
     assert body["error"] == "name_conflict"
+    assert body["code"] == "name_conflict"
+    assert "“New York County”" in body["message"]
+    assert "Rename that keyword in Keywords" in body["message"]
     # The exception detail should mention the offending name for debugging.
     assert "New York County" in body.get("error_detail", "")
 
@@ -8655,3 +9571,603 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
     assert recipes[str(photo_id)]["local"]["mask"]["ref"] == r1["local"]["mask"]["ref"]
     assert recipes[str(pid2)]["local"]["mask"]["ref"] == r2["local"]["mask"]["ref"]
     assert recipes[str(pid2)]["local"]["mask"]["ref"] != recipes[str(photo_id)]["local"]["mask"]["ref"]
+
+
+# ---------------------------------------------------------------------------
+# Universal filter endpoints (Phase 1).
+# Design: docs/plans/2026-07-19-universal-filters-design.md
+# ---------------------------------------------------------------------------
+
+
+def test_api_photos_query_basic(app_and_db):
+    """POST /api/photos/query evaluates a rule tree; response shape matches
+    /api/photos so pages can switch fetch paths without renderer changes."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "rating", "op": ">=", "value": 4}],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert set(data) == {"photos", "total", "page", "per_page"}
+    assert data["total"] == 1
+    assert [p["filename"] for p in data["photos"]] == ["bird3.jpg"]
+    # species attachment matches /api/photos behavior
+    assert "species" in data["photos"][0]
+
+
+def test_api_photos_query_group_tree_and_paging(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": {"mode": "any", "rules": [
+            {"field": "rating", "op": ">=", "value": 5},
+            {"field": "filename", "op": "contains", "value": "bird1"},
+        ]},
+        "sort": "name",
+        "per_page": 1,
+        "page": 2,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2
+    assert [p["filename"] for p in data["photos"]] == ["bird3.jpg"]
+
+
+def test_api_photos_query_validation(app_and_db, monkeypatch):
+    app, _ = app_and_db
+    # Force an active visual model so the active-model injection walker
+    # actually runs — that's the code path that must survive malformed
+    # group rules without raising TypeError. Without a monkeypatch,
+    # ``_inject_active_visual_model`` returns rules verbatim and the
+    # malformed-group asserts below wouldn't exercise the walker at all.
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "some-model", "id": "some-model", "downloaded": True},
+    )
+    client = app.test_client()
+    assert client.post('/api/photos/query', json={
+        "rules": [{"field": "nope", "op": "is", "value": 1}],
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "page": 0,
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "per_page": "many",
+    }).status_code == 400
+    # sort must be a string — a JSON array/object would otherwise raise
+    # TypeError inside ``sort_map.get(sort, ...)`` and surface as a 500.
+    assert client.post('/api/photos/query', json={
+        "rules": [], "sort": [],
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "sort": {"col": "date"},
+    }).status_code == 400
+    # A group whose ``rules`` key is ``null`` (or any non-list) must land as
+    # a 400 from ``_validate_node``. Before the guard, the active-model
+    # walker would iterate ``None`` and raise ``TypeError`` → 500.
+    assert client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": None},
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": "not-a-list"},
+    }).status_code == 400
+    assert client.post('/api/photos/query', data="not json",
+                       content_type="text/plain").status_code == 400
+    # Unsupported operators on numeric fields must land as 400 (validation
+    # error), not 200 with an empty result set — otherwise a malformed
+    # rule like ``file_size contains 1`` looks like a query that legitimately
+    # matched nothing. Covers all fields routed through _numeric_condition:
+    # file_size/width/height/focal_length/aperture/shutter_speed/iso,
+    # gps_lat/gps_lng, rating/quality_score/sharpness/subject_sharpness/
+    # noise_estimate, keyword_count, and prediction_confidence.
+    for field in (
+        "file_size", "width", "height", "focal_length", "aperture",
+        "shutter_speed", "iso", "gps_lat", "gps_lng", "rating",
+        "quality_score", "sharpness", "noise_estimate", "keyword_count",
+        "prediction_confidence",
+    ):
+        assert client.post('/api/photos/query', json={
+            "rules": [{"field": field, "op": "contains", "value": 1}],
+        }).status_code == 400, f"{field} contains 1 must 400"
+
+
+def test_api_photos_query_has_visual_index_injects_active_model(app_and_db, monkeypatch):
+    """``has_visual_index`` rules emitted from the UI have no ``model`` key,
+    so the query API must inject the active visual model — otherwise
+    photos with only stale embeddings from previously-active models would
+    match, disagreeing with visual search (which loads only the active
+    model's embeddings)."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # bird1 has a stale embedding from a former model; bird2 has one from
+    # the currently-active model. Only bird2 should satisfy the filter.
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?, 'old-model', '', ?)",
+        (photos["bird1.jpg"], b"\x01"),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?, 'current-model', '', ?)",
+        (photos["bird2.jpg"], b"\x02"),
+    )
+    db.conn.commit()
+
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "current-model", "id": "current-model", "downloaded": True},
+    )
+
+    client = app.test_client()
+    # No ``model`` on the rule — API layer must inject the active one.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+    # Nested rule groups get the same treatment.
+    resp = client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": [
+            {"field": "has_visual_index", "op": "is", "value": 1},
+        ]},
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+    # An explicit ``model`` in the rule wins over the injection.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "old-model"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird1.jpg"]
+
+
+def test_api_photos_query_has_visual_index_fails_closed_without_active_model(
+    app_and_db, monkeypatch
+):
+    """When no active visual model is configured — fresh library or every
+    installed model was removed — a UI-emitted ``has_visual_index`` rule
+    (no ``model`` key) must fail closed: ``is true`` matches nothing and
+    ``is false`` matches everything. Otherwise the filter would keep
+    matching stale embeddings from a removed model while
+    ``/api/photos/search`` returns ``no_model``, so Browse and visual
+    search would disagree on what "has a visual index" means.
+    """
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # Every photo has a stale embedding — the previously-active model was
+    # uninstalled but its rows remain in ``photo_embeddings``.
+    for filename in photos:
+        db.conn.execute(
+            "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+            "VALUES (?, 'removed-model', '', ?)",
+            (photos[filename], b"\x01"),
+        )
+    db.conn.commit()
+
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+
+    client = app.test_client()
+    # ``is true`` must match nothing — there is no usable visual index.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1}],
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["photos"] == []
+
+    # ``is false`` must match every photo for the same reason.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 0}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == sorted(photos.keys())
+
+    # An explicit ``model`` in the rule is still honored — a saved smart
+    # collection with an old model name keeps working even when nothing is
+    # active, so it stays portable.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "removed-model"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == sorted(photos.keys())
+
+
+def test_api_photos_query_timestamp_gt_preserves_subsecond(app_and_db):
+    """``timestamp > 2024-01-01T12:00:00`` must NOT pad the value to
+    ``.999999`` — that would spuriously exclude sub-second photos in the
+    same clock second (``12:00:00.5``) that are strictly greater than the
+    requested instant. Only bare ``YYYY-MM-DD`` values advance to end of
+    day."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2024-01-01T12:00:00.500000' WHERE id=?",
+        (photos["bird1.jpg"],),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2024-01-02T09:00:00' WHERE id=?",
+        (photos["bird2.jpg"],),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2023-12-31T09:00:00' WHERE id=?",
+        (photos["bird3.jpg"],),
+    )
+    db.conn.commit()
+    client = app.test_client()
+
+    # Precise timestamp comparison — bird1 at 12:00:00.5 IS strictly > 12:00:00
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "timestamp", "op": ">",
+                   "value": "2024-01-01T12:00:00"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird1.jpg", "bird2.jpg"]
+
+    # Bare-date comparison — ``> 2024-01-01`` still means strictly after
+    # the whole day, so bird1 (on that day) is excluded.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "timestamp", "op": ">",
+                   "value": "2024-01-01"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+
+def test_api_filter_fields_registry(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/filters/fields')
+    assert resp.status_code == 200
+    fields = {f["key"]: f for f in resp.get_json()["fields"]}
+    assert "between" in fields["iso"]["ops"]
+    assert fields["flag"]["values"] == ["flagged", "none", "rejected"]
+    assert fields["camera_model"]["suggest"] is True
+    assert fields["timestamp"]["type"] == "date"
+
+
+def test_api_filter_values_counts(app_and_db):
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute("UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
+                    (photos["bird1.jpg"], photos["bird3.jpg"]))
+    db.conn.execute("UPDATE photos SET camera_model='Canon R5' WHERE id=?",
+                    (photos["bird2.jpg"],))
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/filters/values?field=camera_model')
+    assert resp.status_code == 200
+    assert resp.get_json()["values"] == [
+        {"value": "Sony A1", "count": 2},
+        {"value": "Canon R5", "count": 1},
+    ]
+    # Counts respect the expression-minus-edited-rule passed as ?rules=
+    import json as _json
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/filters/values?field=camera_model&rules={rules}')
+    assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 1}]
+    # Typeahead query narrowing
+    resp = client.get('/api/filters/values?field=camera_model&q=can')
+    assert resp.get_json()["values"] == [{"value": "Canon R5", "count": 1}]
+
+
+def test_api_filter_values_rejects_bad_input(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    assert client.get('/api/filters/values?field=rating').status_code == 400
+    assert client.get('/api/filters/values?field=camera_model&rules=notjson').status_code == 400
+    assert client.get(
+        '/api/filters/values?field=camera_model&rules=[{"field":"nope","op":"is","value":1}]'
+    ).status_code == 400
+
+
+def test_api_filter_values_clamps_limit(app_and_db):
+    """Zero/negative/oversized ``limit`` params must not produce unbounded
+    queries (SQLite treats a negative ``LIMIT`` as "no limit")."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # Populate enough distinct camera_model values that a working limit clamp
+    # is observable — a limit of 0/-1 without the clamp would return them all.
+    for i, filename in enumerate(sorted(photos)):
+        db.conn.execute(
+            "UPDATE photos SET camera_model=? WHERE id=?",
+            (f"Model{i}", photos[filename]),
+        )
+    db.conn.commit()
+    client = app.test_client()
+    # Negative and zero clamp up to 1 — always at least one result.
+    for bad_limit in ("-5", "0"):
+        resp = client.get(f'/api/filters/values?field=camera_model&limit={bad_limit}')
+        assert resp.status_code == 200, bad_limit
+        assert len(resp.get_json()["values"]) == 1, bad_limit
+    # Absurdly large values clamp down to the server-side ceiling so a huge
+    # library can't stream every distinct value out through one request.
+    resp = client.get('/api/filters/values?field=camera_model&limit=999999')
+    assert resp.status_code == 200
+    assert len(resp.get_json()["values"]) <= 500
+
+
+def test_api_filter_values_respects_scope(app_and_db):
+    """Typeahead counts must respect the folder / dashboard-collection scope
+    Browse passes to /api/photos/query; without this the badge beside each
+    suggestion counts photos over the whole workspace while the grid is
+    folder- or collection-restricted, and a pick can produce fewer visible
+    grid rows than the count promised."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    folders = db.get_folder_tree()
+    jan = [f for f in folders if f["name"] == "January"][0]
+    db.conn.execute(
+        "UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
+        (photos["bird1.jpg"], photos["bird3.jpg"]),
+    )
+    db.conn.execute(
+        "UPDATE photos SET camera_model='Canon R5' WHERE id=?",
+        (photos["bird2.jpg"],),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    # Unscoped: sees both models.
+    resp = client.get('/api/filters/values?field=camera_model')
+    assert {v["value"] for v in resp.get_json()["values"]} == {"Sony A1", "Canon R5"}
+    # folder_id narrows to only the January folder (bird2.jpg — Canon R5).
+    resp = client.get(
+        f'/api/filters/values?field=camera_model&folder_id={jan["id"]}'
+    )
+    assert resp.get_json()["values"] == [{"value": "Canon R5", "count": 1}]
+
+    # collection_id narrows to only the two picked photos (bird1 + bird3 — Sony A1).
+    collection_id = db.add_collection(
+        "Two Sonys",
+        json.dumps([{
+            "field": "photo_ids",
+            "value": [photos["bird1.jpg"], photos["bird3.jpg"]],
+        }]),
+    )
+    resp = client.get(
+        f'/api/filters/values?field=camera_model&collection_id={collection_id}'
+    )
+    assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 2}]
+
+
+def test_api_photos_query_ids_only(app_and_db):
+    """ids_only returns the complete matching id set in display order —
+    select-all must resolve exactly what the filtered grid shows."""
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "rating", "op": ">=", "value": 3}],
+        "ids_only": True,
+        "sort": "name",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    assert data["ids"] == [photos["bird1.jpg"], photos["bird3.jpg"]]
+    assert data["total"] == 2
+
+
+def test_api_browse_summary_accepts_rules(app_and_db):
+    import json as _json
+    app, _ = app_and_db
+    client = app.test_client()
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/browse/summary?rules={rules}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["filtered_total"] == 1
+    assert client.get('/api/browse/summary?rules=notjson').status_code == 400
+
+
+def test_api_photos_calendar_accepts_rules(app_and_db):
+    import json as _json
+    app, _ = app_and_db
+    client = app.test_client()
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/photos/calendar?year=2024&rules={rules}')
+    assert resp.status_code == 200
+    # bird3.jpg (rating 5, 2024-06-10) is the only match in 2024
+    assert resp.get_json()["days"] == {"2024-06-10": 1}
+    assert client.get('/api/photos/calendar?rules=notjson').status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Universal filter visual clause (Phase 3).
+# ---------------------------------------------------------------------------
+
+
+def _stub_clip(monkeypatch, model_name="test-clip", model_type="bioclip"):
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "name": model_name,
+        "model_type": model_type,
+        "model_str": "fake",
+        "weights_path": "",
+    } if model_name else None)
+    monkeypatch.setitem(
+        sys.modules,
+        "text_encoder",
+        types.SimpleNamespace(
+            encode_text=lambda *_args, **_kwargs: np.array([1.0, 0.0], dtype=np.float32)
+        ),
+    )
+
+
+def _seed_embeddings(db, model_name="test-clip"):
+    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    for name, vec in [
+        ("bird1.jpg", [0.95, 0.0]),
+        ("bird2.jpg", [0.8, 0.0]),
+        ("bird3.jpg", [0.05, 0.0]),
+    ]:
+        db.upsert_photo_embedding(
+            photos[name], model_name, np.array(vec, dtype=np.float32).tobytes()
+        )
+    return photos
+
+
+def test_api_photos_query_visual_ranks_by_similarity(app_and_db, monkeypatch):
+    app, db = app_and_db
+    photos = _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": [],
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["visual"]["status"] == "ok"
+    assert data["visual"]["matched"] == 2
+    assert data["visual"]["indexed"] == 3
+    assert [p["filename"] for p in data["photos"]] == ["bird1.jpg", "bird2.jpg"]
+    assert data["photos"][0]["similarity"] == 0.95
+    assert data["total"] == 2
+
+    # Metadata rules constrain the candidate set before scoring.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "filename", "op": "is", "value": "bird2.jpg"}],
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+    })
+    data = resp.get_json()
+    assert [p["filename"] for p in data["photos"]] == ["bird2.jpg"]
+
+    # Strength changes the threshold: strict drops bird2 (0.8 >= 0.22 stays;
+    # broad keeps everything above 0.10).
+    resp = client.post('/api/photos/query', json={
+        "rules": [],
+        "visual": {"prompt": "a bird", "strength": "broad"},
+    })
+    assert resp.get_json()["visual"]["matched"] == 2
+
+    # ids_only returns the ranked id set.
+    resp = client.post('/api/photos/query', json={
+        "rules": [], "ids_only": True,
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+    })
+    data = resp.get_json()
+    assert data["ids"] == [photos["bird1.jpg"], photos["bird2.jpg"]]
+
+
+def test_api_photos_query_visual_error_states(app_and_db, monkeypatch):
+    app, db = app_and_db
+    client = app.test_client()
+
+    # No active model: metadata rules still apply, status is surfaced.
+    _stub_clip(monkeypatch, model_name=None)
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "rating", "op": ">=", "value": 4}],
+        "visual": {"prompt": "a bird"},
+    })
+    data = resp.get_json()
+    assert data["visual"]["status"] == "no_model"
+    assert data["total"] == 1  # metadata-only fallback, not zero
+
+    # timm models have no text tower.
+    _stub_clip(monkeypatch, model_type="timm")
+    resp = client.post('/api/photos/query', json={
+        "rules": [], "visual": {"prompt": "a bird"},
+    })
+    assert resp.get_json()["visual"]["status"] == "model_no_text_search"
+
+    # No embeddings stored for the active model.
+    _stub_clip(monkeypatch)
+    resp = client.post('/api/photos/query', json={
+        "rules": [], "visual": {"prompt": "a bird"},
+    })
+    data = resp.get_json()
+    assert data["visual"]["status"] == "no_embeddings"
+    assert data["total"] == 3
+
+    # Malformed clauses 400.
+    assert client.post('/api/photos/query', json={
+        "rules": [], "visual": {"prompt": "   "},
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "visual": {"prompt": "x", "strength": "extreme"},
+    }).status_code == 400
+
+
+def test_api_summary_and_values_respect_visual(app_and_db, monkeypatch):
+    """Facet counts and the summary must describe the visually-filtered set."""
+    import json as _json
+    app, db = app_and_db
+    _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    db.conn.execute("UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
+                    (photos["bird1.jpg"], photos["bird3.jpg"]))
+    db.conn.commit()
+
+    client = app.test_client()
+    visual = _json.dumps({"prompt": "a bird", "strength": "balanced"})
+    resp = client.get(f'/api/browse/summary?visual={visual}')
+    assert resp.status_code == 200
+    assert resp.get_json()["filtered_total"] == 2  # bird1 + bird2 only
+
+    # bird3 (Sony, below threshold) must not appear in facet counts.
+    resp = client.get(f'/api/filters/values?field=camera_model&visual={visual}')
+    assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 1}]
+
+
+def test_api_calendar_scopes_visual_to_collection(app_and_db, monkeypatch):
+    """Calendar's visual clause must resolve within the collection scope.
+
+    If the collection has no active-model embeddings but the wider
+    workspace does, the clause must fail 'no_embeddings' and fall back
+    to metadata-only within the collection — matching the grid — rather
+    than injecting outside-collection matches that get intersected away.
+    """
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    for name, vec in [("bird1.jpg", [0.95, 0.0]), ("bird2.jpg", [0.8, 0.0])]:
+        db.upsert_photo_embedding(
+            photos[name], "test-clip", np.array(vec, dtype=np.float32).tobytes()
+        )
+    # bird3 (the only photo in the collection) has no embedding.
+    collection_id = db.add_collection(
+        "Only bird3",
+        json.dumps([{"field": "photo_ids", "value": [photos["bird3.jpg"]]}]),
+    )
+    _stub_clip(monkeypatch)
+    client = app.test_client()
+    visual = json.dumps({"prompt": "a bird", "strength": "balanced"})
+    resp = client.get(
+        f"/api/photos/calendar?year=2024&collection_id={collection_id}&visual={visual}"
+    )
+    assert resp.status_code == 200
+    assert list(resp.get_json()["days"].keys()) == ["2024-06-10"]
+
+
+def test_embedding_fetch_chunks_over_999_ids(app_and_db):
+    """A broad rule tree passes every photo id as the candidate set; the
+    embedding fetch must chunk below SQLITE_MAX_VARIABLE_NUMBER."""
+    _, db = app_and_db
+    fid = db.get_photos()[0]["folder_id"]
+    ids = []
+    rows = []
+    for i in range(1200):
+        pid = db.add_photo(folder_id=fid, filename=f"bulk{i}.jpg", extension=".jpg",
+                           file_size=10, file_mtime=1.0)
+        ids.append(pid)
+        rows.append(pid)
+    vec = np.array([0.5, 0.5], dtype=np.float32).tobytes()
+    for pid in rows:
+        db.upsert_photo_embedding(pid, "test-clip", vec)
+    pairs = db.get_photos_with_embedding("test-clip", photo_ids=ids)
+    assert len(pairs) == 1200

@@ -110,6 +110,10 @@ def test_map_photo_id_deep_link_focuses_marker(live_server, page):
     active_card = page.locator(f".sidebar-card.active[data-id='{pid}']")
     expect(active_card).to_be_visible()
     expect(page.locator("#mapStatus")).to_contain_text("Showing 1 of 1 geolocated photos")
+    expect(page.locator("#mapStatus")).to_contain_text("map coverage")
+    missing_link = page.locator("#mapStatus a")
+    expect(missing_link).to_have_attribute("href", "/browse?location_status=none")
+    expect(missing_link).to_contain_text("without coordinates")
 
 
 def test_map_photo_id_deep_link_reports_missing_location(live_server, page):
@@ -120,6 +124,17 @@ def test_map_photo_id_deep_link_reports_missing_location(live_server, page):
     page.goto(f"{live_server['url']}/map?photo_id={pid}")
 
     expect(page.locator("#mapStatus")).to_contain_text("No map location found for this photo.")
+
+
+def test_empty_map_links_to_photos_without_coordinates(live_server, page):
+    """An all-empty map gives users a working path to the affected photos."""
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/map")
+
+    expect(page.locator("#mapStatus")).to_contain_text("No geolocated photos")
+    missing_link = page.locator("#mapStatus a")
+    expect(missing_link).to_have_attribute("href", "/browse?location_status=none")
+    expect(missing_link).to_contain_text("without coordinates")
 
 
 def test_map_photo_id_deep_link_is_one_shot_for_later_filters(live_server, page):

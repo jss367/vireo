@@ -57,6 +57,7 @@ window.addEventListener('unhandledrejection', function(event) {
  * @param {string} [title] - Dialog title
  * @param {object} [opts] - Options
  * @param {boolean} [opts.multiple] - Allow selecting multiple folders
+ * @param {string} [opts.defaultPath] - Directory shown when the dialog opens
  * @returns {Promise<string|string[]|null>} Selected directory path(s), or null if cancelled.
  *   Returns an array when `opts.multiple` is true, otherwise a string.
  */
@@ -67,6 +68,7 @@ async function pickDirectory(title, opts) {
     directory: true,
     multiple: !!opts.multiple,
     title: title || 'Select Folder',
+    defaultPath: opts.defaultPath || undefined,
   });
   return result || null;
 }
@@ -178,10 +180,28 @@ function closeExternalOpenFailure() {
 
 async function copyExternalUrl(url) {
   var copied = false;
-  try {
-    await navigator.clipboard.writeText(url);
-    copied = true;
-  } catch (e) {
+  if (isTauri()) {
+    try {
+      // Use the native system pasteboard in the packaged app. WebKit's
+      // navigator.clipboard and execCommand paths can resolve/return true
+      // without putting anything on the macOS clipboard.
+      await window.__TAURI_INTERNALS__.invoke('plugin:clipboard-manager|write_text', {
+        text: url,
+      });
+      copied = true;
+    } catch (e) {
+      logError('Native clipboard write failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+  if (!copied && navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(url);
+      copied = true;
+    } catch (e) {
+      logWarn('Web clipboard write failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+  if (!copied) {
     // Always use a fresh throwaway textarea so non-modal callers (e.g. iNat
     // batch Copy URL buttons) never end up selecting a stale value left in
     // #externalOpenModalUrl from an earlier failure modal.
@@ -192,7 +212,9 @@ async function copyExternalUrl(url) {
     document.body.appendChild(temp);
     temp.focus();
     temp.select();
-    try { copied = document.execCommand('copy'); } catch (copyError) {}
+    try { copied = document.execCommand('copy'); } catch (copyError) {
+      logWarn('DOM clipboard fallback failed: ' + (copyError && copyError.message ? copyError.message : copyError));
+    }
     temp.remove();
   }
   if (typeof showToast === 'function') {

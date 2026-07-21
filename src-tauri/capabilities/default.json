@@ -26,6 +26,7 @@
     "shell:allow-spawn",
     "shell:allow-kill",
     "dialog:allow-open",
+    "clipboard-manager:allow-write-text",
     "process:allow-restart",
     "core:tray:default",
     "core:tray:allow-set-icon",

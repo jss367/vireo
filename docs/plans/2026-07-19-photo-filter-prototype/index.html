@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en" data-theme="vireo-dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vireo Universal Photo Filters — Interactive Prototype</title>
+  <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand" aria-label="Vireo prototype">
+      <div class="brand-mark" aria-hidden="true">V</div>
+      <div>
+        <strong>Vireo</strong>
+        <span>Filter prototype</span>
+      </div>
+    </div>
+
+    <nav class="context-tabs" aria-label="Prototype page context">
+      <button class="context-tab active" data-context="browse" aria-pressed="true">Browse</button>
+      <button class="context-tab" data-context="map" aria-pressed="false">Map</button>
+      <button class="context-tab" data-context="review" aria-pressed="false">Review</button>
+      <button class="context-tab" data-context="duplicates" aria-pressed="false">Duplicates</button>
+    </nav>
+
+    <div class="header-actions">
+      <button class="quiet-button" id="themeToggle" type="button" aria-label="Toggle light and dark theme">Theme</button>
+      <button class="reset-button" id="resetPrototype" type="button">Reset prototype</button>
+    </div>
+  </header>
+
+  <div class="prototype-note" role="note">
+    This is a disposable interaction prototype. Counts and CLIP similarity are simulated; no photos or Vireo data are changed.
+  </div>
+
+  <div class="app-body">
+    <aside class="prototype-sidebar" aria-label="Prototype guide">
+      <section>
+        <div class="sidebar-heading">
+          <h2>Try a scenario</h2>
+          <span>One click setup</span>
+        </div>
+        <div class="preset-list" id="presetList"></div>
+      </section>
+
+      <section class="evaluation-section">
+        <div class="sidebar-heading">
+          <h2>Evaluation checklist</h2>
+          <button class="icon-button" id="clearChecklist" type="button" title="Clear checklist" aria-label="Clear evaluation checklist">↺</button>
+        </div>
+        <ol class="checklist" id="evaluationChecklist">
+          <li><label><input type="checkbox" data-check="filename"><span>Find filenames containing <code>owl</code> but not <code>juvenile</code>.</span></label></li>
+          <li><label><input type="checkbox" data-check="clip"><span>Search visually for “bird flying at dusk,” then refine to picked photos rated 4+.</span></label></li>
+          <li><label><input type="checkbox" data-check="advanced"><span>Build <code>(Picked OR 5 stars) AND Camera contains Sony</code>.</span></label></li>
+          <li><label><input type="checkbox" data-check="overflow"><span>Add enough filters to trigger chip overflow.</span></label></li>
+          <li><label><input type="checkbox" data-check="contexts"><span>Carry filters through Browse, Map, Review, and Duplicates.</span></label></li>
+          <li><label><input type="checkbox" data-check="persistence"><span>Reload and check that visible filter state returns.</span></label></li>
+          <li><label><input type="checkbox" data-check="save"><span>Save the active expression as a simulated Collection.</span></label></li>
+          <li><label><input type="checkbox" data-check="values"><span>Add a Camera model rule and pick a value from the count suggestions.</span></label></li>
+          <li><label><input type="checkbox" data-check="pause"><span>Press <code>\</code> to pause filters and again to resume them.</span></label></li>
+        </ol>
+      </section>
+
+      <section class="notes-section">
+        <h2>Questions to notice</h2>
+        <ul>
+          <li>Did plain text and visual search feel distinct enough?</li>
+          <li>Can you always tell why a photo is visible?</li>
+          <li>Does the locked page scope make sense?</li>
+          <li>Is anything important taking too much space?</li>
+        </ul>
+      </section>
+    </aside>
+
+    <main class="workspace">
+      <section class="filter-shell" aria-label="Photo filters">
+        <div class="filter-primary-row">
+          <div class="search-wrap">
+            <span class="search-icon" aria-hidden="true">⌕</span>
+            <input id="quickSearch" type="search" autocomplete="off" spellcheck="false"
+                   placeholder="Search photos…" aria-label="Search photos"
+                   aria-expanded="false" aria-controls="searchSuggestions">
+            <kbd>⌘F</kbd>
+            <div class="search-suggestions" id="searchSuggestions" role="listbox" hidden></div>
+          </div>
+
+          <button class="filter-button" id="filterButton" type="button" aria-expanded="false" aria-controls="filterPopover">
+            <span aria-hidden="true">≡</span>
+            Filters
+            <span class="button-count" id="filterButtonCount" hidden>0</span>
+          </button>
+
+          <div class="view-wrap">
+            <button class="quiet-button" id="viewButton" type="button" aria-expanded="false" aria-controls="viewPopover">View ▾</button>
+            <div class="view-popover" id="viewPopover" hidden>
+              <label>Sort
+                <select id="sortSelect">
+                  <option value="date_desc">Capture date · newest</option>
+                  <option value="date_asc">Capture date · oldest</option>
+                  <option value="name_asc">Filename · A–Z</option>
+                  <option value="rating_desc">Rating · highest</option>
+                  <option value="relevance">Visual relevance</option>
+                </select>
+              </label>
+              <label>Thumbnail size
+                <input id="thumbSize" type="range" min="140" max="300" step="20" value="200">
+              </label>
+              <label class="checkbox-row"><input id="showDetails" type="checkbox" checked> Show card details</label>
+            </div>
+          </div>
+
+          <div class="result-total" aria-live="polite">
+            <strong id="resultCount">0</strong>
+            <span id="resultLabel">photos</span>
+          </div>
+
+          <button class="quiet-button mute-button" id="muteFilters" type="button" hidden title="Temporarily disable filters without losing them (\)">⏸ Pause</button>
+          <button class="quiet-button clear-all" id="clearAll" type="button" hidden>Clear</button>
+          <button class="more-button" id="moreActions" type="button" aria-label="More filter actions" aria-expanded="false">•••</button>
+          <div class="actions-menu" id="actionsMenu" hidden>
+            <button id="saveCollection" type="button">Save as Collection…</button>
+            <button id="openResults" type="button">Open results in…</button>
+            <button id="copyExpression" type="button">Copy filter summary</button>
+          </div>
+        </div>
+
+        <div class="filter-secondary-row" id="filterSecondaryRow">
+          <div class="scope-chip" id="scopeChip" title="This page always applies this scope">
+            <span aria-hidden="true">◇</span>
+            <span id="scopeChipText">Workspace · All available photos</span>
+            <span class="lock" aria-hidden="true">⌁</span>
+          </div>
+          <div class="chip-viewport" id="chipViewport">
+            <div class="chip-list" id="chipList" aria-label="Active filters"></div>
+          </div>
+          <button class="overflow-chip" id="overflowChip" type="button" hidden>+0</button>
+        </div>
+
+        <div class="query-status" id="queryStatus" aria-live="polite" hidden>
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="queryStatusText">Updating results…</span>
+        </div>
+
+        <div class="filter-popover" id="filterPopover" role="dialog" aria-modal="false" aria-label="Edit photo filters" hidden>
+          <div class="popover-header">
+            <div>
+              <h2>Filter photos</h2>
+              <p>Changes update the page immediately.</p>
+            </div>
+            <button class="icon-button" id="closeFilter" type="button" aria-label="Close filter popover">×</button>
+          </div>
+
+          <section class="quick-filters" aria-labelledby="quickFilterHeading">
+            <div class="section-heading">
+              <h3 id="quickFilterHeading">Quick filters</h3>
+              <span>Click again to clear · flags and colors combine</span>
+            </div>
+            <div class="quick-filter-grid">
+              <div class="quick-filter-group">
+                <span>Rating</span>
+                <div class="quick-rating-control">
+                  <select id="quickRatingOp" aria-label="Rating comparison">
+                    <option value="gte">At least (≥)</option>
+                    <option value="eq">Exactly (=)</option>
+                    <option value="lte">At most (≤)</option>
+                  </select>
+                  <div class="star-buttons" id="quickStars" aria-label="Rating value">
+                    <button type="button" data-rating="1" aria-label="1 star">★</button>
+                    <button type="button" data-rating="2" aria-label="2 stars">★</button>
+                    <button type="button" data-rating="3" aria-label="3 stars">★</button>
+                    <button type="button" data-rating="4" aria-label="4 stars">★</button>
+                    <button type="button" data-rating="5" aria-label="5 stars">★</button>
+                  </div>
+                </div>
+              </div>
+              <div class="quick-filter-group">
+                <span>Flag</span>
+                <div class="segmented" id="quickFlags">
+                  <button type="button" data-flag="flagged">⚑ Picked</button>
+                  <button type="button" data-flag="none">– Unflagged</button>
+                  <button type="button" data-flag="rejected">× Rejected</button>
+                </div>
+              </div>
+              <div class="quick-filter-group color-group">
+                <span>Color</span>
+                <div class="color-buttons" id="quickColors" aria-label="Color label">
+                  <button type="button" data-color="red" aria-label="Red label"></button>
+                  <button type="button" data-color="yellow" aria-label="Yellow label"></button>
+                  <button type="button" data-color="green" aria-label="Green label"></button>
+                  <button type="button" data-color="blue" aria-label="Blue label"></button>
+                  <button type="button" data-color="purple" aria-label="Purple label"></button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="rules-section" aria-labelledby="rulesHeading">
+            <div class="section-heading">
+              <div class="heading-with-toggle">
+                <h3 id="rulesHeading">Rules</h3>
+                <label class="advanced-toggle"><input id="advancedToggle" type="checkbox"> Advanced logic</label>
+              </div>
+              <button class="text-button" id="clearRules" type="button">Clear rules</button>
+            </div>
+            <div class="logic-summary" id="logicSummary">Match <strong>all</strong> of these rules</div>
+            <div class="rule-tree" id="ruleTree"></div>
+
+            <div class="add-rule-row">
+              <div class="field-picker-wrap">
+                <button class="add-filter-button" id="addFilterButton" type="button" aria-expanded="false">＋ Add filter</button>
+                <div class="field-picker" id="fieldPicker" hidden>
+                  <input id="fieldSearch" type="search" placeholder="Find a field…" aria-label="Find a filter field">
+                  <div id="fieldOptions" class="field-options"></div>
+                </div>
+              </div>
+              <button class="text-button" id="addGroupButton" type="button" hidden>＋ Add group</button>
+            </div>
+          </section>
+
+          <footer class="popover-footer">
+            <span id="popoverMatchCount">0 matching photos</span>
+            <button class="primary-button" id="doneFilter" type="button">Done</button>
+          </footer>
+        </div>
+      </section>
+
+      <section class="content-header">
+        <div>
+          <h1 id="pageTitle">Browse</h1>
+          <p id="pageDescription">Explore every available photo in this workspace.</p>
+        </div>
+        <div class="content-badges" id="contentBadges"></div>
+      </section>
+
+      <section class="content-canvas" id="contentCanvas" aria-live="polite">
+        <div class="photo-grid" id="photoGrid"></div>
+        <div class="map-view" id="mapView" hidden></div>
+        <div class="review-view" id="reviewView" hidden></div>
+        <div class="duplicates-view" id="duplicatesView" hidden></div>
+        <div class="empty-state" id="emptyState" hidden>
+          <div class="empty-icon" aria-hidden="true">⌕</div>
+          <h2>No photos match</h2>
+          <p>Try removing a filter or broadening the visual match strength.</p>
+          <button class="quiet-button" id="emptyClear" type="button">Clear filters</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modalBackdrop" hidden></div>
+  <div class="save-modal" id="saveModal" role="dialog" aria-modal="true" aria-labelledby="saveModalTitle" hidden>
+    <div class="popover-header">
+      <div>
+        <h2 id="saveModalTitle">Save as Collection</h2>
+        <p>This simulation saves only inside the prototype.</p>
+      </div>
+      <button class="icon-button modal-close" type="button" aria-label="Close">×</button>
+    </div>
+    <label>Collection name
+      <input id="collectionName" type="text" value="My filtered photos">
+    </label>
+    <label class="checkbox-row scope-save-row"><input id="includeScope" type="checkbox" checked> Include this page’s portable scope</label>
+    <div class="save-preview" id="savePreview"></div>
+    <div class="modal-actions">
+      <button class="quiet-button modal-close" type="button">Cancel</button>
+      <button class="primary-button" id="confirmSave" type="button">Save Collection</button>
+    </div>
+  </div>
+
+  <div class="handoff-modal save-modal" id="handoffModal" role="dialog" aria-modal="true" aria-labelledby="handoffTitle" hidden>
+    <div class="popover-header">
+      <div>
+        <h2 id="handoffTitle">Open results in…</h2>
+        <p>Your filters transfer; the destination adds its own visible scope.</p>
+      </div>
+      <button class="icon-button modal-close" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="handoff-options" id="handoffOptions"></div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+    <span id="toastText"></span>
+    <button id="toastAction" type="button" hidden>Undo</button>
+  </div>
+
+  <script src="prototype.js"></script>
+</body>
+</html>

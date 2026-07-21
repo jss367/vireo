@@ -257,6 +257,31 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
     expect(page.locator("#destInput")).to_have_value("/tmp/archive")
 
 
+def test_import_recent_destination_button_selects_saved_path(live_server, page):
+    """Saved import destinations remain visible as one-click choices."""
+    import config as cfg
+
+    config = cfg.load()
+    config["ingest"]["recent_destinations"] = [
+        "/Volumes/Photos/Archive",
+        "/Volumes/Photos/Trips",
+    ]
+    cfg.save(config)
+
+    page.goto(f"{live_server['url']}/import")
+    page.locator("#modeCopy").check()
+
+    choices = page.locator("[data-testid='recent-destinations']")
+    expect(choices).to_be_visible()
+    expect(choices).to_contain_text("Archive")
+    expect(choices).to_contain_text("Trips")
+
+    page.get_by_role(
+        "button", name="Use /Volumes/Photos/Trips"
+    ).click()
+    expect(page.locator("#destInput")).to_have_value("/Volumes/Photos/Trips")
+
+
 def test_import_custom_extensions_feed_preview(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
@@ -355,8 +380,8 @@ def test_import_preview_passes_verify_by_hash_to_duplicate_check(live_server, pa
 
 
 def test_import_preview_shows_destination_folder_structure(live_server, page):
-    """Copy-mode preview surfaces the destination folder structure (new vs
-    existing folders) and a managed-archive callout, wired to
+    """Copy-mode preview surfaces exact destination folder paths and file
+    counts beside the folder template, plus a managed-archive callout, wired to
     /api/import/destination-preview. Skipped duplicates are excluded so the
     folder counts match the files that will actually land."""
     url = live_server["url"]
@@ -424,7 +449,16 @@ def test_import_preview_shows_destination_folder_structure(live_server, page):
     structure = page.locator("#destStructure")
     expect(structure).to_be_visible()
     expect(structure).to_contain_text(
-        "2 photos → 2 folders (1 new, 1 existing)"
+        "Resulting folders: 2 files split into 2 folders (1 new, 1 existing)"
+    )
+    expect(page.locator("#destCard #destStructure")).to_be_visible()
+    expect(structure.locator("th")).to_have_text(["Exact folder", "Files", "Status"])
+    rows = structure.locator("tr")
+    expect(rows.nth(1).locator("td")).to_have_text(
+        ["/archive/2026/2026-07-01", "1", "new"]
+    )
+    expect(rows.nth(2).locator("td")).to_have_text(
+        ["/archive/2026/2026-07-02", "1", "existing"]
     )
     expect(structure).to_contain_text("Merging into a managed archive at")
     expect(structure).to_contain_text("/archive")
@@ -634,8 +668,17 @@ def test_import_duplicate_stream_result_ignored_after_controls_change(
     page.wait_for_function("window.__resolveDuplicates !== null")
     page.locator("#fileTypePreset").select_option("custom")
     page.locator("#chkVerifyByHash").check()
-    page.evaluate("() => window.__resolveDuplicates()")
-    page.wait_for_timeout(100)
+    # The control changes schedule a legitimate automatic refresh after the
+    # debounce interval. Cancel that future run so this assertion stays scoped
+    # to the stale duplicate stream we are releasing, then synchronize on the
+    # stale preview's own finally block instead of an arbitrary timeout.
+    page.evaluate(
+        """() => {
+          clearScheduledImportPreview();
+          window.__resolveDuplicates();
+        }"""
+    )
+    expect(page.locator("#btnPreview")).to_be_enabled()
 
     assert page.evaluate("window.__destinationPreviewCalled") is False
     expect(page.locator("#destStructure")).to_be_hidden()
@@ -837,15 +880,86 @@ def test_import_copy_start_sends_restored_options(live_server, page):
     # The After Import dropdown was untouched, and this is a new-workspace
     # import — the client must omit after_import so the server resolves the
     # default against the newly-created workspace instead of leaking the
-    # previously-active workspace's pipeline.default_strategy.
+    # previously-active workspace's pipeline.default_process_id.
     assert "after_import" not in body
 
 
-def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
-    """When the user actively picks a strategy for a new-workspace import,
-    the client must forward that pick — only the untouched-dropdown case is
-    omitted so the server can apply the new workspace's default."""
+def test_import_start_sends_common_tags_and_gps_location_option(
+    live_server, page,
+):
     url = live_server["url"]
+    captured = {}
+
+    def config_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "google_maps_api_key": "configured-for-test",
+                "pipeline": {"default_process_id": None},
+            }),
+        )
+
+    def start_import(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "import-tags-test"}),
+        )
+
+    page.route("**/api/config", config_route)
+    page.route("**/api/jobs/import-in-place", start_import)
+    page.goto(f"{url}/import")
+
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#importTagInput").fill("Kenya trip")
+    page.locator("#importTagInput").press("Enter")
+    page.locator("#importTagInput").fill("Portfolio")
+    page.locator("#btnAddImportTag").click()
+    expect(page.locator("#importTagList .import-tag-chip")).to_have_count(2)
+    page.locator("#chkLocationFromGps").check()
+
+    page.locator("#btnStart").click()
+    expect(page.locator("#progressCard")).to_be_visible()
+
+    assert captured["body"]["tags"] == ["Kenya trip", "Portfolio"]
+    assert captured["body"]["location_from_gps"] is True
+
+
+def test_import_gps_location_option_explains_missing_api_key(live_server, page):
+    url = live_server["url"]
+
+    def config_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "google_maps_api_key": "",
+                "pipeline": {"default_process_id": None},
+            }),
+        )
+
+    page.route("**/api/config", config_route)
+    page.goto(f"{url}/import")
+
+    expect(page.locator("#chkLocationFromGps")).to_be_disabled()
+    expect(page.locator("#locationGpsHint")).to_contain_text(
+        "Add a Google Maps API key in Settings"
+    )
+
+
+def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
+    """When the user actively picks a saved process for a new-workspace
+    import, the client must forward that pick as a process id — only the
+    untouched-dropdown case is omitted so the server can apply the new
+    workspace's default."""
+    url = live_server["url"]
+    db = live_server["db"]
+    identify_id = next(
+        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+    )
     captured = {}
 
     def start_import(route):
@@ -868,14 +982,14 @@ def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
     page.locator("#workspaceNew").check()
     page.locator("#newWorkspaceName").fill("Serengeti")
     page.locator("#destInput").fill("/tmp/archive")
-    page.locator("#afterImportSelect").select_option("identify")
+    page.locator("#afterImportSelect").select_option(str(identify_id))
 
     page.locator("#btnStart").click()
     expect(page.locator("#progressCard")).to_be_visible()
 
     body = captured["body"]
     assert body["new_workspace_name"] == "Serengeti"
-    assert body["after_import"] == "identify"
+    assert body["after_import"] == identify_id
 
 
 def test_import_new_workspace_shows_target_default_in_after_import_display(
@@ -887,13 +1001,17 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
     inherits — rather than leaking the currently-active workspace's
     (possibly-overridden) prefilled selection."""
     url = live_server["url"]
+    db = live_server["db"]
+    procs_by_name = {p["name"]: p["id"] for p in db.get_saved_processes()}
+    identify_id = procs_by_name["Identify birds"]
+    quick_look_id = procs_by_name["Quick look"]
 
     def config_route(route):
         route.fulfill(
             status=200,
             content_type="application/json",
             body=json.dumps({
-                "pipeline": {"default_strategy": "identify"},
+                "pipeline": {"default_process_id": identify_id},
             }),
         )
 
@@ -905,7 +1023,7 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
                 "id": 1,
                 "name": "Existing",
                 "config_overrides": {
-                    "pipeline": {"default_strategy": "quick_look"},
+                    "pipeline": {"default_process_id": quick_look_id},
                 },
             }),
         )
@@ -915,15 +1033,16 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
     page.goto(f"{url}/import")
 
     # Before touching workspaceNew, the dropdown reflects the CURRENT
-    # workspace's default (quick_look) — the source of the misleading
+    # workspace's default (Quick look) — the source of the misleading
     # signal that this fix addresses.
-    expect(page.locator("#afterImportSelect")).to_have_value("quick_look")
+    expect(page.locator("#afterImportSelect")).to_have_value(str(quick_look_id))
 
     page.locator("#workspaceNew").check()
 
     # After switching to new-workspace mode, the visible selection swaps
-    # to a placeholder that names the GLOBAL default (identify) — matching
-    # what the server will actually apply to the freshly-created workspace.
+    # to a placeholder that names the GLOBAL default (Identify birds) —
+    # matching what the server will actually apply to the freshly-created
+    # workspace.
     expect(page.locator("#afterImportSelect")).to_have_value("__hidden_default__")
     placeholder = page.locator("#afterImportHiddenDefault")
     expect(placeholder).to_contain_text("New workspace default")
@@ -933,7 +1052,7 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
     # dropdown restores the current workspace's default rather than
     # sticking on the placeholder.
     page.locator("#workspaceCurrent").check()
-    expect(page.locator("#afterImportSelect")).to_have_value("quick_look")
+    expect(page.locator("#afterImportSelect")).to_have_value(str(quick_look_id))
 
 
 def test_import_browse_button_opens_folder_browser_fallback(live_server, page):
@@ -950,6 +1069,56 @@ def test_import_browse_button_opens_folder_browser_fallback(live_server, page):
     expect(page.locator(".folder-browser-panel")).to_have_attribute("aria-modal", "true")
     expect(page.locator(".folder-browser-panel")).to_have_attribute(
         "aria-labelledby", "folderBrowserTitle")
+
+
+def test_import_folder_browser_shows_recursive_photo_counts(live_server, page):
+    """Source picker rows show the recursive count returned for each folder."""
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate("window.pickDirectory = async () => null")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target === '/api/browse/photo-counts') {
+              const body = JSON.parse(init.body || '{}');
+              window.__folderCountRequest = body;
+              return Promise.resolve(new Response(JSON.stringify({
+                counts: {
+                  '/tmp/card-a': 1,
+                  '/tmp/card-b': 1234,
+                  '/tmp/empty': 0,
+                },
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/browse') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                path: '/tmp',
+                dirs: [
+                  {name: 'card-a', path: '/tmp/card-a'},
+                  {name: 'card-b', path: '/tmp/card-b'},
+                  {name: 'empty', path: '/tmp/empty'},
+                ],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-source-browse-btn']").click()
+
+    rows = page.locator("#folderBrowserList .folder-browser-item[data-folder-path]")
+    expect(rows).to_have_count(3)
+    expect(rows.nth(0).locator(".folder-browser-count")).to_have_text("1 photo")
+    expect(rows.nth(1).locator(".folder-browser-count")).to_have_text("1,234 photos")
+    expect(rows.nth(2).locator(".folder-browser-count")).to_be_empty()
+    request = page.evaluate("window.__folderCountRequest")
+    assert request["paths"] == ["/tmp/card-a", "/tmp/card-b", "/tmp/empty"]
+    assert request["file_types"] == "both"
 
 
 def test_import_folder_browser_selects_multiple_source_folders(live_server, page):

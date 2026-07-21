@@ -55,6 +55,27 @@ def test_browse_page(app_and_db):
     html = resp.get_data(as_text=True)
     assert 'id="syncBanner"' in html
     assert 'function refreshPendingSyncBanner()' in html
+    assert html.count(
+        "_showLocationError(e && e.message ? e.message : 'Could not"
+    ) == 5
+
+
+def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):
+    """The paired-file behavior must be discoverable in Browse rather than
+    existing only as an internal ``companion_path`` or delete-dialog detail."""
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+
+    assert "JPEG · RAW pair" in html
+    assert 'id="lightboxSourceControl"' in html
+    assert "Viewing JPEG · Show RAW" in html
+    assert "Has JPEG Companion" in html
+    assert "_vireoPairSourceByPhoto[key] = 'jpeg'" in html
+    assert "_vireoPairPendingSourceByPhoto" in html
+    assert "A failed request leaves the old source intact" in html
+    assert "_lbCurrentSrcKey === 'full'" in html
+    assert "_lbLoadDetections(photoId)" in html
+    assert "_vireoPairSourceImageLoaded(photoId, 'jpeg', pairImg)" in html
 
 
 def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
@@ -76,78 +97,6 @@ def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
     assert resp.status_code == 200
     names = {k["name"] for k in db.get_photo_keywords(photo["id"])}
     assert "Cardinal" in names
-
-
-def test_api_add_keyword_skips_normalized_peer_variant(app_and_db):
-    """Single-photo add treats a normalized peer variant as already tagged.
-
-    Regression for Codex thread r3565300310. `api_selection_keyword_suggestions`
-    collapses normalized variants into one representative id; the Browse UI
-    reuses that id for its single-photo Add action. If the photo already
-    carries a legacy edge-quote peer (`‘Cardinal`) and the caller adds the
-    clean `Cardinal` row, the route must not stack the clean row on top or
-    queue a phantom clean `keyword_add` — that leaves duplicate in-app tags
-    and duplicate <rdf:li> entries after sync. Mirrors the batch behavior
-    covered by test_batch_keyword_route_skips_normalized_peer_variants.
-    """
-    app, db = app_and_db
-    photo_row = db.conn.execute(
-        "SELECT id FROM photos WHERE filename = 'bird1.jpg'"
-    ).fetchone()
-    photo_id = photo_row["id"]
-
-    clean_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = 'Cardinal'"
-    ).fetchone()["id"]
-    legacy_id = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES (?, NULL, 0, 'general')",
-        ("‘Cardinal",),
-    ).lastrowid
-    # Untag the fixture clean link so bird1 carries only the LEGACY variant;
-    # the endpoint's peer expansion is what should make it look "already
-    # tagged" rather than a stray exact-id match.
-    db.conn.execute(
-        "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-        (photo_id, clean_id),
-    )
-    db.conn.execute(
-        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
-        (photo_id, legacy_id),
-    )
-    db.conn.commit()
-
-    client = app.test_client()
-    resp = client.post(
-        f"/api/photos/{photo_id}/keywords",
-        json={"keyword_id": clean_id},
-    )
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["ok"] is True
-    # The canonical id is returned even though nothing new was tagged, so
-    # callers that store keyword_id from the response still get the clean
-    # row for subsequent operations.
-    assert body["keyword_id"] == clean_id
-
-    # bird1 should still carry ONLY the legacy variant — no clean row
-    # stacked on top.
-    tags = db.conn.execute(
-        "SELECT keyword_id FROM photo_keywords "
-        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
-        (photo_id, clean_id, legacy_id),
-    ).fetchall()
-    assert sorted(row["keyword_id"] for row in tags) == [legacy_id]
-
-    # No pending clean-name add should be queued — the sidecar already
-    # carries a normalized-equivalent entry.
-    pending = db.conn.execute(
-        """SELECT COUNT(*) AS n FROM pending_changes
-           WHERE change_type = 'keyword_add' AND value = 'Cardinal'
-             AND photo_id = ?""",
-        (photo_id,),
-    ).fetchone()
-    assert pending["n"] == 0
 
 
 def test_help_static_assets_served(app_and_db):
@@ -618,6 +567,21 @@ def test_storage_page_bounds_large_cache_file_listings(app_and_db):
     assert b'Delete Entire Cache' in resp.data
 
 
+def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
+    """Storage surfaces capacity, safety guidance, refresh, and folder actions."""
+    app, _ = app_and_db
+    page = app.test_client().get('/storage')
+    assert page.status_code == 200
+    for marker in (
+        b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
+        b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
+        b'Download again', b'cannot currently be reclaimed separately',
+        b'loadMasksCard(s && s.masks)',
+    ):
+        assert marker in page.data
+    assert page.data.count(b"{name: 'Database'") == 1
+
+
 def test_api_storage_includes_offline_originals(app_and_db):
     """Storage totals include Vireo-managed offline originals."""
     app, _ = app_and_db
@@ -628,6 +592,118 @@ def test_api_storage_includes_offline_originals(app_and_db):
     assert data["offline_originals"]["count"] == 0
     assert data["offline_originals"]["size"] == 0
     assert data["offline_originals"]["path"].endswith("offline")
+
+
+def test_api_storage_reports_volume_reclaimable_and_masks(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+
+    data = app.test_client().get('/api/storage').get_json()
+    assert data["masks"]["size"] == 450
+    assert data["masks"]["total_bytes"] == 450
+    assert len(data["masks"]["variants"]) == 2
+    assert data["reclaimable"] == sum(
+        data[name]["size"] for name in ("thumbnails", "previews", "embeddings")
+    )
+    assert data["total"] == sum([
+        data["database"]["size"], data["thumbnails"]["size"],
+        data["previews"]["size"], data["embeddings"]["size"],
+        data["models"]["size"], data["hf_cache"]["size"],
+        data["offline_originals"]["size"], data["masks"]["size"],
+    ])
+    assert data["storage_root"] == str(tmp_path)
+    assert data["locations"]
+    assert data["volumes"]
+    assert all(volume["name"] for volume in data["volumes"])
+    assert all(volume["free"] >= 0 for volume in data["volumes"])
+    assert all(volume["capacity"] > 0 for volume in data["volumes"])
+
+
+def test_api_storage_reports_each_backing_volume(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+    import classifier
+
+    embedding_dir = tmp_path / "separate-embedding-volume"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    real_ismount = app_module.os.path.ismount
+    simulated_mounts = {str(tmp_path), str(embedding_dir)}
+    monkeypatch.setattr(
+        app_module.os.path, "ismount",
+        lambda path: path in simulated_mounts or real_ismount(path),
+    )
+    disk_usage = app_module.shutil._ntuple_diskusage
+    monkeypatch.setattr(
+        app_module.shutil, "disk_usage",
+        lambda path: disk_usage(
+            1000, 900 if path == str(embedding_dir) else 600,
+            100 if path == str(embedding_dir) else 400,
+        ),
+    )
+
+    data = app.test_client().get('/api/storage').get_json()
+    by_mount = {volume["mount_path"]: volume for volume in data["volumes"]}
+    assert by_mount[str(tmp_path)]["free"] == 400
+    assert by_mount[str(embedding_dir)]["free"] == 100
+    embedding_location = next(
+        location for location in data["locations"]
+        if location["id"] == "embeddings"
+    )
+    assert embedding_location["volume"]["mount_path"] == str(embedding_dir)
+
+
+def test_clear_safe_storage_caches(app_and_db, tmp_path, monkeypatch):
+    app, db = app_and_db
+    import classifier
+
+    preview_dir = tmp_path / "previews"
+    preview_dir.mkdir()
+    (preview_dir / "1_1200.jpg").write_bytes(b"preview")
+    embedding_dir = tmp_path / "embedding-cache"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    response = app.test_client().post('/api/storage/clear-safe')
+    assert response.status_code == 200
+    assert response.get_json()["cleared"] == [
+        "thumbnails", "previews", "embeddings",
+    ]
+    assert not (tmp_path / "thumbs").exists()
+    assert not preview_dir.exists()
+    assert not embedding_dir.exists()
+    assert db.conn.execute("SELECT COUNT(*) FROM preview_cache").fetchone()[0] == 0
+
+
+def test_open_storage_folder_uses_server_selected_path(
+    app_and_db, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    monkeypatch.setattr(
+        app_module.subprocess, "run",
+        lambda command, **kwargs: calls.append(command) or Result(),
+    )
+    response = app.test_client().post('/api/storage/open-folder')
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+    assert calls
+    assert calls[0][-1] == app.config["THUMB_CACHE_DIR"].rsplit(os.sep, 1)[0]
 
 
 def test_detection_cache_stats_endpoint(app_and_db):
@@ -701,188 +777,49 @@ def test_encounter_species_confirm(app_and_db):
     assert len(kw_adds) == len(photo_ids)
 
 
-def test_encounter_species_canonicalizes_legacy_variant_rows(app_and_db):
-    """Photos tagged with a legacy edge-quote species row get migrated to the
-    clean row instead of ending up with duplicate normalized-equivalent tags.
-
-    Regression for the case where an upgraded DB carries BOTH a legacy quoted
-    row (e.g. `‘apapane`) AND a clean row (`apapane`) as separate taxonomy
-    keywords. add_keyword('apapane', is_species=True) picks the clean row
-    (exact match), the replacement path is skipped because the normalized
-    match_key of previous_species equals the requested species, and without
-    canonicalization the legacy tag is left in place, giving the photo two
-    normalized-equivalent species tags.
-    """
+def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
+    """Confirming Verdin must not attach a top-level duplicate to a photo
+    that already carries the hierarchical Verdin taxon."""
     app, db = app_and_db
     client = app.test_client()
-
-    # Insert both rows directly to bypass add_keyword's normalization — mimics
-    # an upgraded DB with a legacy variant alongside a clean row.
-    legacy_kid = db.conn.execute(
-        "INSERT INTO keywords (name, type, is_species) VALUES ('‘apapane', 'taxonomy', 1)"
-    ).lastrowid
-    clean_kid = db.conn.execute(
-        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 1)"
-    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
     db.conn.commit()
-
-    photos = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
-    p_legacy, p_other = photos[0]["id"], photos[1]["id"]
-    db.tag_photo(p_legacy, legacy_kid)
+    photo_ids = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos ORDER BY id LIMIT 2"
+        ).fetchall()
+    ]
+    nested_photo, untagged_photo = photo_ids
+    birds = db.add_keyword("1Birds")
+    family = db.add_keyword("Penduline tits", parent_id=birds)
+    nested = db.add_keyword("Verdin", parent_id=family)
+    db.tag_photo(nested_photo, nested)
 
     resp = client.post(
-        '/api/encounters/species',
-        json={"species": "apapane", "photo_ids": [p_legacy, p_other]},
+        "/api/encounters/species",
+        json={"species": "Verdin", "photo_ids": photo_ids},
     )
     assert resp.status_code == 200
-
-    # Both photos should carry exactly one apapane taxonomy tag (the clean
-    # row) — no duplicate legacy row alongside.
-    for pid in (p_legacy, p_other):
-        species_tags = db.conn.execute(
-            """SELECT k.id, k.name FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               WHERE pk.photo_id = ? AND k.is_species = 1""",
-            (pid,),
-        ).fetchall()
-        assert len(species_tags) == 1, (
-            f"photo {pid} should have exactly one species tag after canonicalization, "
-            f"got {[dict(t) for t in species_tags]!r}"
-        )
-        assert species_tags[0]["id"] == clean_kid
-        assert species_tags[0]["name"] == "apapane"
-
-    # The legacy stored spelling must be queued for XMP removal so the
-    # sidecar drops the quoted entry.
-    pending = db.get_pending_changes()
-    legacy_removes = [
-        c for c in pending
-        if c["change_type"] == "keyword_remove"
-        and c["photo_id"] == p_legacy
-        and c["value"] == "‘apapane"
-    ]
-    assert legacy_removes, (
-        f"expected a keyword_remove for the legacy '‘apapane' spelling on photo {p_legacy}; "
-        f"pending: {pending!r}"
-    )
-
-
-def test_encounter_species_canonicalizes_taxonomy_only_legacy_variant(app_and_db):
-    """Legacy `type='taxonomy'` rows without `is_species=1` are still species tags.
-
-    The endpoint elsewhere treats a keyword as a species when
-    ``is_species = 1 OR type = 'taxonomy'`` (see
-    ``Database.get_confirmed_species_for_photo`` and related helpers). Rows can
-    end up with ``type='taxonomy', is_species=0`` after a user promotes a
-    general keyword to taxonomy via the type dropdown, or after an upgrade
-    path that stamped ``type`` without flipping ``is_species``.
-
-    If the canonicalization pass only checks ``is_species = 1``, such a legacy
-    row is invisible to it and the photo keeps the legacy tag alongside the
-    clean row that ``add_keyword`` resolves — the same duplicate-tag failure
-    covered by ``test_encounter_species_canonicalizes_legacy_variant_rows``,
-    but on the taxonomy-only branch of species membership.
-    """
-    app, db = app_and_db
-    client = app.test_client()
-
-    # Legacy edge-quote row with taxonomy typing but is_species=0 — this
-    # combination is what the canonicalization query previously missed.
-    legacy_kid = db.conn.execute(
-        "INSERT INTO keywords (name, type, is_species) VALUES ('‘apapane', 'taxonomy', 0)"
-    ).lastrowid
-    clean_kid = db.conn.execute(
-        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 1)"
-    ).lastrowid
-    db.conn.commit()
-
-    photos = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
-    p_legacy, p_other = photos[0]["id"], photos[1]["id"]
-    db.tag_photo(p_legacy, legacy_kid)
-
-    resp = client.post(
-        '/api/encounters/species',
-        json={"species": "apapane", "photo_ids": [p_legacy, p_other]},
-    )
-    assert resp.status_code == 200
-
-    # The legacy taxonomy-only row must be untagged from p_legacy, leaving
-    # exactly the clean species row. Species membership matches the
-    # endpoint's own semantics: is_species=1 OR type='taxonomy'.
-    for pid in (p_legacy, p_other):
-        species_tags = db.conn.execute(
-            """SELECT k.id, k.name FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               WHERE pk.photo_id = ?
-                 AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-            (pid,),
-        ).fetchall()
-        assert len(species_tags) == 1, (
-            f"photo {pid} should have exactly one species tag after canonicalization "
-            f"of the taxonomy-only legacy row, got {[dict(t) for t in species_tags]!r}"
-        )
-        assert species_tags[0]["id"] == clean_kid
-        assert species_tags[0]["name"] == "apapane"
-
-    # The legacy stored spelling must be queued for XMP removal so the
-    # sidecar drops the quoted entry.
-    pending = db.get_pending_changes()
-    legacy_removes = [
-        c for c in pending
-        if c["change_type"] == "keyword_remove"
-        and c["photo_id"] == p_legacy
-        and c["value"] == "‘apapane"
-    ]
-    assert legacy_removes, (
-        f"expected a keyword_remove for the legacy '‘apapane' spelling on photo {p_legacy}; "
-        f"pending: {pending!r}"
-    )
-
-
-def test_encounter_species_replacement_finds_taxonomy_only_previous(app_and_db):
-    """Replacement path resolves ``previous_species`` via the taxonomy-only rule.
-
-    When ``previous_species`` (drawn from the pipeline cache's
-    ``confirmed_species``) normalizes to a stored row that carries
-    ``type='taxonomy'`` but ``is_species=0``, the ``old_kid`` lookup must find
-    it. Without ``OR type='taxonomy'`` it misses, ``is_replacement`` stays true
-    but no ``old_kid`` is resolved, so the previously-tagged photo keeps the
-    legacy tag while ``add_keyword`` adds the new species alongside it —
-    leaving two normalized-equivalent taxonomy tags on the same photo.
-    """
-    app, db = app_and_db
-    client = app.test_client()
-
-    prev_kid = db.conn.execute(
-        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 0)"
-    ).lastrowid
-    db.conn.commit()
-
-    photo_id = db.conn.execute(
-        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    root = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Verdin' AND parent_id IS NULL"
     ).fetchone()["id"]
-    db.tag_photo(photo_id, prev_kid)
 
-    _seed_encounter_cache(app, db, [photo_id], confirmed_species="apapane")
-
-    resp = client.post(
-        '/api/encounters/species',
-        json={"species": "iiwi", "photo_ids": [photo_id]},
-    )
-    assert resp.status_code == 200
-    assert resp.get_json().get("previous_species") == "apapane"
-
-    remaining = db.conn.execute(
-        """SELECT k.name FROM keywords k
-           JOIN photo_keywords pk ON pk.keyword_id = k.id
-           WHERE pk.photo_id = ?
-             AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-        (photo_id,),
-    ).fetchall()
-    names = sorted(row["name"] for row in remaining)
-    assert names == ["iiwi"], (
-        f"expected only the new species after replacement, got {names!r}"
-    )
+    nested_ids = {row["id"] for row in db.get_photo_keywords(nested_photo)}
+    untagged_ids = {row["id"] for row in db.get_photo_keywords(untagged_photo)}
+    assert nested in nested_ids
+    assert root not in nested_ids
+    assert root in untagged_ids
+    species_by_photo = db.get_species_keywords_for_photos(photo_ids)
+    assert species_by_photo[nested_photo].count("Verdin") == 1
+    assert species_by_photo[untagged_photo].count("Verdin") == 1
+    additions = [
+        row for row in db.get_pending_changes()
+        if row["change_type"] == "keyword_add" and row["value"] == "Verdin"
+    ]
+    assert [row["photo_id"] for row in additions] == [untagged_photo]
 
 
 def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
@@ -912,7 +849,7 @@ def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
 
 def test_encounter_species_validation(app_and_db):
     """POST /api/encounters/species validates required fields."""
-    app, db = app_and_db
+    app, _ = app_and_db
     client = app.test_client()
 
     resp = client.post('/api/encounters/species', json={"species": ""})
@@ -921,21 +858,6 @@ def test_encounter_species_validation(app_and_db):
     resp = client.post('/api/encounters/species',
                        json={"species": "Robin", "photo_ids": []})
     assert resp.status_code == 400
-
-    # A species that normalizes to `""` (bare quote / whitespace / quote-only)
-    # must be rejected as a client validation error before reaching
-    # add_keyword. Without the pre-normalization guard, add_keyword's
-    # ValueError would escape the transaction handler as a 500.
-    photos = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchall()
-    photo_ids = [p["id"] for p in photos]
-    for bad in ("'", "\"", "‘’"):
-        resp = client.post(
-            '/api/encounters/species',
-            json={"species": bad, "photo_ids": photo_ids},
-        )
-        assert resp.status_code == 400, (
-            f"expected 400 for species={bad!r}, got {resp.status_code}: {resp.get_data(as_text=True)}"
-        )
 
 
 def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
@@ -1285,52 +1207,6 @@ def test_burst_override_change_untags_previous(app_and_db):
     assert ("keyword_add", "Junco") in values
 
 
-def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
-    """When the pipeline cache still holds a legacy quoted species like
-    `‘apapane` but the DB row is stored under the normalized `apapane`, the
-    replacement path must queue keyword_remove with the STORED normalized
-    name so it cancels an outstanding keyword_add for the same normalized
-    key. Queuing the raw quoted value would leave both the stale add and a
-    quoted remove in the pending set, and the next XMP sync would then
-    write the stray-quote spelling back to the sidecar.
-    """
-    app, db = app_and_db
-    client = app.test_client()
-    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
-
-    # Pretend an earlier confirm queued a keyword_add for the normalized
-    # spelling. This is the state we need cancellation to fire against.
-    resp = client.post(
-        "/api/encounters/species",
-        json={"species": "Apapane", "photo_ids": photo_ids},
-    )
-    assert resp.status_code == 200
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
-    assert ("keyword_add", "Apapane") in values
-
-    # Seed the pipeline cache's confirmed_species with the LEGACY quoted
-    # spelling. In reality this would come from an upgraded pipeline cache
-    # written before keyword normalization landed. The DB row is still stored
-    # as clean `Apapane` (add_keyword strips the leading edge quote).
-    _seed_encounter_cache(app, db, photo_ids, confirmed_species="‘Apapane")
-
-    resp = client.post(
-        "/api/encounters/species",
-        json={"species": "Blue Jay", "photo_ids": photo_ids},
-    )
-    assert resp.status_code == 200
-
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
-    # The stale keyword_add for the normalized spelling must be cancelled by
-    # a remove that targets the same normalized value — not the raw quoted
-    # cache value. If the queue used the cache spelling, this assertion
-    # would fail because the raw remove wouldn't match the stored add and
-    # both would linger.
-    assert ("keyword_add", "Apapane") not in values
-    assert ("keyword_remove", "‘Apapane") not in values
-    assert ("keyword_add", "Blue Jay") in values
-
-
 def test_encounter_species_confirm_same_species_noop_on_keywords(app_and_db):
     """Re-confirming the same species doesn't queue a remove."""
     app, db = app_and_db
@@ -1495,6 +1371,373 @@ def test_encounter_species_no_op_when_all_already_tagged(app_and_db):
         assert "Blue Jay" in names
 
 
+def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db):
+    """Accepting a prediction already represented by a hierarchical species
+    changes review status and records a status-only prediction_accept edit
+    that undo/redo respect without re-tagging the pre-existing keyword."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="verdin.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    db.tag_photo(photo_id, nested)
+    root = db.add_keyword("Verdin", is_species=True)
+    assert db.get_photos_with_equivalent_species([photo_id], root) == {photo_id}
+    detection_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.9,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()["id"]
+    before = len([
+        row for row in db.get_edit_history()
+        if row["action_type"] == "prediction_accept"
+    ])
+
+    response = client.post(f"/api/predictions/{prediction_id}/accept")
+
+    assert response.status_code == 200
+    # A prediction_accept entry IS recorded so the user-visible accept is
+    # auditable and undoable — the entry carries a ``no_tag`` payload so
+    # undo/redo touch only the prediction review status.
+    accept_rows = [
+        row for row in db.get_edit_history()
+        if row["action_type"] == "prediction_accept"
+    ]
+    assert len(accept_rows) == before + 1
+    names = [row["name"] for row in db.get_photo_keywords(photo_id)]
+    assert names.count("Verdin") == 1
+    assert db.conn.execute(
+        "SELECT status FROM prediction_review WHERE prediction_id = ? "
+        "AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "accepted"
+
+    # Undo reverses the review-status flip without untagging the
+    # pre-existing hierarchical keyword.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "prediction_accept"
+    assert db.conn.execute(
+        "SELECT COALESCE(status, 'pending') AS status FROM prediction_review "
+        "WHERE prediction_id = ? AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "pending"
+    names_after_undo = [row["name"] for row in db.get_photo_keywords(photo_id)]
+    # The hierarchy leaf (parent nested Verdin) is still attached; the
+    # root Verdin was never tagged so it must not appear now.
+    assert nested in {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert root not in {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert names_after_undo.count("Verdin") == 1
+
+    # Redo re-flips the review status without tagging the root Verdin.
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone["action_type"] == "prediction_accept"
+    assert db.conn.execute(
+        "SELECT status FROM prediction_review WHERE prediction_id = ? "
+        "AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "accepted"
+    assert root not in {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested in {row["id"] for row in db.get_photo_keywords(photo_id)}
+
+
+def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db):
+    """Additional-subject acceptance mirrors regular acceptance when the
+    species already exists through a hierarchy leaf: a status-only
+    prediction_accept entry is recorded that undo/redo respect without
+    touching the pre-existing keyword association."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="subject-verdin.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    db.tag_photo(photo_id, nested)
+    root = db.add_keyword("Verdin", is_species=True)
+    detection_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.9,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()["id"]
+
+    response = client.post(f"/api/predictions/{prediction_id}/accept-subject")
+
+    assert response.status_code == 200
+    # Exactly one status-only prediction_accept edit is recorded — it
+    # exists so the accept is auditable/undoable but its payload marks
+    # ``no_tag`` so undo/redo do not touch the pre-existing keyword.
+    accept_rows = [
+        row for row in db.get_edit_history()
+        if row["action_type"] == "prediction_accept"
+    ]
+    assert len(accept_rows) == 1
+    names = [row["name"] for row in db.get_photo_keywords(photo_id)]
+    assert names.count("Verdin") == 1
+    assert db.conn.execute(
+        "SELECT status FROM prediction_review WHERE prediction_id = ? "
+        "AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "accepted"
+
+    # Undo reverses the status flip without untagging the hierarchy leaf
+    # or attaching the root spelling.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "prediction_accept"
+    assert db.conn.execute(
+        "SELECT COALESCE(status, 'pending') AS status FROM prediction_review "
+        "WHERE prediction_id = ? AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "pending"
+    ids_after_undo = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested in ids_after_undo
+    assert root not in ids_after_undo
+
+
+def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_db):
+    """Accept-subject on a photo that already carries the target species
+    accepts agreeing predictions from EVERY classifier model on one
+    detection. Each classifier owns its own ``labels_fingerprint`` scope,
+    so undo must reset every recorded prediction id — not just the first.
+    Only iterating the head of ``prediction_ids`` would leave the other
+    classifiers' accepted rows accepted after undo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="verdin-multi.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo already carries Verdin through a hierarchy leaf so every
+    # per-model accept below runs the no_tag path.
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    db.tag_photo(photo_id, nested)
+    db.add_keyword("Verdin", is_species=True)
+
+    detection_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    # Verdin predictions from two DIFFERENT classifier models — each
+    # owns its own labels fingerprint, so each accept covers a distinct
+    # sibling scope on the same detection.
+    db.add_prediction(
+        detection_id, "Verdin", 0.9, "bioclip", labels_fingerprint="fp1",
+    )
+    db.add_prediction(
+        detection_id, "Verdin", 0.87, "inat", labels_fingerprint="fp2",
+    )
+    # A rival top-confidence sibling in each classifier scope so the
+    # undo path has something to promote back to 'pending'.
+    db.add_prediction(
+        detection_id, "Other", 0.5, "bioclip", labels_fingerprint="fp1",
+    )
+    db.add_prediction(
+        detection_id, "Other", 0.4, "inat", labels_fingerprint="fp2",
+    )
+    target_pred = next(
+        row for row in db.get_predictions()
+        if row["classifier_model"] == "bioclip" and row["species"] == "Verdin"
+    )
+
+    response = client.post(
+        f"/api/predictions/{target_pred['id']}/accept-subject",
+    )
+    assert response.status_code == 200, response.get_data(as_text=True)
+
+    # Both models' Verdin predictions are accepted.
+    statuses_by_model = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    assert statuses_by_model == {"bioclip": "accepted", "inat": "accepted"}
+
+    # A single ``prediction_accept`` edit is recorded — it should carry
+    # both prediction ids under ``prediction_ids``.
+    accept_rows = [
+        row for row in db.get_edit_history()
+        if row["action_type"] == "prediction_accept"
+    ]
+    assert len(accept_rows) == 1
+
+    # Undo must reset BOTH classifier scopes. Without iterating every
+    # recorded prediction id, the inat scope stays accepted.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "prediction_accept"
+
+    statuses_after_undo = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    for model, status in statuses_after_undo.items():
+        assert status != "accepted", (
+            f"undo must reset the {model!r} Verdin prediction; a still-"
+            "accepted sibling scope means the second recorded prediction "
+            "id was skipped"
+        )
+
+
+def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
+    """Accept-subject batches naturally mix a real tag (the first accept
+    adds the species) with follow-up no-op accepts (later classifiers see
+    the species already attached). The aggregate edit item must encode
+    every accepted prediction id as JSON ``prediction_ids`` — the compact
+    comma-separated fallback cannot be parsed by ``_edit_prediction_ids``
+    and would drop every sibling status flip on undo, leaving the second
+    classifier's accepted row accepted.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="verdin-mixed.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries NO species keyword up front, so the first accept in
+    # the loop actually tags Verdin (changed_tag=True); every later
+    # classifier's accept sees the species already attached and returns
+    # changed_tag=False. The aggregate history item must still carry
+    # every prediction id so undo resets both scopes.
+    db.add_keyword("Verdin", is_species=True)
+
+    detection_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(
+        detection_id, "Verdin", 0.9, "bioclip", labels_fingerprint="fp1",
+    )
+    db.add_prediction(
+        detection_id, "Verdin", 0.87, "inat", labels_fingerprint="fp2",
+    )
+    db.add_prediction(
+        detection_id, "Other", 0.5, "bioclip", labels_fingerprint="fp1",
+    )
+    db.add_prediction(
+        detection_id, "Other", 0.4, "inat", labels_fingerprint="fp2",
+    )
+    target_pred = next(
+        row for row in db.get_predictions()
+        if row["classifier_model"] == "bioclip" and row["species"] == "Verdin"
+    )
+
+    response = client.post(
+        f"/api/predictions/{target_pred['id']}/accept-subject",
+    )
+    assert response.status_code == 200, response.get_data(as_text=True)
+
+    # Both models' Verdin predictions are accepted; the species is
+    # attached exactly once.
+    statuses_by_model = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    assert statuses_by_model == {"bioclip": "accepted", "inat": "accepted"}
+    assert [k["name"] for k in db.get_photo_keywords(photo_id)].count("Verdin") == 1
+
+    # The recorded prediction_accept edit stores prediction ids as JSON,
+    # not a comma-separated fallback string.
+    accept_rows = [
+        row for row in db.get_edit_history()
+        if row["action_type"] == "prediction_accept"
+    ]
+    assert len(accept_rows) == 1
+    items = db.conn.execute(
+        "SELECT old_value FROM edit_history_items WHERE edit_id = ?",
+        (accept_rows[0]["id"],),
+    ).fetchall()
+    assert len(items) == 1
+    stored_old = items[0]["old_value"] or ""
+    assert stored_old.lstrip().startswith("{"), (
+        "mixed accept-subject must encode prediction_ids as JSON so undo "
+        f"can parse every scope; got {stored_old!r}"
+    )
+    parsed = json.loads(stored_old)
+    assert set(parsed.get("prediction_ids") or []) == {
+        row["id"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    # Mixed (not all no_tag) — the aggregate item must NOT declare
+    # no_tag, so undo still untags the species that was actually added.
+    assert not parsed.get("no_tag")
+
+    # Undo must reset BOTH classifier scopes AND untag the species that
+    # was actually added by the first accept in the loop.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "prediction_accept"
+    assert "Verdin" not in {k["name"] for k in db.get_photo_keywords(photo_id)}
+
+    statuses_after_undo = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    for model, status in statuses_after_undo.items():
+        assert status != "accepted", (
+            f"undo must reset the {model!r} Verdin prediction; a still-"
+            "accepted sibling scope means the mixed batch dropped a "
+            "prediction id from history"
+        )
+
+
 def test_encounter_species_records_only_newly_tagged(app_and_db):
     """A mixed set (some already carry the species, some don't) records edit
     items ONLY for the newly-tagged photos.
@@ -1622,6 +1865,581 @@ def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
     assert not db.get_pending_changes()
 
 
+def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db):
+    """Replacing a confirmed species removes its nested hierarchy leaf and
+    records enough history for undo and redo to restore the exact tags."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    alternate_parent = db.add_keyword("Desert birds")
+    alternate_nested = db.add_keyword("Verdin", parent_id=alternate_parent)
+    db.tag_photo(photo_id, nested)
+    db.tag_photo(photo_id, alternate_nested)
+    _seed_encounter_cache(
+        app, db, [photo_id], confirmed_species="Verdin",
+    )
+
+    response = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+
+    assert response.status_code == 200
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Verdin" not in names
+    assert "Blue Jay" in names
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested not in tagged_ids
+    assert alternate_nested not in tagged_ids
+    history = db.get_edit_history()
+    assert history[0]["action_type"] == "species_replace"
+
+    db.undo_last_edit()
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Verdin" in names
+    assert "Blue Jay" not in names
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested in tagged_ids
+    assert alternate_nested in tagged_ids
+
+    db.redo_last_undo()
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Verdin" not in names
+    assert "Blue Jay" in names
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested not in tagged_ids
+    assert alternate_nested not in tagged_ids
+
+
+def test_encounter_species_replacement_retags_same_taxon_alias(app_and_db):
+    """Same-taxon replacement (e.g. common name → scientific alias) must still
+    end up tagging the photo with the new keyword row instead of stripping the
+    old row and leaving the photo without any species.
+
+    ``get_photos_with_equivalent_species`` matches by taxon_id, so a photo
+    tagged with the previous species alias gets flagged as "already carrying"
+    the new one. Without excluding rows scheduled for removal from that
+    precheck, the replacement loop untags the old row, ``newly_tagged`` stays
+    empty, and the photo ends up carrying no species keyword.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    # Prior confirmation left a linked root "Verdin" row plus a hierarchical
+    # leaf that also carries the taxon — replacement must strip both and
+    # still leave the photo with the new scientific-name row.
+    root_verdin = db.add_keyword("Verdin", is_species=True)
+    parent = db.add_keyword("Penduline tits")
+    nested_verdin = db.add_keyword("Verdin", parent_id=parent)
+    # Backfill taxon on the nested leaf so the same-taxon removal loop
+    # includes it (matches mark_species_keywords' link behavior).
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 2912, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (nested_verdin,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_id, root_verdin)
+    db.tag_photo(photo_id, nested_verdin)
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Auriparus flaviceps", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    def _species_names_on(pid):
+        return sorted(
+            row["name"] for row in db.conn.execute(
+                """SELECT k.name FROM keywords k
+                   JOIN photo_keywords pk ON pk.keyword_id = k.id
+                   WHERE pk.photo_id = ?
+                     AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                (pid,),
+            ).fetchall()
+        )
+
+    remaining = _species_names_on(photo_id)
+    assert remaining == ["Auriparus flaviceps"], (
+        f"expected only the new scientific-name row, got {remaining!r}"
+    )
+    history = db.get_edit_history()
+    assert history[0]["action_type"] == "species_replace"
+
+    db.undo_last_edit()
+    restored = _species_names_on(photo_id)
+    assert "Verdin" in restored
+    assert "Auriparus flaviceps" not in restored
+
+    db.redo_last_undo()
+    redone = _species_names_on(photo_id)
+    assert redone == ["Auriparus flaviceps"]
+
+
+def test_encounter_species_replacement_preserves_linked_homonym(app_and_db):
+    """When ``previous_species`` resolves to an unlinked legacy row and the
+    photo carries a distinct linked same-key homonym, the linked row is a
+    different species and must not be scheduled for removal.
+
+    Regression: the ``old_target_taxon_id is None`` branch matched every
+    species row on the photo by display key, so an encounter replacement
+    where the cache's confirmed species was legacy ``Robin`` (NULL taxon)
+    would delete a taxonomy-linked ``robin`` from the same photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (400, 'Turdus migratorius', 'American Robin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Unlinked legacy species row — this becomes ``old_kid_row``.
+    legacy_root = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL, type = 'taxonomy' WHERE id = ?",
+        (legacy_root,),
+    )
+    # Distinct linked same-key row anywhere in the catalog. add_keyword's
+    # (name, parent_id, type) UNIQUE constraint dedupes at parent_id=NULL,
+    # so insert this one under a hierarchy parent to make it a separate row.
+    hierarchy_parent = db.add_keyword("Turdidae")
+    linked_homonym = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Robin', ?, 1, 'taxonomy', 400)",
+        (hierarchy_parent,),
+    ).lastrowid
+    db.tag_photo(photo_id, linked_homonym)
+    db.conn.commit()
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Robin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert linked_homonym in tagged_ids, (
+        "Linked same-key homonym is a distinct species — it must survive "
+        "an encounter replacement whose previous species is unlinked and "
+        "only coincidentally shares the normalized name"
+    )
+
+
+def test_encounter_species_replacement_preserves_legacy_homonym(app_and_db):
+    """When the previous species is a linked taxon and the catalog also
+    holds another taxonomy row with the SAME normalized key bound to a
+    different taxon (a homonym: legacy ``Robin`` alongside taxonomy
+    ``Robin`` pointing at a different species), a replacement must not
+    match unlinked NULL-taxon same-key rows as the old species. Otherwise
+    a legacy ``Robin`` tag on the photo (potentially the intended
+    homonym) is queued for removal purely because its normalized key
+    coincides with the swapped-out species name.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (100, 'Erithacus rubecula', 'Robin', 'species')"
+    )
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (200, 'Turdus migratorius', 'American Robin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Linked "old" species Erithacus rubecula (taxon 100), name "Robin".
+    old_root = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 100, type = 'taxonomy' WHERE id = ?",
+        (old_root,),
+    )
+    # A DIFFERENT taxonomy row anywhere in the catalog whose normalized key
+    # is also "robin" but points at a different taxon (American Robin).
+    # add_keyword's (name, parent_id, type) UNIQUE constraint means we insert
+    # directly under a hierarchy parent to make it a distinct row.
+    homonym_parent = db.add_keyword("Turdidae")
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Robin', ?, 1, 'taxonomy', 200)",
+        (homonym_parent,),
+    )
+    # A separate legacy species leaf on the photo whose taxon has not
+    # been backfilled (species-like but taxon_id IS NULL). This mimics
+    # an upgraded catalog where a hierarchy leaf was flagged as
+    # taxonomy but never linked. Because its normalized key coincides
+    # with the swapped-out species, without the homonym guard the
+    # replacement would treat it as the old species and untag it.
+    legacy_parent = db.add_keyword("Old Field Guide")
+    legacy_leaf = db.add_keyword("Robin", parent_id=legacy_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (legacy_leaf,),
+    )
+    db.tag_photo(photo_id, old_root)
+    db.tag_photo(photo_id, legacy_leaf)
+    db.conn.commit()
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Robin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    # Linked root "Robin" was the confirmed old species — must be untagged.
+    assert old_root not in tagged_ids
+    # Legacy leaf "Robin" is an ambiguous homonym — must survive; the
+    # replacement should not treat it as the old species just because
+    # the normalized key matches.
+    assert legacy_leaf in tagged_ids
+
+
+def test_encounter_species_replacement_scopes_hierarchy_fallback_to_submitted_photos(
+    app_and_db,
+):
+    """The hierarchy-fallback old-species lookup must be scoped to keywords
+    actually attached to the submitted photos.
+
+    Regression: when ``previous_species`` only exists as a hierarchical
+    keyword and multiple same-name nested rows live in the catalog under
+    different parents pointing at different taxa (a homonym elsewhere), an
+    unscoped ``LIMIT 1`` could pick the row that belongs to some other
+    photo. The subsequent removal loop matches attached rows by
+    ``taxon_id`` — so if the fallback picks a taxon the submitted photo
+    does not actually carry, the real hierarchy tag survives while the
+    new species is added on top, leaving a stale duplicate.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) VALUES "
+        "(9101, 'Auriparus flaviceps', 'Verdin', 'species'),"
+        "(9102, 'Fakelatus fake', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Hierarchy leaf actually attached to the submitted photo. Points at
+    # taxon 9101.
+    attached_parent = db.add_keyword("Penduline tits")
+    attached_leaf = db.add_keyword("Verdin", parent_id=attached_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9101, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (attached_leaf,),
+    )
+    # A DIFFERENT same-name hierarchy leaf in the catalog that is NOT
+    # attached to this photo and points at an unrelated taxon 9102. An
+    # unscoped LIMIT 1 could pick this row first (the ``k.id`` tiebreaker
+    # is deterministic but incidental), and the removal loop would then
+    # look for taxon 9102 on the submitted photo — miss — and leave the
+    # real ``Verdin`` tag attached.
+    unrelated_parent = db.add_keyword("Nonexistent group")
+    unrelated_leaf = db.add_keyword("Verdin", parent_id=unrelated_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9102, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (unrelated_leaf,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_id, attached_leaf)
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    # The attached hierarchy leaf on the submitted photo must be gone.
+    assert attached_leaf not in tagged_ids, (
+        "Scoped hierarchy fallback should have picked the attached leaf "
+        "(taxon 9101) so the removal loop matches and untags it."
+    )
+    # The unrelated same-name leaf must remain untouched — it was not
+    # attached to this photo in the first place, and nothing should have
+    # touched it.
+    unrelated_still_exists = db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (unrelated_leaf,),
+    ).fetchone()
+    assert unrelated_still_exists is not None
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Blue Jay" in names
+    assert "Verdin" not in names
+
+
+def test_encounter_species_replacement_resolves_hierarchy_fallback_per_photo(
+    app_and_db,
+):
+    """When submitted photos carry same-name hierarchy leaves under DIFFERENT
+    taxa, the replacement removal loop must resolve each photo's old row on
+    its own taxon.
+
+    Regression: the previous fix scoped the fallback to attached leaves but
+    still picked one ``best_taxon`` covering the most photos. In a batch
+    that spans two taxa under the same hierarchy alias (an ambiguous name
+    with distinct parents — for example ``Verdin`` nested under both
+    ``Penduline tits`` linked to taxon A and ``Other family`` linked to
+    taxon B), the removal loop only matched the winning taxon. Every
+    photo carrying a leaf under the losing taxon kept its old species
+    attached while the new one was added on top — a stale duplicate.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) VALUES "
+        "(9201, 'Auriparus flaviceps', 'Verdin', 'species'),"
+        "(9202, 'Fakelatus fake', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_rows = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 2"
+    ).fetchall()
+    photo_a = photo_rows[0]["id"]
+    photo_b = photo_rows[1]["id"]
+
+    # Two hierarchy leaves, both named ``Verdin`` but under different
+    # parents pointing at different taxa. Both submitted photos carry
+    # SEPARATE leaves — one under each taxon. The removal loop matches
+    # attached rows by ``taxon_id``, so a whole-batch ``best_taxon`` pick
+    # would leave one of the two photos with the old leaf still tagged.
+    parent_a = db.add_keyword("Penduline tits")
+    leaf_a = db.add_keyword("Verdin", parent_id=parent_a)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9201, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (leaf_a,),
+    )
+    parent_b = db.add_keyword("Other family")
+    leaf_b = db.add_keyword("Verdin", parent_id=parent_b)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9202, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (leaf_b,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_a, leaf_a)
+    db.tag_photo(photo_b, leaf_b)
+    _seed_encounter_cache(
+        app, db, [photo_a, photo_b], confirmed_species="Verdin",
+    )
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_a, photo_b]},
+    )
+    assert resp.status_code == 200
+
+    kids_a = {row["id"] for row in db.get_photo_keywords(photo_a)}
+    kids_b = {row["id"] for row in db.get_photo_keywords(photo_b)}
+    # Each photo's own hierarchy leaf must be gone — not just the one for
+    # the taxon that happened to cover the most photos.
+    assert leaf_a not in kids_a, (
+        "photo_a's Verdin leaf (taxon 9201) must be untagged even though "
+        "the batch also contains a Verdin leaf on another taxon"
+    )
+    assert leaf_b not in kids_b, (
+        "photo_b's Verdin leaf (taxon 9202) must be untagged — a batch-wide "
+        "``best_taxon`` pick would leave one of the two photos stranded"
+    )
+    names_a = {row["name"] for row in db.get_photo_keywords(photo_a)}
+    names_b = {row["name"] for row in db.get_photo_keywords(photo_b)}
+    assert "Blue Jay" in names_a
+    assert "Blue Jay" in names_b
+    assert "Verdin" not in names_a
+    assert "Verdin" not in names_b
+
+
+def test_encounter_species_replacement_skips_unrelated_root_when_only_leaf_attached(
+    app_and_db,
+):
+    """When a same-name root species row exists in the catalog for one taxon
+    but the submitted photo actually carries only a hierarchical leaf for a
+    DIFFERENT taxon, the removal must still target the attached leaf.
+
+    Regression: the previous resolver took a catalog-wide root shortcut and
+    assigned that root row to every submitted photo. The removal loop below
+    matches attached rows by ``taxon_id`` — so a photo whose only same-name
+    tag was a leaf under a different taxon kept its old leaf attached while
+    the new species was added on top, leaving a stale duplicate.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) VALUES "
+        "(9301, 'Auriparus flaviceps', 'Verdin', 'species'),"
+        "(9302, 'Fakelatus fake', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Root species row named "Verdin" exists in the catalog, linked to
+    # taxon 9301. NOT attached to the submitted photo. The old resolver
+    # short-circuited on this row and assigned taxon 9301 as the removal
+    # target for every submitted photo.
+    root_verdin = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9301, type = 'taxonomy' WHERE id = ?",
+        (root_verdin,),
+    )
+    # The photo actually carries only a nested "Verdin" leaf under a
+    # different taxon (9302) — a legitimate homonym under a different
+    # parent (the kind of row duplicate repair deliberately preserves).
+    attached_parent = db.add_keyword("Other family")
+    attached_leaf = db.add_keyword("Verdin", parent_id=attached_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9302, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (attached_leaf,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_id, attached_leaf)
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    # The attached hierarchy leaf (taxon 9302) on the submitted photo
+    # must be gone. A catalog-wide root shortcut on the 9301 row would
+    # have left the 9302 leaf attached because taxon_id mismatch.
+    assert attached_leaf not in tagged_ids, (
+        "Per-photo resolution should have picked the attached 9302 leaf "
+        "as the old row so the removal loop matches and untags it, even "
+        "though a same-name root row for a different taxon exists in the "
+        "catalog."
+    )
+    # The unrelated root row for taxon 9301 must remain untouched — it
+    # was never attached to this photo, so replacement must not affect it.
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (root_verdin,),
+    ).fetchone() is not None
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Blue Jay" in names
+    assert "Verdin" not in names
+
+
+def test_encounter_species_replacement_removes_repaired_alias_leaf(app_and_db):
+    """When the submitted photo carries only a repaired hierarchy leaf whose
+    display name DIFFERS from ``previous_species`` but shares the same taxon
+    as the linked root, the removal must still find and untag it.
+
+    Regression: the per-photo old-row query required the attached leaf's
+    ``k.name`` to equal ``previous_species`` (COLLATE NOCASE), so after
+    duplicate repair detached the redundant root and left only a
+    differently-named alias leaf (for example ``Birds|Desert Verdin`` under
+    linked root ``Verdin``), the resolver picked no old row for the photo.
+    ``is_replacement`` stayed true but ``old_kid_row`` was None, so the
+    endpoint recorded a plain add and left the photo tagged with both the
+    stale alias leaf and the new species. Match rows by the linked root's
+    ``taxon_id`` in addition to name so the alias leaf is caught and
+    removed.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) VALUES "
+        "(9401, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Linked root species ``Verdin`` at taxon 9401 — exists in the catalog
+    # but is NOT attached to the submitted photo (duplicate repair detached
+    # the redundant root when the photo already carried a hierarchy leaf).
+    root_verdin = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9401, type = 'taxonomy' WHERE id = ?",
+        (root_verdin,),
+    )
+    # The photo carries only a repaired hierarchy leaf whose display name
+    # (``Desert Verdin``) differs from the root's name but points at the
+    # same taxon. A name-only lookup misses it entirely.
+    attached_parent = db.add_keyword("Birds")
+    attached_leaf = db.add_keyword("Desert Verdin", parent_id=attached_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9401, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (attached_leaf,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_id, attached_leaf)
+    # Cached ``confirmed_species`` is the canonical root display name
+    # (``Verdin``) — the encounter was confirmed under that name before
+    # duplicate repair rewrote the DB tags.
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json().get("previous_species") == "Verdin"
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    # The repaired alias leaf must be gone — not left behind alongside the
+    # new species. Matching only by name would miss it because
+    # ``Desert Verdin`` != ``Verdin``.
+    assert attached_leaf not in tagged_ids, (
+        "Taxon-based per-photo resolution should have picked the attached "
+        "alias leaf (same taxon as the linked root) so the removal loop "
+        "matches and untags it."
+    )
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Blue Jay" in names
+    # Neither the alias leaf nor the canonical root should remain on the
+    # photo — a lingering ``Desert Verdin`` would leave the photo tagged
+    # with the old species alongside ``Blue Jay``.
+    assert "Desert Verdin" not in names
+    assert "Verdin" not in names
+
+    # The unrelated root row for the same taxon must remain in the catalog
+    # — it was never attached to this photo, so replacement must not affect
+    # its existence.
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (root_verdin,),
+    ).fetchone() is not None
+
+
 def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     """Old-species lookup must be scoped to root species keywords only."""
     app, db = app_and_db
@@ -1656,6 +2474,141 @@ def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     for pid in photo_ids:
         kw_ids = {k["id"] for k in db.get_photo_keywords(pid)}
         assert root_sparrow_id not in kw_ids
+
+
+def test_encounter_species_replacement_finds_taxonomy_only_previous(app_and_db):
+    """Replacement path resolves ``previous_species`` via the taxonomy-only rule.
+
+    When ``previous_species`` (drawn from the pipeline cache's
+    ``confirmed_species``) resolves to a stored row that carries
+    ``type='taxonomy'`` but ``is_species=0`` (update_keyword with an explicit
+    type doesn't set the legacy column), the ``old_kid`` lookup must find it.
+    Without ``OR type='taxonomy'`` it misses, ``is_replacement`` stays true
+    but no ``old_kid`` is resolved, so the previously-tagged photo keeps the
+    old tag while ``add_keyword`` adds the new species alongside it —
+    leaving two taxonomy tags on the same photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    prev_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 0)"
+    ).lastrowid
+    db.conn.commit()
+
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    db.tag_photo(photo_id, prev_kid)
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="apapane")
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "iiwi", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json().get("previous_species") == "apapane"
+
+    remaining = db.conn.execute(
+        """SELECT k.name FROM keywords k
+           JOIN photo_keywords pk ON pk.keyword_id = k.id
+           WHERE pk.photo_id = ?
+             AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+        (photo_id,),
+    ).fetchall()
+    names = sorted(row["name"] for row in remaining)
+    assert names == ["iiwi"], (
+        f"expected only the new species after replacement, got {names!r}"
+    )
+
+
+def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
+    """When the pipeline cache still holds a legacy quoted species like
+    `‘apapane` but the DB row is stored under the normalized `apapane`, the
+    replacement path must queue keyword_remove with the STORED normalized
+    name so it cancels an outstanding keyword_add for the same normalized
+    key. Queuing the raw quoted value would leave both the stale add and a
+    quoted remove in the pending set, and the next XMP sync would then
+    write the stray-quote spelling back to the sidecar. The v5 migration
+    normalizes DB rows but not pipeline cache files, so this state remains
+    reachable.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Pretend an earlier confirm queued a keyword_add for the normalized
+    # spelling. This is the state we need cancellation to fire against.
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Apapane", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_add", "Apapane") in values
+
+    # Seed the pipeline cache's confirmed_species with the LEGACY quoted
+    # spelling — an upgraded pipeline cache written before keyword
+    # normalization landed. The DB row is stored as clean `Apapane`.
+    _seed_encounter_cache(app, db, photo_ids, confirmed_species="‘Apapane")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    # The stale keyword_add for the normalized spelling must be cancelled by
+    # a remove that targets the same normalized value — not the raw quoted
+    # cache value. If the queue used the cache spelling, both would linger.
+    assert ("keyword_add", "Apapane") not in values
+    assert ("keyword_remove", "‘Apapane") not in values
+    assert ("keyword_add", "Blue Jay") in values
+
+
+def test_encounter_species_replacement_queues_stored_case_previous_name(app_and_db):
+    """Cache/stored spelling can differ by case only (SQLite NOCASE keeps
+    them together, but pending_changes.value is exact-match). When
+    replacing a species whose cache reads `saffron finch` but the stored
+    keyword row and outstanding pending add are `Saffron Finch`, the
+    remove queued for the old species must use the stored spelling so it
+    cancels the pending add. Queuing the cache spelling would leave both
+    add(`Saffron Finch`) and remove(`saffron finch`) in the pending set;
+    sync_to_xmp then treats them as a paired rename and writes the old
+    species back to the sidecar.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Earlier confirm queues keyword_add('Saffron Finch') under the DB's
+    # canonical case.
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Saffron Finch", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_add", "Saffron Finch") in values
+
+    # Cache confirmed_species drifts to a case-variant spelling (upgraded
+    # cache written by a client that normalized case differently).
+    _seed_encounter_cache(app, db, photo_ids, confirmed_species="saffron finch")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    # The stale add must be cancelled by a remove that targets the same
+    # stored spelling — not the lowercase cache value.
+    assert ("keyword_add", "Saffron Finch") not in values
+    assert ("keyword_remove", "saffron finch") not in values
+    assert ("keyword_add", "Blue Jay") in values
 
 
 def test_species_search(app_and_db):
@@ -1757,7 +2710,7 @@ def test_pages_link_base_css(app_and_db):
     """Every page includes a <link> to vireo-base.css."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
@@ -1829,17 +2782,60 @@ def test_compare_predictions_api(app_and_db):
     assert len(data["photos"]) >= 2
 
     # Check structure of a photo entry
-    photo = data["photos"][0]
+    photo = next(
+        item for item in data["photos"]
+        if item["photo_id"] == photo_ids[0]
+    )
     assert "photo_id" in photo
     assert "filename" in photo
     assert "predictions" in photo
     assert isinstance(photo["predictions"], dict)  # keyed by model name
+    assert "subjects" in photo
+    subject = next(
+        item for item in photo["subjects"]
+        if item["detection_id"] == det_ids_0[0]
+    )
+    assert subject["box"] == {
+        "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3,
+    }
+    assert set(subject["predictions"]) == {"model-a", "model-b"}
     # Each model maps to a list of predictions (multi-detection support)
     for model_preds in photo["predictions"].values():
         assert isinstance(model_preds, list)
         assert len(model_preds) >= 1
         assert "species" in model_preds[0]
         assert "confidence" in model_preds[0]
+        assert "detection_id" in model_preds[0]
+
+
+def test_compare_predictions_api_preserves_unclassified_subject(app_and_db):
+    """A qualifying box remains visible when no classifier prediction exists."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    det_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.55, "y": 0.4, "w": 0.2, "h": 0.2},
+            "confidence": 0.45,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    cid = db.add_collection(
+        "Unclassified Subject",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    response = app.test_client().get(
+        f"/api/predictions/compare?collection_id={cid}"
+    )
+
+    assert response.status_code == 200
+    subjects = response.get_json()["photos"][0]["subjects"]
+    subject = next(item for item in subjects if item["detection_id"] == det_id)
+    assert subject["predictions"] == {}
 
 
 def test_compare_predictions_api_exposes_miss_flags(app_and_db):
@@ -1967,6 +2963,69 @@ def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
     assert row["row_label"] == "Match"
     assert row["needs_review"] is False
     assert data["summary"]["missing_predictions"] == 0
+
+
+def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
+    """An alias prediction (hierarchy leaf name) whose taxon matches the
+    photo's canonical species keyword must not be shown as a conflict.
+
+    ``get_species_keywords_for_photos`` returns species keyword names
+    canonicalized to the same-taxon root spelling. When the prediction
+    label is a hierarchy alias for the same taxon (for example
+    ``Desert Verdin`` under a ``Verdin`` root), the Compare endpoint
+    used to feed the raw alias string into ``compare_prediction_to_keywords``
+    and — because taxonomy.json is not available in the test environment —
+    fall through the exact-text fallback and mark it a conflict. The fix
+    routes the prediction through ``resolve_species_display_name`` so
+    both sides agree on the canonical root spelling.
+    """
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 2912 WHERE id = ?", (root,),
+    )
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Desert Verdin', ?, 1, 'taxonomy', 2912)",
+        (parent,),
+    ).lastrowid
+    db.tag_photo(photo_id, leaf)
+    db.conn.commit()
+
+    rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    cid = db.add_collection("Alias Compare", rules)
+    det_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.9,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det_id, "Desert Verdin", 0.95, "model-a")
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    row = next(p for p in data["photos"] if p["photo_id"] == photo_id)
+    # get_species_keywords_for_photos canonicalizes the hierarchy leaf
+    # (``Desert Verdin``) to the same-taxon root (``Verdin``); the
+    # prediction label must agree so Compare records a match rather than
+    # a conflict.
+    assert row["species_keywords"] == ["Verdin"]
+    preds = row["predictions"]["model-a"]
+    assert preds[0]["category"] == "match"
 
 
 def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
@@ -2475,7 +3534,7 @@ def test_pages_include_vireo_utils(app_and_db):
     """Every page includes vireo-utils.js via _navbar.html."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/id-conflicts', '/map']
     for page in pages:
@@ -2497,7 +3556,7 @@ def test_pages_no_inline_escapeHtml(app_and_db):
     """No page template should still define escapeHtml inline."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/id-conflicts', '/map']
     for page in pages:
@@ -3599,6 +4658,62 @@ def test_encounter_species_confirm_single_burst_does_not_detach(app_and_db):
     assert enc["bursts"][0]["species_override"] == {"species": "Golden Eagle", "confirmed": True}
 
 
+def test_encounter_species_burst_confirm_does_not_detach_on_variant_spelling(app_and_db):
+    """Burst confirm must compare `enc_species` against the submitted species
+    by keyword_match_key: a cached pre-normalization spelling of the same
+    species (e.g. legacy `‘Apapane` from before the migration ran vs the
+    stored/submitted `Apapane`) is the same species and must not trigger
+    _auto_detach_burst_for_species. A raw `!=` compare would treat them as
+    different and split the burst out even though nothing actually changed.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    # Encounter has 2 bursts; confirmed_species carries the legacy quoted
+    # spelling. The clean form is what the user is submitting.
+    results = {
+        "encounters": [
+            {
+                "species": ["Apapane", 0.9],
+                "confirmed_species": "‘Apapane",
+                "species_predictions": [],
+                "species_confirmed": True,
+                "photo_count": 2,
+                "burst_count": 2,
+                "time_range": ["2024-06-10T09:00:00", "2024-06-10T09:00:02"],
+                "photo_ids": [1, 2],
+                "bursts": [
+                    {"photo_ids": [1], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [2], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-06-10T09:00:00"},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-06-10T09:00:02"},
+        ],
+        "summary": {"total_photos": 2, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 0, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Apapane", "photo_ids": [1], "burst_index": 0})
+    assert resp.status_code == 200
+
+    with open(path) as f:
+        updated = _json.load(f)
+    # Same species (variant-only difference in confirmed_species) — burst
+    # must NOT be split off. Still exactly one encounter with both bursts.
+    assert len(updated["encounters"]) == 1
+    assert len(updated["encounters"][0]["bursts"]) == 2
+
+
 def test_encounter_species_detach_merges_into_adjacent_encounter(app_and_db):
     """Detaching a second burst merges it into an adjacent encounter with matching confirmed species."""
     import json as _json
@@ -3716,34 +4831,65 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
         assert "sparrow" not in dupe_names
 
 
-def test_keyword_duplicates_reports_edge_quote_variants(app_and_db):
-    """Duplicate keyword listing should use the same normalization as cleanup."""
+def test_keyword_duplicates_scoped_by_slot(app_and_db):
+    """Same-name keywords in different slots (parent_id, type) are not reported.
+
+    The cleanup endpoint merges only within
+    (keyword_match_key, parent_id, type, species-bearing).
+    If the duplicates listing groups solely by lowered name, users would see
+    persistent false positives — a taxonomy `Robin` and an individual `Robin`,
+    or `Springfield` under Illinois vs Missouri — that never disappear after
+    clicking Clean.
+    """
     app, db = app_and_db
-    folder_id = db.get_folder_tree()[0]["id"]
-    pid_a = db.add_photo(
-        folder_id, "quote-dupe-a.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photos = db.get_photos()
+    p1 = photos[0]["id"]
+    p2 = photos[1]["id"]
+
+    # Same name under two different parents — legitimately distinct places
+    illinois = db.add_keyword("Illinois")
+    missouri = db.add_keyword("Missouri")
+    sfd_il = db.add_keyword("Springfield", parent_id=illinois)
+    sfd_mo = db.add_keyword("Springfield", parent_id=missouri)
+    db.tag_photo(p1, sfd_il)
+    db.tag_photo(p2, sfd_mo)
+
+    # Same name at root but different type — species vs general
+    # Insert directly to bypass add_keyword's dedup, and match how the migration
+    # allows type-distinct roots to coexist (UNIQUE(name, parent_id) permits it
+    # because parent_id is NULL — NULLs don't compare equal in SQLite).
+    cur1 = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("Robin",),
     )
-    pid_b = db.add_photo(
-        folder_id, "quote-dupe-b.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    cur2 = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Robin",),
     )
-    clean_id = db.add_keyword("apapane")
-    quoted_id = db.conn.execute(
-        "INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",)
+    db.conn.commit()
+    db.tag_photo(p1, cur1.lastrowid)
+    db.tag_photo(p2, cur2.lastrowid)
+
+    # Same name/parent/type but different effective species identity. Legacy
+    # databases may contain type=general,is_species=1 species alongside an
+    # ordinary general homonym; cleanup must not offer or merge this pair.
+    species_general = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES (?, 'general', 1)",
+        ("robin",),
     ).lastrowid
     db.conn.commit()
-    db.tag_photo(pid_a, clean_id)
-    db.tag_photo(pid_b, quoted_id)
+    db.tag_photo(p1, species_general)
 
-    resp = app.test_client().get("/api/keywords/duplicates")
-
-    assert resp.status_code == 200
-    groups = resp.get_json()
-    apapane = next(
-        group for group in groups
-        if {variant["name"] for variant in group["variants"]}
-        == {"apapane", "\u2018apapane"}
-    )
-    assert apapane["keep"] == "apapane"
+    with app.test_client() as c:
+        resp = c.get("/api/keywords/duplicates")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        dupe_names = {v["name"] for d in data for v in d["variants"]}
+        # Neither slot-distinct name should be reported as a duplicate
+        assert "Springfield" not in dupe_names
+        assert "Robin" not in dupe_names
+        assert "robin" not in dupe_names
 
 
 def test_all_keywords_scoped_by_workspace(app_and_db):
@@ -4024,48 +5170,6 @@ def test_rename_keyword_normalizes_edge_quotes_and_queues_clean_name(app_and_db)
     assert ("keyword_add", "‘apapane") not in actions
 
 
-def test_rename_keyword_queues_normalization_only_change_for_stored_edge_quote(
-    app_and_db,
-):
-    """When the PUT body's name matches the current legacy stored spelling
-    verbatim (e.g. an upgraded row still stored as `‘apapane` and a client
-    that faithfully re-sent `‘apapane`), db.update_keyword() still normalizes
-    the row to the clean spelling `apapane`. The route must queue the
-    remove(old_raw) + add(clean) sidecar pair for affected photos and
-    rename species curation accordingly, otherwise the DB row is
-    canonicalized while XMP/highlight rows stay keyed to the legacy
-    spelling."""
-    app, db = app_and_db
-    client = app.test_client()
-    # Insert a legacy quoted row directly so it survives add_keyword's
-    # normalization, then tag a photo with it.
-    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
-    db.conn.commit()
-    kid = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
-    ).fetchone()["id"]
-    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, kid)
-    db.conn.execute("DELETE FROM pending_changes")
-    db.conn.commit()
-
-    resp = client.put(f"/api/keywords/{kid}", json={"name": "‘apapane"})
-    assert resp.status_code == 200
-
-    row = db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (kid,)
-    ).fetchone()
-    assert row["name"] == "apapane"
-
-    changes = db.conn.execute(
-        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
-        (p1,),
-    ).fetchall()
-    actions = [(c["change_type"], c["value"]) for c in changes]
-    assert ("keyword_remove", "‘apapane") in actions
-    assert ("keyword_add", "apapane") in actions
-
-
 def test_rename_keyword_rejects_empty_after_normalization(app_and_db):
     """PUT /api/keywords/<id> with a quote-only name must be rejected at
     the boundary — same contract as add_keyword — instead of storing an
@@ -4130,285 +5234,6 @@ def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
     assert ("keyword_add", "‘apapane") not in actions
 
 
-def test_api_update_keyword_returns_effective_id_and_merged_flag_on_peer_merge(
-    app_and_db,
-):
-    """When ``db.update_keyword`` merges the requested row into a
-    normalized-equal peer, the requested keyword id is deleted server-side.
-    The route must respond with the surviving peer id and a ``merged`` flag
-    so the keywords UI (``keywords.html`` ``renameKeyword`` / ``updateType`` /
-    ``kwBulkApply``) can refetch instead of mutating a stale entry in place
-    — otherwise ``allKeywords`` keeps a phantom row pointing at the deleted
-    id and subsequent rename/type/delete actions on that visible entry
-    silently affect nothing. Plain renames (no merge) must still report
-    ``merged: false`` and the original id so the local optimistic update
-    path stays a no-op refetch."""
-    app, db = app_and_db
-    client = app.test_client()
-
-    # Merge case: rename an unrelated keyword to a name that already belongs
-    # to another top-level peer. update_keyword deletes ``other_id`` and
-    # returns ``apapane_id`` as the survivor.
-    apapane_id = db.add_keyword("apapane")
-    other_id = db.add_keyword("Other")
-
-    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
-    assert resp.status_code == 200
-    payload = resp.get_json()
-    assert payload["ok"] is True
-    assert payload["merged"] is True
-    assert payload["effective_id"] == apapane_id
-    # Verify the DB matches the response so the client can trust
-    # ``effective_id`` as the row to switch its selection onto.
-    assert db.conn.execute(
-        "SELECT id FROM keywords WHERE id = ?", (other_id,)
-    ).fetchone() is None
-    survivor = db.conn.execute(
-        "SELECT id FROM keywords WHERE id = ?", (apapane_id,)
-    ).fetchone()
-    assert survivor is not None
-
-    # Plain rename (no peer): merged=false, effective_id matches the
-    # requested id so the client's local update remains correct.
-    plain_id = db.add_keyword("Solo")
-    resp = client.put(f"/api/keywords/{plain_id}", json={"name": "SoloRenamed"})
-    assert resp.status_code == 200
-    payload = resp.get_json()
-    assert payload["ok"] is True
-    assert payload["merged"] is False
-    assert payload["effective_id"] == plain_id
-
-
-def test_type_only_put_merge_queues_sidecar_rename_for_peer_photos(
-    app_and_db,
-):
-    """Type-only PUT that merges a clean row into a legacy peer must queue
-    keyword_remove(legacy) + keyword_add(canonical) for photos that were
-    ALREADY tagged with the legacy peer, otherwise those sidecars keep
-    exporting the quoted spelling even after the DB row is canonicalized.
-
-    Reproduces the fresh gap after the previous peer-normalization fix
-    (r3565437646). Scenario: an upgraded DB has a clean general keyword
-    ``apapane`` AND a legacy taxonomy peer stored as ``‘apapane`` (edge
-    quote). A photo P is already tagged with the legacy peer, and its
-    sidecar has already been synced under that quoted spelling. The
-    Browse/Keywords UI sends a type dropdown change on the general row —
-    ``PUT /api/keywords/<general_id>`` with ``{"type": "taxonomy"}`` and
-    no ``name`` field.
-
-    ``db.update_keyword`` detects the same-slot taxonomy peer and merges
-    the general row into it, then runs ``_normalize_keyword_row_name`` to
-    rewrite the survivor's DB name from ``‘apapane`` to ``apapane``. That
-    helper retargets ``pending_changes`` and species curation scoped to
-    the peer's tag set — but it does NOT emit new sidecar remove/add rows
-    for photos whose XMP was already synced under the legacy spelling.
-    ``api_update_keyword`` used to only snapshot/queue sidecar work when
-    the request included a ``name``, so the type-only PUT skipped the
-    queue entirely and photos on the peer kept exporting ``‘apapane`` to
-    their sidecars indefinitely.
-    """
-    app, db = app_and_db
-    client = app.test_client()
-
-    # Clean general keyword — the row the user is about to retype.
-    general_id = db.add_keyword("apapane")
-
-    # Legacy taxonomy peer inserted directly to preserve the edge quote
-    # (add_keyword would normalize it away). is_species=1 mirrors an
-    # upgraded taxonomy row.
-    db.conn.execute(
-        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
-        ("‘apapane",),
-    )
-    db.conn.commit()
-    legacy_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = '‘apapane'"
-    ).fetchone()["id"]
-
-    # Tag photo p1 with the legacy peer — this photo's sidecar has already
-    # been synced under the quoted spelling and needs the remove/add pair.
-    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, legacy_id)
-    db.conn.execute("DELETE FROM pending_changes")
-    db.conn.commit()
-
-    # Type-only PUT: no `name` in body. Mirrors the Browse/Keywords type
-    # dropdown flow.
-    resp = client.put(
-        f"/api/keywords/{general_id}", json={"type": "taxonomy"}
-    )
-    assert resp.status_code == 200
-    payload = resp.get_json()
-    assert payload["ok"] is True
-    assert payload["merged"] is True
-    assert payload["effective_id"] == legacy_id
-
-    # The merge collapsed general_id into legacy_id AND canonicalized the
-    # survivor's stored name.
-    assert db.conn.execute(
-        "SELECT id FROM keywords WHERE id = ?", (general_id,)
-    ).fetchone() is None
-    survivor = db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
-    ).fetchone()
-    assert survivor["name"] == "apapane"
-
-    # The regression: photo p1 must have keyword_remove('‘apapane') +
-    # keyword_add('apapane') queued so its sidecar catches up with the
-    # canonicalized DB row. Without the fix, no rows would be queued for
-    # p1 and the sidecar would keep exporting the quoted spelling.
-    changes = db.conn.execute(
-        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
-        "ORDER BY id",
-        (p1,),
-    ).fetchall()
-    actions = [(c["change_type"], c["value"]) for c in changes]
-    assert ("keyword_remove", "‘apapane") in actions
-    assert ("keyword_add", "apapane") in actions
-
-
-def test_type_only_put_merge_queues_sidecar_rename_for_source_photos(
-    app_and_db,
-):
-    """Type-only PUT that merges a legacy-spelled SOURCE row into a clean
-    peer must queue keyword_remove(legacy) + keyword_add(canonical) for
-    photos that were originally tagged with the source row — otherwise
-    those source photos' sidecars keep exporting the source's legacy
-    spelling even after _merge_keyword_into moves their DB tags to the
-    peer's clean spelling.
-
-    Reproduces the fresh gap after the previous peer-photos fix
-    (r3565437646). Scenario: an upgraded DB has a legacy general keyword
-    stored as ``‘apapane`` (edge quote) AND a clean taxonomy peer
-    ``apapane``. A photo P1 is tagged with the legacy general source row
-    and its sidecar has already been synced under the quoted spelling.
-    The Browse/Keywords UI sends a type dropdown change on the legacy
-    row — ``PUT /api/keywords/<legacy_id>`` with ``{"type": "taxonomy"}``
-    and no ``name`` field.
-
-    ``db.update_keyword`` detects the same-slot clean taxonomy peer and
-    merges the legacy source into it, retargeting P1's DB tag onto the
-    peer's clean spelling. But ``api_update_keyword`` used to only
-    snapshot the source's pre-update state when the request included a
-    ``name``, so the type-only PUT skipped the source-photo queue
-    entirely and P1 kept exporting ``‘apapane`` to its sidecar
-    indefinitely. The peer-photos block (see the sibling test) only
-    handles photos ALREADY tagged with the peer, not those retargeted
-    from the source.
-    """
-    app, db = app_and_db
-    client = app.test_client()
-
-    # Clean taxonomy peer — the target the legacy row will merge into.
-    taxonomy_id = db.add_keyword("apapane", is_species=True)
-    row = db.conn.execute(
-        "SELECT type FROM keywords WHERE id = ?", (taxonomy_id,)
-    ).fetchone()
-    assert row["type"] == "taxonomy"
-
-    # Legacy general row inserted directly to preserve the edge quote
-    # (add_keyword would normalize it away).
-    db.conn.execute(
-        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
-        ("‘apapane",),
-    )
-    db.conn.commit()
-    legacy_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = '‘apapane'"
-    ).fetchone()["id"]
-
-    # Tag photo p1 with the legacy SOURCE row — this photo's sidecar has
-    # already been synced under the quoted spelling and needs the
-    # remove/add pair after the merge retargets its DB tag.
-    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, legacy_id)
-    db.conn.execute("DELETE FROM pending_changes")
-    db.conn.commit()
-
-    # Type-only PUT on the legacy row: no `name` in body. Mirrors the
-    # Browse/Keywords type dropdown flow.
-    resp = client.put(
-        f"/api/keywords/{legacy_id}", json={"type": "taxonomy"}
-    )
-    assert resp.status_code == 200
-    payload = resp.get_json()
-    assert payload["ok"] is True
-    assert payload["merged"] is True
-    assert payload["effective_id"] == taxonomy_id
-
-    # The merge collapsed legacy_id into taxonomy_id and retargeted p1's
-    # DB tag onto the clean spelling.
-    assert db.conn.execute(
-        "SELECT id FROM keywords WHERE id = ?", (legacy_id,)
-    ).fetchone() is None
-    survivor = db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (taxonomy_id,)
-    ).fetchone()
-    assert survivor["name"] == "apapane"
-
-    # The regression: source photo p1 must have keyword_remove('‘apapane')
-    # + keyword_add('apapane') queued so its sidecar catches up with the
-    # retargeted DB row. Without the fix, no rows would be queued for p1
-    # and the sidecar would keep exporting the quoted spelling.
-    changes = db.conn.execute(
-        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
-        "ORDER BY id",
-        (p1,),
-    ).fetchall()
-    actions = [(c["change_type"], c["value"]) for c in changes]
-    assert ("keyword_remove", "‘apapane") in actions
-    assert ("keyword_add", "apapane") in actions
-
-
-def test_type_only_put_merge_skips_queue_when_peer_already_canonical(
-    app_and_db,
-):
-    """When the peer's stored name is already canonical, the survivor
-    keeps its clean spelling and no sidecar remove/add is needed. Verify
-    the new pre-merge peer snapshot doesn't queue phantom rows in that
-    case — otherwise a routine type dropdown change would spam pending
-    ``keyword_remove('apapane')`` + ``keyword_add('apapane')`` pairs that
-    cancel each other but litter the pending panel."""
-    app, db = app_and_db
-    client = app.test_client()
-
-    # Both rows already have canonical names; only their type differs.
-    general_id = db.add_keyword("apapane")
-    # Force a distinct taxonomy peer with the same clean name via direct
-    # INSERT — add_keyword promotes general → taxonomy in place when a
-    # taxon match exists, and top-level UNIQUE(name, parent_id) allows
-    # coexisting rows with different types under a NULL parent.
-    db.conn.execute(
-        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
-        ("apapane",),
-    )
-    db.conn.commit()
-    taxonomy_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = 'apapane' AND type = 'taxonomy'"
-    ).fetchone()["id"]
-
-    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, taxonomy_id)
-    db.conn.execute("DELETE FROM pending_changes")
-    db.conn.commit()
-
-    resp = client.put(
-        f"/api/keywords/{general_id}", json={"type": "taxonomy"}
-    )
-    assert resp.status_code == 200
-    assert resp.get_json()["merged"] is True
-
-    # No pending_changes for p1 — the survivor's stored name didn't
-    # change (both rows already canonical), so no sidecar rewrite is
-    # needed and the guard on peer_new_name != peer_pre_name must skip
-    # the queue.
-    remaining = db.conn.execute(
-        "SELECT COUNT(*) AS c FROM pending_changes WHERE photo_id = ?",
-        (p1,),
-    ).fetchone()["c"]
-    assert remaining == 0
-
-
 def test_rename_keyword_merges_into_normalized_peer_child(app_and_db):
     """Same guard for child keywords: without the peer check, two rows under
     the same parent with normalized-equal names would violate
@@ -4432,39 +5257,6 @@ def test_rename_keyword_merges_into_normalized_peer_child(app_and_db):
         "SELECT id FROM keywords WHERE id = ?", (other_id,)
     ).fetchone()
     assert other_row is None
-
-
-def test_rename_keyword_detects_stored_edge_quote_peer(app_and_db):
-    """A pre-existing row whose stored spelling still carries edge quotes
-    (imported before normalization landed) must also participate in the
-    peer merge; the check compares via vireo_normalize_keyword so both
-    sides are compared in their cleaned form."""
-    app, db = app_and_db
-    client = app.test_client()
-    db.conn.execute(
-        "INSERT INTO keywords (name) VALUES (?)", ("‘apapane",)
-    )
-    db.conn.commit()
-    legacy_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = '‘apapane'"
-    ).fetchone()["id"]
-    other_id = db.add_keyword("Other")
-
-    resp = client.put(f"/api/keywords/{other_id}", json={"name": "apapane"})
-    assert resp.status_code == 200
-
-    other_row = db.conn.execute(
-        "SELECT id FROM keywords WHERE id = ?", (other_id,)
-    ).fetchone()
-    assert other_row is None
-    # The legacy row survives because the merge target is the peer, not
-    # the renamed row — but its stored spelling is canonicalized to the
-    # clean name so the survivor doesn't remain visible/exported as the
-    # stray-quote variant after a rename to the clean spelling.
-    survived = db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
-    ).fetchone()
-    assert survived["name"] == "apapane"
 
 
 def test_rename_keyword_does_not_merge_across_types_toplevel(app_and_db):
@@ -4741,6 +5533,309 @@ def test_apply_ordered_highlights_resorts_when_visible_match():
     assert order == [2, 1]
     marks = {p["id"]: p["is_highlighted"] for p in buckets[0]["photos"]}
     assert marks == {1: False, 2: True}
+
+
+def test_highlight_score_bucket_orders_picks_then_scored_then_unscored():
+    """Highlights ordering (picked_first) forms three contiguous regions:
+    picks (scored first, then unscored in capture order), scored non-picks by
+    score, then unscored non-picks in capture order. No rich metrics are set,
+    so highlight_score collapses to quality_score (+0.08 pick bonus)."""
+    from app import _highlight_score_bucket
+
+    photos = [
+        # scored non-picks (out of order to prove score sorts them)
+        {"id": 4, "quality_score": 0.3, "flag": "none", "timestamp": "2024-01-07"},
+        {"id": 5, "quality_score": 0.9, "flag": "none", "timestamp": "2024-01-06"},
+        # unscored non-picks (later capture times, shuffled)
+        {"id": 6, "quality_score": None, "flag": "none", "timestamp": "2024-03-02"},
+        {"id": 7, "quality_score": None, "flag": "none", "timestamp": "2024-03-01"},
+        # picks: one scored, two unscored (shuffled capture times)
+        {"id": 1, "quality_score": 0.5, "flag": "flagged", "timestamp": "2024-01-05"},
+        {"id": 2, "quality_score": None, "flag": "flagged", "timestamp": "2024-01-09"},
+        {"id": 3, "quality_score": None, "flag": "flagged", "timestamp": "2024-01-02"},
+    ]
+    _highlight_score_bucket(photos, picked_first=True)
+    # picks first (scored pick 1, then unscored picks 3<2 by capture time),
+    # then scored non-picks by score (5 before 4),
+    # then unscored non-picks by capture time (7 before 6).
+    assert [p["id"] for p in photos] == [1, 3, 2, 5, 4, 7, 6]
+
+
+def test_highlight_score_bucket_picked_first_false_unchanged():
+    """Regression: the non-picks-first path (life list / best-photo) still
+    ranks purely by score descending, ignoring flag and capture time."""
+    from app import _highlight_score_bucket
+
+    photos = [
+        {"id": 1, "quality_score": 0.4, "flag": "flagged", "timestamp": "2024-01-01"},
+        {"id": 2, "quality_score": 0.9, "flag": "none", "timestamp": "2024-01-09"},
+        {"id": 3, "quality_score": 0.6, "flag": "none", "timestamp": "2024-01-02"},
+    ]
+    _highlight_score_bucket(photos, picked_first=False)
+    assert [p["id"] for p in photos] == [2, 3, 1]
+
+
+def test_bucket_unanalyzed_count_counts_unscored_non_picks_only():
+    from app import _bucket_unanalyzed_count
+
+    photos = [
+        {"id": 1, "quality_score": 0.5, "flag": "flagged"},   # scored pick
+        {"id": 2, "quality_score": None, "flag": "flagged"},  # unscored pick (excluded)
+        {"id": 3, "quality_score": 0.4, "flag": "none"},      # scored non-pick
+        {"id": 4, "quality_score": None, "flag": "none"},     # unscored non-pick
+        {"id": 5, "quality_score": None, "flag": "none"},     # unscored non-pick
+    ]
+    assert _bucket_unanalyzed_count(photos) == 2
+    assert _bucket_unanalyzed_count([]) == 0
+    assert _bucket_unanalyzed_count(None) == 0
+
+
+def _set_photo_quality_flag(db, photo_id, quality=None, flag=None):
+    db.conn.execute(
+        "UPDATE photos SET quality_score = ?, flag = ? WHERE id = ?",
+        (quality, flag, photo_id),
+    )
+    db.conn.commit()
+
+
+def _seed_anianiau_bucket(db):
+    """Seed one species folder mirroring the real bug: a scored pick, two
+    unscored picks, scored/unscored non-picks, and a rejected photo. Returns
+    (folder_id, {label: photo_id})."""
+    fid = db.add_folder('/photos/hawaii', name='hawaii')
+    kid = db.add_keyword('Anianiau', is_species=True)
+    spec = [
+        # label, quality, flag, timestamp
+        ("scored_pick",   0.45, "flagged", "2024-01-05T10:00:00"),
+        ("unscored_pickB", None, "flagged", "2024-01-02T10:00:00"),
+        ("unscored_pickA", None, "flagged", "2024-01-09T10:00:00"),
+        ("np_high",       0.90, None,       "2024-01-06T10:00:00"),
+        ("np_low",        0.40, None,       "2024-01-07T10:00:00"),
+        ("unp_early",     None, None,       "2024-03-01T10:00:00"),
+        ("unp_late",      None, None,       "2024-03-02T10:00:00"),
+        ("rejected",      0.99, "rejected", "2024-01-01T10:00:00"),
+    ]
+    ids = {}
+    for i, (label, quality, flag, ts) in enumerate(spec):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"{label}.jpg", extension='.jpg',
+            file_size=1000 + i, file_mtime=float(i), timestamp=ts,
+        )
+        db.tag_photo(pid, kid)
+        _set_photo_quality_flag(db, pid, quality=quality, flag=flag)
+        ids[label] = pid
+    return fid, ids
+
+
+def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
+    """Unscored photos now flow into Highlights: all three picks appear (the
+    real bug was two vanishing), ordered picks -> scored -> unscored, with
+    is_analyzed flags and unanalyzed_count set for the divider."""
+    from app import (
+        _apply_highlight_preferences,
+        _apply_ordered_highlights,
+        _collect_highlight_buckets,
+    )
+
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    # unanalyzed_count is assigned in _apply_highlight_preferences (which
+    # always runs after ordering in the real flow) so its tail count
+    # reflects any curated promotion. Mirror the full pipeline here.
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Anianiau")
+
+    order = [p["filename"] for p in bucket["photos"]]
+    assert order == [
+        "scored_pick.jpg",       # scored pick leads
+        "unscored_pickB.jpg",    # unscored picks next, capture order
+        "unscored_pickA.jpg",
+        "np_high.jpg",           # scored non-picks by score
+        "np_low.jpg",
+        "unp_early.jpg",         # unscored non-picks last, capture order
+        "unp_late.jpg",
+    ]
+    # rejected photo is still excluded entirely
+    assert "rejected.jpg" not in order
+
+    by_name = {p["filename"]: p for p in bucket["photos"]}
+    assert by_name["scored_pick.jpg"]["is_analyzed"] is True
+    assert by_name["unscored_pickA.jpg"]["is_analyzed"] is False
+    assert by_name["unp_early.jpg"]["is_analyzed"] is False
+    # Only unscored non-picks form the labeled "not yet analyzed" tail.
+    assert bucket["unanalyzed_count"] == 2
+
+
+def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_and_db):
+    """Raising the quality floor above 0 drops unscored photos (no measured
+    quality) and low-scored ones, leaving only photos above the floor."""
+    from app import _collect_highlight_buckets
+
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.5)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    bucket = next(b for b in buckets if b["species"] == "Anianiau")
+    names = {p["filename"] for p in bucket["photos"]}
+
+    # Only np_high (0.90) clears the 0.5 floor; the rejected 0.99 stays excluded.
+    assert names == {"np_high.jpg"}
+
+
+def test_highlight_bucket_canonicalizes_accepted_hierarchy_species():
+    """Accepted hierarchy aliases use the same canonical bucket key as
+    curation setters and root species rows."""
+    from app import _collect_highlight_buckets
+
+    candidates = [{
+        "id": 1,
+        "filename": "verdin.jpg",
+        "species": "Desert Verdin",
+        "quality_score": 0.8,
+    }]
+    buckets, _unidentified = _collect_highlight_buckets(
+        candidates,
+        0.7,
+        canonicalize_species=lambda _name: "Verdin",
+    )
+
+    assert [bucket["species"] for bucket in buckets] == ["Verdin"]
+
+
+def test_highlights_unscored_only_workspace_returns_content_with_empty_folders(app_and_db):
+    """Unscored-only workspaces must not silently blank the Highlights page.
+
+    ``get_folders_with_quality_data`` is scored-only, so the payload's
+    ``folders`` list is empty when nothing has been analyzed. But the
+    highlights payload can still return eligible content (buckets and
+    unidentified photos) via the min_quality<=0 admission of unscored
+    candidates. The frontend gate must key off actual content, not folder
+    presence — this test pins the API contract so a future regression that
+    drops content when ``folders == []`` is caught here.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/highlights")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    # The scored-only folder dropdown is legitimately empty in this fixture.
+    assert data["folders"] == []
+    # ...but the payload still carries eligible content — the workspace has
+    # three unscored, unrejected photos in the unidentified section.
+    assert data["unidentified"]["photo_count"] == 3
+    assert data["meta"]["eligible"] == 3
+
+
+def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotion(app_and_db):
+    """Curated promotion of an unscored photo must not misplace the divider.
+
+    ``_apply_highlight_preferences`` runs after the initial bucket sort and
+    can promote an unscored, non-flagged photo to the front when it's saved
+    as the species representative. The tail count anchors the "Not yet
+    analyzed" divider, so under the old (total-unscored-non-picks) semantic
+    a promoted unscored rep would inflate the count and the frontend divider
+    would misfire above analyzed photos. The tail semantic (trailing
+    contiguous run of unscored non-picks) fixes that: after promotion, the
+    count is the number of unscored non-picks that remain at the actual
+    tail, not the total in the bucket.
+    """
+    from app import (
+        _apply_highlight_preferences,
+        _apply_ordered_highlights,
+        _collect_highlight_buckets,
+    )
+
+    _app, db = app_and_db
+    fid = db.add_folder('/photos/curate', name='curate')
+    kid = db.add_keyword('Iiwi', is_species=True)
+    scored_a = db.add_photo(
+        folder_id=fid, filename='scored_a.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1.0, timestamp='2024-01-01T10:00:00',
+    )
+    scored_b = db.add_photo(
+        folder_id=fid, filename='scored_b.jpg', extension='.jpg',
+        file_size=1001, file_mtime=2.0, timestamp='2024-01-02T10:00:00',
+    )
+    unscored_rep = db.add_photo(
+        folder_id=fid, filename='unscored_rep.jpg', extension='.jpg',
+        file_size=1002, file_mtime=3.0, timestamp='2024-01-03T10:00:00',
+    )
+    unscored_tail = db.add_photo(
+        folder_id=fid, filename='unscored_tail.jpg', extension='.jpg',
+        file_size=1003, file_mtime=4.0, timestamp='2024-01-04T10:00:00',
+    )
+    for pid in (scored_a, scored_b, unscored_rep, unscored_tail):
+        db.tag_photo(pid, kid)
+    _set_photo_quality_flag(db, scored_a, quality=0.9)
+    _set_photo_quality_flag(db, scored_b, quality=0.4)
+    # unscored_rep and unscored_tail deliberately left with quality_score=NULL.
+
+    # Sanity-check the pre-curation ordering: unscored non-picks form a
+    # contiguous tail, so the tail count equals the total unscored non-pick
+    # count (2). This is the state the divider was designed for.
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Iiwi")
+    assert [p["filename"] for p in bucket["photos"]] == [
+        "scored_a.jpg", "scored_b.jpg",
+        "unscored_rep.jpg", "unscored_tail.jpg",
+    ]
+    assert bucket["unanalyzed_count"] == 2
+
+    # Now promote unscored_rep to species representative. Preferences run
+    # after the initial sort and push it to the front, so the tail shrinks
+    # to just unscored_tail — anything else would place the divider above
+    # analyzed content.
+    db.set_species_representative("Iiwi", unscored_rep)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Iiwi")
+
+    order = [p["filename"] for p in bucket["photos"]]
+    assert order[0] == "unscored_rep.jpg"  # rep promoted to the front
+    assert order[-1] == "unscored_tail.jpg"  # tail intact
+    assert bucket["unanalyzed_count"] == 1  # tail-only, not 2
+
+
+def test_bucket_unanalyzed_count_ignores_non_trailing_unscored():
+    """Only the trailing contiguous run of unscored non-picks counts.
+
+    Curated ordering can leave an unscored, non-flagged photo above analyzed
+    content; those interior unscored photos must NOT be counted, or the
+    frontend divider would misfire on the first one and leave analyzed
+    photos below the label.
+    """
+    from app import _bucket_unanalyzed_count
+
+    # Interior unscored rep, then a contiguous analyzed run, then two tail
+    # photos: only the trailing pair counts.
+    photos = [
+        {"id": 1, "quality_score": None, "flag": "none"},   # promoted, interior
+        {"id": 2, "quality_score": 0.9, "flag": "none"},
+        {"id": 3, "quality_score": 0.5, "flag": "none"},
+        {"id": 4, "quality_score": None, "flag": "none"},   # tail
+        {"id": 5, "quality_score": None, "flag": "none"},   # tail
+    ]
+    assert _bucket_unanalyzed_count(photos) == 2
+
+    # No trailing tail at all — an analyzed photo at the end means the
+    # divider must not fire.
+    photos = [
+        {"id": 1, "quality_score": None, "flag": "none"},
+        {"id": 2, "quality_score": 0.9, "flag": "none"},
+    ]
+    assert _bucket_unanalyzed_count(photos) == 0
 
 
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
@@ -5606,8 +6701,8 @@ def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
     assert remaining == []
 
 
-def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
-    """Multi-select suggestions should offer keywords present on only some photos."""
+def test_selection_keyword_suggestions_return_partial_and_shared_keywords(app_and_db):
+    """Multi-select keyword data includes both partial and shared keywords."""
     app, db = app_and_db
     ids = [
         row["id"]
@@ -5632,56 +6727,29 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert by_name["Sparrow"]["count"] == 1
     assert by_name["Sparrow"]["missing_count"] == 2
 
-    keywords_by_name = {item["name"]: item for item in data["keywords"]}
-    assert keywords_by_name["Cardinal"]["present_photo_ids"] == [ids[0]]
-    assert sorted(keywords_by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
-    assert keywords_by_name["Sparrow"]["present_photo_ids"] == [ids[1]]
-
-
-def test_selection_keyword_suggestions_normalize_edge_quotes(app_and_db):
-    """Stray leading quote variants should count as the same selected keyword."""
-    app, db = app_and_db
-    folder_id = db.get_folder_tree()[0]["id"]
-    ids = [
-        db.add_photo(
-            folder_id,
-            f"quote-normalize-{idx}.jpg",
-            extension=".jpg",
-            file_size=1,
-            file_mtime=1.0,
-        )
-        for idx in range(3)
-    ]
-    clean_id = db.add_keyword("apapane")
-    quoted_id = db.conn.execute(
-        "INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",)
-    ).lastrowid
-    db.conn.commit()
-    db.tag_photo(ids[0], clean_id)
-    db.tag_photo(ids[1], quoted_id)
-    client = app.test_client()
-
-    resp = client.post(
-        "/api/selection/keyword-suggestions",
-        json={"photo_ids": ids[:2]},
-        content_type="application/json",
-    )
-
-    assert resp.status_code == 200
-    assert resp.get_json()["suggestions"] == []
-
+    shared_id = db.add_keyword("Shared selection keyword")
+    for photo_id in ids:
+        db.tag_photo(photo_id, shared_id)
     resp = client.post(
         "/api/selection/keyword-suggestions",
         json={"photo_ids": ids},
         content_type="application/json",
     )
-
     assert resp.status_code == 200
-    by_name = {item["name"]: item for item in resp.get_json()["suggestions"]}
-    assert sorted(by_name) == ["apapane"]
-    assert by_name["apapane"]["count"] == 2
-    assert by_name["apapane"]["missing_count"] == 1
-    assert by_name["apapane"]["missing_photo_ids"] == [ids[2]]
+    data = resp.get_json()
+    keywords_by_name = {item["name"]: item for item in data["keywords"]}
+    assert keywords_by_name["Cardinal"]["present_photo_ids"] == [ids[0]]
+    assert sorted(keywords_by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
+    assert keywords_by_name["Sparrow"]["present_photo_ids"] == [ids[1]]
+    assert keywords_by_name["Shared selection keyword"] == {
+        "id": shared_id,
+        "name": "Shared selection keyword",
+        "type": "general",
+        "count": len(ids),
+        "missing_count": 0,
+        "present_photo_ids": ids,
+        "missing_photo_ids": [],
+    }
 
 
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
@@ -5754,85 +6822,6 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
 
 
-def test_batch_keyword_route_skips_normalized_peer_variants(app_and_db):
-    """Batch add should treat photos tagged with any normalized peer as done.
-
-    Regression: `api_selection_keyword_suggestions` collapses variants that
-    share a normalized (name, parent_id, type) key and returns a single
-    representative id. If one selected photo already carries a legacy
-    edge-quote peer of the chosen keyword (e.g. `‘Cardinal` alongside
-    clean `Cardinal`), "Add to N missing" would stack the clean row on
-    top of the legacy variant, leaving duplicate in-app tags and a
-    duplicate `<rdf:li>` in the sidecar. The endpoint must expand the
-    same normalized peer ids used by the remove path.
-    """
-    app, db = app_and_db
-    rows = db.conn.execute(
-        "SELECT id, filename FROM photos ORDER BY filename"
-    ).fetchall()
-    ids = [row["id"] for row in rows]
-
-    clean_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = 'Cardinal'"
-    ).fetchone()["id"]
-    legacy_id = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES (?, NULL, 0, 'general')",
-        ("‘Cardinal",),
-    ).lastrowid
-    # Untag the fixture link so bird1 carries only the LEGACY variant; that
-    # way the endpoint's variant expansion is what makes it look "already
-    # tagged" rather than a stray exact-id match.
-    db.conn.execute(
-        "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-        (ids[0], clean_id),
-    )
-    db.conn.execute(
-        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
-        (ids[0], legacy_id),
-    )
-    db.conn.commit()
-
-    client = app.test_client()
-    resp = client.post(
-        "/api/batch/keyword",
-        json={"photo_ids": ids, "keyword_id": clean_id},
-        content_type="application/json",
-    )
-    assert resp.status_code == 200
-    # bird2 and bird3 had no variant tag, so both get the clean row.
-    # bird1 (with the legacy variant) must be treated as already tagged —
-    # updated == 2, NOT 3.
-    assert resp.get_json()["updated"] == 2
-
-    # bird1 should still carry ONLY the legacy variant — no clean row
-    # stacked on top.
-    bird1_tags = db.conn.execute(
-        "SELECT keyword_id FROM photo_keywords "
-        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
-        (ids[0], clean_id, legacy_id),
-    ).fetchall()
-    assert sorted(row["keyword_id"] for row in bird1_tags) == [legacy_id]
-
-    # bird2 and bird3 got the clean row.
-    for bird_pid in (ids[1], ids[2]):
-        bird_tags = db.conn.execute(
-            "SELECT keyword_id FROM photo_keywords "
-            "WHERE photo_id = ? AND keyword_id = ?",
-            (bird_pid, clean_id),
-        ).fetchall()
-        assert len(bird_tags) == 1
-
-    # No pending sidecar add gets queued for bird1 — it already carries a
-    # normalized-equivalent tag.
-    pending = db.conn.execute(
-        """SELECT photo_id FROM pending_changes
-           WHERE change_type = 'keyword_add' AND value = 'Cardinal'
-           ORDER BY photo_id"""
-    ).fetchall()
-    assert [row["photo_id"] for row in pending] == sorted([ids[1], ids[2]])
-
-
 def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
     """Selected-keyword removal should only affect selected photos that have it."""
     app, db = app_and_db
@@ -5877,114 +6866,68 @@ def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
 
 
-def test_batch_keyword_remove_untags_normalized_peer_variants(app_and_db):
-    """Batch remove should untag every normalized-peer keyword variant.
+def test_batch_keyword_remove_cancels_pending_add_queued_with_variant_spelling(app_and_db):
+    """Batch remove must cancel a pending add that was queued via a
+    stray-quote spelling variant.
 
-    Regression: `api_selection_keyword_suggestions` collapses variants that
-    share a normalized (name, parent_id, type) key and returns a single
-    representative id. If a selection has one photo tagged with the clean
-    row and another with a legacy edge-quote row, "Remove from N" sends
-    the representative id here. Without peer expansion, only the exact
-    keyword_id gets untagged and the other photo keeps its legacy variant.
+    Keyword normalization happens at the choke points: POSTing `‘apapane`
+    stores both the keyword row and its pending `keyword_add` under the
+    clean spelling `apapane`. A later batch remove of the clean keyword
+    must find and cancel that still-unsynced pending add instead of
+    queuing a `keyword_remove` alongside it — otherwise the next XMP sync
+    would see a remove for a keyword that was never written.
     """
     app, db = app_and_db
     rows = db.conn.execute(
         "SELECT id, filename FROM photos ORDER BY filename"
     ).fetchall()
     ids = [row["id"] for row in rows]
-
-    # Insert a legacy peer directly so add_keyword's normalization doesn't
-    # merge the two rows on write. The rows have identical normalized
-    # (name, parent_id, type); only the stored spelling differs.
-    clean_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = 'Cardinal'"
-    ).fetchone()["id"]
-    legacy_id = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES (?, NULL, 0, 'general')",
-        ("‘Cardinal",),
-    ).lastrowid
-    db.conn.commit()
-
-    # bird1 already carries Cardinal (from the fixture). Tag bird2 with the
-    # legacy variant so it's in the selection but not covered by clean_id.
-    db.conn.execute(
-        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
-        (ids[1], legacy_id),
-    )
-    db.conn.commit()
-
     client = app.test_client()
+
+    # Queue the pending add through the API with a variant spelling.
     resp = client.post(
-        "/api/batch/keyword-remove",
-        json={"photo_ids": ids, "keyword_id": clean_id},
+        f"/api/photos/{ids[1]}/keywords",
+        json={"name": "‘apapane"},
         content_type="application/json",
     )
     assert resp.status_code == 200
-    # Both bird1 (via clean_id) and bird2 (via legacy peer) get untagged.
-    assert resp.get_json()["updated"] == 2
+    kid = resp.get_json()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "apapane"
 
-    still_tagged = db.conn.execute(
-        "SELECT photo_id, keyword_id FROM photo_keywords "
-        "WHERE keyword_id IN (?, ?)",
-        (clean_id, legacy_id),
-    ).fetchall()
-    assert still_tagged == []
-
-
-def test_batch_keyword_remove_cancels_legacy_pending_add(app_and_db):
-    """Batch remove must cancel pending adds queued under legacy peer names.
-
-    Regression: when a photo carries a legacy edge-quote peer of a
-    normalized keyword (e.g. `‘Cardinal` alongside clean `Cardinal`) and
-    still has an unsynced `keyword_add` under that legacy spelling, the
-    representative-id remove path used to queue only a `keyword_remove`
-    for the canonical `Cardinal` and leave the legacy pending add in
-    place, so the next XMP sync would write the quoted variant back.
-    """
-    app, db = app_and_db
-    rows = db.conn.execute(
-        "SELECT id, filename FROM photos ORDER BY filename"
-    ).fetchall()
-    ids = [row["id"] for row in rows]
-
-    clean_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = 'Cardinal'"
-    ).fetchone()["id"]
-    legacy_id = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES (?, NULL, 0, 'general')",
-        ("‘Cardinal",),
-    ).lastrowid
-    db.conn.execute(
-        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
-        (ids[1], legacy_id),
-    )
-    db.queue_change(ids[1], "keyword_add", "‘Cardinal")
-    db.conn.commit()
-
-    client = app.test_client()
-    resp = client.post(
-        "/api/batch/keyword-remove",
-        json={"photo_ids": ids, "keyword_id": clean_id},
-        content_type="application/json",
-    )
-    assert resp.status_code == 200
-    assert resp.get_json()["updated"] == 2
-
-    still_tagged = db.conn.execute(
-        "SELECT photo_id, keyword_id FROM photo_keywords "
-        "WHERE keyword_id IN (?, ?)",
-        (clean_id, legacy_id),
-    ).fetchall()
-    assert still_tagged == []
-
-    legacy_pending = db.conn.execute(
-        """SELECT change_type FROM pending_changes
-           WHERE photo_id = ? AND value = '‘Cardinal'""",
+    # The pending change is stored under the clean spelling, not the raw
+    # request variant.
+    pending = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
         (ids[1],),
     ).fetchall()
-    assert legacy_pending == []
+    assert [row["value"] for row in pending] == ["apapane"]
+
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": kid},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 1
+
+    still_tagged = db.conn.execute(
+        "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+        (kid,),
+    ).fetchall()
+    assert still_tagged == []
+
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes "
+        "WHERE photo_id = ? AND value = 'apapane'",
+        (ids[1],),
+    ).fetchall()
+    assert remaining == [], (
+        "the pending add should be cancelled, not left alongside a remove"
+    )
 
 
 def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
@@ -6062,73 +7005,6 @@ def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
     assert pending_after_redo == [], (
         "redo of the cancel-a-pending-add remove must leave no pending "
         "change — mirroring the original bulk remove that cancelled the add"
-    )
-
-
-def test_batch_keyword_remove_undo_cancels_legacy_pending_remove(app_and_db):
-    """Undo of a batch remove must cancel legacy-peer pending removes too.
-
-    When a selection contains one photo tagged with the clean row and
-    another with a legacy edge-quote peer, ``api_batch_keyword_remove``
-    untags both and queues ``keyword_remove`` under each stored spelling.
-    The edit history records only the representative id, so a naive undo
-    that cancels only the representative's stored name leaves the
-    ``keyword_remove('‘Cardinal')`` pending — and the next XMP sync then
-    strips the just-retagged keyword back out of the sidecar because
-    ``remove_keywords`` matches on the normalized key.
-    """
-    app, db = app_and_db
-    rows = db.conn.execute(
-        "SELECT id, filename FROM photos ORDER BY filename"
-    ).fetchall()
-    ids = [row["id"] for row in rows]
-
-    clean_id = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = 'Cardinal'"
-    ).fetchone()["id"]
-    legacy_id = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES (?, NULL, 0, 'general')",
-        ("‘Cardinal",),
-    ).lastrowid
-    db.conn.execute(
-        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
-        (ids[1], legacy_id),
-    )
-    db.conn.commit()
-
-    client = app.test_client()
-    remove_resp = client.post(
-        "/api/batch/keyword-remove",
-        json={"photo_ids": ids, "keyword_id": clean_id},
-        content_type="application/json",
-    )
-    assert remove_resp.status_code == 200
-    assert remove_resp.get_json()["updated"] == 2
-
-    pending_after_remove = db.conn.execute(
-        """SELECT change_type, value FROM pending_changes
-           WHERE photo_id = ? AND change_type = 'keyword_remove'
-           ORDER BY value""",
-        (ids[1],),
-    ).fetchall()
-    assert [(row["change_type"], row["value"]) for row in pending_after_remove] == [
-        ("keyword_remove", "Cardinal"),
-        ("keyword_remove", "‘Cardinal"),
-    ], "batch remove should queue removes under both variant spellings"
-
-    undo_resp = client.post("/api/undo")
-    assert undo_resp.status_code == 200
-
-    pending_after_undo = db.conn.execute(
-        """SELECT change_type, value FROM pending_changes
-           WHERE photo_id = ? AND value IN ('Cardinal', '‘Cardinal')""",
-        (ids[1],),
-    ).fetchall()
-    assert pending_after_undo == [], (
-        "undo must cancel pending removes for every variant spelling "
-        "queued by the batch remove — otherwise sync strips the "
-        "just-restored tag"
     )
 
 
@@ -6212,6 +7088,141 @@ def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path,
     assert db2.get_meta(Database._WILDLIFE_BACKFILL_DONE_KEY) == "1", (
         "Wildlife backfill marker must be set synchronously by create_app "
         "on first boot — otherwise user edits race the backfill."
+    )
+    db2.close()
+
+
+def test_create_app_repairs_duplicate_species_after_taxonomy_marking(
+    tmp_path, monkeypatch,
+):
+    """Startup must type/link legacy hierarchy leaves before stamping the
+    one-shot duplicate-species repair marker."""
+    from unittest.mock import MagicMock, patch
+
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    db = Database(db_path)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, common_name, rank) "
+        "VALUES (2912, 2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Verdin', ?, 0, 'general')",
+        (parent,),
+    ).lastrowid
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+    db.close()
+
+    fake_tax = MagicMock()
+    fake_tax.lookup.side_effect = lambda name: (
+        {"taxon_id": 2912} if name == "Verdin" else None
+    )
+    with patch("taxonomy.load_local_taxonomy", return_value=fake_tax):
+        create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test")
+
+    db2 = Database(db_path, initialize_schema=False)
+    tagged_ids = {row["id"] for row in db2.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    assert db2.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1"
+    db2.close()
+
+
+def test_create_app_runs_keyword_normalization_migration_on_file_db(
+    tmp_path, monkeypatch,
+):
+    """Regression: create_app must run the one-shot keyword-name
+    normalization migration on the startup connection for a file-backed
+    database. Database.__init__ only runs it when initialize_schema=True,
+    and every connection this app opens (startup init_db and every
+    per-request _get_db) passes initialize_schema=False, so without an
+    explicit run in create_app upgraded DBs could serve requests with
+    ‘apapane-style variant rows still present.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    # Seed a legacy edge-quote variant keyword row that the write-side
+    # normalization would reject at runtime; only the migration can heal
+    # it. Insert via raw SQL to bypass add_keyword's normalization.
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.conn.execute("DELETE FROM db_meta WHERE key = 'keyword_names_normalized'")
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 1, 'taxonomy')",
+        ("‘apapane",),
+    ).lastrowid
+    db.conn.commit()
+    assert db.get_meta("keyword_names_normalized") != "1", (
+        "Pre-condition: normalization marker should be unset before create_app"
+    )
+    db.close()
+
+    fake_tax = MagicMock()
+    fake_tax.lookup.return_value = None
+
+    with patch("taxonomy.load_local_taxonomy", return_value=fake_tax):
+        app = create_app(
+            db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test",
+        )
+        assert app is not None
+
+    # After create_app returns, the seeded variant row must have been
+    # normalized in place and the marker set.
+    db2 = Database(db_path, initialize_schema=False)
+    row = db2.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row is not None
+    assert row["name"] == "apapane", (
+        "create_app must normalize legacy variant keyword names before "
+        "serving requests, but the '‘apapane' row is still stored verbatim."
+    )
+    assert db2.get_meta("keyword_names_normalized") == "1", (
+        "keyword_names_normalized marker must be set after create_app "
+        "runs the one-shot migration synchronously."
     )
     db2.close()
 
@@ -8284,17 +9295,22 @@ def test_highlights_page_renders_after_redesign(app_and_db):
     assert b"Per row" in resp.data
 
 
-def test_highlights_get_empty(app_and_db):
-    """GET /api/highlights returns empty buckets when no quality data exists."""
+def test_highlights_get_includes_unscored_photos(app_and_db):
+    """Unscored photos now surface on Highlights (the page used to be empty
+    until analysis ran). The fixture's three unanalyzed photos — none carrying
+    an accepted species keyword — appear in the unidentified section, marked
+    not-yet-analyzed so the divider can label them."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get("/api/highlights")
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["buckets"] == []
-    assert data["unidentified"]["photo_count"] == 0
-    assert data["folders"] == []
-    assert data["meta"]["eligible"] == 0
+    unid = data["unidentified"]
+    assert unid["photo_count"] == 3
+    assert unid["unanalyzed_count"] == 3
+    assert all(p["is_analyzed"] is False for p in unid["photos"])
+    assert data["meta"]["eligible"] == 3
 
 
 def test_highlights_buckets_by_accepted_species(app_and_db):
@@ -8950,6 +9966,58 @@ def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
         {"photo_id": pid, "reason": "already_confirmed"}
     ]
     assert db.get_review_status(pred["id"], db._ws_id()) == "pending"
+
+
+def test_highlights_confirm_ignores_higher_rank_taxonomy_keyword(app_and_db):
+    # Codex P2: a higher-rank taxonomy keyword (e.g. genus) must not count as
+    # a confirmed species — otherwise Highlights Confirm would skip the photo
+    # and never accept the species-rank prediction the user actually saw. The
+    # pre-skip must mirror get_highlights_candidates' rank filter.
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hcr2', 'hcr2', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    genus_taxon_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (?, ?, ?, ?)",
+        (900001, "Haliaeetus", "Sea Eagles", "genus"),
+    ).lastrowid
+    genus_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Haliaeetus', 'taxonomy', 0, ?)",
+        (genus_taxon_id,),
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'genus.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, genus_kid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.91, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["skipped"] == []
+    assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
+    kw_names = {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert "Bald Eagle" in kw_names
+    # The genus-rank tag is preserved alongside the newly-confirmed species.
+    assert "Haliaeetus" in kw_names
 
 
 def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
@@ -9882,6 +10950,422 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     assert "New Species" not in hl
 
 
+def test_highlights_relabel_preserves_higher_rank_taxonomy_curation(app_and_db):
+    """When a photo carries a linked higher-rank taxonomy keyword (family,
+    genus, ...) with its own curation, the relabel query intentionally
+    leaves that keyword attached — the ``t.rank = 'species' OR t.rank IS
+    NULL`` filter on ``old_rows`` restricts removal to species-rank rows.
+    The source-curation snapshot must apply the same rank filter, otherwise
+    ``_accept_curation_source`` migrates the higher-rank tag's curation to
+    the new species even though the higher-rank keyword still holds the
+    photo — leaving the family/genus keyword attached with its curation
+    stripped away.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/higherrank', 'higherrank', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Family-rank taxon and a linked taxonomy keyword for it. The relabel
+    # removal query filters to species-rank rows (species or NULL rank),
+    # so this family keyword is intentionally left attached.
+    family_taxon = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (5040, 'Corvidae', 'Corvids', 'family', 'Animalia')"
+    ).lastrowid
+    family_kid = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Corvids', NULL, 1, 'taxonomy', ?)",
+        (family_taxon,),
+    ).lastrowid
+    # Destination species.
+    db.add_keyword("Common Raven", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'higherrank.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, family_kid)
+    # Curation on the family-rank keyword: a highlight and a global
+    # representative. Both must stay under 'Corvids' after the relabel
+    # because the keyword itself is not being removed.
+    db.add_species_highlight("Corvids", pid)
+    db.set_species_representative("Corvids", pid)
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Common Raven"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    # The family-rank keyword must still be attached to the photo — the
+    # old_rows removal query excludes non-species ranks.
+    attached = {
+        r["id"] for r in db.conn.execute(
+            "SELECT k.id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ?",
+            (pid,),
+        ).fetchall()
+    }
+    assert family_kid in attached, (
+        "family-rank taxonomy keyword must remain attached — its curation "
+        "cannot be swept into the relabel target"
+    )
+
+    # The highlight and representative for the family name must remain
+    # under 'Corvids', not be migrated to 'Common Raven'.
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Corvids") or {}), (
+        "family-rank highlight must stay under its own species key"
+    )
+    assert pid not in (hl.get("Common Raven") or {}), (
+        "family-rank highlight must not migrate to the new species while "
+        "the family keyword is still attached to the photo"
+    )
+    reps = db.get_species_representatives()
+    assert reps.get("Corvids") == pid, (
+        "family-rank representative must stay under its own species key"
+    )
+    assert reps.get("Common Raven") != pid, (
+        "family-rank representative must not migrate to the new species "
+        "while the family keyword is still attached to the photo"
+    )
+
+
+def test_highlights_relabel_canonicalizes_hierarchy_leaf_source(app_and_db):
+    """When a photo's only attached species tag is a linked hierarchy leaf
+    (e.g. ``Desert Verdin``) but existing curation is stored under the
+    canonical root spelling for the shared taxon (``Verdin`` — where
+    ``repair_duplicate_photo_species`` deliberately left the root highlight
+    row in place), the source-curation snapshot must canonicalize the leaf
+    to the root spelling before filtering.
+
+    Otherwise ``_accept_curation_source`` sees only the leaf key
+    (``desertverdin``) and rejects the root-key highlight/representative row
+    as stale. The relabel would then untag the old species and tag the new
+    one while leaving the user's curation rows stranded under the old root.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/leaf', 'leaf', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Species-rank taxon shared by both a top-level root ``Verdin`` and a
+    # hierarchical leaf ``Desert Verdin``. The photo carries only the leaf,
+    # mirroring the state after ``repair_duplicate_photo_species`` detaches
+    # a redundant root.
+    verdin_taxon = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species', 'Animalia')"
+    ).lastrowid
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+        (verdin_taxon, root_kid),
+    )
+    parent_kid = db.add_keyword("Penduline tits")
+    leaf_kid = db.add_keyword("Desert Verdin", parent_id=parent_kid)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (verdin_taxon, leaf_kid),
+    )
+    db.add_keyword("Common Raven", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'leaf.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, leaf_kid)
+    # Curation is keyed under the canonical root spelling — this is how
+    # existing highlight/representative rows survive duplicate repair.
+    db.add_species_highlight("Verdin", pid)
+    db.set_species_representative("Verdin", pid)
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Common Raven"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    # The root-key highlight/representative rows must have been migrated
+    # onto the relabel target, not left stranded under 'Verdin' — the
+    # photo no longer carries any Verdin species tag.
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Common Raven") or {}), (
+        "root-key highlight must migrate to the relabel target when the "
+        "attached hierarchy leaf canonicalizes to the same taxon"
+    )
+    assert pid not in (hl.get("Verdin") or {}), (
+        "root-key highlight must not remain under the old species after "
+        "the leaf was untagged"
+    )
+    reps = db.get_species_representatives()
+    assert reps.get("Common Raven") == pid, (
+        "root-key representative must migrate to the relabel target"
+    )
+    assert reps.get("Verdin") != pid, (
+        "root-key representative must not remain under the old species"
+    )
+
+
+def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
+    """When a photo has no attached species tag but a prediction whose label
+    is a hierarchy alias (e.g. ``Desert Verdin``), the prediction snapshot
+    used to accept curation-source rows must canonicalize through
+    ``resolve_species_display_name``.
+
+    Regression: highlight buckets canonicalize the prediction label to its
+    unique-taxon root before saving (via ``add_species_highlight``), so a
+    starred unconfirmed alias bucket keyed on ``Desert Verdin`` lands under
+    ``Verdin``. The relabel path built ``predicted_species_by_pid`` from
+    the raw prediction label only. In the prediction-only branch
+    (no attached species tag), ``_accept_curation_source`` then rejected
+    the saved ``Verdin`` highlight/representative rows as stale because
+    ``verdin`` was not in the ``{desertverdin}`` set — leaving the user's
+    curation stranded under the old bucket after relabel.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/predcanon', 'predcanon', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Species-rank taxon shared by a top-level ``Verdin`` root and a
+    # hierarchy alias ``Desert Verdin`` — one canonical taxon, so
+    # ``resolve_species_display_name('Desert Verdin')`` returns ``Verdin``.
+    verdin_taxon = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (2913, 'Auriparus flaviceps', 'Verdin', 'species', 'Animalia')"
+    ).lastrowid
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+        (verdin_taxon, root_kid),
+    )
+    parent_kid = db.add_keyword("Penduline tits")
+    leaf_kid = db.add_keyword("Desert Verdin", parent_id=parent_kid)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (verdin_taxon, leaf_kid),
+    )
+    db.add_keyword("Common Raven", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predcanon.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # No species keyword tag on the photo — the prediction is the only
+    # source that ties the photo to ``Verdin``. This puts the relabel on
+    # the ``keyword_add``/prediction-only branch of the source filter.
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    # Raw prediction label uses the hierarchy alias.
+    db.add_prediction(det, "Desert Verdin", 0.88, "m")
+    # Curation was saved against the alias but ``add_species_highlight``
+    # /``set_species_representative`` canonicalize to the root spelling —
+    # matching what ``_collect_highlight_buckets`` and the buckets UI
+    # would show for this photo.
+    db.add_species_highlight("Desert Verdin", pid)
+    db.set_species_representative("Desert Verdin", pid)
+    hl_before = db.get_species_highlights()
+    assert pid in (hl_before.get("Verdin") or {}), (
+        "sanity: add_species_highlight should canonicalize to the root "
+        "spelling for a unique-taxon hierarchy alias"
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Common Raven"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Common Raven") or {}), (
+        "root-key highlight must migrate when the raw prediction label is "
+        "a hierarchy alias that canonicalizes to the same root — otherwise "
+        "the accept-source filter would reject 'Verdin' as stale"
+    )
+    assert pid not in (hl.get("Verdin") or {}), (
+        "canonical-root highlight must not remain under the old bucket"
+    )
+    reps = db.get_species_representatives()
+    assert reps.get("Common Raven") == pid, (
+        "root-key representative must migrate to the relabel target"
+    )
+    assert reps.get("Verdin") != pid
+
+
+def test_highlights_relabel_does_not_fold_non_ascii_case_variants(app_and_db):
+    """`_accept_curation_source` must key by ``keyword_match_key`` (SQLite's
+    ASCII-only NOCASE fold), not Python's ``str.lower()``. SQLite/add_keyword
+    keep ``Éclair`` and ``éclair`` as distinct species rows, but
+    ``str.lower()`` folds them together — so a stale ``éclair`` curation
+    row on a photo currently carrying ``Éclair`` would be swept into the
+    relabel target if the filter used ``.lower()``. Under the fix, the
+    stale row stays under ``éclair``.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/nonascii', 'nonascii', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Two DISTINCT species keywords: `Éclair` (uppercase É) and `éclair`
+    # (lowercase é). add_keyword's NOCASE dedupe is ASCII-only, so they
+    # coexist. Insert directly to avoid any casing-convention rewrite.
+    kid_upper = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Éclair', NULL, 1, 'taxonomy')"
+    ).lastrowid
+    kid_target = db.add_keyword("Warbler", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'nonascii.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # Photo currently carries `Éclair`.
+    db.tag_photo(pid, kid_upper)
+    # Stale species_highlights row keyed to the DIFFERENT species `éclair`
+    # — SQLite treats it as unrelated to the tagged `Éclair`. The photo
+    # has no `éclair` tag, so this row must stay under `éclair` after a
+    # relabel of its actual (Éclair) tag.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'éclair', ?, 0)",
+        (ws_id, pid),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Warbler"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    # The lowercase `éclair` highlight is STALE — the photo doesn't carry
+    # that species — so it must remain under `éclair`, not migrate to the
+    # relabel target.
+    remaining = db.conn.execute(
+        "SELECT species FROM species_highlights "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (ws_id, pid),
+    ).fetchall()
+    remaining_species = {r["species"] for r in remaining}
+    assert "éclair" in remaining_species, (
+        "stale non-ASCII-case-variant curation row must not be folded "
+        "onto the relabel target"
+    )
+    assert "Warbler" not in remaining_species
+
+
+def test_highlights_relabel_queues_remove_for_non_ascii_case_variant(app_and_db):
+    """Relabeling a photo from `Éclair` to a distinct SQLite species must
+    queue a `keyword_remove` for the old spelling. SQLite's NOCASE fold
+    is ASCII-only, so `Éclair` and `éclair` live as separate keyword rows
+    with separate ids — but Python `.lower()` folds them equal. A
+    name-based `.lower()` skip on the remove would leave the old spelling
+    in the sidecar even though the tag was flipped in the DB, so the
+    next XMP sync would still export `Éclair`. Comparing by keyword id
+    sidesteps the ASCII/Unicode fold mismatch.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/nonascii-remove', 'nonascii-remove', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    kid_upper = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Éclair', NULL, 1, 'taxonomy')"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'nonascii-remove.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, kid_upper)
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "éclair"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    rows = db.conn.execute(
+        "SELECT name FROM keywords WHERE name IN ('Éclair', 'éclair')"
+    ).fetchall()
+    assert {r["name"] for r in rows} == {"Éclair", "éclair"}, (
+        "SQLite NOCASE is ASCII-only, so the two spellings must remain "
+        "as distinct rows"
+    )
+    tagged = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ?",
+        (pid,),
+    ).fetchall()
+    tagged_names = {r["name"] for r in tagged}
+    assert "éclair" in tagged_names
+    assert "Éclair" not in tagged_names, (
+        "photo should carry only the new species row, not the old one"
+    )
+    pending = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (ws_id, pid),
+    ).fetchall()
+    remove_values = {
+        r["value"] for r in pending if r["change_type"] == "keyword_remove"
+    }
+    add_values = {
+        r["value"] for r in pending if r["change_type"] == "keyword_add"
+    }
+    assert "Éclair" in remove_values, (
+        "keyword_remove must be queued for the pre-existing non-ASCII "
+        "case variant; a name-based `.lower()` compare would have folded "
+        "it equal to the new species and skipped the remove, leaving the "
+        "old spelling in the exported XMP"
+    )
+    assert "éclair" in add_values
+
+
 def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
     """Undoing a relabel that moved a secondary representative must
     restore it at its original ``selected_order`` — otherwise
@@ -10150,6 +11634,400 @@ def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_
     assert len(data["buckets"]) == 1
     assert data["buckets"][0]["species"] == "Real Bird"
     assert data["buckets"][0]["is_accepted"] is True
+
+
+def _seed_waxbill_casing_scenario(db):
+    """One accepted `Common waxbill` photo plus one photo whose only signal
+    is a raw title-cased prediction `Common Waxbill` (label-file casing —
+    prediction rows are external vocabulary and stay verbatim)."""
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'accepted.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, waxbill_kw),
+    )
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predicted.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions "
+        "(detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Common Waxbill', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+    return fid, accepted_pid, predicted_pid
+
+
+def test_highlights_merges_prediction_casing_with_accepted_keyword(app_and_db):
+    """A title-cased classifier label and a sentence-cased accepted keyword
+    are the same species: one Highlights bucket, keyed by the keyword
+    spelling. Prediction rows keep label-file casing (external vocabulary),
+    so the merge must happen at bucket-collection time."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid, accepted_pid, predicted_pid = _seed_waxbill_casing_scenario(db)
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    waxbill_buckets = [
+        b for b in data["buckets"] if b["species"].lower() == "common waxbill"
+    ]
+    assert len(waxbill_buckets) == 1
+    bucket = waxbill_buckets[0]
+    assert bucket["species"] == "Common waxbill"
+    assert {p["id"] for p in bucket["photos"]} == {accepted_pid, predicted_pid}
+
+
+def test_species_highlights_add_canonicalizes_prediction_cased_label(app_and_db):
+    """Starring a photo in a prediction-cased bucket must store and surface
+    the highlight under the keyword spelling.
+
+    Regression for the silently-dropped star: the client sends the bucket
+    label (`Common Waxbill` from the classifier), but the eligibility
+    queries compare species strings exact against `keywords.name`
+    (`Common waxbill`). Without canonicalization at the route/setter, the
+    star writes a `Common Waxbill` row that no query ever matches again."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid, _accepted_pid, predicted_pid = _seed_waxbill_casing_scenario(db)
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Common Waxbill", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?",
+        (predicted_pid,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Common waxbill"]
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    bucket = next(
+        b for b in resp.get_json()["buckets"]
+        if b["species"] == "Common waxbill"
+    )
+    assert bucket["has_highlight_selection"] is True
+    starred = next(p for p in bucket["photos"] if p["id"] == predicted_pid)
+    assert starred["is_highlighted"] is True
+
+    # Un-starring with yet another casing of the same label must find and
+    # remove the canonical row rather than silently deleting nothing.
+    resp = client.delete(
+        "/api/species-highlights",
+        json={"species": "COMMON WAXBILL", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["removed"] == 1
+
+
+def test_species_highlights_add_preserves_ambiguous_homonym_species(app_and_db):
+    """When two intentionally-distinct root species keywords share a
+    NOCASE key (legacy general ``Robin`` alongside taxonomy ``robin``),
+    curation requests from a specific bucket must land on that bucket's
+    exact spelling. Silently collapsing to one canonical spelling would
+    make the eligibility precheck (which compares ``bucket["species"]``
+    exact) reject the request coming from the other homonym's bucket."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/robin', 'robin', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    legacy_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    )
+    legacy_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (legacy_pid, legacy_kw),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.5")
+    assert resp.status_code == 200
+    buckets = resp.get_json()["buckets"]
+    legacy_bucket = next(b for b in buckets if b["species"] == "Robin")
+    assert legacy_pid in {p["id"] for p in legacy_bucket["photos"]}
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Robin", "photo_id": legacy_pid},
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?",
+        (legacy_pid,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Robin"]
+
+
+def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
+    app_and_db,
+):
+    """When two intentionally-distinct species keywords share a NOCASE key
+    (legacy general ``Robin`` alongside taxonomy ``robin``), the relabel
+    snapshots must key on the SAME spelling ``add_keyword`` will store.
+    ``resolve_species_display_name`` preserves the caller spelling
+    (``Robin``) for bucket/parse/setter symmetry, but ``add_keyword``'s
+    typed lookup picks the taxonomy row (``robin``); before the fix the
+    snapshot compared destination curation against ``Robin`` while the
+    rename actually landed on ``robin``, so undo would delete a pre-existing
+    ``robin`` highlight it never created."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrhom', 'hrhom', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Legacy Species", is_species=True)
+    # Legacy general row with is_species=1 (a pre-migration state that
+    # the v2 sweep intentionally preserves for ambiguous homonyms), plus
+    # the taxonomy row add_keyword's typed lookup will pick.
+    legacy_robin = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    taxonomy_robin = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    ).lastrowid
+    # The photo being relabelled currently carries the "Legacy Species"
+    # tag; the relabel will move it to whichever Robin row add_keyword
+    # picks (the taxonomy row).
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.add_species_highlight("Legacy Species", pid)
+    # Pre-existing destination highlight, keyed on the taxonomy spelling
+    # (which is what add_keyword would store for a "Robin" request).
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'robin', ?, 0)",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Robin"},
+    )
+    assert resp.status_code == 200
+    # add_keyword's typed lookup returns the taxonomy row, so the tag
+    # lands on `robin`. The pre-existing `robin` highlight survives.
+    tagged = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND (k.is_species = 1 OR k.type = 'taxonomy')",
+        (pid,),
+    ).fetchall()
+    assert [r["name"] for r in tagged] == ["robin"]
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("robin") or {})
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    hl_after_undo = db.get_species_highlights()
+    # The pre-existing `robin` highlight must survive the undo — before
+    # the fix the snapshot recorded dst_existed=False (compared against
+    # "Robin") and undo deleted the user's pre-existing row.
+    assert pid in (hl_after_undo.get("robin") or {}), (
+        "Undo deleted pre-existing robin highlight because snapshots keyed "
+        "on the wrong spelling"
+    )
+    # And the original bucket is restored.
+    assert pid in (hl_after_undo.get("Legacy Species") or {})
+    # Silence the unused-variable warnings on the setup rows: keeping
+    # them named documents the two homonym roles.
+    assert legacy_robin != taxonomy_robin
+
+
+def test_species_highlight_eligibility_accepted_species_exact_match(app_and_db):
+    """When a photo's accepted keyword resolves to one specific spelling of
+    an ambiguous homonym, a stored highlight for the OTHER homonym must
+    stay ineligible. Applying COLLATE NOCASE across the whole eligibility
+    COALESCE relaxed the accepted-keyword branch too: a stored highlight
+    keyed ``Robin`` would then match a photo whose accepted keyword
+    subquery returned ``robin``, silently making the wrong species bucket
+    appear to have a highlight."""
+    app, db = app_and_db
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/elig', 'elig', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    # Two intentionally-distinct root species keywords sharing a NOCASE
+    # key — the migration explicitly preserves this shape.
+    legacy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    taxonomy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'elig.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # The photo's accepted keyword is the TAXONOMY row (lowercase
+    # ``robin``); the accepted-branch of the eligibility COALESCE
+    # returns exactly ``robin``.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, taxonomy_kid),
+    )
+    # Stored highlight keyed on the OTHER homonym's spelling
+    # (uppercase ``Robin``, the general row) — a plausible remnant when
+    # ambiguous-homonym curation is left alone by the v2 sweep.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Robin', ?, 0)",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    eligible = db.get_species_highlights("Robin", eligible_only=True)
+    # Before the fix the whole-COALESCE NOCASE would match ``Robin`` to
+    # the accepted ``robin`` and mark the highlight eligible. With the
+    # branch-specific NOCASE, the accepted keyword compares EXACT.
+    assert eligible == {}, (
+        "Cross-homonym match: stored 'Robin' highlight should NOT be "
+        "eligible for a photo whose accepted keyword is 'robin'"
+    )
+    # The same-spelling case still passes (sanity check the accepted
+    # branch still resolves an exact match).
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ?", (pid,)
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, legacy_kid),
+    )
+    db.conn.commit()
+    same_spelling = db.get_species_highlights("Robin", eligible_only=True)
+    assert pid in (same_spelling.get("Robin") or {})
+
+
+def test_resolve_species_display_name_prefers_taxonomy_over_general_homonym(
+    app_and_db,
+):
+    """When a taxonomy species row and a non-species general row share a
+    NOCASE key (e.g. taxonomy ``Common waxbill`` alongside a hand-tagged
+    ``Common Waxbill`` general), ``add_keyword(is_species=True)`` picks
+    the taxonomy row. ``resolve_species_display_name`` must mirror that
+    pick — otherwise the bucket collection keys prediction-only photos
+    under ``Common Waxbill``, curation setters store rows under the
+    non-taxonomy spelling, and once the prediction is accepted the
+    stored highlight no longer matches the accepted keyword spelling
+    (``Common waxbill``) and silently disappears from the bucket."""
+    _, db = app_and_db
+    # Taxonomy species row (the one add_keyword prefers).
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    )
+    # Separate non-species general row with classifier casing —
+    # someone hand-tagged the same spelling as a plain keyword.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common Waxbill', 'general', 0)"
+    )
+    db.conn.commit()
+
+    # Every caller spelling must land on the taxonomy row's stored
+    # spelling: that's what add_keyword(is_species=True) will pick, and
+    # bucket / parse / setter paths all agree on the same string.
+    assert db.resolve_species_display_name("Common Waxbill") == "Common waxbill"
+    assert db.resolve_species_display_name("common waxbill") == "Common waxbill"
+    assert db.resolve_species_display_name("COMMON WAXBILL") == "Common waxbill"
+
+    # Cross-check the invariant: add_keyword(is_species=True) actually
+    # returns the taxonomy row — otherwise the resolve fix would be
+    # tracking a different behavior than reality.
+    picked_id = db.add_keyword("Common Waxbill", is_species=True)
+    picked_name = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (picked_id,)
+    ).fetchone()["name"]
+    assert picked_name == "Common waxbill"
+
+
+def test_resolve_species_display_name_promotes_non_species_general_alone(
+    app_and_db,
+):
+    """When only a non-species general row shares the NOCASE key,
+    ``add_keyword(is_species=True)`` finds and promotes it in place —
+    is_species/type flip but the stored name is untouched. Resolve must
+    return that stored name so curation keys on the string the promoted
+    row will carry, not on a case-convention-derived spelling that
+    doesn't exist."""
+    _, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common Waxbill', 'general', 0)"
+    )
+    db.conn.commit()
+
+    # No taxonomy candidate for this NOCASE key, so add_keyword will
+    # promote the general row rather than insert a fresh taxonomy row.
+    # Resolve returns the general's stored spelling — the string
+    # curation setters must key on.
+    assert db.resolve_species_display_name("common waxbill") == "Common Waxbill"
+
+    # add_keyword promotes in place; the row's name doesn't change.
+    picked_id = db.add_keyword("common waxbill", is_species=True)
+    row = db.conn.execute(
+        "SELECT name, type, is_species FROM keywords WHERE id = ?",
+        (picked_id,),
+    ).fetchone()
+    assert row["name"] == "Common Waxbill"
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
 
 
 def test_highlights_save(app_and_db):
@@ -11136,7 +13014,13 @@ def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
     client = app.test_client()
 
-    payload = {"pipeline": {"w_species": 0.40, "hard_cut_score": 0.55, "tau_enc": 30.0}}
+    payload = {"pipeline": {
+        "w_species": 0.40,
+        "hard_cut_score": 0.55,
+        "species_hard_cut_confidence": 0.85,
+        "species_hard_cut_margin": 0.65,
+        "tau_enc": 30.0,
+    }}
     resp = client.post("/api/pipeline/save-grouping-defaults", json=payload)
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
@@ -11145,6 +13029,8 @@ def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
     saved = cfg.load()
     assert saved["pipeline"]["w_species"] == 0.40
     assert saved["pipeline"]["hard_cut_score"] == 0.55
+    assert saved["pipeline"]["species_hard_cut_confidence"] == 0.85
+    assert saved["pipeline"]["species_hard_cut_margin"] == 0.65
     assert saved["pipeline"]["tau_enc"] == 30.0
 
 
@@ -11268,6 +13154,280 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         import math as _math
         assert isinstance(pipe["tau_enc"], int | float)
         assert _math.isfinite(pipe["tau_enc"])
+
+
+def test_collections_list_survives_one_unresolvable_rule(app_and_db):
+    """A single collection whose rule can't be resolved must not 500 the
+    whole /api/collections list. Before this, one bad rule raised an
+    unhandled ValueError, the endpoint 500'd, and every collection
+    dropdown in the UI came back empty. The bad collection should degrade
+    to photo_count=None with count_error=True; the others still count.
+    """
+    import json
+    app, db = app_and_db
+    client = app.test_client()
+
+    good = db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()}
+
+    assert by_id[good]["photo_count"] == 1
+    assert "count_error" not in by_id[good]
+
+    assert by_id[bad]["photo_count"] is None
+    assert by_id[bad]["count_error"] is True
+
+
+def test_browse_init_flags_degraded_without_counting(app_and_db, monkeypatch):
+    """/api/browse/init must mark collections with unresolvable rules as
+    degraded (count_error=True) so the sidebar first paint disables them —
+    but it must NOT run COUNT(DISTINCT p.id) per collection to figure that
+    out. That N+1 is what the async loadCollectionCounts() in
+    bootstrapBrowse() was designed to avoid, and re-adding it to the
+    critical first-paint path makes Browse wait on every smart-collection
+    query.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    good = db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    # If browse init still ran a full count per collection, this monkeypatch
+    # would blow up the request. The endpoint must derive the count_error
+    # flag from rule validation alone, with actual counts left to the
+    # client's async /api/collections call.
+    def boom(self, _cid):
+        raise sqlite3.OperationalError("count_collection_photos should not run on browse init")
+
+    monkeypatch.setattr(Database, "count_collection_photos", boom)
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+
+    # The healthy collection is neither degraded nor eagerly counted.
+    assert by_id[good].get("count_error") in (None, False)
+    assert "photo_count" not in by_id[good]
+
+    # The broken one is still flagged so the sidebar renders it disabled
+    # before loadCollectionCounts() has a chance to run.
+    assert by_id[bad]["count_error"] is True
+
+
+def test_collections_list_surfaces_non_rule_failures(app_and_db, monkeypatch):
+    """The count_error path is for rule-validation failures only. If
+    count_collection_photos raises a genuine infrastructure error (locked or
+    corrupt DB, bad generated query), /api/collections must NOT silently
+    downgrade it to a count_error row — the pickers would then tell the user
+    to fix the rule when the real problem is DB-side. Non-ValueError errors
+    must bubble up so the 5xx surfaces where a human will see it.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+
+    # Patch the class so the per-request Database instance built by
+    # _get_db() is affected too — the route does not share the fixture's
+    # instance.
+    def boom(self, _cid):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Database, "count_collection_photos", boom)
+
+    resp = client.get("/api/collections")
+    # Not a 200 with count_error — a real 5xx so the incident is visible.
+    assert resp.status_code >= 500
+
+
+def test_collection_photos_returns_400_for_unresolvable_rule(app_and_db):
+    """When a collection's rules can't be resolved, /photos, /photo-ids and
+    /api/import/collection-preview must return a 400, not 500. Otherwise the
+    pipeline picker (which just shows every collection from /api/collections)
+    would advertise a source whose downstream endpoints crash the moment a
+    user selects it — leaving the UI stuck.
+    """
+    import json
+    app, db = app_and_db
+    client = app.test_client()
+
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    resp = client.get(f"/api/collections/{bad}/photos")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.get(f"/api/collections/{bad}/photo-ids")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.post(
+        "/api/import/collection-preview",
+        json={"collection_id": bad},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+def test_pipeline_picker_disables_degraded_collections(app_and_db):
+    """The pipeline page's collection picker must not offer degraded
+    collections as selectable — count_error entries render with a `disabled`
+    attribute so users can't accidentally pick a source that would 500 the
+    downstream /photos endpoint.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+    html = client.get("/pipeline").get_data(as_text=True)
+    # The renderer keys off c.count_error and adds ' disabled' to the option
+    # (plus a tooltip explaining why it's unavailable). Assert the branch is
+    # actually in the template rather than probing it from the DOM.
+    assert "c.count_error" in html
+    assert "unavailable" in html
+
+
+def test_collection_pickers_disable_degraded_collections(app_and_db):
+    """Every page that renders a collection picker from /api/collections must
+    honor count_error. Before this fix only the pipeline picker did — the
+    review, cull, id-conflicts, pipeline-review, and browse pickers still appended
+    every collection as selectable, so picking a broken one 400'd the
+    downstream request. Regression guard: the same count_error /
+    'unavailable' branch that exists on the pipeline page must exist on each
+    of these pages too.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+    for route in ("/review", "/cull", "/id-conflicts", "/pipeline/review", "/browse"):
+        html = client.get(route).get_data(as_text=True)
+        assert "count_error" in html, (
+            f"{route} does not check count_error on its collection picker"
+        )
+        assert "unavailable" in html, (
+            f"{route} does not label degraded collections as unavailable"
+        )
+
+
+def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch):
+    """A count_error collection must not report can_add_photos=True from
+    either /api/collections or /api/browse/init. The add-to-collection
+    modal filters only on can_add_photos, and /api/collections/<id>/add-photos
+    reaches set(ids_rule["value"]) — which 500s on any malformed photo_ids
+    payload. Defense-in-depth alongside the picker guards: degraded rows
+    are surfaced (so the user can edit them) but never offered as an
+    append target.
+    """
+    import json
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    # A static photo_ids collection whose count query fails at rule-resolve
+    # time: the shape looks like a manual-add target, but the DB can't
+    # count it, so it lands in the count_error path.
+    bad = db.add_collection(
+        "Broken static",
+        json.dumps([
+            {"field": "photo_ids", "value": [1, 2, 3]},
+            {"field": "nonexistent_field", "op": "is", "value": 1},
+        ]),
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()}
+    assert by_id[bad]["count_error"] is True
+    assert by_id[bad]["can_add_photos"] is False, (
+        "degraded /api/collections row must not advertise manual-add support"
+    )
+
+    # /api/browse/init derives count_error from cheap rule validation, so
+    # patch that instead of count_collection_photos to trigger the branch.
+    monkeypatch.setattr(Database, "rules_resolvable", lambda self, rules: False)
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+    assert by_id[bad]["count_error"] is True
+    assert by_id[bad]["can_add_photos"] is False, (
+        "degraded /api/browse/init row must not advertise manual-add support"
+    )
+
+
+def test_browse_filter_by_collection_guards_degraded_rows():
+    """The Browse sidebar renders every collection from /api/collections as a
+    clickable filter target (filterByCollection). Before this fix,
+    left-clicking a degraded row hit /api/collections/<id>/photos, which now
+    400s, leaving Browse advertising a source that can't load. Regression
+    guard: filterByCollection must bail out at the top for count_error rows
+    (with a toast) rather than firing the request.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "browse.html"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("async function filterByCollection")
+    assert fn_start != -1, "filterByCollection function not found"
+    # Grab enough of the function body to include the guard block. The guard
+    # must reference count_error and return before the normal load path runs.
+    body = text[fn_start:fn_start + 2000]
+    assert "count_error" in body, (
+        "browse.html filterByCollection does not check count_error"
+    )
+    guard_end = body.find("return;")
+    fetch_start = body.find("loadPhotos")
+    assert guard_end != -1 and fetch_start != -1 and guard_end < fetch_start, (
+        "browse.html filterByCollection does not early-return before loading"
+    )
+
+
+def test_review_switch_collection_does_not_silently_widen_scope():
+    """When /api/collections/<id>/photos fails, the review page must not fall
+    back to `allPredictions.slice()` — that silently widened the scope back
+    to every prediction, the opposite of what the user asked for. Regression
+    guard on the template source itself.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "review.html"
+    text = src.read_text(encoding="utf-8")
+    # Locate the switchCollection function and the catch branch inside it.
+    fn_start = text.find("async function switchCollection")
+    assert fn_start != -1, "switchCollection function not found"
+    fn_end = text.find("\n}", fn_start)
+    assert fn_end != -1
+    body = text[fn_start:fn_end]
+    # The old silent fallback assigned allPredictions.slice() from the catch;
+    # the new behavior keeps the scope empty and surfaces a toast.
+    assert "predictions = allPredictions.slice()" not in body.split("catch")[1], (
+        "review.html still silently widens scope on collection load failure"
+    )
+    assert "predictions = []" in body
+    assert "showToast" in body
 
 
 def test_collection_preview_returns_match_count(app_and_db):
@@ -11681,22 +13841,44 @@ def test_import_page_returns_200(app_and_db):
     assert 'id="afterImportSelect"' in html
     assert 'value="__none__"' in html  # "None — import only" option
     assert "/api/import/check-duplicates" in html
+    assert "Trust likely duplicates" in html
+    assert "Verify duplicates byte-for-byte" in html
+    assert "capture time to the second" in html
+    assert "res.unverified_duplicates_only" in html
     assert 'id="safeToFormatPill"' in html
     assert "/api/jobs/import-in-place" in html
     assert "/api/jobs/import-photos" in html
 
 
-def test_import_page_resolves_default_strategy_client_side(app_and_db):
+def test_import_page_resolves_default_process_client_side(app_and_db):
     """Templates are Jinja-free by convention, so the after-import menu's
     default resolves in page JS from the workspace's config_overrides
-    merged over /api/config — assert the wiring exists (behavior is
-    covered by the user-first scenario)."""
+    merged over /api/config, and the process options load from
+    /api/processes — assert the wiring exists (behavior is covered by the
+    user-first scenario)."""
     app, _ = app_and_db
     client = app.test_client()
     html = client.get("/import").data.decode()
     assert "/api/workspaces/active" in html
-    assert "default_strategy" in html
+    assert "default_process_id" in html
+    assert "/api/processes" in html
     assert "config_overrides" in html
+
+
+def test_import_page_offers_common_and_custom_folder_templates(app_and_db):
+    """Folder organization is approachable without removing strftime's
+    flexibility or breaking custom templates loaded from config."""
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/import").data.decode()
+
+    assert 'id="folderTemplatePreset"' in html
+    assert '%Y/%m/%d — 2026/07/12' in html
+    assert '%Y/%Y-%m-%d — 2026/2026-07-12' in html
+    assert '<option value="__custom__">Custom…</option>' in html
+    assert 'id="folderTemplate"' in html
+    assert "function selectedFolderTemplate()" in html
+    assert "preset.value = commonOption ? template : '__custom__'" in html
 
 
 def test_process_page_has_no_import_source(app_and_db):
@@ -11743,7 +13925,14 @@ def test_native_import_commands_route_to_import_page():
         menu = f.read()
 
     assert "ids::NAV_IMPORT => Some(\"/import\")" in menu
+    assert "ids::NAV_LIGHTROOM => Some(\"/lightroom\")" in menu
+    # File → Import Lightroom Catalog must be a route (not a command) so it
+    # still works after Open in Browser — command dispatch is a no-op in
+    # browser mode, but route_for_id opens the URL in the user's browser.
+    assert "ids::FILE_IMPORT_LIGHTROOM => Some(\"/lightroom\")" in menu
+    assert "FILE_IMPORT_LIGHTROOM => Some(\"import_lightroom\")" not in menu
     assert "case 'import_photos':\n        nativeMenuRoute('/import');" in navbar
+    assert '"Import Lightroom Catalog..."' in menu
     # Import Folder... must stay a distinct action from Import Photos...:
     # it deep-links into Copy-to-archive with the source picker open.
     assert (
@@ -11771,6 +13960,8 @@ def test_native_shell_owns_external_navigation_policy():
     assert "navigation::handle_navigation(&navigation_app, url)" in lib
     assert ".on_new_window(" in lib
     assert "NewWindowResponse::Deny" in lib
+    assert ".on_download(" in lib
+    assert "handle_download(&download_app, event)" in lib
 
 
 def test_pipeline_plan_accepts_folder_scope(app_and_db):

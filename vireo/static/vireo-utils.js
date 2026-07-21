@@ -260,6 +260,14 @@ var VireoPipelineConfig = (function() {
         soft_cut_score: percent(
           pipelineValue(p, 'soft_cut_score'), 'soft_cut_score'
         ),
+        species_hard_cut_confidence: percent(
+          pipelineValue(p, 'species_hard_cut_confidence'),
+          'species_hard_cut_confidence'
+        ),
+        species_hard_cut_margin: percent(
+          pipelineValue(p, 'species_hard_cut_margin'),
+          'species_hard_cut_margin'
+        ),
         merge_score: percent(pipelineValue(p, 'merge_score'), 'merge_score'),
         merge_max_gap: asNumber(
           pipelineValue(p, 'merge_max_gap'), 'merge_max_gap'
