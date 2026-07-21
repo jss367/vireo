@@ -375,7 +375,7 @@ class JobRunner:
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
               ephemeral=False, runtime_warning=None, counts_for_badge=True,
-              pausable=False):
+              pausable=False, blocks_local_transitions=True):
         """Start a background job.
 
         Args:
@@ -395,8 +395,12 @@ class JobRunner:
             counts_for_badge: if False, the job remains visible in job lists
                        but does not contribute to app/Dock attention badges.
             pausable: if True, pause_job() may suspend the worker the next
-                       time it calls is_cancelled(). Only set this for work
-                       that checks cancellation at safe boundaries.
+                      time it calls is_cancelled(). Only set this for work
+                      that checks cancellation at safe boundaries.
+            blocks_local_transitions: if False, Work Locally stage/sync/discard
+                      actions may proceed while this job runs. Reserve this
+                      for observational jobs whose results are safely dropped
+                      when a local transition invalidates their cache.
 
         Returns:
             job_id string
@@ -426,6 +430,7 @@ class JobRunner:
             "ephemeral": ephemeral,
             "counts_for_badge": counts_for_badge,
             "pausable": bool(pausable),
+            "blocks_local_transitions": bool(blocks_local_transitions),
             "runtime_warning": runtime_warning,
             # Pre-seeded so later writes from worker threads update an
             # existing key instead of inserting a new one: key insertion

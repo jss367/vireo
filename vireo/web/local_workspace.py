@@ -48,6 +48,11 @@ def create_local_workspace_blueprint(
         # scan/import is paused would silently orphan rows the manifest
         # doesn't cover once the paused job resumes.
         for job in get_runner().list_jobs():
+            # Observational jobs can opt out when their cache invalidation
+            # already makes an in-flight result from the old path layout
+            # harmless. The automatic new-images walk uses this path.
+            if job.get("blocks_local_transitions") is False:
+                continue
             if (
                 job.get("workspace_id") == workspace_id
                 and job.get("status") in {"queued", "running", "pausing", "paused"}
