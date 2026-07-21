@@ -1122,9 +1122,15 @@ async function loadPredictions() {
     if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
     _predictionsReloading = false;
     document.getElementById('loading').textContent = 'Error: ' + err.message;
-    // Restore the header button state so the user isn't stuck with a
-    // permanently-disabled "Reloading…" label when the fetch fails.
-    renderButtons();
+    // Clear the stale ``predictions`` array before re-rendering so Accept
+    // All and per-card handlers can't fire against the previous filter
+    // or collection's rows under the new visible chips. Without this the
+    // header button (and inline handlers) become enabled again with old
+    // counts, letting users accept/reject predictions that are outside
+    // the current filter scope.
+    allPredictions = [];
+    predictions = [];
+    renderAll();
   }
 }
 

@@ -644,6 +644,13 @@
     });
     if (hiddenByFilter && !unresolved.length && !resolved.length) {
       setEmptyVisible(false);
+      // Hide the previously-rendered summary and sticky apply bar so a
+      // stale "Reject N extra copies" button (or the summary counts) does
+      // not remain visible under the "no groups match" message — that
+      // button would otherwise post loser hashes for groups the active
+      // filter has hidden.
+      document.getElementById('summary').style.display = 'none';
+      document.getElementById('applyBar').style.display = 'none';
       document.getElementById('results').innerHTML =
         '<div class="no-results">No duplicate groups match the active filters (' +
         hiddenByFilter + ' hidden). Clear or pause filters to see them.</div>';
