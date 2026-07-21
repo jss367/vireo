@@ -1226,8 +1226,13 @@
     const backdrop = $('.vf-save-backdrop');
     // Post-save semantics: the saved Collection reopens unmuted with the
     // visual clause applied — preview THAT count, never the paused view's.
-    const context = state.getContextRules ? state.getContextRules() : [];
-    const rules = { mode: 'all', rules: clone(context).concat(clone(state.root.rules)) };
+    // Preview the same expression confirmSaveCollection persists
+    // (state.root + visual), NOT the current view's page-context scope:
+    // the reopened collection matches globally, so including
+    // getContextRules() in the preview would show a folder-scoped count
+    // that disagrees with what the collection actually contains on
+    // reopen (CodeRabbit review r3620473554).
+    const rules = { mode: 'all', rules: clone(state.root.rules) };
     const preview = $('.vf-save-preview');
     preview.textContent = expressionSummary();
     fetchJson('/api/photos/query', {

@@ -18739,19 +18739,20 @@ class Database:
         self.conn.commit()
 
     def duplicate_collection(self, collection_id):
-        """Copy a collection (name + rules) within the active workspace.
+        """Copy a collection (name + rules + visual clause) within the active workspace.
 
         The new collection's name is ``"{original} (copy)"``; if that name is
         already taken, append an incrementing counter like ``"(copy 2)"``.
-        Rules are copied verbatim, which means static collections (photo_ids
-        rules) keep their memberships.
+        Rules and ``visual_json`` are copied verbatim, which means static
+        collections (photo_ids rules) keep their memberships and visual
+        collections keep their visual clause.
 
         Returns the new collection id. Raises ``ValueError`` if the source
         collection isn't in the active workspace.
         """
         ws = self._ws_id()
         row = self.conn.execute(
-            "SELECT name, rules FROM collections WHERE id = ? AND workspace_id = ?",
+            "SELECT name, rules, visual_json FROM collections WHERE id = ? AND workspace_id = ?",
             (collection_id, ws),
         ).fetchone()
         if not row:
@@ -18771,8 +18772,8 @@ class Database:
             n += 1
 
         cur = self.conn.execute(
-            "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
-            (new_name, row["rules"], ws),
+            "INSERT INTO collections (name, rules, workspace_id, visual_json) VALUES (?, ?, ?, ?)",
+            (new_name, row["rules"], ws, row["visual_json"]),
         )
         self.conn.commit()
         return cur.lastrowid

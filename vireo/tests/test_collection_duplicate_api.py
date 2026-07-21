@@ -63,6 +63,35 @@ def test_duplicate_collection_copies_static_photo_memberships(app_and_db):
     assert orig_photos == set(pids)
 
 
+def test_duplicate_collection_copies_visual_clause(app_and_db):
+    """A visual collection duplicates with its visual_json intact — otherwise
+    the copy silently drops back to a metadata-only match (Codex review
+    r3620636596 / CodeRabbit review r3620473547)."""
+    app, db = app_and_db
+    _clear_default_collections(db)
+
+    rules = [{"field": "rating", "op": ">=", "value": 3}]
+    visual = {"prompt": "bird in flight", "strength": "balanced"}
+    with app.test_client() as c:
+        resp = c.post(
+            "/api/collections",
+            json={"name": "Visual Picks", "rules": rules, "visual": visual},
+        )
+        assert resp.status_code == 200
+        cid = resp.get_json()["id"]
+
+        resp = c.post(f"/api/collections/{cid}/duplicate", json={})
+        assert resp.status_code == 200
+        new_id = resp.get_json()["id"]
+
+    row = db.conn.execute(
+        "SELECT rules, visual_json FROM collections WHERE id = ?", (new_id,)
+    ).fetchone()
+    assert json.loads(row["rules"]) == rules
+    assert row["visual_json"] is not None
+    assert json.loads(row["visual_json"]) == visual
+
+
 def test_duplicate_unknown_collection_returns_404(app_and_db):
     app, _ = app_and_db
     with app.test_client() as c:

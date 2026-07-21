@@ -221,6 +221,37 @@ def test_dashboard_options_flags_degraded_collections(app_and_db):
         assert client.get(f"/api/coverage?collection_id={cid}").status_code == 400
 
 
+def test_dashboard_options_flags_visual_collections(app_and_db):
+    """Visual collections carry a ``has_visual`` flag so stats.html's scope
+    picker disables them — a visual collection selected in Dashboard scope
+    would silently widen to every metadata match because /api/stats and
+    /api/coverage resolve collection_id through ``_build_collection_query``
+    (rules-only). Codex review r3620636595."""
+    app, db = app_and_db
+    plain = db.add_collection("Plain", "[]")
+    visual = db.add_collection(
+        "Visual",
+        json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
+        visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
+    )
+
+    client = app.test_client()
+    resp = client.get("/api/dashboard/options")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+    assert by_id[plain]["has_visual"] is False
+    assert by_id[visual]["has_visual"] is True
+
+    # Server-side belt-and-suspenders: a bookmarked /dashboard link with the
+    # visual collection id 400s so the panels don't render metadata-only
+    # numbers passed off as visual-scoped.
+    assert client.get(f"/api/stats?collection_id={visual}").status_code == 400
+    assert client.get(f"/api/coverage?collection_id={visual}").status_code == 400
+    # Plain collections still work.
+    assert client.get(f"/api/stats?collection_id={plain}").status_code == 200
+    assert client.get(f"/api/coverage?collection_id={plain}").status_code == 200
+
+
 def test_dashboard_scope_rejects_foreign_collection(app_and_db):
     """Scope ids cannot cross workspace boundaries."""
     app, db = app_and_db

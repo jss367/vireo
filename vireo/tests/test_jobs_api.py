@@ -3395,6 +3395,34 @@ def test_jobs_previews_rejects_visual_collection(app_and_db):
         assert "visual-search clause" in resp.get_json()["error"]
 
 
+def test_jobs_previews_rejects_visual_collection_when_id_is_a_json_string(app_and_db):
+    """The visual guard must coerce non-int JSON types before the
+    ``visual_json`` lookup — SQLite's ``WHERE id = ?`` matches integer id 1
+    when handed the string ``"1"`` or ``True``, so an early ``isinstance``
+    bail-out would let a string- or bool-typed id skip the guard and hit
+    the rules-only path anyway (Codex review r3620636582)."""
+    app, _ = app_and_db
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/previews", json={"collection_id": str(col_id)},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_jobs_previews_rejects_non_integer_collection_id(app_and_db):
+    """An unparseable ``collection_id`` (e.g. ``[1]``) is rejected outright
+    so a caller can't slip past the guard with an exotic type."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/previews", json={"collection_id": [1]},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        assert "must be an integer" in resp.get_json()["error"]
+
+
 @pytest.mark.parametrize(
     "extra",
     [

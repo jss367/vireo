@@ -564,9 +564,17 @@ async function loadDashboardOptions() {
   (dashboardOptions.collections || []).forEach(function(collection) {
     var option = document.createElement('option');
     option.value = collection.id;
-    option.textContent = collection.name
-      + (collection.degraded ? ' (unavailable — rule error)' : '');
-    if (collection.degraded) option.disabled = true;
+    // Dashboard scope (/api/stats, /api/coverage, and the Browse
+    // drilldown link) evaluates rules only via _build_collection_query,
+    // so a visual collection selected here would silently widen to every
+    // metadata match. The has_visual flag surfaces from
+    // /api/dashboard/options; disable those options and 400 server-side
+    // as belt-and-suspenders.
+    var suffix = '';
+    if (collection.degraded) suffix = ' (unavailable — rule error)';
+    else if (collection.has_visual) suffix = ' (visual — open from Browse)';
+    option.textContent = collection.name + suffix;
+    if (collection.degraded || collection.has_visual) option.disabled = true;
     collectionSelect.appendChild(option);
   });
 

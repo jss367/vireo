@@ -513,6 +513,27 @@ def test_list_collections_flags_visual(app_and_db):
     assert by_name["Plain"]["has_visual"] is False
 
 
+def test_create_collection_rejects_non_string_visual_strength(app_and_db):
+    """A JSON array for ``visual.strength`` is unhashable, so
+    ``strength in _VISUAL_STRENGTH_THRESHOLDS`` raises TypeError; without
+    an explicit type check that TypeError escapes the 400 handler as a 500
+    (CodeRabbit review r3620473547 outside-diff note)."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections",
+        json={
+            "name": "Bad strength",
+            "rules": [],
+            "visual": {"prompt": "bird", "strength": ["broad"]},
+        },
+    )
+    assert resp.status_code == 400, resp.get_json()
+    assert "strength" in resp.get_json()["error"]
+
+
 def test_collection_photos_rejects_visual_collection(app_and_db):
     """``/api/collections/<id>/photos`` refuses visual collections. The
     endpoint only evaluates ``rules``; without this reject the Review and

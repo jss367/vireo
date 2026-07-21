@@ -4403,6 +4403,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("visual.prompt must be a non-empty string")
         strength = visual.get("strength", "balanced")
+        # An unhashable strength (e.g. ``["broad"]``) makes ``strength in
+        # _VISUAL_STRENGTH_THRESHOLDS`` raise ``TypeError``, which would
+        # escape the 400 handler in the collection create/update paths as
+        # a 500 (CodeRabbit review r3620473547 outside-diff note).
+        if not isinstance(strength, str):
+            raise ValueError("visual.strength must be a string")
         if strength not in _VISUAL_STRENGTH_THRESHOLDS:
             raise ValueError("visual.strength must be broad, balanced, or strict")
         return {"prompt": prompt.strip(), "strength": strength}
@@ -9946,7 +9952,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         folders = [dict(row) for row in db.get_folder_tree()]
         collection_rows = db.conn.execute(
-            "SELECT id, name, rules FROM collections "
+            "SELECT id, name, rules, visual_json FROM collections "
             "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
             (db._ws_id(),),
         ).fetchall()
@@ -9957,14 +9963,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "id": row["id"],
                 "name": row["name"],
                 "degraded": degraded,
+                # Dashboard scope path (/api/stats, /api/coverage, and the
+                # Dashboard Browse drilldown link) resolves collection_id
+                # through ``_build_collection_query``, which evaluates
+                # ``rules`` only. A visual collection selected here would
+                # silently widen to every metadata match (Codex review
+                # r3620636595), so stats.html disables these picker options.
+                "has_visual": row["visual_json"] is not None,
             })
         return jsonify({"folders": folders, "collections": collections})
 
     @app.route("/api/stats")
     def api_stats():
         db = _get_db()
+        scope = _dashboard_scope_args()
+        err = _reject_visual_collection(db, scope.get("collection_id"))
+        if err is not None:
+            return err
         try:
-            stats = db.get_dashboard_stats(**_dashboard_scope_args())
+            stats = db.get_dashboard_stats(**scope)
         except ValueError as exc:
             return json_error(str(exc), 400)
         return jsonify(stats)
@@ -9979,6 +9996,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         db = _get_db()
         scope = _dashboard_scope_args()
+        err = _reject_visual_collection(db, scope.get("collection_id"))
+        if err is not None:
+            return err
         try:
             return jsonify({
                 "overall": db.get_coverage_stats(**scope),
@@ -10721,12 +10741,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo instead of the visually-matched subset — the fix Codex
         flagged in review r3620423210. Pickers hide these collections too,
         but this is the source-of-truth boundary check.
+
+        Coerce the raw JSON value before the ``visual_json`` lookup:
+        SQLite's ``WHERE id = ?`` still matches integer id 1 when handed
+        ``"1"`` or ``True``, so an early ``isinstance`` bail-out would let
+        a string- or bool-typed id skip the guard and hit the rules-only
+        path anyway (Codex review r3620636582). Return a 400 on an
+        unparseable id so callers can't silently widen the scope.
         """
-        if collection_id is None:
+        coerced = _coerce_collection_id(collection_id)
+        if coerced is None:
             return None
-        if not isinstance(collection_id, int) or isinstance(collection_id, bool):
-            return None
-        row = _collection_row(db, collection_id)
+        if coerced is False:
+            return json_error("collection_id must be an integer", 400)
+        row = _collection_row(db, coerced)
         if row is not None and row["visual_json"] is not None:
             return json_error(_VISUAL_COLLECTION_MSG, 400)
         return None
