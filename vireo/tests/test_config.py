@@ -814,6 +814,61 @@ def test_migrate_toggle_ui_h_conflict_no_config_file(tmp_path, monkeypatch):
     assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
 
 
+def test_migrate_compare_nav_id_moves_custom_binding(tmp_path, monkeypatch):
+    """A saved navigation shortcut on the retired "compare" id is moved onto
+    "id_conflicts" so the binding follows the renamed page."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "keyboard_shortcuts": {
+            "navigation": {"compare": "ctrl+shift+c"},
+        },
+    })
+
+    assert cfg.migrate_compare_nav_id_to_id_conflicts() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    nav = raw["keyboard_shortcuts"]["navigation"]
+    assert "compare" not in nav
+    assert nav["id_conflicts"] == "ctrl+shift+c"
+    assert cfg.MIGRATION_COMPARE_NAV_ID in raw["_migrations_applied"]
+
+
+def test_migrate_compare_nav_id_does_not_clobber_explicit_id_conflicts(
+    tmp_path, monkeypatch
+):
+    """An explicit id_conflicts binding wins over a stale compare one, which
+    is simply dropped."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "keyboard_shortcuts": {
+            "navigation": {"compare": "ctrl+shift+c", "id_conflicts": "ctrl+i"},
+        },
+    })
+
+    assert cfg.migrate_compare_nav_id_to_id_conflicts() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    nav = raw["keyboard_shortcuts"]["navigation"]
+    assert "compare" not in nav
+    assert nav["id_conflicts"] == "ctrl+i"
+
+
+def test_migrate_compare_nav_id_is_one_time(tmp_path, monkeypatch):
+    """Marker gates the migration; a compare key re-added later is left alone."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"keyboard_shortcuts": {"navigation": {}}})
+    assert cfg.migrate_compare_nav_id_to_id_conflicts() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert cfg.MIGRATION_COMPARE_NAV_ID in raw["_migrations_applied"]
+
+    raw["keyboard_shortcuts"]["navigation"]["compare"] = "ctrl+shift+c"
+    _write_raw(cfg.CONFIG_PATH, raw)
+    assert cfg.migrate_compare_nav_id_to_id_conflicts() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["keyboard_shortcuts"]["navigation"]["compare"] == "ctrl+shift+c"
+
+
 def test_migrate_browse_location_status_rewrites_exact_legacy_default(
     tmp_path, monkeypatch
 ):

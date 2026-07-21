@@ -2198,7 +2198,7 @@ function sendReport() {
 <!-- New Images Banner -->
 <div class="new-images-banner" id="newImagesBanner" style="display:none;">
   <span id="newImagesMsg"></span>
-  <button type="button" class="banner-cta" onclick="createPipelineFromNewImages(this)">Create a pipeline</button>
+  <button type="button" class="banner-cta" onclick="reviewNewImagesImport(this)">Review import</button>
   <button class="banner-dismiss" onclick="dismissNewImagesBanner()">&times;</button>
 </div>
 
@@ -2374,7 +2374,8 @@ window.NAV_ALL_PAGES = [
   {id: 'storage',         label: 'Storage',         href: '/storage'},
   {id: 'audit',           label: 'Audit',           href: '/audit'},
   {id: 'move',            label: 'Move',            href: '/move'},
-  {id: 'compare',         label: 'Compare',         href: '/compare'},
+  {id: 'id_conflicts',    label: 'ID Conflicts',    href: '/id-conflicts',
+   keywords: 'compare conflict prediction model disagreement species keyword classify review'},
   {id: 'settings',        label: 'Settings',        href: '/settings'},
   {id: 'workspace',       label: 'Workspace',       href: '/workspace'},
   {id: 'lightroom',       label: 'Lightroom',       href: '/lightroom'},
@@ -2826,14 +2827,14 @@ window.NAV_ALL_PAGES = [
     pipeline: '/pipeline', lightroom: '/lightroom', pipeline_review: '/pipeline/review',
     review: '/review', cull: '/cull', browse: '/browse', map: '/map',
     variants: '/variants', dashboard: '/dashboard', storage: '/storage', audit: '/audit',
-    compare: '/compare', workspace: '/workspace', shortcuts: '/shortcuts',
+    id_conflicts: '/id-conflicts', workspace: '/workspace', shortcuts: '/shortcuts',
     settings: '/settings', keywords: '/keywords'
   };
 
   var NAV_DEFAULTS = {
     pipeline: '', lightroom: '', pipeline_review: '', review: '',
     cull: '', browse: '', map: '', variants: '',
-    dashboard: '', storage: '', audit: '', compare: '', workspace: '',
+    dashboard: '', storage: '', audit: '', id_conflicts: '', workspace: '',
     shortcuts: '', settings: '', keywords: ''
   };
 
@@ -3042,7 +3043,7 @@ window.NAV_ALL_PAGES = [
       import: 'Import', pipeline: 'Process', pipeline_review: 'Process Review',
       review: 'Review', cull: 'Cull', browse: 'Browse', map: 'Map',
       variants: 'Variants', dashboard: 'Dashboard', storage: 'Storage', audit: 'Audit',
-      compare: 'Compare', workspace: 'Workspace', keywords: 'Keywords',
+      id_conflicts: 'ID Conflicts', workspace: 'Workspace', keywords: 'Keywords',
       shortcuts: 'Shortcuts', settings: 'Settings',
     },
     review: {
@@ -3106,7 +3107,7 @@ window.NAV_ALL_PAGES = [
     navigation: {
       import: '', pipeline: '', pipeline_review: '', review: '',
       cull: '', browse: '', map: '', variants: '',
-      dashboard: '', storage: '', audit: '', compare: '', workspace: '',
+      dashboard: '', storage: '', audit: '', id_conflicts: '', workspace: '',
       shortcuts: '', settings: '', keywords: '',
     },
     review: { accept: 'a', skip: 's' },
@@ -7906,6 +7907,12 @@ function lightboxDelete() {
         refreshBrowseSidebarCounts();
       }
     }
+
+    try {
+      document.dispatchEvent(new CustomEvent('lightbox:photodeleted', {
+        detail: { photoId: currentId, result: data || null }
+      }));
+    } catch (_) {}
   });
 }
 /* ---------- iNat Submission ---------- */
@@ -9698,7 +9705,7 @@ window.handleNativeMenuCommand = async function(command) {
       }
       case 'photo_compare':
         if (typeof openBrowseCompare === 'function') openBrowseCompare();
-        else nativeMenuRoute('/compare');
+        else nativeMenuRoute('/id-conflicts');
         break;
       case 'photo_add_keyword':
         if (typeof batchAddKeyword === 'function') {
@@ -11201,7 +11208,7 @@ function dismissNewImagesBanner() {
   }
 }
 
-async function createPipelineFromNewImages(btn) {
+async function reviewNewImagesImport(btn) {
   if (btn && btn.disabled) return;
   if (btn) {
     btn.disabled = true;
@@ -11210,7 +11217,7 @@ async function createPipelineFromNewImages(btn) {
   // One POST, then navigate. When the walk that produced the banner count is
   // still cached (the common case), this returns the snapshot instantly and
   // we deep-link to it. If the server is still walking (202) — or anything
-  // goes wrong — land on the pipeline page in its "preparing" state, which
+  // goes wrong — land on the Import page in its "preparing" state, which
   // owns the polling and shows live walk progress. Never poll here holding
   // the user on a frozen button, and never dump them on a blank wizard with
   // no explanation.
@@ -11219,12 +11226,12 @@ async function createPipelineFromNewImages(btn) {
     if (r.ok && r.status !== 202) {
       const data = await r.json();
       if (data && data.snapshot_id != null) {
-        window.location.href = `/pipeline?new_images=${data.snapshot_id}`;
+        window.location.href = `/import?new_images=${data.snapshot_id}`;
         return;
       }
     }
   } catch (e) { /* fall through to the preparing page */ }
-  window.location.href = '/pipeline?new_images=preparing';
+  window.location.href = '/import?new_images=preparing';
 }
 
 // Run on page load and every 60s. Banner dismissal is per-workspace via

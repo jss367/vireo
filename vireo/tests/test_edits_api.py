@@ -1,3 +1,6 @@
+import os
+
+
 def test_set_color_label(app_and_db):
     """POST /api/photos/<id>/color_label sets the color label."""
     app, db = app_and_db
@@ -393,6 +396,627 @@ def test_sync_status(app_and_db):
     resp = client.get('/api/sync/status')
     data = resp.get_json()
     assert data['pending_count'] == 1
+
+
+def test_sync_preview_describes_location_keyword_as_xmp_delta(
+    client_with_photo,
+):
+    """The internal ``effective`` token never stands in for a location value."""
+    import config as cfg
+    from xmp import write_gps_location
+
+    app, db, photo_id = client_with_photo
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    florida_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Florida', 'location')"
+    ).lastrowid
+    tallahassee_id = db.conn.execute(
+        "INSERT INTO keywords "
+        "(name, parent_id, type, latitude, longitude) "
+        "VALUES ('Tallahassee', ?, 'location', 30.4383, -84.2807)",
+        (florida_id,),
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, tallahassee_id)
+    db.queue_change(photo_id, "location", "effective")
+
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_gps_location(
+        os.path.join(folder, "test.xmp"),
+        48.8566,
+        2.3522,
+        source="keyword",
+    )
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "Location",
+        "action": "updated",
+        "before": "48.85660, 2.35220",
+        "after": "Tallahassee, Florida",
+        "after_detail": "30.43830, -84.28070 · from a location keyword",
+    }
+
+
+def test_sync_preview_explains_when_location_xmp_writes_are_disabled(
+    client_with_photo,
+):
+    """A queued cleanup check must not imply that a location will be written."""
+    app, db, photo_id = client_with_photo
+    location_id = db.conn.execute(
+        "INSERT INTO keywords "
+        "(name, type, latitude, longitude) "
+        "VALUES ('Tallahassee', 'location', 30.4383, -84.2807)"
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, location_id)
+    db.queue_change(photo_id, "location", "effective")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["location_sync_enabled"] is False
+    change = payload["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP location",
+        "action": "unchanged",
+        "before": "No XMP sidecar",
+        "after": "No XMP sidecar",
+        "after_detail": (
+            "Tallahassee stays in Vireo; writing its GPS to XMP is turned off"
+        ),
+    }
+
+
+def test_sync_preview_does_not_promise_rating_write_without_sidecar(
+    client_with_photo,
+):
+    """Rating sync cannot create a sidecar, so the preview says it stays in Vireo."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "rating", "5")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP rating",
+        "action": "unchanged",
+        "before": "No XMP sidecar",
+        "after": "No XMP sidecar",
+        "after_detail": (
+            "5 stars stays in Vireo; rating sync only updates an existing, "
+            "readable XMP sidecar"
+        ),
+    }
+    assert change["creates_xmp_sidecar"] is False
+    assert change["rating_requires_sidecar"] is True
+
+
+def test_sync_preview_accounts_for_selected_change_creating_rating_sidecar(
+    client_with_photo,
+):
+    """A selected keyword write creates the sidecar before rating sync runs."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "rating", "5")
+    db.queue_change(photo_id, "keyword_add", "Raptor")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    rating = changes["rating"]
+    assert changes["keyword_add"]["creates_xmp_sidecar"] is True
+    assert rating["rating_requires_sidecar"] is True
+    assert rating["presentation"] == rating["presentation_with_sidecar"]
+    assert rating["presentation_with_sidecar"] == {
+        "field": "Rating",
+        "action": "updated",
+        "before": "No XMP sidecar",
+        "after": "5 stars",
+        "after_detail": "Another selected change creates the XMP sidecar first",
+    }
+    assert rating["presentation_without_sidecar"]["action"] == "unchanged"
+
+
+def test_sync_preview_reports_rating_persisted_when_location_creates_sidecar(
+    client_with_photo,
+):
+    """Assigned GPS with the toggle on creates the sidecar before rating runs.
+
+    ``sync.py`` writes ``write_gps_location`` before ``write_rating``, so
+    the rating actually lands in the new sidecar. The preview must mirror
+    that instead of reporting the rating as staying in Vireo.
+    """
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    location_id = db.conn.execute(
+        "INSERT INTO keywords "
+        "(name, type, latitude, longitude) "
+        "VALUES ('Tallahassee', 'location', 30.4383, -84.2807)"
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, location_id)
+    db.queue_change(photo_id, "rating", "4")
+    db.queue_change(photo_id, "location", "effective")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    assert changes["location"]["creates_xmp_sidecar"] is True
+    rating = changes["rating"]
+    assert rating["presentation"] == rating["presentation_with_sidecar"]
+    assert rating["presentation_with_sidecar"]["action"] == "updated"
+    assert rating["presentation_with_sidecar"]["after"] == "4 stars"
+
+
+def test_sync_preview_does_not_persist_rating_when_location_lacks_gps(
+    client_with_photo,
+):
+    """A location keyword without coordinates cannot create the sidecar."""
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    # No latitude/longitude on the keyword -- ``sync.py`` will call
+    # ``remove_vireo_gps_location`` here, which never creates a sidecar.
+    location_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Placeholder', 'location')"
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, location_id)
+    db.queue_change(photo_id, "rating", "2")
+    db.queue_change(photo_id, "location", "effective")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    assert changes["location"]["creates_xmp_sidecar"] is False
+    assert changes["rating"]["presentation"]["action"] == "unchanged"
+
+
+def test_sync_preview_reports_rating_persisted_when_edit_recipe_creates_sidecar(
+    client_with_photo,
+):
+    """A non-empty edit recipe writes a sidecar via _load_or_create_xmp."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "rating", "5")
+    db.queue_change(photo_id, "edit_recipe", '{"exposure": 0.5}')
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    assert changes["edit_recipe"]["creates_xmp_sidecar"] is True
+    assert changes["rating"]["presentation"]["action"] == "updated"
+    assert changes["rating"]["presentation"]["after"] == "5 stars"
+
+
+def test_sync_preview_shows_hierarchical_keyword_before_removal(
+    client_with_photo,
+):
+    """A hierarchy-only keyword removal shows the XMP value it will delete."""
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords=set(),
+        hierarchical_keywords={"Animals|Birds|Raptor"},
+    )
+    db.queue_change(photo_id, "keyword_remove", "Birds")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "Keyword",
+        "action": "removed",
+        "before": "Animals › Birds › Raptor",
+        "after": "Not in XMP",
+    }
+
+
+def test_sync_preview_reports_flat_and_hierarchy_when_both_will_be_removed(
+    client_with_photo,
+):
+    """Solo keyword_remove drops flat + hierarchy; both must show in the review."""
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords={"Raptor"},
+        hierarchical_keywords={"Animals|Birds|Raptor"},
+    )
+    db.queue_change(photo_id, "keyword_remove", "Raptor")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["paired_keyword_rename"] is False
+    assert change["presentation"] == {
+        "field": "Keyword",
+        "action": "removed",
+        "before": "Raptor; Animals › Birds › Raptor",
+        "after": "Not in XMP",
+    }
+
+
+def test_sync_preview_preserves_hierarchy_during_paired_keyword_rename(
+    client_with_photo,
+):
+    """A normalized add/remove pair only replaces the flat XMP spelling."""
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords=set(),
+        hierarchical_keywords={"Animals|Birds|Raptor"},
+    )
+    db.queue_change(photo_id, "keyword_remove", "Birds")
+    db.queue_change(photo_id, "keyword_add", "Birds")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    removal = changes["keyword_remove"]
+    assert removal["paired_keyword_rename"] is True
+    assert removal["auto_includes_keyword_add"] is True
+    assert removal["creates_xmp_sidecar"] is True
+    assert removal["presentation"] == {
+        "field": "Keyword hierarchy",
+        "action": "unchanged",
+        "before": "Animals › Birds › Raptor",
+        "after": "Animals › Birds › Raptor",
+        "after_detail": (
+            "The matching keyword addition replaces only the flat spelling; "
+            "this hierarchy stays in XMP"
+        ),
+    }
+
+
+def test_sync_preview_clears_rename_flags_after_discarding_paired_keyword_add(
+    client_with_photo,
+):
+    """Discarding one half of an add/remove pair must un-pair the survivor.
+
+    Before the fix, the frontend cached the preview locally and only
+    dropped the discarded change from the list, leaving the surviving
+    keyword_remove flagged as ``paired_keyword_rename=True`` and
+    ``creates_xmp_sidecar=True``. A rating queued alongside that pair
+    then displayed as if the sidecar would be created, but the actual
+    sync produced no sidecar and silently dropped the rating. Refetching
+    the preview after discard must yield up-to-date flags so the rating
+    presentation and sync payload agree.
+    """
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords=set(),
+        hierarchical_keywords={"Animals|Birds|Raptor"},
+    )
+    db.queue_change(photo_id, "keyword_remove", "Birds")
+    db.queue_change(photo_id, "keyword_add", "Birds")
+    db.queue_change(photo_id, "rating", "4")
+
+    client = app.test_client()
+    initial = client.get("/api/sync/preview").get_json()
+    changes = {c["type"]: c for c in initial["photos"][0]["changes"]}
+    assert changes["keyword_remove"]["paired_keyword_rename"] is True
+    assert changes["keyword_remove"]["creates_xmp_sidecar"] is True
+    add_id = changes["keyword_add"]["id"]
+
+    resp = client.post("/api/sync/discard", json={"change_ids": [add_id]})
+    assert resp.status_code == 200
+
+    refreshed = client.get("/api/sync/preview").get_json()
+    after = {c["type"]: c for c in refreshed["photos"][0]["changes"]}
+    assert "keyword_add" not in after
+    removal = after["keyword_remove"]
+    assert removal["paired_keyword_rename"] is False
+    assert removal["auto_includes_keyword_add"] is False
+    assert removal["creates_xmp_sidecar"] is False
+    assert removal["presentation"]["action"] == "removed"
+
+
+def test_sync_preview_treats_flag_as_unchanged_when_sync_is_disabled(
+    client_with_photo,
+):
+    """A stale queued flag does not promise an XMP write after opt-out."""
+    import config as cfg
+    from xmp import write_pick_flag
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_pick_flag(os.path.join(folder, "test.xmp"), "rejected")
+    db.queue_change(photo_id, "flag", "flagged")
+    config = cfg.load()
+    config["sync_flags_to_xmp"] = False
+    cfg.save(config)
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["creates_xmp_sidecar"] is False
+    assert change["presentation"] == {
+        "field": "XMP flag",
+        "action": "unchanged",
+        "before": "Rejected",
+        "after": "Rejected",
+        "after_detail": "Picked stays in Vireo; flag sync to XMP is turned off",
+    }
+
+
+def test_sync_preview_does_not_promise_removal_from_unreadable_xmp(
+    client_with_photo,
+):
+    """Keyword removal cannot modify a corrupt sidecar."""
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    with open(os.path.join(folder, "test.xmp"), "w") as sidecar:
+        sidecar.write("not xml")
+    db.queue_change(photo_id, "keyword_remove", "Raptor")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP keyword",
+        "action": "unchanged",
+        "before": "Unreadable XMP sidecar",
+        "after": "Unreadable XMP sidecar",
+        "after_detail": (
+            "Raptor cannot be removed because the XMP sidecar is unreadable"
+        ),
+    }
+
+
+def test_sync_preview_treats_absent_keyword_removal_as_unchanged(
+    client_with_photo,
+):
+    """A keyword removal against a missing sidecar accurately reports a no-op."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "keyword_remove", "Raptor")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP keyword",
+        "action": "unchanged",
+        "before": "No XMP sidecar",
+        "after": "No XMP sidecar",
+        "after_detail": "No XMP sidecar contains Raptor to remove",
+    }
+
+
+def test_sync_preview_reports_paired_flat_rename_as_replacement(
+    client_with_photo,
+):
+    """A paired keyword_add/remove targeting an existing flat variant shows as replaced.
+
+    The sync path dispatches the removal through the flat-only path and
+    then ``write_sidecar`` writes the clean spelling, so the sidecar ends
+    with the paired add's value. Reporting the remove side as
+    ``Not in XMP`` hides that the keyword survives with a canonicalized
+    spelling; the review must present it as an unchanged keyword whose
+    flat entry is rewritten by the paired addition.
+    """
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    # Existing flat variant with a smart quote; both pending values
+    # normalize to the same key so ``sync_to_xmp`` pairs them.
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords={"‘apapane"},
+        hierarchical_keywords=set(),
+    )
+    db.queue_change(photo_id, "keyword_remove", "‘apapane")
+    db.queue_change(photo_id, "keyword_add", "apapane")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    removal = changes["keyword_remove"]
+    assert removal["paired_keyword_rename"] is True
+    assert removal["auto_includes_keyword_add"] is True
+    assert removal["creates_xmp_sidecar"] is True
+    assert removal["presentation"] == {
+        "field": "Keyword",
+        "action": "unchanged",
+        "before": "‘apapane",
+        "after": "apapane",
+        "after_detail": (
+            "The matching keyword addition rewrites this flat spelling; "
+            "the keyword itself stays in XMP"
+        ),
+    }
+
+
+def test_sync_preview_skips_writes_when_folder_is_offline(client_with_photo):
+    """A photo whose folder is unmounted must not promise XMP writes.
+
+    ``sync_to_xmp`` guards every write with
+    ``os.path.isdir(os.path.dirname(xmp_path))`` and skips the photo with
+    ``folder not accessible`` when the check fails (a common NAS-offline
+    case). The preview endpoint would otherwise ask
+    ``read_sync_preview_metadata`` to inspect the unreachable path,
+    which treats it as an absent sidecar and surfaces writes such as
+    ``No XMP sidecar → Raptor`` for keyword additions that will never
+    actually run.
+    """
+    import shutil
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+
+    db.queue_change(photo_id, "keyword_add", "Raptor")
+    db.queue_change(photo_id, "rating", "4")
+
+    # Simulate the NAS going offline between when the photo was cataloged
+    # and when the preview is opened.
+    shutil.rmtree(folder)
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    photos = response.get_json()["photos"]
+    assert len(photos) == 1
+    assert photos[0]["folder_offline"] is True
+    changes = {change["type"]: change for change in photos[0]["changes"]}
+    offline_detail = (
+        "Sync will skip this photo because its folder is offline; "
+        "no XMP will be written"
+    )
+    assert changes["keyword_add"]["creates_xmp_sidecar"] is False
+    assert changes["keyword_add"]["presentation"] == {
+        "field": "Keyword",
+        "action": "unchanged",
+        "before": "Folder not accessible",
+        "after": "Folder not accessible",
+        "after_detail": offline_detail,
+    }
+    # Rating normally splits its presentation based on whether another
+    # selected change will create the sidecar. An offline folder makes
+    # sidecar creation impossible, so both variants collapse to the same
+    # "folder not accessible" message and the rating is not asked to
+    # split at all.
+    assert changes["rating"].get("rating_requires_sidecar") is not True
+    assert changes["rating"]["presentation"] == {
+        "field": "Rating",
+        "action": "unchanged",
+        "before": "Folder not accessible",
+        "after": "Folder not accessible",
+        "after_detail": offline_detail,
+    }
+
+
+def test_sync_preview_does_not_promise_edit_clear_from_unreadable_xmp(
+    client_with_photo,
+):
+    """Clearing a Vireo edit marker cannot modify a corrupt sidecar."""
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    with open(os.path.join(folder, "test.xmp"), "w") as sidecar:
+        sidecar.write("not xml")
+    db.queue_change(photo_id, "edit_recipe", "")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP photo edits",
+        "action": "unchanged",
+        "before": "Unreadable XMP sidecar",
+        "after": "Unreadable XMP sidecar",
+        "after_detail": (
+            "The Vireo edit marker cannot be cleared because the XMP sidecar "
+            "is unreadable"
+        ),
+    }
+
+
+def test_sync_preview_treats_absent_edit_marker_clear_as_unchanged(
+    client_with_photo,
+):
+    """A clear against a missing sidecar accurately reports a no-op."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "edit_recipe", "")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP photo edits",
+        "action": "unchanged",
+        "before": "No XMP sidecar",
+        "after": "No XMP sidecar",
+        "after_detail": "No XMP sidecar contains Vireo edits to clear",
+    }
 
 
 def test_edit_history_recorded_on_rating(app_and_db):

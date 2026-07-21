@@ -53,3 +53,131 @@ def test_escape_closes_lightbox_before_pending_changes_overlay(live_server, page
     page.keyboard.press("Escape")
 
     expect(sync_overlay).to_be_hidden()
+
+
+def test_location_changes_are_grouped_with_plain_language_delta(live_server, page):
+    """Identical location writes render once with thumbnails, not raw tokens."""
+    import config as cfg
+
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:2]
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    florida_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Florida', 'location')"
+    ).lastrowid
+    tallahassee_id = db.conn.execute(
+        "INSERT INTO keywords "
+        "(name, parent_id, type, latitude, longitude) "
+        "VALUES ('Tallahassee', ?, 'location', 30.4383, -84.2807)",
+        (florida_id,),
+    ).lastrowid
+    db.conn.commit()
+    for photo_id in photo_ids:
+        db.set_photo_location(photo_id, tallahassee_id)
+        db.queue_change(photo_id, "location", "effective")
+
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("openSyncPreview()")
+
+    overlay = page.locator("#syncPreviewOverlay")
+    expect(overlay).to_be_visible()
+    expect(overlay.locator(".sync-review-group")).to_have_count(1)
+    expect(overlay.locator(".sync-review-group-title")).to_have_text(
+        "Location updated on 2 photos"
+    )
+    expect(overlay.locator(".sync-review-delta")).to_contain_text(
+        "No XMP sidecar"
+    )
+    expect(overlay.locator(".sync-review-delta")).to_contain_text(
+        "Tallahassee, Florida"
+    )
+    expect(overlay.locator(".sync-review-note")).to_contain_text(
+        "written to XMP as GPS metadata"
+    )
+    expect(overlay.locator(".sync-preview-thumb")).to_have_count(2)
+    expect(overlay).not_to_contain_text("effective")
+
+    # The Dashboard's compact pending-change detail consumes the same API;
+    # keep the internal token out of that secondary review surface too.
+    page.goto(f"{live_server['url']}/dashboard")
+    pending_card = page.locator("#pendingCard")
+    expect(pending_card).to_be_visible()
+    pending_card.click()
+    pending_detail = page.locator("#pendingDetail")
+    expect(pending_detail).to_contain_text(
+        "Location: No XMP sidecar → Tallahassee, Florida"
+    )
+    expect(pending_detail).not_to_contain_text("effective")
+
+
+def test_rating_preview_responds_to_selected_sidecar_creator(live_server, page):
+    """Filtering out the change that creates XMP updates the rating promise."""
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+    db.queue_change(photo_id, "rating", "5")
+    db.queue_change(photo_id, "keyword_add", "Raptor")
+
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("openSyncPreview()")
+
+    overlay = page.locator("#syncPreviewOverlay")
+    expect(overlay).to_be_visible()
+    rating_group = overlay.locator(".sync-review-group").filter(
+        has_text="Rating updated"
+    )
+    expect(rating_group.locator(".sync-review-before")).to_have_text(
+        "No XMP sidecar"
+    )
+    expect(rating_group.locator(".sync-review-after")).to_have_text("5 stars")
+    expect(rating_group).to_contain_text(
+        "Another selected change creates the XMP sidecar first"
+    )
+
+    overlay.get_by_text("Keyword additions").locator("input").uncheck()
+
+    rating_group = overlay.locator(".sync-review-group").filter(
+        has_text="XMP rating unchanged"
+    )
+    expect(rating_group.locator(".sync-review-before")).to_have_text(
+        "No XMP sidecar"
+    )
+    expect(rating_group.locator(".sync-review-after")).to_have_text(
+        "No XMP sidecar"
+    )
+    expect(rating_group).to_contain_text("5 stars stays in Vireo")
+
+
+def test_rating_preview_accounts_for_auto_included_keyword_pair(
+    live_server, page,
+):
+    """A selected rename removal auto-includes its hidden sidecar-creating add."""
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+    db.queue_change(photo_id, "rating", "5")
+    db.queue_change(photo_id, "keyword_add", "Raptor")
+    db.queue_change(photo_id, "keyword_remove", "Raptor")
+
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("openSyncPreview()")
+
+    overlay = page.locator("#syncPreviewOverlay")
+    expect(overlay).to_be_visible()
+    overlay.get_by_text("Keyword additions").locator("input").uncheck()
+
+    rating_group = overlay.locator(".sync-review-group").filter(
+        has_text="Rating updated"
+    )
+    expect(rating_group.locator(".sync-review-after")).to_have_text("5 stars")
+    expect(rating_group).to_contain_text(
+        "Another selected change creates the XMP sidecar first"
+    )
+
+    overlay.get_by_text("Keyword removals").locator("input").uncheck()
+
+    rating_group = overlay.locator(".sync-review-group").filter(
+        has_text="XMP rating unchanged"
+    )
+    expect(rating_group).to_contain_text("5 stars stays in Vireo")

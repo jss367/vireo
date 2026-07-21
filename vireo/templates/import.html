@@ -233,7 +233,8 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <label><input type="radio" name="importMode" value="copy" id="modeCopy" onchange="updateImportMode()"> Copy to archive</label>
       </div>
       <h3>Source</h3>
-      <div class="row">
+      <div id="newImagesImportSource" class="hint" style="display:none;margin-bottom:12px;"></div>
+      <div class="row" id="sourcePickerRow">
         <button class="btn btn-primary" id="btnBrowseSource" data-testid="import-source-browse-btn" onclick="browseForSource()">Browse...</button>
         <input type="text" id="sourceInput" list="volumeDatalist"
                placeholder="or type a card/folder path and press Enter"
@@ -242,7 +243,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <button class="btn" id="btnAddSource" onclick="addSource()">Add</button>
       </div>
       <div class="source-list" id="sourceList"></div>
-      <div class="row" style="margin-top:8px;">
+      <div class="row" id="sourceRecursiveRow" style="margin-top:8px;">
         <label><input type="checkbox" id="chkRecursive" checked onchange="refreshSourceCounts()"> Include subfolders</label>
       </div>
       <div id="fileTypesWrap" class="section-divider" style="display:none;">
@@ -479,6 +480,7 @@ let importPreviewSeq = 0;
 let importPreviewTimer = null;
 let importThumbSchedulerCancel = null;
 let importTags = [];
+let newImagesSnapshotId = null;
 let importExiftoolReady = null;
 let importExiftoolRequired = true;
 
@@ -611,6 +613,9 @@ function selectedImportMode() {
 }
 
 function updateImportMode() {
+  if (newImagesSnapshotId !== null) {
+    document.getElementById('modeInPlace').checked = true;
+  }
   activeImportMode = selectedImportMode();
   const copyMode = activeImportMode === 'copy';
   document.getElementById('destCard').style.display = copyMode ? '' : 'none';
@@ -897,6 +902,7 @@ function renderSources() {
       renderSources();
       scheduleImportPreview();
     };
+    if (newImagesSnapshotId !== null) btn.style.display = 'none';
     div.appendChild(span);
     div.appendChild(meta);
     div.appendChild(btn);
@@ -905,7 +911,7 @@ function renderSources() {
 }
 
 function selectedSourceCountOptions() {
-  const copyMode = selectedImportMode() === 'copy';
+  const copyMode = newImagesSnapshotId === null && selectedImportMode() === 'copy';
   return {
     file_types: copyMode ? selectedFileTypes() : 'both',
     recursive: document.getElementById('chkRecursive').checked,
@@ -927,6 +933,7 @@ function formatPhotoCount(n) {
 
 async function refreshSourceCount(path) {
   if (!path) return;
+  if (newImagesSnapshotId !== null) return;
   const options = selectedSourceCountOptions();
   const key = sourceCountKey(path, options);
   const existing = sourceCounts[path];
@@ -973,6 +980,7 @@ async function refreshSourceCount(path) {
 }
 
 function refreshSourceCounts() {
+  if (newImagesSnapshotId !== null) return;
   sources.forEach(refreshSourceCount);
 }
 
@@ -1920,8 +1928,11 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
     thumbsEl.className = 'import-preview-thumbs';
     groups[subfolder].forEach((f) => {
       const isDuplicate = dupes.has(f.path);
+      const isUnavailable = f.available === false;
       const card = document.createElement('div');
-      card.className = 'import-preview-thumb skeleton' + (isDuplicate ? ' duplicate' : '');
+      card.className = 'import-preview-thumb' +
+        (isUnavailable ? '' : ' skeleton') +
+        (isDuplicate ? ' duplicate' : '');
       card.dataset.path = f.path || '';
       if (f.thumb_url) card.dataset.thumbUrl = f.thumb_url;
       card.title = f.path || f.filename || '';
@@ -1937,6 +1948,11 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
         const badge = document.createElement('div');
         badge.className = 'import-preview-badge';
         badge.textContent = 'Duplicate';
+        card.appendChild(badge);
+      } else if (isUnavailable) {
+        const badge = document.createElement('div');
+        badge.className = 'import-preview-badge';
+        badge.textContent = 'Unavailable';
         card.appendChild(badge);
       }
 
@@ -2053,9 +2069,10 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
 }
 
 function importPreviewSignature() {
-  const copyMode = selectedImportMode() === 'copy';
+  const copyMode = newImagesSnapshotId === null && selectedImportMode() === 'copy';
   return JSON.stringify({
     sources: sources.slice(),
+    source_snapshot_id: newImagesSnapshotId,
     mode: copyMode ? 'copy' : 'in_place',
     file_types: copyMode ? selectedFileTypes() : 'both',
     recursive: document.getElementById('chkRecursive').checked,
@@ -2183,12 +2200,12 @@ async function previewImport(opts) {
   importPreviewSeq += 1;
   const requestSeq = importPreviewSeq;
   const summary = document.getElementById('previewSummary');
-  if (!sources.length) {
+  if (!sources.length && newImagesSnapshotId === null) {
     summary.textContent = '';
     showError('Add at least one source folder.');
     return;
   }
-  const copyMode = selectedImportMode() === 'copy';
+  const copyMode = newImagesSnapshotId === null && selectedImportMode() === 'copy';
   const fileTypes = copyMode ? selectedFileTypes() : 'both';
   if (copyMode && Array.isArray(fileTypes) && !fileTypes.length) {
     summary.textContent = '';
@@ -2200,14 +2217,20 @@ async function previewImport(opts) {
   if (btnPreview) btnPreview.disabled = true;
   summary.textContent = 'Discovering files…';
   try {
-    const resp = await fetch('/api/import/folder-preview', {
+    const snapshotMode = newImagesSnapshotId !== null;
+    const resp = await fetch(
+      snapshotMode
+        ? '/api/import/new-images-preview'
+        : '/api/import/folder-preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        folders: sources,
-        file_types: fileTypes,
-        recursive: document.getElementById('chkRecursive').checked,
-      }),
+      body: JSON.stringify(snapshotMode ? {
+        snapshot_id: newImagesSnapshotId,
+      } : {
+          folders: sources,
+          file_types: fileTypes,
+          recursive: document.getElementById('chkRecursive').checked,
+        }),
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
     const data = await resp.json();
@@ -2226,6 +2249,14 @@ async function previewImport(opts) {
       return;
     }
     renderImportPreviewGrid(files, [], null);
+    if (snapshotMode) {
+      const unavailable = Number(data.unavailable_count || 0);
+      summary.textContent = Number(data.total_count || files.length).toLocaleString() +
+        ' captured file' + (Number(data.total_count || files.length) === 1 ? '' : 's') +
+        ' · originals will stay in place' +
+        (unavailable ? ' · ' + unavailable.toLocaleString() + ' unavailable' : '');
+      return;
+    }
     if (!copyMode) {
       summary.textContent = files.length + ' files found · originals will stay in place';
       return;
@@ -2331,18 +2362,23 @@ function renderFolderTable(el, folders) {
 async function startImport() {
   showError('');
   addImportTagFromInput();
-  if (!sources.length) { showError('Add at least one source folder.'); return; }
+  if (!sources.length && newImagesSnapshotId === null) {
+    showError('Add at least one source folder.');
+    return;
+  }
   const allowMissingExiftool = !!document.getElementById('chkAllowMissingExiftool')?.checked;
   if (importExiftoolRequired && importExiftoolReady === false && !allowMissingExiftool) {
     showError('Repair ExifTool before importing, or use Advanced → Import without metadata.');
     document.getElementById('exiftoolCard')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
   }
-  const copyMode = selectedImportMode() === 'copy';
-  const body = {
-    sources: sources,
-    recursive: document.getElementById('chkRecursive').checked,
-  };
+  const copyMode = newImagesSnapshotId === null && selectedImportMode() === 'copy';
+  const body = newImagesSnapshotId !== null ? {
+    source_snapshot_id: newImagesSnapshotId,
+  } : {
+      sources: sources,
+      recursive: document.getElementById('chkRecursive').checked,
+    };
   if (allowMissingExiftool) body.allow_missing_exiftool = true;
   if (importTags.length) body.tags = importTags.slice();
   if (document.getElementById('chkLocationFromGps').checked) {
@@ -2482,10 +2518,48 @@ function renderResult(res, status) {
       li.textContent = msg;
       unsafe.appendChild(li);
     });
-    document.getElementById('resultSummary').textContent =
-      (res.indexed || res.discovered || 0) + ' indexed' +
-      (res.failed ? ' · ' + res.failed + ' failed' : '') +
-      (status && status !== 'completed' ? ' · job ' + status : '');
+    if (res.source_snapshot_id != null) {
+      [
+        ['Missing', res.missing, res.missing_paths],
+        ['Unreadable', res.unreadable, res.unreadable_paths],
+        ['Not indexed', res.unindexed, res.unindexed_paths],
+      ].forEach(([label, count, paths]) => {
+        (paths || []).forEach(path => {
+          const li = document.createElement('li');
+          li.textContent = label + ': ' + path;
+          unsafe.appendChild(li);
+        });
+        if (Number(count || 0) > (paths || []).length) {
+          const li = document.createElement('li');
+          li.textContent = label + ': ' +
+            (Number(count) - paths.length).toLocaleString() +
+            ' additional path' +
+            (Number(count) - paths.length === 1 ? '' : 's') +
+            ' omitted from this summary';
+          unsafe.appendChild(li);
+        }
+      });
+      unsafe.style.display = unsafe.children.length ? '' : 'none';
+    }
+    if (res.source_snapshot_id != null) {
+      const parts = [
+        (res.requested || 0) + ' requested',
+        (res.imported || 0) + ' imported',
+      ];
+      if (res.already_cataloged) {
+        parts.push(res.already_cataloged + ' already cataloged');
+      }
+      if (res.missing) parts.push(res.missing + ' missing');
+      if (res.unreadable) parts.push(res.unreadable + ' unreadable');
+      if (res.unindexed) parts.push(res.unindexed + ' not indexed');
+      if (status && status !== 'completed') parts.push('job ' + status);
+      document.getElementById('resultSummary').textContent = parts.join(' · ');
+    } else {
+      document.getElementById('resultSummary').textContent =
+        (res.indexed || res.discovered || 0) + ' indexed' +
+        (res.failed ? ' · ' + res.failed + ' failed' : '') +
+        (status && status !== 'completed' ? ' · job ' + status : '');
+    }
     document.getElementById('resultFolders').innerHTML = '';
     renderChainInfo(res);
     renderTaggingInfo(res);
@@ -2636,6 +2710,100 @@ function renderModelWarning(res) {
   }
 }
 
+function sleepNewImagesImport(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function createNewImagesImportSnapshot(onPending) {
+  for (;;) {
+    const resp = await fetch(
+      '/api/workspaces/active/new-images/snapshot', { method: 'POST' });
+    if (resp.status === 202) {
+      const progress = await resp.json().catch(() => ({}));
+      if (onPending) onPending(progress || {});
+      await sleepNewImagesImport(3000);
+      continue;
+    }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || 'snapshot failed');
+    if (data.snapshot_id == null) throw new Error('snapshot missing');
+    return data.snapshot_id;
+  }
+}
+
+async function activateNewImagesImport(snapshotId) {
+  const sourceNote = document.getElementById('newImagesImportSource');
+  const startButton = document.getElementById('btnStart');
+  startButton.disabled = true;
+  sourceNote.style.display = '';
+  sourceNote.textContent = 'Loading the captured list of newly detected images…';
+
+  const resp = await fetch(
+    '/api/workspaces/active/new-images/snapshot/' +
+    encodeURIComponent(snapshotId));
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || 'snapshot expired');
+
+  newImagesSnapshotId = Number(snapshotId);
+  sources = data.folder_paths || [];
+  sourceCounts = {};
+  sources.forEach(path => {
+    sourceCounts[path] = {
+      status: 'loaded',
+      text: 'Captured source folder',
+    };
+  });
+
+  document.getElementById('modeInPlace').checked = true;
+  document.getElementById('modeInPlace').disabled = true;
+  document.getElementById('modeCopy').disabled = true;
+  document.getElementById('sourcePickerRow').style.display = 'none';
+  document.getElementById('sourceRecursiveRow').style.display = 'none';
+  document.getElementById('workspaceCurrent').checked = true;
+  document.getElementById('workspaceCurrent').disabled = true;
+  document.getElementById('workspaceNew').disabled = true;
+  sourceNote.textContent = Number(data.file_count || 0).toLocaleString() +
+    ' newly detected image' + (Number(data.file_count || 0) === 1 ? '' : 's') +
+    ' captured from registered folders. Import will add exactly this list in place.';
+  renderSources();
+  updateImportMode();
+  document.getElementById('btnPreview').textContent = 'Refresh preview';
+  startButton.disabled = Number(data.file_count || 0) === 0;
+  await previewImport({ automatic: true });
+}
+
+async function initNewImagesImport(deepLinkId) {
+  const sourceNote = document.getElementById('newImagesImportSource');
+  const startButton = document.getElementById('btnStart');
+  startButton.disabled = true;
+  sourceNote.style.display = '';
+  try {
+    let snapshotId = deepLinkId;
+    if (deepLinkId === 'preparing') {
+      sourceNote.textContent = 'Scanning registered folders for new images…';
+      snapshotId = await createNewImagesImportSnapshot(progress => {
+        let text = 'Scanning registered folders for new images…';
+        if (progress.files_checked > 0) {
+          text = Number(progress.files_checked).toLocaleString() +
+            ' files checked · ' +
+            Number(progress.new_count_so_far || 0).toLocaleString() +
+            ' new so far…';
+        }
+        sourceNote.textContent = text;
+      });
+      history.replaceState(
+        null, '', '/import?new_images=' + encodeURIComponent(snapshotId));
+    } else if (!/^\d+$/.test(String(deepLinkId || ''))) {
+      throw new Error('The detected-image list is invalid.');
+    }
+    await activateNewImagesImport(snapshotId);
+  } catch (e) {
+    sourceNote.textContent = 'The list of newly detected images could not be loaded.';
+    showError(String(e.message || e));
+    startButton.disabled = true;
+  }
+}
+
 async function initImportPage() {
   // Install destination-structure invalidation before the first await —
   // the form controls it listens on are all static template markup, so
@@ -2765,7 +2933,10 @@ async function initImportPage() {
   loadImportRemoteTargets();
   loadOrphanedStaging();
   updateImportMode();
-  if (menuParams.get('pick') === 'source') {
+  const newImagesDeepLink = menuParams.get('new_images');
+  if (newImagesDeepLink) {
+    await initNewImagesImport(newImagesDeepLink);
+  } else if (menuParams.get('pick') === 'source') {
     // One-shot trigger: strip it from the URL so a manual reload doesn't
     // reopen the picker, then open it (native dialog in Tauri, in-page
     // folder browser otherwise).

@@ -183,7 +183,7 @@ DEFAULTS = {
             "dashboard": "",
             "storage": "",
             "audit": "",
-            "compare": "",
+            "id_conflicts": "",
             "workspace": "",
             "shortcuts": "",
             "settings": "",
@@ -317,6 +317,7 @@ MIGRATION_EYE_DETECT_DEFAULT_OFF = "eye_detect_default_off_2026_07"
 MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID = "default_strategy_to_process_id_2026_07"
 MIGRATION_BROWSE_LOCATION_STATUS = "browse_location_status_2026_07"
 MIGRATION_W_SPECIES_DEFAULT = "w_species_default_2026_07"
+MIGRATION_COMPARE_NAV_ID = "compare_nav_id_to_id_conflicts_2026_07"
 
 _LEGACY_MISS_DET_CONFIDENCE = 0.25
 _LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
@@ -451,6 +452,38 @@ def migrate_browse_location_status_field():
         if rewrote:
             raw["browse_card_fields"] = new_default
         applied.append(MIGRATION_BROWSE_LOCATION_STATUS)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
+
+
+def migrate_compare_nav_id_to_id_conflicts():
+    """One-time rename of the ``compare`` navigation shortcut to ``id_conflicts``.
+
+    The Compare page was renamed to ID Conflicts (nav id ``compare`` ->
+    ``id_conflicts``). A user who had assigned a navigation shortcut to the
+    old page still has it stored under ``keyboard_shortcuts.navigation.compare``,
+    but the runtime now only registers ``id_conflicts`` and the shortcuts
+    editor no longer shows a ``compare`` action, so the binding is orphaned.
+    Move any stored ``compare`` binding onto ``id_conflicts`` (without
+    clobbering an explicit ``id_conflicts`` value) and drop the stale key.
+    Gated by a marker so it runs at most once per install.
+    """
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_COMPARE_NAV_ID in applied:
+            return False
+        rewrote = False
+        shortcuts = raw.get("keyboard_shortcuts")
+        if isinstance(shortcuts, dict):
+            nav = shortcuts.get("navigation")
+            if isinstance(nav, dict) and "compare" in nav:
+                old = nav.pop("compare")
+                if isinstance(old, str) and old and not nav.get("id_conflicts"):
+                    nav["id_conflicts"] = old
+                rewrote = True
+        applied.append(MIGRATION_COMPARE_NAV_ID)
         raw["_migrations_applied"] = applied
         save(raw)
         return rewrote

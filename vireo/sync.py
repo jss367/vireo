@@ -247,10 +247,6 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
             if new_flag is not None:
                 write_pick_flag(xmp_path, new_flag)
 
-            # Write rating
-            if new_rating is not None:
-                write_rating(xmp_path, new_rating)
-
             if sync_location:
                 loc = db.get_assigned_photo_location(photo_id)
                 if loc and loc.get("latitude") is not None and loc.get("longitude") is not None:
@@ -267,6 +263,13 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
 
             if edit_recipe_json is not None:
                 write_edit_recipe(xmp_path, edit_recipe_json)
+
+            # Write rating after every operation that can create a sidecar.
+            # Rating alone intentionally remains a no-op for missing XMP, but
+            # a selected keyword, flag, location, or edit write should make
+            # the same-photo rating persist rather than silently clear it.
+            if new_rating is not None:
+                write_rating(xmp_path, new_rating)
 
             if supported_ids:
                 synced += 1

@@ -376,6 +376,7 @@ def test_api_new_images_registers_ephemeral_job_on_cache_cold(app_and_db, monkey
         assert job["status"] == "running"
         assert job["workspace_id"] == ws_id
         assert job["counts_for_badge"] is False
+        assert job["blocks_local_transitions"] is False
         # Job is tied to the workspace via config.workspace_name for the UI label.
         assert "workspace_name" in job["config"]
     finally:
@@ -1324,9 +1325,9 @@ def test_new_images_preview_disambiguates_duplicate_basenames(app_and_db):
         assert "DCIM" in sf
 
 
-def test_new_images_preview_skips_missing_files(app_and_db):
-    """If a path in the snapshot no longer exists on disk, skip it rather
-    than 500ing — the file may have been moved or deleted since snapshot."""
+def test_new_images_preview_reports_missing_files(app_and_db):
+    """A vanished snapshot path stays visible instead of silently shrinking
+    the count the new-images banner promised."""
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "shoot"
     folder.mkdir()
@@ -1346,5 +1347,10 @@ def test_new_images_preview_skips_missing_files(app_and_db):
         )
         assert resp.status_code == 200
         data = resp.get_json()
-    assert data["total_count"] == 1
-    assert data["files"][0]["filename"] == "here.jpg"
+    assert data["total_count"] == 2
+    assert data["available_count"] == 1
+    assert data["unavailable_count"] == 1
+    files = {f["filename"]: f for f in data["files"]}
+    assert files["here.jpg"]["available"] is True
+    assert files["gone.jpg"]["available"] is False
+    assert files["gone.jpg"]["error"] == "File is no longer available"

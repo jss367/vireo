@@ -366,7 +366,7 @@ ALL_NAV_IDS = frozenset({
     "import",
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "life_list", "browse", "edit", "map", "location_review", "variants",
-    "dashboard", "storage", "audit", "move", "compare",
+    "dashboard", "storage", "audit", "move", "id_conflicts",
     "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",
 })
@@ -375,6 +375,13 @@ DEFAULT_TABS = [
     "import", "browse", "pipeline", "pipeline_review",
     "review", "cull", "jobs", "highlights", "misses", "storage", "settings",
 ]
+
+# Retired nav id -> current nav id. Applied when reading a workspace's saved
+# tabs so a pinned tab written under an old id survives a rename instead of
+# being dropped as unknown. "compare" was renamed to "id_conflicts".
+NAV_ID_ALIASES = {
+    "compare": "id_conflicts",
+}
 
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
@@ -2339,6 +2346,7 @@ class Database:
             self._ws_id(),
             allowed_nav_ids=ALL_NAV_IDS,
             default_tabs=DEFAULT_TABS,
+            nav_id_aliases=NAV_ID_ALIASES,
         )
 
     def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
@@ -2469,6 +2477,32 @@ class Database:
         # new-images backlog. Drop any stale cached payload so the next read
         # recomputes against the updated folder set.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+
+    def add_workspace_folder_exact(
+            self, workspace_id, folder_id, *, is_root=False):
+        """Link exactly one folder to a workspace, without its descendants.
+
+        Scanner-owned restricted scopes use this when the caller has already
+        selected the exact folders being touched. The regular
+        :meth:`add_workspace_folder` deliberately materializes a whole known
+        subtree for user-selected roots; using it here could attach unrelated
+        catalog folders that happen to sit below the same filesystem parent.
+        """
+        self.conn.execute(
+            """INSERT OR IGNORE INTO workspace_folders
+               (workspace_id, folder_id, is_root) VALUES (?, ?, ?)""",
+            (workspace_id, folder_id, 1 if is_root else 0),
+        )
+        if is_root:
+            self.conn.execute(
+                """UPDATE workspace_folders SET is_root = 1
+                   WHERE workspace_id = ? AND folder_id = ?""",
+                (workspace_id, folder_id),
+            )
+        self.conn.commit()
+        self._new_images_cache.invalidate_workspaces(
+            self._db_path, [workspace_id],
+        )
 
     def remove_workspace_folder(self, workspace_id, folder_id):
         """Unlink a single folder from a workspace."""
@@ -16257,7 +16291,7 @@ class Database:
                     # than the prediction), broader (existing is more
                     # specific than the prediction). See compare.py's
                     # compare_prediction_to_keywords and the "keyword
-                    # support" counters in templates/compare.html. Without
+                    # support" counters in templates/id_conflicts.html. Without
                     # this, a photo tagged with a broader ancestor keyword
                     # (e.g. Anatidae) that is only "held down" by a
                     # neighbour's American Wigeon prediction is stripped

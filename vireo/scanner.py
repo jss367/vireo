@@ -1331,7 +1331,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     }
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False, repair_missing_metadata=False):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -1356,8 +1356,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         restrict_files: optional iterable of absolute file paths. When
             provided alongside ``restrict_dirs``, only files whose path
             is in this set are discovered — untracked files in the same
-            directory are ignored. Used by the pipeline's repair path to
-            touch only photos already in the DB.
+            directory are ignored.
         vireo_dir: optional path to the vireo data directory (e.g. ``~/.vireo``).
             When provided, working copies are extracted for RAW photos after
             companion pairing, and derived-cache invalidation fires on
@@ -1391,6 +1390,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             has an edit recipe. Passing ``vireo_dir=None`` to suppress
             extraction would also silently drop those masks. See PR
             #1107 review.
+        register_restrict_dirs_as_roots: restricted scans traditionally treat
+            each explicit directory as a newly adopted workspace root. Set
+            False when the restricted files already live below registered
+            roots (for example a new-images snapshot or metadata repair):
+            discovered descendants are linked to the workspace but are not
+            promoted to additional roots.
+        allow_photo_inserts: when False, update existing photo rows only.
+            Files without an existing ``photos`` row are skipped. This gives
+            Process metadata repair a mechanically enforced no-admission
+            contract while retaining the shared metadata refresh code.
     """
     root_path = Path(root)
     # Don't open the root at all if the root is, or sits inside, an
@@ -1661,11 +1670,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # instead; the base stays linked but is_root=0. See
     # ``new_images.mapped_roots``. ``effective_restrict_dirs`` (bundle-filtered)
     # is the set actually enumerated, so root marking matches what was scanned.
+    _effective_restrict_paths = None
     _restrict_root_paths = None
     if restrict_dirs is not None:
-        _restrict_root_paths = {
+        _effective_restrict_paths = {
             os.path.normpath(str(d)) for d in effective_restrict_dirs
         }
+        _restrict_root_paths = (
+            _effective_restrict_paths
+            if register_restrict_dirs_as_roots else set()
+        )
 
     def _ensure_folder(folder_path):
         """Ensure a folder and all its parents exist in the DB. Returns folder_id."""
@@ -1692,9 +1706,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # subtrees from prior scans / other workspaces) into the active
         # workspace. Only the ``_restrict_root_paths`` themselves should
         # link. See PR #1107 review (line 1186).
+        normalized_folder = os.path.normpath(folder_str)
+        is_restrict_target = (
+            _effective_restrict_paths is not None
+            and normalized_folder in _effective_restrict_paths
+        )
         link_to_ws = (
-            _restrict_root_paths is None
-            or os.path.normpath(folder_str) in _restrict_root_paths
+            _effective_restrict_paths is None
+            or (register_restrict_dirs_as_roots and is_restrict_target)
         )
 
         folder_id = db.add_folder(
@@ -1704,6 +1723,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             workspace_root=is_ws_root,
             link_to_workspace=link_to_ws,
         )
+        if (
+            is_restrict_target
+            and not register_restrict_dirs_as_roots
+            and db._active_workspace_id is not None
+        ):
+            # Snapshot imports and metadata repair select exact leaf folders
+            # below an existing workspace root. Link only that leaf: the
+            # regular subtree-linking API would also attach unrelated known
+            # descendants that this restricted scan never touched.
+            db.add_workspace_folder_exact(
+                db._active_workspace_id, folder_id, is_root=False,
+            )
         folder_cache[folder_str] = folder_id
         return folder_id
 
@@ -2062,6 +2093,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             ).fetchone()
             row_already_existed = existing_row is not None
             prev_file_hash = existing_row["file_hash"] if existing_row else None
+
+            # Process may refresh metadata for cataloged photos, but it must
+            # never admit a filesystem path as a side effect. A row can
+            # disappear between repair-scope resolution and this point; skip
+            # that race rather than recreating it through add_photo().
+            if not allow_photo_inserts and not row_already_existed:
+                log.info(
+                    "Update-only scan skipped uncataloged file: %s", image_path,
+                )
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total)
+                continue
 
             photo_id = db.add_photo(
                 folder_id=folder_id,

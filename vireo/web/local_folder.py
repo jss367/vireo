@@ -98,6 +98,13 @@ def create_local_folder_blueprint(
             workspace_ids.update(affected_workspace_ids(db, root_id))
             workspace_ids.update(workspace_ids_for_folder_tree(db, root_id))
         for job in get_runner().list_jobs():
+            # Observational jobs such as the automatic new-images walk do not
+            # retain catalog writes or path mutations that a local transition
+            # can invalidate. Their cache generation is bumped when the
+            # transition rebases paths, so a result from the old layout is
+            # dropped instead of leaking back into the UI.
+            if job.get("blocks_local_transitions") is False:
+                continue
             # ``pausing``/``paused`` jobs still hold their original workspace
             # and root assumptions in the worker's memory. A stage/sync/discard
             # starting under them would race the paused work when it resumes,

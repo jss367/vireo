@@ -1,4 +1,5 @@
 """Tests for the full-chain import pipeline endpoint."""
+import json
 import os
 import shutil
 import tempfile
@@ -2390,8 +2391,8 @@ def test_import_full_copy_true_still_requires_destination(setup):
         shutil.rmtree(src, ignore_errors=True)
 
 
-def test_pipeline_accepts_sources_list(setup):
-    """Pipeline endpoint should accept sources as a list of folders."""
+def test_pipeline_rejects_sources_list(setup):
+    """Process cannot admit filesystem paths; callers must use Import."""
     app, db_path = setup
     src1 = tempfile.mkdtemp()
     src2 = tempfile.mkdtemp()
@@ -2412,9 +2413,8 @@ def test_pipeline_accepts_sources_list(setup):
                 "skip_extract_masks": True,
                 "skip_regroup": True,
             })
-            assert resp.status_code == 200
-            data = resp.get_json()
-            assert "job_id" in data
+            assert resp.status_code == 400
+            assert "use Import" in resp.get_json()["error"]
     finally:
         shutil.rmtree(src1, ignore_errors=True)
         shutil.rmtree(src2, ignore_errors=True)
@@ -2780,9 +2780,9 @@ def test_import_full_copy_false_still_scans_source_root(setup, tmp_path, monkeyp
     )
 
 
-def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
-    """POST /api/jobs/pipeline should propagate source_snapshot_id from the
-    request body into the PipelineParams passed to run_pipeline_job."""
+def test_pipeline_rejects_source_snapshot_id(setup, tmp_path):
+    """New-images snapshots cross the catalog boundary through Import,
+    never Process."""
     app, db_path = setup
 
     # Create a snapshot in the active workspace so the request body references
@@ -2798,36 +2798,15 @@ def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
     snap_id = db.create_new_images_snapshot([str(img_path)])
     db.conn.close()
 
-    # The handler does ``from pipeline_job import PipelineParams, run_pipeline_job``
-    # inside the request, so patching the attribute on the module swaps what
-    # the handler's local binding will see on next request.
-    import threading
-
-    import pipeline_job
-    captured = {}
-    called = threading.Event()
-    original = pipeline_job.run_pipeline_job
-
-    def spy_run(job, runner, db_path_arg, ws_id, params, **_kwargs):
-        captured["source_snapshot_id"] = params.source_snapshot_id
-        called.set()
-
-    pipeline_job.run_pipeline_job = spy_run
-    try:
-        with app.test_client() as c:
-            resp = c.post("/api/jobs/pipeline", json={
-                "source_snapshot_id": snap_id,
-                "skip_classify": True,
-                "skip_extract_masks": True,
-                "skip_regroup": True,
-            })
-            assert resp.status_code == 200, resp.get_json()
-
-        # JobRunner runs work() on a worker thread; wait briefly for spy to fire.
-        assert called.wait(timeout=5.0), "run_pipeline_job spy was not invoked"
-        assert captured["source_snapshot_id"] == snap_id
-    finally:
-        pipeline_job.run_pipeline_job = original
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": snap_id,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+    assert resp.status_code == 400
+    assert "use Import" in resp.get_json()["error"]
 
 
 def test_pipeline_endpoint_forwards_missing_originals_invalidator(
@@ -2848,14 +2827,8 @@ def test_pipeline_endpoint_forwards_missing_originals_invalidator(
     from db import Database
     app, db_path = setup
 
-    # Prime a source folder so the collection-less pipeline path takes
-    # the scan branch; the spy short-circuits before scanner.scan runs.
-    folder = tmp_path / "photos"
-    folder.mkdir()
-    img_path = folder / "IMG_001.JPG"
-    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     db = Database(db_path)
-    db.add_folder(str(folder))
+    collection_id = db.add_collection("Existing photos", json.dumps([]))
     db.conn.close()
 
     import pipeline_job
@@ -2873,7 +2846,7 @@ def test_pipeline_endpoint_forwards_missing_originals_invalidator(
     try:
         with app.test_client() as c:
             resp = c.post("/api/jobs/pipeline", json={
-                "sources": [str(folder)],
+                "collection_id": collection_id,
                 "skip_classify": True,
                 "skip_extract_masks": True,
                 "skip_regroup": True,
@@ -2894,11 +2867,9 @@ def test_pipeline_endpoint_forwards_missing_originals_invalidator(
         pipeline_job.run_pipeline_job = original
 
 
-def test_pipeline_snapshot_overrides_stale_source_paths(setup, tmp_path):
-    """When a valid source_snapshot_id is present, the job overrides any
-    source/sources the caller passed. The handler must not preflight-validate
-    those stale paths — rejecting an otherwise-valid snapshot run because
-    the accompanying placeholder folder no longer exists is a false 400."""
+def test_pipeline_rejects_snapshot_combined_with_stale_sources(setup, tmp_path):
+    """Combining two filesystem admission scopes remains a Process boundary
+    violation regardless of whether either path is valid."""
     app, db_path = setup
 
     from db import Database
@@ -2911,24 +2882,16 @@ def test_pipeline_snapshot_overrides_stale_source_paths(setup, tmp_path):
     snap_id = db.create_new_images_snapshot([str(img_path)])
     db.conn.close()
 
-    import pipeline_job
-    original = pipeline_job.run_pipeline_job
-    pipeline_job.run_pipeline_job = lambda *a, **kw: None
-    try:
-        with app.test_client() as c:
-            resp = c.post("/api/jobs/pipeline", json={
-                "source_snapshot_id": snap_id,
-                "sources": ["/does/not/exist/stale"],  # stale placeholder
-                "skip_classify": True,
-                "skip_extract_masks": True,
-                "skip_regroup": True,
-            })
-            assert resp.status_code == 200, (
-                f"snapshot should override stale sources, got "
-                f"{resp.status_code}: {resp.get_json()}"
-            )
-    finally:
-        pipeline_job.run_pipeline_job = original
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": snap_id,
+            "sources": ["/does/not/exist/stale"],
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+    assert resp.status_code == 400
+    assert "use Import" in resp.get_json()["error"]
 
 
 def test_pipeline_rejects_destination_with_snapshot(setup, tmp_path):
@@ -2967,10 +2930,7 @@ def test_pipeline_rejects_destination_with_snapshot(setup, tmp_path):
 
 
 def test_pipeline_rejects_unknown_snapshot_id(setup, tmp_path):
-    """A pipeline request with a non-existent source_snapshot_id must be
-    rejected synchronously with 404 rather than accepted and failing later
-    on the worker thread with a generic job error. This gives the client
-    an actionable response at request time."""
+    """Process rejects snapshot admission before snapshot lookup."""
     app, db_path = setup
 
     with app.test_client() as c:
@@ -2980,10 +2940,8 @@ def test_pipeline_rejects_unknown_snapshot_id(setup, tmp_path):
             "skip_extract_masks": True,
             "skip_regroup": True,
         })
-        assert resp.status_code == 404, (
-            f"stale snapshot id must be rejected synchronously, "
-            f"got {resp.status_code}: {resp.get_json()}"
-        )
+        assert resp.status_code == 400
+        assert "use Import" in resp.get_json()["error"]
 
 
 def test_pipeline_rejects_oversized_snapshot_id(setup):

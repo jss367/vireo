@@ -18280,7 +18280,7 @@ def test_all_nav_ids_covers_every_page():
         "import",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
         "misses", "highlights", "life_list", "browse", "edit", "map", "location_review", "variants",
-        "dashboard", "storage", "audit", "move", "compare",
+        "dashboard", "storage", "audit", "move", "id_conflicts",
         "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",
     }
