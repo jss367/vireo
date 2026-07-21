@@ -1692,6 +1692,75 @@ def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
     assert dict(leaf) == {"type": "location", "parent_id": county_id}
 
 
+def test_place_upsert_reuses_misclassified_administrative_leaf(tmp_path):
+    """Selecting an admin region heals and enriches its hierarchy row."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+    county_id = db.add_keyword(
+        "San Diego County", parent_id=state_id, kw_type="location",
+    )
+
+    selected_id = db.upsert_place_chain({
+        "place_id": "california-region",
+        "name": "California",
+        "types": ["administrative_area_level_1"],
+        "lat": 36.7783,
+        "lng": -119.4179,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+
+    assert selected_id == state_id
+    state = db.conn.execute(
+        "SELECT type, place_id, latitude, longitude FROM keywords WHERE id = ?",
+        (state_id,),
+    ).fetchone()
+    assert dict(state) == {
+        "type": "location",
+        "place_id": "california-region",
+        "latitude": 36.7783,
+        "longitude": -119.4179,
+    }
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = ? AND parent_id = ?",
+        ("California", country_id),
+    ).fetchone()[0] == 1
+
+    park_id = db.upsert_place_chain({
+        "place_id": "nearby-park",
+        "name": "Nearby Park",
+        "types": ["park"],
+        "lat": 32.75,
+        "lng": -117.0,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+            {
+                "name": "San Diego County",
+                "types": ["administrative_area_level_2"],
+            },
+        ],
+    })
+
+    park = db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (park_id,),
+    ).fetchone()
+    assert park["parent_id"] == county_id
+
+
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
     from db import Database

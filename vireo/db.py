@@ -10162,6 +10162,7 @@ class Database:
 
     def _upsert_one_keyword(
         self, name, parent_id, place_id=None, latitude=None, longitude=None,
+        reuse_location_component=False,
     ):
         """Insert-or-fetch a single ``type='location'`` keyword row.
 
@@ -10175,6 +10176,11 @@ class Database:
           whose ``place_id`` is also NULL. SELECT-then-INSERT (rather than
           ``INSERT OR IGNORE``) so we never collide a coordless parent row
           with a place_id-bearing leaf that happens to share a name+parent.
+        * ``reuse_location_component`` is true only for administrative address
+          components. In that case, a matching location hierarchy row can be
+          reused even if it already carries a place id. A coordless matching
+          row can also absorb the selected administrative place's id and
+          coordinates instead of creating a suffixed duplicate.
 
         Cross-type collision handling: the table-level ``UNIQUE(name,
         parent_id)`` constraint doesn't filter by ``type``, so a pre-existing
@@ -10208,6 +10214,40 @@ class Database:
                 )
                 return cur.fetchone()["id"]
             except sqlite3.IntegrityError:
+                if reuse_location_component:
+                    place_row = self.conn.execute(
+                        "SELECT id FROM keywords WHERE place_id = ?",
+                        (place_id,),
+                    ).fetchone()
+                    if place_row is None:
+                        if parent_id is None:
+                            clash = self.conn.execute(
+                                "SELECT id, type, place_id FROM keywords "
+                                "WHERE name = ? AND parent_id IS NULL",
+                                (name,),
+                            ).fetchone()
+                        else:
+                            clash = self.conn.execute(
+                                "SELECT id, type, place_id FROM keywords "
+                                "WHERE name = ? AND parent_id = ?",
+                                (name, parent_id),
+                            ).fetchone()
+                        if (
+                            clash is not None
+                            and clash["place_id"] is None
+                            and (
+                                clash["type"] == "location"
+                                or self._restore_misclassified_location_ancestor(
+                                    clash["id"],
+                                )
+                            )
+                        ):
+                            self.conn.execute(
+                                "UPDATE keywords SET place_id = ?, latitude = ?, "
+                                "longitude = ? WHERE id = ?",
+                                (place_id, latitude, longitude, clash["id"]),
+                            )
+                            return clash["id"]
                 # ON CONFLICT(place_id) handles same-place-id re-picks. The
                 # remaining failure mode is the table-level UNIQUE(name,
                 # parent_id): a *different* keyword (different place_id, or
@@ -10234,14 +10274,16 @@ class Database:
             existing = self.conn.execute(
                 "SELECT id FROM keywords "
                 "WHERE name = ? AND parent_id IS NULL "
-                "  AND type = 'location' AND place_id IS NULL",
+                "  AND type = 'location' "
+                + ("" if reuse_location_component else "AND place_id IS NULL"),
                 (name,),
             ).fetchone()
         else:
             existing = self.conn.execute(
                 "SELECT id FROM keywords "
                 "WHERE name = ? AND parent_id = ? "
-                "  AND type = 'location' AND place_id IS NULL",
+                "  AND type = 'location' "
+                + ("" if reuse_location_component else "AND place_id IS NULL"),
                 (name, parent_id),
             ).fetchone()
         if existing:
@@ -10274,7 +10316,13 @@ class Database:
                 # Should be unreachable — re-raise the original error
                 # rather than swallow it.
                 raise
-            if clash["type"] == "location" and clash["place_id"] is None:
+            if (
+                clash["type"] == "location"
+                and (
+                    clash["place_id"] is None
+                    or reuse_location_component
+                )
+            ):
                 # Defensive: our narrow SELECT missed it (shouldn't happen,
                 # but reusing it is safe and idempotent).
                 return clash["id"]
@@ -10449,6 +10497,7 @@ class Database:
                 place_id=None,
                 latitude=None,
                 longitude=None,
+                reuse_location_component=True,
             )
             chain.append(parent_id)
         return chain
@@ -10491,6 +10540,11 @@ class Database:
                 place_id=details["place_id"],
                 latitude=lat,
                 longitude=lng,
+                reuse_location_component=(
+                    self._location_component_rank({
+                        "types": details.get("types"),
+                    }) is not None
+                ),
             )
         return leaf_id
 
