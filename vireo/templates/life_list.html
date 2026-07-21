@@ -840,15 +840,20 @@ document.addEventListener('lifelist:changed', function() {
 async function loadExplorer(rootId) {
   var panel = document.getElementById('tab-explorer');
   panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Loading…</div></div>';
+  // Reset drill state and invalidate any in-flight per-class fetch BEFORE the
+  // await, so a class switch immediately supersedes pending /rank or /species
+  // responses. If we bumped after the await, a rank response resolving during
+  // the class fetch would still pass its token check and re-open the old view;
+  // if the class fetch then failed, that stale rank view would linger.
+  explorerPath = [];        // reset drill path whenever a new class is loaded
+  explorerRankView = null;  // and exit the flat rank view on class change
+  explorerRankReqId++;      // invalidate any in-flight /rank or /species fetch from the old class
   try {
     explorerData = await safeFetch('/api/life-list/explorer' + (rootId ? ('?root=' + encodeURIComponent(rootId)) : ''));
   } catch (e) {
     panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Failed to load explorer.</div></div>';
     return;
   }
-  explorerPath = [];        // reset drill path whenever a new class is loaded
-  explorerRankView = null;  // and exit the flat rank view on class change
-  explorerRankReqId++;      // invalidate any in-flight /rank fetch from the old class
   renderExplorer();
 }
 
@@ -1403,6 +1408,12 @@ var explorerLeafData = null;   // last species-leaf payload
 var explorerLeafGenus = null;  // {id,name,rank} of the genus being shown
 
 async function loadExplorerSpecies(node) {
+  // Share the view-revision token with /rank fetches so that a chip click
+  // (or class switch) that lands mid-load can't be overwritten by the species
+  // response arriving later. Without this guard, a still-pending species load
+  // would call renderExplorerLeaf(false) after openRankView has already
+  // rendered the flat view, silently reverting the user's action.
+  var myReq = explorerRankReqId;
   explorerLeafGenus = { id: node.id, name: node.common_name || node.name, rank: node.rank };
   explorerPath.push(explorerLeafGenus);
   renderSunburst();
@@ -1411,9 +1422,11 @@ async function loadExplorerSpecies(node) {
   try {
     explorerLeafData = await safeFetch('/api/life-list/explorer/species?genus=' + encodeURIComponent(node.id));
   } catch (e) {
+    if (myReq !== explorerRankReqId) return;   // superseded by rank-view open or class switch
     if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Failed to load species.</div>';
     return;
   }
+  if (myReq !== explorerRankReqId) return;   // superseded — leave the newer view alone
   renderExplorerLeaf(false);
 }
 
