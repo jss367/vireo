@@ -2535,6 +2535,80 @@ def _build_explorer_species(db, genus_id):
     return {"genus_id": genus_id, "species": species}
 
 
+def _build_explorer_rank(db, rank, root_id=None):
+    """Flat list of all taxa at `rank` under the class root, each flagged
+    found/unfound. Server-authoritative so it agrees with the summary chips."""
+    if rank not in _EXPLORER_RANKS:
+        rank = "family"
+    root = (db.get_explorer_root() if root_id is None
+            else db.get_taxon_by_id(root_id))
+    empty = {"taxonomy_ready": root is not None, "valid_root": False,
+             "rank": rank, "root": None, "found": 0, "total": 0, "items": []}
+    if root is None:
+        empty["taxonomy_ready"] = False
+        return empty
+    if root["rank"] != "class":
+        return empty
+
+    rows = db.get_taxon_subtree(root["id"])
+    found = db.get_life_list_taxon_ids()
+    nodes = {r["id"]: {**r, "children": [], "found_species": 0,
+                       "total_species": 0}
+             for r in rows}
+    for n in nodes.values():
+        pid = n["parent_id"]
+        if pid in nodes and pid != n["id"]:
+            nodes[pid]["children"].append(n)
+
+    def rollup(node):
+        if node["rank"] == "species":
+            node["total_species"] = 1
+            node["found_species"] = 1 if node["id"] in found else 0
+        else:
+            for c in node["children"]:
+                rollup(c)
+                node["total_species"] += c["total_species"]
+                node["found_species"] += c["found_species"]
+    rollup(nodes[root["id"]])
+
+    def order_label(node):
+        cur = node["parent_id"]
+        while cur in nodes and nodes[cur]["rank"] != "order":
+            cur = nodes[cur]["parent_id"]
+        if cur in nodes and nodes[cur]["rank"] == "order":
+            o = nodes[cur]
+            return o["common_name"] or o["name"]
+        return None
+
+    targets = [n for n in nodes.values() if n["rank"] == rank]
+    found_species_ids = [n["id"] for n in targets
+                         if rank == "species" and n["found_species"] > 0]
+    photos = (db.get_life_list_best_photo_by_taxon(found_species_ids)
+              if found_species_ids else {})
+
+    items = []
+    for n in targets:
+        is_found = n["found_species"] > 0
+        items.append({
+            "id": n["id"], "name": n["name"], "common_name": n["common_name"],
+            "rank": rank, "found": is_found,
+            "found_species": n["found_species"],
+            "total_species": n["total_species"],
+            "order": order_label(n),
+            "photo": (photos.get(n["id"])
+                      if (rank == "species" and is_found) else None),
+        })
+    items.sort(key=lambda i: (not i["found"],
+                              (i["common_name"] or i["name"]).lower()))
+    return {
+        "taxonomy_ready": True, "valid_root": True, "rank": rank,
+        "root": {"id": root["id"], "name": root["name"],
+                 "common_name": root.get("common_name"), "rank": root["rank"]},
+        "found": sum(1 for i in items if i["found"]), "total": len(items),
+        "items": items,
+    }
+
+
 # strftime directives grouped by what they can render. Used by
 # ``_strftime_template_can_render`` so the NAS-mount overlap guard does not
 # treat every ``%``-bearing template component as matching whatever the mount
@@ -11356,6 +11430,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not genus_id:
             return jsonify({"genus_id": None, "species": []})
         return jsonify(_build_explorer_species(db, genus_id))
+
+    @app.route("/api/life-list/explorer/rank")
+    def api_life_list_explorer_rank():
+        db = _get_db()
+        rank = request.args.get("rank", "family")
+        root_id = request.args.get("root", type=int)
+        return jsonify(_build_explorer_rank(db, rank, root_id=root_id))
 
     _LIFE_LIST_EXPORT_FORMATS = {
         "json": "json",

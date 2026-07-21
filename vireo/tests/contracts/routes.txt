@@ -71,6 +71,7 @@ GET          /api/labels/search-places
 GET          /api/labels/taxon-groups
 GET          /api/life-list
 GET          /api/life-list/explorer
+GET          /api/life-list/explorer/rank
 GET          /api/life-list/explorer/species
 GET          /api/life-list/export
 GET          /api/life-list/species

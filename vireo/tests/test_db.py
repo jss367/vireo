@@ -18884,6 +18884,28 @@ def test_best_photo_by_taxon(db):
     assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'
 
 
+def test_best_photo_by_taxon_chunks_large_id_list(db):
+    """A large taxon-id list (species-rank explorer view) must not blow the
+    SQLite variable limit; chunking returns correct results for the real ids
+    mixed in among thousands of non-matching ones."""
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    # 3000 ids (> both the 900 chunk size and SQLite's 999 default var limit)
+    big = list(range(900000, 903000)) + [ids['Melospiza melodia']]
+    best = db.get_life_list_best_photo_by_taxon(big)
+    assert best[ids['Melospiza melodia']]['filename'] == 'a.jpg'
+    assert all(k in {ids['Melospiza melodia']} for k in best)  # no spurious keys
+
+
 def test_apply_case_convention_preserves_mixed_case_eponym(tmp_path):
     """The 'lower' convention must not mangle mixed-case first words:
     `McKay's bunting` keeps its internal capital, ALL-CAPS label-file

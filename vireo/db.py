@@ -13418,25 +13418,32 @@ class Database:
         if not ids:
             return {}
         ws = self._ws_id()
-        placeholders = ",".join("?" for _ in ids)
-        rows = self.conn.execute(
-            f"""SELECT k.taxon_id AS tid, p.id, p.filename, p.quality_score, p.timestamp
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id AND k.taxon_id IN ({placeholders})
-                JOIN photos p ON p.id = pk.photo_id
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                 AND wf.workspace_id = ?
-                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok','partial')
-                WHERE COALESCE(p.flag, 'none') != 'rejected'
-                ORDER BY k.taxon_id,
-                         COALESCE(p.quality_score, -1) DESC,
-                         COALESCE(p.timestamp, '') DESC""",
-            ids + [ws],
-        ).fetchall()
         best = {}
-        for r in rows:
-            if r["tid"] not in best:  # first row per taxon is the best by ORDER BY
-                best[r["tid"]] = {"id": r["id"], "filename": r["filename"]}
+        # Chunk the IN list so we stay under SQLite's per-statement variable
+        # limit (as low as 999 on some builds). Each taxon falls in exactly one
+        # chunk, so first-row-per-taxon within a chunk is that taxon's global
+        # best and chunk results merge without collision. The species-rank
+        # explorer view can pass every found species in a class (1k+).
+        for start in range(0, len(ids), 900):
+            chunk = ids[start:start + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT k.taxon_id AS tid, p.id, p.filename, p.quality_score, p.timestamp
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id AND k.taxon_id IN ({placeholders})
+                    JOIN photos p ON p.id = pk.photo_id
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                     AND wf.workspace_id = ?
+                    JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok','partial')
+                    WHERE COALESCE(p.flag, 'none') != 'rejected'
+                    ORDER BY k.taxon_id,
+                             COALESCE(p.quality_score, -1) DESC,
+                             COALESCE(p.timestamp, '') DESC""",
+                chunk + [ws],
+            ).fetchall()
+            for r in rows:
+                if r["tid"] not in best:  # first row per taxon is the best by ORDER BY
+                    best[r["tid"]] = {"id": r["id"], "filename": r["filename"]}
         return best
 
     def get_taxon_by_id(self, taxon_id):
