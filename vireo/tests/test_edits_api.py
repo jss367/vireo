@@ -727,6 +727,56 @@ def test_sync_preview_preserves_hierarchy_during_paired_keyword_rename(
     }
 
 
+def test_sync_preview_clears_rename_flags_after_discarding_paired_keyword_add(
+    client_with_photo,
+):
+    """Discarding one half of an add/remove pair must un-pair the survivor.
+
+    Before the fix, the frontend cached the preview locally and only
+    dropped the discarded change from the list, leaving the surviving
+    keyword_remove flagged as ``paired_keyword_rename=True`` and
+    ``creates_xmp_sidecar=True``. A rating queued alongside that pair
+    then displayed as if the sidecar would be created, but the actual
+    sync produced no sidecar and silently dropped the rating. Refetching
+    the preview after discard must yield up-to-date flags so the rating
+    presentation and sync payload agree.
+    """
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords=set(),
+        hierarchical_keywords={"Animals|Birds|Raptor"},
+    )
+    db.queue_change(photo_id, "keyword_remove", "Birds")
+    db.queue_change(photo_id, "keyword_add", "Birds")
+    db.queue_change(photo_id, "rating", "4")
+
+    client = app.test_client()
+    initial = client.get("/api/sync/preview").get_json()
+    changes = {c["type"]: c for c in initial["photos"][0]["changes"]}
+    assert changes["keyword_remove"]["paired_keyword_rename"] is True
+    assert changes["keyword_remove"]["creates_xmp_sidecar"] is True
+    add_id = changes["keyword_add"]["id"]
+
+    resp = client.post("/api/sync/discard", json={"change_ids": [add_id]})
+    assert resp.status_code == 200
+
+    refreshed = client.get("/api/sync/preview").get_json()
+    after = {c["type"]: c for c in refreshed["photos"][0]["changes"]}
+    assert "keyword_add" not in after
+    removal = after["keyword_remove"]
+    assert removal["paired_keyword_rename"] is False
+    assert removal["auto_includes_keyword_add"] is False
+    assert removal["creates_xmp_sidecar"] is False
+    assert removal["presentation"]["action"] == "removed"
+
+
 def test_sync_preview_treats_flag_as_unchanged_when_sync_is_disabled(
     client_with_photo,
 ):

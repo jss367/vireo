@@ -516,7 +516,7 @@ async function _syncDiscardFromLightbox(changeIds, photoId) {
     });
   } catch(e) { return; }
 
-  _syncForgetChanges(changeIds);
+  await _syncRefreshPreviewAfterDiscard(changeIds);
 
   var photoAfter = _syncFindPhotoData(photoId);
   var visibleAfter = _syncVisibleChangesFor(photoAfter);
@@ -568,6 +568,23 @@ function _syncForgetChanges(changeIds) {
   _syncPreviewData.photos = _syncPreviewData.photos.filter(function(p) { return p.changes.length > 0; });
 }
 
+// Refetch the preview after a discard so derived flags (creates_xmp_sidecar,
+// paired_keyword_rename) and per-change presentations reflect the new state.
+// Discarding one half of a same-key keyword_add/keyword_remove pair
+// invalidates the surviving remove's rename-pairing flags, and rating
+// previews rely on those flags to decide whether a sidecar will be
+// created; without the refetch, a rating queued alongside such a pair
+// can look like it will be written and then be silently dropped by
+// sync_to_xmp. If the refetch fails, fall back to a local removal so the
+// UI still reflects the discard.
+async function _syncRefreshPreviewAfterDiscard(changeIds) {
+  try {
+    _syncPreviewData = await safeFetch('/api/sync/preview', {}, { toast: false });
+  } catch(e) {
+    _syncForgetChanges(changeIds);
+  }
+}
+
 async function discardSyncChanges(changeIds) {
   if (!changeIds || changeIds.length === 0) return;
   try {
@@ -576,7 +593,7 @@ async function discardSyncChanges(changeIds) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({change_ids: changeIds}),
     });
-    _syncForgetChanges(changeIds);
+    await _syncRefreshPreviewAfterDiscard(changeIds);
     renderSyncPreview();
   } catch(e) {}
 }
