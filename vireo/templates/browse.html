@@ -2993,6 +2993,26 @@ async function bootstrapBrowse() {
           dashboardCollectionScope = true;
         }
       }
+      // Dashboard-scoped visual collection links (?dashboard_scope=1&collection_id=<visual>
+      // [&rating_min=...]): /api/browse/init and /api/photos/query both restrict
+      // by the collection's ``rules`` and ignore ``visual_json`` in the dashboard
+      // scope path, so keeping dashboardCollectionScope=true would silently widen
+      // to every metadata match (Codex review r3621519730). Drop the scope so we
+      // fall through to filterByCollection() and the saved rules + visual
+      // expression loads correctly; any URL filter chips are cleared by
+      // loadExpression() replacing state.root, so surface a toast if we dropped
+      // filters the user asked for.
+      if (collectionLink && dashboardCollectionScope && deepLinkedIsVisual) {
+        dashboardCollectionScope = false;
+        if (typeof showToast === 'function') {
+          showToast(
+            hasExplicitFilterParams
+              ? 'Opened the visual collection — dashboard scope and URL filters were dropped so the visual clause applies. Edit the filter bar to add them back.'
+              : 'Opened the visual collection — dashboard scope was dropped so the visual clause applies.',
+            'info'
+          );
+        }
+      }
       if (activeCollectionId && !dashboardCollectionScope) {
         // Plain collection deep link: open it into the filter bar as
         // editable chips (rules + visual round-trip), replacing the

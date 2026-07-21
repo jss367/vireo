@@ -84,6 +84,40 @@ def test_dashboard_collection_drill_down_is_explicitly_composable(live_server, p
     expect(page.locator(".grid-card")).to_have_count(2)
 
 
+def test_dashboard_scoped_visual_collection_link_loads_visual_clause(live_server, page):
+    """A bookmarked drilldown into a visual collection
+    (``?dashboard_scope=1&collection_id=<visual>``) must load the saved
+    rules + visual expression into the filter bar. ``/api/browse/init`` and
+    ``/api/photos/query`` only evaluate ``rules`` in the dashboard-scope
+    path, so keeping the scope would silently widen to every metadata match
+    and drop the visual clause (Codex review r3621519730)."""
+    import json as _json
+
+    db = live_server["db"]
+    visual_id = db.add_collection(
+        "Soaring hawks",
+        _json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
+        visual_json=_json.dumps(
+            {"prompt": "a soaring hawk", "strength": "balanced"},
+        ),
+    )
+
+    page.goto(
+        f"{live_server['url']}/browse"
+        f"?dashboard_scope=1&collection_id={visual_id}"
+    )
+    page.wait_for_selector("#vireoFilterBar", timeout=15000)
+    # filterByCollection() ran → visual chip is loaded into the bar.
+    page.wait_for_selector(".vf-chip.visual", timeout=15000)
+    assert (
+        page.evaluate("VireoFilter.getVisual() && VireoFilter.getVisual().prompt")
+        == "a soaring hawk"
+    )
+    # dashboardCollectionScope was cleared so subsequent filter edits behave
+    # like a plain reopen, not a scoped drilldown.
+    assert page.evaluate("dashboardCollectionScope") is False
+
+
 def test_dashboard_rejects_reversed_url_dates_and_labels_open_ranges(live_server, page):
     """Bookmarked dates are validated and summaries match open-ended semantics."""
     page.goto(
