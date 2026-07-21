@@ -2968,12 +2968,15 @@ async function bootstrapBrowse() {
     // selection (Codex review r3624637674).
     var bootstrapScopeGen = browseScopeGen;
     browseFilterInitPromise.then(function() {
-      if (browseScopeGen !== bootstrapScopeGen) {
-        // A user sidebar click (folder/keyword/collection) already changed
-        // scope while init was pending; their newer selection is
-        // authoritative, so skip the URL-driven deep-link/persisted replay.
-        return;
-      }
+      // A user sidebar click (folder/keyword/collection) may have changed
+      // scope while init was pending. Their newer selection is authoritative
+      // for the collection deep-link replay below — reopening the URL's
+      // collection over the user's later selection is the bug in Codex
+      // review r3624637674. But we must still apply any restored/URL filter
+      // chips: returning early here left them rendered in the bar without
+      // ever running through resetAndLoad, so the grid didn't match the
+      // visible chips until the user edited them (Codex review r3624766665).
+      var scopeChanged = browseScopeGen !== bootstrapScopeGen;
       VireoFilter.setResultTotal(totalPhotos);
       // Collection deep links must open showing exactly that collection \u2014
       // whether plain (?collection_id=..., historical endpoint behavior) or
@@ -3045,10 +3048,12 @@ async function bootstrapBrowse() {
           );
         }
       }
-      if (activeCollectionId && !dashboardCollectionScope) {
+      if (activeCollectionId && !dashboardCollectionScope && !scopeChanged) {
         // Plain collection deep link: open it into the filter bar as
         // editable chips (rules + visual round-trip), replacing the
-        // historical collection-endpoint mode.
+        // historical collection-endpoint mode. Skipped when a user sidebar
+        // click already claimed a different scope — their queued
+        // filterByCollection/filterByFolder/filterByKeyword owns the view.
         filterByCollection(activeCollectionId);
         return;
       }

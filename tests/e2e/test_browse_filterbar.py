@@ -222,6 +222,59 @@ def test_deep_link_replay_yields_to_sidebar_click(live_server, page):
     assert page.evaluate("openedCollectionId") == clicked_id
 
 
+def test_restored_url_filters_apply_after_pending_folder_click(live_server, page):
+    """URL/persisted filter chips must run through the grid after a pending
+    sidebar click, not just render in the bar. Before the fix, the bootstrap
+    ``.then`` returned early on ``scopeChanged`` and skipped the post-init
+    ``VireoFilter.hasFilters()`` reload, so a folder click during pending
+    ``/api/filters/fields`` produced a folder-scoped grid with the URL rating
+    filter visible in the chip strip but never actually applied until the
+    user edited a chip (Codex review r3624766665).
+    """
+    yard_folder_id = live_server["data"]["folders"][1]
+    held_routes = []
+    page.route(
+        "**/api/filters/fields",
+        lambda route: held_routes.append(route),
+    )
+
+    # rating_min=4 restores as a "rating >= 4" chip; only hawk1 (park) has
+    # rating 4, so yard ∩ rating>=4 = 0 while yard alone = 2. That gap is
+    # what makes the fix observable.
+    page.goto(live_server["url"] + "/browse?rating_min=4")
+    # Wait for the sidebar to render so the folder click hits a real
+    # tree item; #gridContainer is present unconditionally and doesn't
+    # prove bootstrap has populated folders yet.
+    page.wait_for_function(
+        "folderId => document.querySelector("
+        "'#folderTree .tree-item[data-folder-id=\"' + folderId + '\"]')",
+        arg=yard_folder_id,
+        timeout=15000,
+    )
+    for _ in range(50):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "filter-field request was never issued"
+    assert not page.evaluate("VireoFilter.isReady()")
+
+    # Click yard folder while filter-bar init is pending. filterByFolder
+    # bumps browseScopeGen and runs reloadBrowseResults() with no rules yet,
+    # so the grid shows the 2 yard photos unfiltered by rating.
+    page.evaluate("folderId => filterByFolder(folderId)", yard_folder_id)
+    held_routes[0].continue_()
+
+    # After init, the bootstrap .then must have applied the restored rating
+    # rule against the yard folder scope; no yard photo has rating 4.
+    page.wait_for_function(
+        "folderId => VireoFilter.isReady() && VireoFilter.hasFilters() && "
+        "activeFolderId === folderId",
+        arg=yard_folder_id,
+        timeout=15000,
+    )
+    _wait_total(page, 0)
+
+
 def test_quick_rating_filter_and_chip_semantics(live_server, page):
     _open_browse(page, live_server)
     assert _total(page) == 5
