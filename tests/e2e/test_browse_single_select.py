@@ -442,7 +442,11 @@ def test_needs_identification_refreshes_after_identification_added(live_server, 
     collection_id = collection["id"]
 
     page.goto(f"{live_server['url']}/browse")
-    page.evaluate("(id) => filterByCollection(id)", collection_id)
+    page.wait_for_function("window.VireoFilter && VireoFilter.isReady()")
+    with page.expect_response(
+        lambda r: "/api/photos/query" in r.url and r.status == 200
+    ):
+        page.evaluate("(id) => filterByCollection(id)", collection_id)
 
     target_card = page.locator(f'.grid-card[data-id="{target_id}"]').first
     expect(target_card).to_be_visible()
