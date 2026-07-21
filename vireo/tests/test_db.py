@@ -1645,6 +1645,23 @@ def test_repair_misclassified_location_ancestors_restores_adjacent_nodes(
     assert db.repair_misclassified_location_ancestors() == 0
 
 
+def test_repair_misclassified_location_ancestors_ignores_pure_taxonomy_root(
+    tmp_path,
+):
+    """A root taxonomy row with no location descendants must stay taxonomy."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    genus_id = db.add_keyword("Ardea", kw_type="taxonomy")
+    db.add_keyword("Ardea alba", parent_id=genus_id, kw_type="taxonomy")
+
+    assert db.repair_misclassified_location_ancestors() == 0
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (genus_id,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+
+
 def test_repair_misclassified_location_ancestors_restores_root_chain(tmp_path):
     """Repair a taxonomy-typed country at the root of a location hierarchy."""
     from db import Database
