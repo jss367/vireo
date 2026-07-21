@@ -502,3 +502,31 @@ def test_api_misses_since_restricts_to_recent_run(client, db_with_misses):
     r2 = client.get("/api/misses?category=clipped&since=2026-04-21T00:00:00%2B00:00")
     assert r2.status_code == 200
     assert r2.get_json()["photos"] == []
+
+
+def test_api_misses_rejects_visual_collection(client, db_with_misses):
+    """The Misses page filter funnels ``collection_id`` through
+    ``collection_photo_ids``, which evaluates ``rules`` only. A visual
+    collection would silently widen the miss scope to every metadata
+    match instead of the visually-matched subset — Codex review
+    r3620423210 on PR #1343 flagged the equivalent risk for
+    ``/api/collections/<id>/photos``; the misses filter has the same
+    boundary. Reject with 400 so the front-end picker (which disables
+    the same options) has a defense-in-depth backstop.
+    """
+    _, db, _ = db_with_misses
+    visual_cid = db.add_collection(
+        "Visual", json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
+        visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
+    )
+
+    r = client.get(f"/api/misses?collection_id={visual_cid}")
+    assert r.status_code == 400
+    assert "visual collections" in r.get_json()["error"]
+
+    r_prev = client.post(
+        "/api/misses/preview",
+        data=json.dumps({"collection_id": visual_cid}),
+        content_type="application/json",
+    )
+    assert r_prev.status_code == 400

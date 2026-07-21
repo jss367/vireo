@@ -701,8 +701,18 @@ async function initMissFilters() {
   (results[0] || []).forEach(function(c) {
     var option = document.createElement('option');
     option.value = c.id;
-    option.textContent = c.name + (c.photo_count == null ? '' : ' (' + c.photo_count + ')');
-    option.disabled = !!c.count_error;
+    if (c.has_visual) {
+      // Misses filter consumes the collection via
+      // collection_photo_ids, which is rules-only — a visual
+      // collection would silently expand the filter to every
+      // metadata match. Server 400s the request too.
+      option.disabled = true;
+      option.textContent = c.name + ' (visual — open in Browse)';
+      option.title = 'Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause.';
+    } else {
+      option.textContent = c.name + (c.photo_count == null ? '' : ' (' + c.photo_count + ')');
+      option.disabled = !!c.count_error;
+    }
     collectionSelect.appendChild(option);
   });
   var folderSelect = document.getElementById('missFolderFilter');

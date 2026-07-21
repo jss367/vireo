@@ -2,121 +2,313 @@
   {
     "question": "How do I add photos to Vireo?",
     "category": "Getting Started",
-    "keywords": ["scan", "import", "add", "folder", "photos", "directory"],
+    "keywords": [
+      "scan",
+      "import",
+      "add",
+      "folder",
+      "photos",
+      "directory"
+    ],
     "answer": "Open Import, leave Add in place selected, and click Browse to choose one or more folders. Select an After import processing option, then click Start import. Vireo adds supported photos and their subfolders to the active workspace without moving or copying them. Choose Copy to archive instead when you want Vireo to copy photos into your archive."
   },
   {
     "question": "How do I classify my photos?",
     "category": "Getting Started",
-    "keywords": ["classify", "identify", "species", "scan", "pipeline", "AI"],
+    "keywords": [
+      "classify",
+      "identify",
+      "species",
+      "scan",
+      "pipeline",
+      "AI"
+    ],
     "answer": "When adding photos, choose a processing option under After import before clicking Start import. For photos already in the workspace, open Process, select the workspace folders, choose a strategy, and click Start Pipeline. Jobs shows progress; it is not where processing starts."
   },
   {
     "question": "How do I review processing results?",
     "category": "Getting Started",
-    "keywords": ["review", "results", "cull", "keep", "reject", "triage"],
+    "keywords": [
+      "review",
+      "results",
+      "cull",
+      "keep",
+      "reject",
+      "triage"
+    ],
     "answer": "Open Process Review to inspect classifications and any available quality recommendations. When culling analysis is available, open Cull to rapidly mark photos keep, review, or reject using keyboard shortcuts."
   },
   {
     "question": "How do I save my decisions to my photo files?",
     "category": "Getting Started",
-    "keywords": ["sync", "xmp", "sidecar", "save", "export", "metadata", "lightroom"],
+    "keywords": [
+      "sync",
+      "xmp",
+      "sidecar",
+      "save",
+      "export",
+      "metadata",
+      "lightroom"
+    ],
     "answer": "Use the Sync feature to write changes to XMP sidecar files. This writes standard metadata that Lightroom, Darktable, and other tools can read. Your original image files are never modified."
   },
   {
     "question": "Where are my photos stored?",
     "category": "Photos",
-    "keywords": ["storage", "location", "files", "disk", "move", "copy"],
-    "answer": "On your filesystem, exactly where you put them. Vireo reads photos in place and never moves, copies, or uploads them. The database is just a cache \u2014 you can rebuild it anytime from your files."
+    "keywords": [
+      "storage",
+      "location",
+      "files",
+      "disk",
+      "move",
+      "copy"
+    ],
+    "answer": "On your filesystem, exactly where you put them. Vireo reads photos in place and never moves, copies, or uploads them. The database is just a cache — you can rebuild it anytime from your files."
   },
   {
     "question": "Does Vireo modify my original photo files?",
     "category": "Photos",
-    "keywords": ["modify", "original", "raw", "change", "alter", "safe"],
+    "keywords": [
+      "modify",
+      "original",
+      "raw",
+      "change",
+      "alter",
+      "safe"
+    ],
     "answer": "No. Metadata is written to XMP sidecar files (.xmp) alongside your photos. Your original image files are never touched."
   },
   {
     "question": "How do I delete or remove a photo?",
     "category": "Photos",
-    "keywords": ["delete", "remove", "trash", "discard"],
+    "keywords": [
+      "delete",
+      "remove",
+      "trash",
+      "discard"
+    ],
     "answer": "In Browse view, select a photo and use the reject action. This marks the photo for rejection but does not delete the file from disk. Vireo never deletes your files."
   },
   {
     "question": "How do I move photos to a different folder?",
     "category": "Photos",
-    "keywords": ["move", "relocate", "organize", "folder", "destination"],
+    "keywords": [
+      "move",
+      "relocate",
+      "organize",
+      "folder",
+      "destination"
+    ],
     "answer": "Use the Move page to relocate photos to a different folder. Select photos and choose a destination. Vireo moves the actual files on disk and updates its database."
   },
   {
     "question": "What is the Process page?",
     "category": "Classification",
-    "keywords": ["pipeline", "steps", "detection", "classification", "quality", "scoring"],
+    "keywords": [
+      "pipeline",
+      "steps",
+      "detection",
+      "classification",
+      "quality",
+      "scoring"
+    ],
     "answer": "The Process page runs indexing, species classification, feature extraction, and quality scoring for photos already in the active workspace. Use Import to add new photos; use Process when you want to run or rerun selected processing stages."
   },
   {
     "question": "What species can Vireo identify?",
     "category": "Classification",
-    "keywords": ["species", "identify", "model", "iNaturalist", "birds", "animals"],
+    "keywords": [
+      "species",
+      "identify",
+      "model",
+      "iNaturalist",
+      "birds",
+      "animals"
+    ],
     "answer": "Over 10,000 species, depending on the model. The iNaturalist-trained classifier covers the broadest range. You can run multiple models and compare predictions."
   },
   {
     "question": "How does culling work?",
     "category": "Culling",
-    "keywords": ["cull", "triage", "sort", "keep", "reject", "review", "quality"],
+    "keywords": [
+      "cull",
+      "triage",
+      "sort",
+      "keep",
+      "reject",
+      "review",
+      "quality"
+    ],
     "answer": "The Cull page groups similar photos and lets you quickly decide which to keep. Vireo scores photos on focus, exposure, composition, and noise to suggest the best shots. Use keyboard shortcuts to move through photos rapidly."
   },
   {
     "question": "How do I add keywords to photos?",
     "category": "Keywords",
-    "keywords": ["keyword", "tag", "label", "taxonomy", "hierarchy"],
-    "answer": "Open the Keywords page to manage your keyword hierarchy. You can add keywords to individual photos or in bulk. Keywords are global \u2014 they're shared across all workspaces."
+    "keywords": [
+      "keyword",
+      "tag",
+      "label",
+      "taxonomy",
+      "hierarchy"
+    ],
+    "answer": "Open the Keywords page to manage your keyword hierarchy. You can add keywords to individual photos or in bulk. Keywords are global — they're shared across all workspaces."
   },
   {
     "question": "Can I import keywords from Lightroom?",
     "category": "Keywords",
-    "keywords": ["lightroom", "import", "lrcat", "catalog", "keyword", "hierarchy"],
+    "keywords": [
+      "lightroom",
+      "import",
+      "lrcat",
+      "catalog",
+      "keyword",
+      "hierarchy"
+    ],
     "answer": "Yes. Vireo can import keyword hierarchies from Lightroom catalog files (.lrcat). Your XMP sidecars are also compatible with Lightroom, so you can use both tools on the same library."
   },
   {
     "question": "What are collections?",
     "category": "Collections",
-    "keywords": ["collection", "group", "album", "organize", "set"],
+    "keywords": [
+      "collection",
+      "group",
+      "album",
+      "organize",
+      "set"
+    ],
     "answer": "Collections let you group photos together regardless of which folder they're in. Collections are workspace-scoped, so each workspace has its own set."
   },
   {
     "question": "What are workspaces?",
     "category": "Workspaces",
-    "keywords": ["workspace", "scope", "separate", "project", "session"],
+    "keywords": [
+      "workspace",
+      "scope",
+      "separate",
+      "project",
+      "session"
+    ],
     "answer": "Workspaces let you organize your work into separate contexts. Each workspace has its own predictions, collections, and pending changes. Photos and keywords are shared across all workspaces. A Default workspace is created automatically."
   },
   {
     "question": "How do I create a new workspace?",
     "category": "Workspaces",
-    "keywords": ["create", "new", "workspace", "add"],
+    "keywords": [
+      "create",
+      "new",
+      "workspace",
+      "add"
+    ],
     "answer": "Go to the Workspace page and click the button to create a new workspace. Give it a name and it's ready to use. You can switch between workspaces from the workspace switcher."
   },
   {
     "question": "Do I need an internet connection?",
     "category": "Settings",
-    "keywords": ["internet", "offline", "connection", "cloud", "upload", "network"],
+    "keywords": [
+      "internet",
+      "offline",
+      "connection",
+      "cloud",
+      "upload",
+      "network"
+    ],
     "answer": "Only for downloading AI models on first use. After that, everything runs locally on your machine. No cloud processing, no uploads, no accounts."
   },
   {
     "question": "Do I need a GPU?",
     "category": "Settings",
-    "keywords": ["gpu", "cuda", "nvidia", "cpu", "speed", "performance", "hardware"],
-    "answer": "No, but it helps. Classification runs on CPU if no GPU is available \u2014 it's just slower. A CUDA-compatible NVIDIA GPU will significantly speed up large scans."
+    "keywords": [
+      "gpu",
+      "cuda",
+      "nvidia",
+      "cpu",
+      "speed",
+      "performance",
+      "hardware"
+    ],
+    "answer": "No, but it helps. Classification runs on CPU if no GPU is available — it's just slower. A CUDA-compatible NVIDIA GPU will significantly speed up large scans."
   },
   {
     "question": "How do I use Vireo with Darktable?",
     "category": "Settings",
-    "keywords": ["darktable", "editor", "external", "develop", "raw", "processing", "dng", "nikon"],
+    "keywords": [
+      "darktable",
+      "editor",
+      "external",
+      "develop",
+      "raw",
+      "processing",
+      "dng",
+      "nikon"
+    ],
     "answer": "Configure the Darktable binary path in Settings. You can then send photos to Darktable for editing, apply styles, and export processed versions. If you shoot Nikon High Efficiency NEFs, enable auto-convert to DNG and configure Adobe DNG Converter if Vireo cannot auto-detect it."
   },
   {
     "question": "Is Vireo free?",
     "category": "Settings",
-    "keywords": ["free", "cost", "price", "license", "open source", "MIT"],
+    "keywords": [
+      "free",
+      "cost",
+      "price",
+      "license",
+      "open source",
+      "MIT"
+    ],
     "answer": "Yes. Vireo is free and open source under the MIT license. You can use it, modify it, and contribute to it."
+  },
+  {
+    "question": "How do I filter photos?",
+    "category": "Browsing",
+    "keywords": [
+      "filter",
+      "filters",
+      "search",
+      "rules",
+      "chips",
+      "rating",
+      "flag",
+      "color",
+      "camera",
+      "date"
+    ],
+    "answer": "Every photo page (Browse, Map, Review, Duplicates) shares one filter bar. Type in the search box and press Enter for a text search, or open Filters for quick rating/flag/color filters and a rule builder over every metadata field — camera, lens, ISO, capture date (including “in the last N months”), species, and more. Active filters appear as chips you can remove individually; the dashed chip shows the page's fixed scope. Flags and colors multi-select into a single “is one of” rule, and typed values suggest real values from your library with live match counts."
+  },
+  {
+    "question": "How do I search photos visually?",
+    "category": "Browsing",
+    "keywords": [
+      "visual",
+      "clip",
+      "similar",
+      "semantic",
+      "search",
+      "describe"
+    ],
+    "answer": "Type a description in the filter bar's search box and choose “✦ Visually similar to …” from the suggestion menu. The visual clause appears as a purple chip, combines with your other filters, and offers broad/balanced/strict strength in the Filters popover. If visual search can't run (no active model, or no visual index yet), the chip shows an error state and your metadata filters keep working — results are never silently empty."
+  },
+  {
+    "question": "How do I temporarily disable my filters?",
+    "category": "Browsing",
+    "keywords": [
+      "pause",
+      "resume",
+      "disable",
+      "backslash",
+      "mute",
+      "filters"
+    ],
+    "answer": "Press \\ (backslash) or click Pause in the filter bar. All filters are disabled without being lost — chips dim, and a note reports how many photos would match. Press \\ again or click Resume to re-apply them. The paused state persists per workspace."
+  },
+  {
+    "question": "How do I save my filters as a Collection?",
+    "category": "Browsing",
+    "keywords": [
+      "save",
+      "collection",
+      "smart",
+      "filters",
+      "reuse"
+    ],
+    "answer": "Open Filters and click “Save as Collection…”. The saved Collection stores your full expression — including a visual search clause if one is active (marked with ✦ in the sidebar). Clicking a Collection opens its rules back into the filter bar as editable chips, so you can refine it and re-save."
   }
 ]

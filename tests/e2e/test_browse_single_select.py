@@ -456,8 +456,9 @@ def test_needs_identification_refreshes_after_identification_added(live_server, 
         and r.request.method == "POST"
         and r.status == 200
     ), page.expect_response(
-        lambda r: f"/api/collections/{collection_id}/photos" in r.url
-        and r.status == 200
+        # Collections open into the filter bar now; membership-change
+        # refreshes re-evaluate the expression through the query path.
+        lambda r: "/api/photos/query" in r.url and r.status == 200
     ):
         keyword_input.press("Enter")
 
@@ -1111,12 +1112,21 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
     assert page.evaluate("selectedPhotos.size") == 1
 
     # Switch to a collection; stale selection must drop before loadPhotos.
+    # Collections now open INTO the filter bar as an editable expression
+    # (Phase 5) — the reload goes through resetAndLoad, which clears the
+    # selection; the chips prove the collection's rules were applied.
+    page.evaluate("loadCollections()")
+    page.wait_for_function(
+        f"window.collectionsById && collectionsById[{collection_id}]", timeout=4000
+    )
     page.evaluate(f"filterByCollection({collection_id})")
     page.wait_for_function(
-        f"activeCollectionId === {collection_id}", timeout=2000
+        "document.querySelector('.vf-chips') && "
+        "document.querySelector('.vf-chips').textContent.includes('File extension')",
+        timeout=4000,
     )
 
-    assert page.evaluate("selectedPhotos.size") == 0
+    page.wait_for_function("selectedPhotos.size === 0", timeout=4000)
     assert page.evaluate("selectedPhotoId") is None
     expect(bar).to_be_hidden()
 
@@ -1162,12 +1172,19 @@ def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
     page.locator(".grid-card").first.wait_for(state="visible")
 
     # Text sitting in the quick-search box (no Enter yet) must not apply
-    # later and kick the user out of collection mode.
+    # later and overwrite the opened collection's expression.
+    page.evaluate("loadCollections()")
+    page.wait_for_function(
+        f"window.collectionsById && collectionsById[{collection_id}]", timeout=4000
+    )
     page.locator(".vf-search input").fill("hum")
     page.evaluate(f"filterByCollection({collection_id})")
     page.wait_for_function(
-        f"activeCollectionId === {collection_id}", timeout=2000
+        "document.querySelector('.vf-chips') && "
+        "document.querySelector('.vf-chips').textContent.includes('File extension')",
+        timeout=4000,
     )
 
     page.wait_for_timeout(350)
-    assert page.evaluate("activeCollectionId") == collection_id
+    chips = page.evaluate("document.querySelector('.vf-chips').textContent")
+    assert "File extension" in chips and "hum" not in chips

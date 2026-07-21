@@ -1992,6 +1992,18 @@ var activeCollectionId = null;
 // A Dashboard deep link can combine a collection with date/keyword filters.
 // Normal collection clicks keep the historical collection-only behavior.
 var dashboardCollectionScope = false;
+// Which saved collection (if any) is currently loaded into the filter bar
+// as editable chips. Phase 5's ``filterByCollection`` clears
+// ``activeCollectionId`` when it hands off to the filter bar (because the
+// expression IS the filter and the historical "collection endpoint" mode
+// is gone), so we need a separate handle to reload the expression after
+// membership edits — refreshActiveCollectionAfterMembershipChange used to
+// only reload the sidebar counts, leaving a stale photo_ids list in the
+// bar until the user reopened the collection (CodeRabbit review
+// r3620473562). Cleared by the filter bar's onChange when the user edits
+// the expression (so a user-edited chip set isn't silently reverted to
+// the saved collection on the next membership refresh).
+var openedCollectionId = null;
 
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
@@ -2842,17 +2854,12 @@ async function bootstrapBrowse() {
       dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
     }
     // Legacy filter deep-link params (rating_min/flag/keyword/dates/…) are
-    // compiled into an initial rule tree by VireoFilter.init below. Forward
-    // the capture-date bounds to the bootstrap endpoint as well so Dashboard
-    // drill-downs do not briefly paint the entire collection while the filter
-    // registry is still loading.
+    // compiled into an initial rule tree by VireoFilter.init below, which
+    // reloads through /api/photos/query — the bootstrap endpoint is
+    // scope-only (Phase 5 removed its legacy filter params).
     var initParams = new URLSearchParams();
     initParams.set('sort', document.getElementById('sortSelect').value);
     if (activeFolderId) initParams.set('folder_id', activeFolderId);
-    ['date_from', 'date_to'].forEach(function(name) {
-      var value = pageParams.get(name);
-      if (value) initParams.set(name, value);
-    });
     // Collection-only deep links keep their historical endpoint behavior,
     // while Dashboard links opt into composable filters via dashboard_scope.
     // The combined init endpoint still needs the collection id for first paint
@@ -2891,6 +2898,19 @@ async function bootstrapBrowse() {
       onChange: function(info) {
         if (timelineMode) loadCalendarData();
         if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+        // Any user-driven change to the filter chips means the bar no
+        // longer represents the saved collection verbatim — drop the
+        // handle so a later membership refresh doesn't silently revert
+        // the user's edits back to the collection's saved expression.
+        // Our own filterByCollection() → loadExpression() fires onChange
+        // with reason 'expressionLoaded' (opening) or 'expressionRefreshed'
+        // (membership-change refresh); both paths set openedCollectionId
+        // above, so leave it alone.
+        if (openedCollectionId && info &&
+            info.reason !== 'expressionLoaded' &&
+            info.reason !== 'expressionRefreshed') {
+          openedCollectionId = null;
+        }
         // A cleared quick search is the one filter edit where the previously
         // selected photo is expected to reappear in the wider result set \u2014
         // preserve the anchor so the detail panel and scroll position don't
@@ -2898,7 +2918,16 @@ async function bootstrapBrowse() {
         // selected photo, and loadUntilPhotoRendered would then keep paging
         // through the whole matching set (potentially many /api/photos/query
         // requests) just to prove the anchor is gone.
-        var preserveAnchor = info && info.reason === 'quickSearchCleared';
+        var preserveAnchor = info && (
+          info.reason === 'quickSearchCleared' ||
+          // A selected member of a just-opened collection should stay
+          // anchored (it existed in the old collection view too). But a
+          // membership-refresh reopen (reason 'expressionRefreshed') skips
+          // this — the selected photo may have just left the collection,
+          // and loadUntilPhotoRendered would otherwise page through the
+          // whole refreshed set looking for it (Codex review r3622521603).
+          info.reason === 'expressionLoaded'
+        );
         resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
         // Summary panel (photo count, classified, top species) is a separate
         // endpoint from the grid; without this the filter changes the grid
@@ -2918,6 +2947,7 @@ async function bootstrapBrowse() {
             ? activeCollectionId : null,
         };
       },
+      onCollectionSaved: function() { loadCollections(); },
     }).then(function() {
       VireoFilter.setResultTotal(totalPhotos);
       // Collection deep links must open showing exactly that collection \u2014
@@ -2939,10 +2969,62 @@ async function bootstrapBrowse() {
       var collectionLink = !!urlParams.get('collection_id');
       if (collectionLink && !hasExplicitFilterParams && VireoFilter.hasFilters()) {
         VireoFilter.clearAll(true);
-        // Plain collection: /api/browse/init already painted the collection
-        // and there are no filters left to apply, so skip the reload
-        // entirely. Dashboard-scoped: same story \u2014 the init call included
-        // collection_id, so the just-painted grid already matches.
+      }
+      // A ?collection_id=...&rating_min=4 (or &date_from=..., etc.) link
+      // compiles the URL filter params into rules above; if we then called
+      // filterByCollection() its loadExpression() would REPLACE state.root
+      // with the saved collection rules and silently drop the URL filters
+      // (Codex review r3620935211). Treat the collection as a composable
+      // dashboard-style scope for this case: keep the URL filter chips
+      // and scope /api/photos/query by the collection alongside them.
+      //
+      // Exception — visual collections: /api/photos/query's collection
+      // restriction evaluates ``rules`` only, not ``visual_json``. Composing
+      // URL filters this way would silently drop the visual clause and
+      // widen to every metadata match with the URL filter (Codex review
+      // r3621403147). Fall through to filterByCollection() instead so the
+      // saved rules + visual expression loads correctly; the URL filter
+      // chips are cleared because loadExpression() replaces state.root, so
+      // surface a toast so the drop isn't silent.
+      var deepLinkedCollection = collectionLink ? collectionsById[activeCollectionId] : null;
+      var deepLinkedIsVisual = !!(deepLinkedCollection && deepLinkedCollection.visual_json);
+      if (collectionLink && hasExplicitFilterParams && !dashboardCollectionScope) {
+        if (deepLinkedIsVisual) {
+          if (typeof showToast === 'function') {
+            showToast(
+              'Opened the visual collection — URL filters (rating/date/etc.) were dropped so the visual clause applies. Edit the filter bar to add them back.',
+              'info'
+            );
+          }
+        } else {
+          dashboardCollectionScope = true;
+        }
+      }
+      // Dashboard-scoped visual collection links (?dashboard_scope=1&collection_id=<visual>
+      // [&rating_min=...]): /api/browse/init and /api/photos/query both restrict
+      // by the collection's ``rules`` and ignore ``visual_json`` in the dashboard
+      // scope path, so keeping dashboardCollectionScope=true would silently widen
+      // to every metadata match (Codex review r3621519730). Drop the scope so we
+      // fall through to filterByCollection() and the saved rules + visual
+      // expression loads correctly; any URL filter chips are cleared by
+      // loadExpression() replacing state.root, so surface a toast if we dropped
+      // filters the user asked for.
+      if (collectionLink && dashboardCollectionScope && deepLinkedIsVisual) {
+        dashboardCollectionScope = false;
+        if (typeof showToast === 'function') {
+          showToast(
+            hasExplicitFilterParams
+              ? 'Opened the visual collection — dashboard scope and URL filters were dropped so the visual clause applies. Edit the filter bar to add them back.'
+              : 'Opened the visual collection — dashboard scope was dropped so the visual clause applies.',
+            'info'
+          );
+        }
+      }
+      if (activeCollectionId && !dashboardCollectionScope) {
+        // Plain collection deep link: open it into the filter bar as
+        // editable chips (rules + visual round-trip), replacing the
+        // historical collection-endpoint mode.
+        filterByCollection(activeCollectionId);
         return;
       }
       if (VireoFilter.hasFilters()) {
@@ -2987,8 +3069,11 @@ function renderCollectionList(collections) {
     var trailing = unavailable
       ? '<span class="collection-unavailable-badge">unavailable</span>'
       : '<span class="count">' + (c.photo_count != null ? c.photo_count : '') + '</span>';
+    var visualMark = c.visual_json
+      ? '<span class="collection-visual-mark" title="Includes a visual search clause">\u2726</span>'
+      : '';
     html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
-      '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
+      '<span class="collection-name">' + escapeHtml(c.name) + '</span>' + visualMark +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       resolveBtn +
       trailing + '</div>';
@@ -3081,6 +3166,17 @@ function filterByFolder(folderId) {
   var hadSidebarKeyword = activeKeyword !== null;
   activeKeyword = null;
   activeCollectionId = null;
+  // Sidebar scope changes leave the "reopened collection" association
+  // stale: without this, tagging a keyword next fires
+  // refreshActiveCollectionAfterMembershipChange, which sees
+  // openedCollectionId still set and calls filterByCollection() —
+  // filterByCollection clears activeFolderId, unexpectedly replacing
+  // the user's folder-scoped view with the original collection
+  // (Codex review r3622204141). filterByKeyword goes through
+  // VireoFilter.addRule → onChange → the openedCollectionId clear at
+  // browse init, but filterByFolder's reloadBrowseResults() path
+  // bypasses VireoFilter, so clear it explicitly here.
+  openedCollectionId = null;
   document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
   });
@@ -3231,8 +3327,51 @@ function scheduleCollectionCountsRefresh() {
 }
 
 function refreshActiveCollectionAfterMembershipChange() {
-  if (!activeCollectionId) return;
-  filterByCollection(activeCollectionId, { preserveAnchor: false });
+  if (activeCollectionId) {
+    filterByCollection(activeCollectionId, { preserveAnchor: false });
+    return;
+  }
+  // A collection opened into the filter bar carries a static rules snapshot
+  // (the saved photo_ids list plus any user-picked chips). loadCollections()
+  // refreshes the sidebar counts but the bar keeps the STALE photo_ids
+  // rule until the user manually reopens the collection, so an add/remove
+  // just made from Browse doesn't show up in the current grid (CodeRabbit
+  // review r3620473562). Refetch the collection metadata and reopen so
+  // the bar's photo_ids expression matches the fresh membership.
+  if (openedCollectionId) {
+    var reopenId = openedCollectionId;
+    // Ensure filterByCollection sees the freshest rules/visual_json, not
+    // whatever the last renderCollectionList cached; loadCollections
+    // (called by callers of this function) refreshes collectionsById via
+    // loadCollectionCounts, but that's async — sequence with a fetch.
+    safeFetch('/api/collections', {}, { toast: false }).then(function(list) {
+      if (Array.isArray(list)) {
+        list.forEach(function(c) { collectionsById[c.id] = c; });
+      }
+      // The user can switch scope (folder click, keyword click, filter
+      // change) while this fetch is in flight; those paths clear
+      // ``openedCollectionId``. Reopening unconditionally would reinstate
+      // the old collection and wipe the user's new scope (Codex review
+      // r3622743705). Only reopen if the same collection is still open.
+      if (openedCollectionId === reopenId) {
+        filterByCollection(reopenId, { preserveAnchor: false });
+      }
+    }).catch(function() {
+      // Even without the refresh, opening the cached copy is closer to
+      // right than leaving the stale expression in place — but still
+      // only if the user hasn't already moved on.
+      if (openedCollectionId === reopenId) {
+        filterByCollection(reopenId, { preserveAnchor: false });
+      }
+    });
+    return;
+  }
+  // Collections open into the filter bar now (Phase 5): when a membership
+  // change (tag/untag, add/remove) happens while an expression is active,
+  // re-evaluate it so photos that no longer match leave the grid.
+  if (window.VireoFilter && VireoFilter.hasFilters()) {
+    resetAndLoad({ preserveAnchor: false });
+  }
 }
 
 // When bulk-removing the keyword that currently drives the filter, the
@@ -3275,91 +3414,62 @@ function refreshBrowseSidebarCounts() {
 }
 
 async function filterByCollection(id, options) {
-  // Guard: degraded (count_error) collections would 400 /api/collections/<id>/photos.
-  // Surface the reason instead of silently reloading into an error state. The
-  // sidebar renders these rows as `.tree-item.unavailable` and the context menu
-  // suppresses "Filter by this Collection", so this branch also catches any
-  // programmatic caller (deep-link, membership-change refresh) that pre-dates
-  // the guard.
+  // The sidebar collection list is rendered from the initial /photos payload,
+  // so a slow /api/filters/fields (or workspace) round-trip leaves clickable
+  // collections in the DOM before VireoFilter.init resolves. Without this
+  // guard, the saved expression is pushed into the filter bar while
+  // state.fields is still null and the in-flight init's restorePersisted/
+  // finish then overwrites the just-loaded rules/visual clause with the
+  // persisted Browse filters, silently dropping the collection click
+  // (Codex review r3622909557). filterByKeyword uses this same guard for
+  // the analogous race. The bootstrap deep-link caller fires from inside
+  // VireoFilter.init(...).then(...), so it is unaffected.
+  if (window.VireoFilter && !VireoFilter.isReady()) return;
+  // Guard: degraded (count_error) collections can't resolve their rules.
   var collectionMeta = collectionsById[id];
+  if (!collectionMeta) {
+    // Programmatic callers (deep links, tests, refresh paths) can race the
+    // sidebar render — fetch the list before giving up.
+    await loadCollections();
+    collectionMeta = collectionsById[id];
+  }
   if (collectionMeta && collectionMeta.count_error) {
     if (typeof showToast === 'function') {
       showToast(
         (collectionMeta.name || 'This collection') +
-          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+          " is unavailable \u2014 its rules could not be resolved. Right-click \u2192 Edit Rules to fix it.",
         'error'
       );
     }
     return;
   }
-  var preserveAnchor = !(options && options.preserveAnchor === false);
-  var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
-  var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
+  if (!collectionMeta) return;
+  // Opening a collection loads its saved expression into the filter bar as
+  // editable chips (rules + visual clause round-trip). The expression IS
+  // the filter; loadExpression's onChange reload refreshes the grid with
+  // anchor preservation handled by the shared path.
   activeFolderId = null;
   activeKeyword = null;
-  activeCollectionId = id;
+  activeCollectionId = null;
   dashboardCollectionScope = false;
-  photos = [];
-  currentPage = 1;
-  allLoaded = false;
-  var collectionLoadEpoch = ++loadEpoch;  // invalidate any in-flight loadPhotos response
-  loading = false;     // safe to clear: the stale response will be dropped
-  // Selection cannot be safely carried across a dataset switch: a surviving
-  // Set or single-focus id can arm actions against hidden photos. A single
-  // focused photo is restored below only after proving it exists in the
-  // destination collection and no user interaction has superseded it.
-  selectedPhotos.clear();
-  selectedPhotoId = null;
-  selectedIndex = -1;
-  refreshCardSelectionVisuals();
-  updateBatchBar();
-  document.getElementById('grid').innerHTML = '';
-  document.getElementById('gridContainer').scrollTop = 0;
-  if (anchor) hideDetailPanel();
-  else closeDetail();
-  function collectionRequestIsCurrent() {
-    return collectionLoadEpoch === loadEpoch && activeCollectionId === id;
-  }
-  function anchorScanShouldContinue() {
-    return collectionRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
-  }
-  if (anchor) anchorScanDepth++;
+  // Track which collection is currently loaded so post-membership refresh
+  // can pull fresh rules/photo_ids without waiting for a user reopen.
+  openedCollectionId = id;
+  var rules = [];
+  var visual = null;
+  try { rules = JSON.parse(collectionMeta.rules || '[]'); } catch (e) { rules = []; }
   try {
-    await loadPhotos();
-    if (!collectionRequestIsCurrent()) return;
-    if (!anchor) return;
-
-    var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
-    if (!collectionRequestIsCurrent()) return;
-    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
-    if (!card) {
-      clearActiveSelectionAndDetail();
-      return;
-    }
-    selectedPhotoId = anchor.photoId;
-    selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
-    refreshCardSelectionVisuals();
-    updateBatchBar();
-    if (anchor.detailVisible) loadDetail(anchor.photoId);
-    requestAnimationFrame(function() {
-      if (!collectionRequestIsCurrent()) return;
-      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
-      restorePhotoAnchor(anchor);
-      updateScrollPosition();
-    });
-  } finally {
-    if (anchor) {
-      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
-      // Auto-hydration was suppressed for every loadPhotos() call while a scan
-      // was open (including ones from unrelated folder/keyword switches). When
-      // the last scan ends, resume the normal path so the current grid fills
-      // its viewport instead of stalling on skeletons until a manual scroll.
-      if (anchorScanDepth === 0) {
-        rearmInfiniteScrollObserver();
-        requestAnimationFrame(ensureViewportHydrated);
-      }
-    }
-  }
+    visual = collectionMeta.visual_json ? JSON.parse(collectionMeta.visual_json) : null;
+  } catch (e) { visual = null; }
+  // Membership-refresh callers pass {preserveAnchor: false} to avoid paging
+  // through the whole refreshed collection looking for a photo that may
+  // have just left it; propagate via a distinct reason so the shared
+  // onChange handler skips anchor preservation for that path (Codex review
+  // r3622521603).
+  var preserveAnchor = !(options && options.preserveAnchor === false);
+  VireoFilter.loadExpression(rules, visual, {
+    reason: preserveAnchor ? 'expressionLoaded' : 'expressionRefreshed',
+  });
 }
 
 /* ---------- Collection Modal ---------- */
@@ -3888,10 +3998,17 @@ async function saveCollection() {
 
   try {
     var url = collectionEditingId ? '/api/collections/' + collectionEditingId : '/api/collections';
+    // This modal only edits rules — the preview and controls never surface
+    // the stored visual clause. When editing an existing visual collection,
+    // leaving visual_json in place would silently apply a hidden visual
+    // prompt on reopen that the user just previewed without (Codex review
+    // r3623087112). Clear it so the saved collection matches the preview.
+    var body = {name: name, rules: rules};
+    if (collectionEditingId) body.visual = null;
     await safeFetch(url, {
       method: collectionEditingId ? 'PUT' : 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name: name, rules: rules}),
+      body: JSON.stringify(body),
     });
     hideCollectionModal();
     loadCollections();
@@ -8100,8 +8217,19 @@ async function deleteCollectionById(cid, name) {
     return;
   }
   // If we were filtering by the deleted collection, clear the filter.
+  // ``activeCollectionId`` covers dashboard-scope collection links; opened
+  // collections now live under ``openedCollectionId`` (their saved
+  // expression is loaded into the filter bar instead of being applied as a
+  // scope), so we need to clear that path too — otherwise the sidebar row
+  // disappears but the filter bar and grid keep applying the deleted
+  // collection's expression until the user manually clears it (Codex
+  // review r3621903982).
   if (activeCollectionId === cid) {
     activeCollectionId = null;
+    resetAndLoad();
+  } else if (openedCollectionId === cid) {
+    openedCollectionId = null;
+    if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
     resetAndLoad();
   }
   await loadCollections();

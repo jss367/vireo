@@ -220,6 +220,10 @@
   }
 
   function ruleLabel(rule) {
+    if (rule.field === 'photo_ids') {
+      const n = Array.isArray(rule.value) ? rule.value.length : 0;
+      return `${n} hand-picked photo${n === 1 ? '' : 's'}`;
+    }
     const spec = state.fields[rule.field] || { label: rule.field, type: 'text' };
     const opLabel = OP_LABELS[rule.op] || rule.op;
     return `${spec.label} ${opLabel} ${valueLabel(spec, rule)}`;
@@ -255,11 +259,34 @@
     return state.root.rules.length ? clone(state.root) : { mode: 'all', rules: [] };
   }
 
+  // AND the page-context rules with the user's root expression while
+  // preserving that expression's group mode. Concatenating
+  // ``state.root.rules`` directly into an outer ``{mode: 'all', rules: …}``
+  // wrapper would flatten a saved ``{mode: 'any'}`` or ``{mode: 'none'}``
+  // root — the Edit Rules modal in Browse can save either — from OR/NOT
+  // into AND, silently changing what the reopened collection matches
+  // (Codex review r3620791294). Non-'all' roots are wrapped as a nested
+  // child so the outer AND with the context is honored without collapsing
+  // the inner OR/NOT.
+  function composeWithContext(context, root) {
+    const ctx = clone(context);
+    const rootMode = (root && root.mode) || 'all';
+    const rootRules = (root && Array.isArray(root.rules)) ? root.rules : [];
+    if (rootMode === 'all') {
+      if (!ctx.length && !rootRules.length) return [];
+      return { mode: 'all', rules: ctx.concat(clone(rootRules)) };
+    }
+    if (!ctx.length) return clone(root);
+    return { mode: 'all', rules: ctx.concat([clone(root)]) };
+  }
+
   function effectiveRules() {
     const context = state.getContextRules ? state.getContextRules() : [];
-    const user = state.muted ? [] : state.root.rules;
-    if (!context.length && !user.length) return [];
-    return { mode: 'all', rules: clone(context).concat(clone(user)) };
+    if (state.muted) {
+      if (!context.length) return [];
+      return { mode: 'all', rules: clone(context) };
+    }
+    return composeWithContext(context, state.root);
   }
 
   function hasUserFilters() {
@@ -288,7 +315,15 @@
     // the root of a whole class of prototype-review bugs.
     if (options.lightRender) renderLight();
     else render();
-    schedulePersist();
+    // Persistence writes the expanded rule tree into ui_state. Opening a
+    // saved collection would then snapshot its whole photo_ids list into
+    // every workspace-state fetch, and a later reload would restore that
+    // stale expansion instead of re-resolving the live collection —
+    // membership edits/deletes wouldn't show through (Codex r3623087117).
+    // Callers opening a saved expression pass ``noPersist: true`` so the
+    // load itself isn't persisted; subsequent user edits go through
+    // mutate() again without the flag and persist normally.
+    if (!options.noPersist) schedulePersist();
     // `reason` (optional string) is forwarded to onChange so pages can
     // pick per-cause reload behavior — e.g. Browse preserving the
     // selected-photo anchor when a quick search is cleared but not for
@@ -322,7 +357,10 @@
   function refreshWouldMatch() {
     const epoch = ++wouldMatchEpoch;
     const context = state.getContextRules ? state.getContextRules() : [];
-    const rules = { mode: 'all', rules: clone(context).concat(clone(state.root.rules)) };
+    // Mirror effectiveRules' mode-preserving compose: a paused-view
+    // "would match" counter must reflect what unpausing would apply, not
+    // an AND-flattened version of an any/none root (Codex r3620791294).
+    const rules = composeWithContext(context, state.root);
     fetchJson('/api/photos/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -555,6 +593,8 @@
     badge.hidden = count === 0;
     $('.vf-clear').hidden = !hasUserFilters();
     $('.vf-mute').hidden = !hasUserFilters() && !state.muted;
+    const saveBtn = $('.vf-save-collection');
+    if (saveBtn) saveBtn.hidden = !hasUserFilters();
     renderVisualNote();
     renderHandoff();
     requestAnimationFrame(updateChipOverflow);
@@ -1002,6 +1042,17 @@
       toast('Filters cleared', true);
     });
     $('.vf-toast button').addEventListener('click', () => { undo(); $('.vf-toast').hidden = true; });
+    const saveCollectionBtn = $('.vf-save-collection');
+    if (saveCollectionBtn) {
+      saveCollectionBtn.addEventListener('click', openSaveModal);
+      $('.vf-save-cancel').addEventListener('click', closeSaveModal);
+      $('.vf-save-backdrop').addEventListener('click', closeSaveModal);
+      $('.vf-save-confirm').addEventListener('click', confirmSaveCollection);
+      $('.vf-save-name').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') confirmSaveCollection();
+        else if (e.key === 'Escape') closeSaveModal();
+      });
+    }
 
     $('.vf-chip-row').addEventListener('click', (e) => {
       const x = e.target.closest('[data-chip-x]');
@@ -1197,6 +1248,69 @@
     window.addEventListener('resize', updateChipOverflow);
   }
 
+  function expressionSummary() {
+    const parts = [];
+    if (state.visual) parts.push(`✦ Visually similar to “${state.visual.prompt}” (${state.visual.strength})`);
+    chipEntries().forEach((entry) => { if (!entry.visual) parts.push(entry.label); });
+    return parts.join(' AND ') || 'No filters';
+  }
+
+  function openSaveModal() {
+    const modal = $('.vf-save-modal');
+    const backdrop = $('.vf-save-backdrop');
+    // Post-save semantics: the saved Collection reopens unmuted with the
+    // visual clause applied — preview THAT count, never the paused view's.
+    // Preview the same expression confirmSaveCollection persists
+    // (state.root + visual), NOT the current view's page-context scope:
+    // the reopened collection matches globally, so including
+    // getContextRules() in the preview would show a folder-scoped count
+    // that disagrees with what the collection actually contains on
+    // reopen (CodeRabbit review r3620473554).
+    // Preserve the root's group mode (any/none) so the count reflects
+    // what the saved collection actually matches, not an all-mode
+    // flattening of it (Codex review r3620791294). ``userRules()`` is
+    // the shared helper for that shape.
+    const rules = userRules();
+    const preview = $('.vf-save-preview');
+    preview.textContent = expressionSummary();
+    fetchJson('/api/photos/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules, per_page: 1, visual: state.visual || undefined }),
+    }).then((data) => {
+      preview.textContent = `${Number(data.total).toLocaleString()} matching photo${data.total === 1 ? '' : 's'} — ${expressionSummary()}`;
+    }).catch(() => {});
+    $('.vf-save-name').value = '';
+    modal.hidden = false;
+    backdrop.hidden = false;
+    setTimeout(() => $('.vf-save-name').focus(), 0);
+  }
+
+  function closeSaveModal() {
+    $('.vf-save-modal').hidden = true;
+    $('.vf-save-backdrop').hidden = true;
+  }
+
+  function confirmSaveCollection() {
+    const name = $('.vf-save-name').value.trim();
+    if (!name) { $('.vf-save-name').focus(); return; }
+    fetchJson('/api/collections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        rules: state.root.rules.length ? state.root : [],
+        visual: state.visual || null,
+      }),
+    }).then(() => {
+      closeSaveModal();
+      toast(`Saved “${name}” as a Collection`);
+      if (state.onCollectionSaved) state.onCollectionSaved();
+    }).catch((e) => {
+      toast(`Could not save: ${e.message}`);
+    });
+  }
+
   const HANDOFF_PAGES = [
     ['browse', '/browse', 'Browse', 'Workspace · All available photos'],
     ['map', '/map', 'Map', 'Adds: plottable locations scope'],
@@ -1233,6 +1347,7 @@
       state.onChange = options.onChange || null;
       state.getContextRules = options.getContextRules || null;
       state.getScope = options.getScope || null;
+      state.onCollectionSaved = options.onCollectionSaved || null;
       rootEl = typeof options.root === 'string' ? document.querySelector(options.root) : options.root;
       if (!rootEl) return Promise.reject(new Error('VireoFilter: missing root element'));
       return loadRegistry().then(() => {
@@ -1287,6 +1402,41 @@
       if (state.ready) renderLight();
     },
     visualSearch(text) { applyVisualSearch(text); },
+    loadExpression(rules, visual, opts) {
+      // Open a saved Collection into the bar as editable chips. Accepts the
+      // stored rules JSON (legacy flat list or grouped tree) and the
+      // visual_json clause; both become live, editable state.
+      //
+      // The default 'expressionLoaded' reason lets pages preserve the photo
+      // anchor — a selected member of the opened collection should stay in
+      // place. Membership-refresh callers (a keyword/tag change while the
+      // collection is open) pass ``{ reason: 'expressionRefreshed' }`` so
+      // the anchor is NOT preserved: the selected photo may have just left
+      // the collection, and loadUntilPhotoRendered would then page through
+      // the whole refreshed set looking for it (Codex review r3622521603).
+      let root = { mode: 'all', rules: [] };
+      if (Array.isArray(rules)) root = { mode: 'all', rules: clone(rules) };
+      else if (rules && Array.isArray(rules.rules)) root = clone(rules);
+      // Legacy default collections use the {"field": "all"} sentinel (no
+      // condition) — opening one is simply "show everything", not a chip.
+      root.rules = root.rules.filter((r) => !(r && r.field === 'all'));
+      const reason = (opts && opts.reason) || 'expressionLoaded';
+      mutate(() => {
+        state.root = root;
+        state.muted = false;
+        state.visual = (
+          visual && typeof visual.prompt === 'string' && visual.prompt
+        ) ? { prompt: visual.prompt,
+              strength: ['broad', 'balanced', 'strict'].includes(visual.strength)
+                ? visual.strength : 'balanced' }
+          : null;
+        state.visualInfo = null;
+        // See mutate()'s noPersist note (Codex r3623087117): opening a
+        // saved collection should not snapshot its expanded rule list
+        // (e.g. a huge photo_ids array from a manual collection) into
+        // workspaces.ui_state.
+      }, { reason, noPersist: true });
+    },
     getUserRules() { return userRules(); },
     addRule(field, op, value) {
       mutate(() => {

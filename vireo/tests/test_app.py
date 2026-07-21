@@ -3981,7 +3981,8 @@ def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
             pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
         )
 
-    rating_resp = client.get("/api/photos/search?q=bird&threshold=-1&rating_min=5")
+    rules = json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    rating_resp = client.get(f"/api/photos/search?q=bird&threshold=-1&rules={rules}")
     assert rating_resp.status_code == 200
     assert [r["photo"]["id"] for r in rating_resp.get_json()["results"]] == [p3]
 
@@ -13404,7 +13405,9 @@ def test_browse_filter_by_collection_guards_degraded_rows():
         "browse.html filterByCollection does not check count_error"
     )
     guard_end = body.find("return;")
-    fetch_start = body.find("loadPhotos")
+    # Collections open into the filter bar now (Phase 5): the load path is
+    # VireoFilter.loadExpression rather than a collection-endpoint fetch.
+    fetch_start = body.find("loadExpression")
     assert guard_end != -1 and fetch_start != -1 and guard_end < fetch_start, (
         "browse.html filterByCollection does not early-return before loading"
     )
