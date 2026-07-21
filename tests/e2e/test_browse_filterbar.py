@@ -119,12 +119,10 @@ def test_queued_collection_open_yields_to_later_folder_click(live_server, page):
 def test_queued_collection_open_yields_to_later_keyword_click(live_server, page):
     """A queued early collection open must not resume over a later keyword click.
 
-    filterByKeyword returns at the readiness guard while /api/filters/fields is
-    still pending. If it didn't bump browseScopeGen before returning, releasing
-    the fields request would let the queued filterByCollection resume and
-    overwrite the user's newer keyword intent. Bumping the gen up front
-    invalidates the queued open so nothing surprising lands (Codex review
-    r3624549744).
+    filterByKeyword is now queued behind browseFilterInitPromise (Codex review
+    r3624927534) — the gen bump at entry invalidates the queued
+    filterByCollection so it aborts, and the keyword rule is applied after
+    fields load rather than dropped, so the user's later click is honored.
     """
     collection_id = next(
         collection["id"]
@@ -152,18 +150,29 @@ def test_queued_collection_open_yields_to_later_keyword_click(live_server, page)
         "filterByCollection(collectionId); }",
         collection_id,
     )
-    # ...but a later keyword click races in before the fields resolve. The
-    # readiness guard drops it, but it must still advance browseScopeGen so
-    # the queued collection open observes a newer scope and aborts.
-    page.evaluate("filterByKeyword('anything')")
+    # ...but a later keyword click races in before the fields resolve. It
+    # advances browseScopeGen so the queued collection open observes a newer
+    # scope and aborts, then queues itself and applies once init resolves.
+    page.evaluate(
+        "() => { window._earlyKeywordClick = filterByKeyword('Red-tailed Hawk'); }"
+    )
     held_routes[0].continue_()
 
-    page.wait_for_function("VireoFilter.isReady()", timeout=15000)
+    # The keyword rule must actually land after init resolves — that's the
+    # difference from the old drop-the-click behavior, which left a
+    # deep-linked collection (or bootstrap grid) showing while the user's
+    # keyword selection was silently lost.
+    page.wait_for_function(
+        "() => VireoFilter.isReady() && activeKeyword === 'Red-tailed Hawk' && "
+        "VireoFilter.hasFilters()",
+        timeout=15000,
+    )
     # Give the queued collection continuation a chance to run so we can
-    # assert it aborted rather than replacing the user's later click.
+    # assert it aborted rather than clobbering the keyword selection.
     page.wait_for_timeout(200)
     assert page.evaluate("openedCollectionId") is None
     assert page.evaluate("activeCollectionId") is None
+    assert page.evaluate("activeKeyword") == "Red-tailed Hawk"
 
 
 def test_deep_link_replay_yields_to_sidebar_click(live_server, page):
@@ -220,6 +229,56 @@ def test_deep_link_replay_yields_to_sidebar_click(live_server, page):
     # have reopened deep_link_id after B's queued open bailed as stale.
     page.wait_for_timeout(200)
     assert page.evaluate("openedCollectionId") == clicked_id
+
+
+def test_pending_keyword_click_supersedes_deep_link_collection(live_server, page):
+    """A keyword clicked during pending init must displace the URL collection.
+
+    Opening ``/browse?collection_id=A`` starts the collection-scoped grid
+    while ``/api/filters/fields`` is still pending. A keyword click during
+    that window used to be dropped at the readiness guard — the bootstrap
+    ``.then`` then saw ``scopeChanged`` and skipped the deep-link replay,
+    but the collection A grid stayed on screen and the keyword rule was
+    never installed (Codex review r3624927534). filterByKeyword now queues
+    behind the init promise and applies once fields load, replacing the
+    collection scope with the user's later intent.
+    """
+    collections_by_name = {c["name"]: c["id"] for c in live_server["db"].get_collections()}
+    deep_link_id = collections_by_name["All Photos"]
+    held_routes = []
+    page.route(
+        "**/api/filters/fields",
+        lambda route: held_routes.append(route),
+    )
+
+    page.goto(live_server["url"] + f"/browse?collection_id={deep_link_id}")
+    page.wait_for_selector("#grid .grid-card", timeout=15000)
+    for _ in range(50):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "filter-field request was never issued"
+    assert not page.evaluate("VireoFilter.isReady()")
+
+    # Keyword click during pending init: previously dropped at the readiness
+    # guard, now queued behind browseFilterInitPromise.
+    page.evaluate(
+        "() => { window._earlyKeywordClick = filterByKeyword('Red-tailed Hawk'); }"
+    )
+    held_routes[0].continue_()
+
+    # After init, the keyword rule must land and the collection scope must
+    # be gone — the queued keyword continuation clears activeCollectionId
+    # and installs the rule. Only hawk1 carries the Red-tailed Hawk keyword
+    # tag (predictions don't tag), so the total drops from All Photos (5)
+    # to 1. The gap between "All Photos" and "keyword=Red-tailed Hawk"
+    # totals is what makes the fix observable.
+    page.wait_for_function(
+        "() => VireoFilter.isReady() && activeKeyword === 'Red-tailed Hawk' && "
+        "activeCollectionId === null && VireoFilter.hasFilters()",
+        timeout=15000,
+    )
+    _wait_total(page, 1)
 
 
 def test_restored_url_filters_apply_after_pending_folder_click(live_server, page):

@@ -3267,19 +3267,35 @@ function renderKeywordTree(keywords) {
   };
 }
 
-function filterByKeyword(name) {
+async function filterByKeyword(name) {
   // Bump the scope generation BEFORE the readiness guard so an in-flight
   // queued filterByCollection (awaiting browseFilterInitPromise) sees the
   // newer intent and bails out on resume. Without this, the collection
   // could resume after fields load and clobber the user's later click
   // (Codex review r3624549744).
-  browseScopeGen++;
+  var myScopeGen = ++browseScopeGen;
   // The sidebar tree is rendered from the /photos init payload, so a
   // slow /api/filters/fields (or workspace) round-trip leaves clickable
   // keywords in the DOM before VireoFilter.init resolves. Without this
   // guard, addRule -> makeRule dereferences state.fields (still null)
-  // and throws, leaving activeKeyword toggled but no rule/reload applied.
-  if (!VireoFilter.isReady()) return;
+  // and throws. Dropping the click outright would leave the bootstrap
+  // grid (e.g. a ``?collection_id=A`` deep link's collection scope) in
+  // place while the user's later keyword selection is silently lost
+  // (Codex review r3624927534) — queue behind init and apply once ready,
+  // matching filterByCollection's pattern.
+  if (window.VireoFilter && !VireoFilter.isReady()) {
+    if (!browseFilterInitPromise) return;
+    try {
+      await browseFilterInitPromise;
+    } catch (e) {
+      return;
+    }
+    if (!VireoFilter.isReady()) return;
+    // A later sidebar click (folder/keyword/collection) advanced the scope
+    // while we were waiting for filter-bar init. Applying this stale
+    // keyword now would clobber the user's newer selection.
+    if (browseScopeGen !== myScopeGen) return;
+  }
   if (activeKeyword === name) {
     activeKeyword = null;
   } else {
