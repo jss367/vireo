@@ -674,6 +674,100 @@ def test_list_collections_flags_degraded_visual_collection(app_and_db):
     }
 
 
+def test_browse_init_visual_collection_scope_returns_empty_first_paint(app_and_db):
+    """``/api/browse/init?collection_id=<visual>`` cannot resolve the
+    visual clause — ``db.get_photos(collection_id=...)`` /
+    ``count_filtered_photos`` expand only ``collections.rules``, the same
+    rules-only path guarded elsewhere by ``_reject_visual_collection``.
+    For a visual-only collection (rules ``[]``) that would silently widen
+    the first paint to the entire workspace instead of the saved visual
+    result set; the client's ``filterByCollection()`` reloads through
+    ``/api/photos/query`` right after, but the wrong grid still flashes
+    between the two — and any failure before ``filterByCollection()``
+    runs leaves the user staring at the widened scope. Return
+    ``photos: []`` and ``total: 0`` for the collection scope's first
+    paint so the wrong data can never appear (Codex review on PR #1343)."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    # Baseline: unfiltered init returns every workspace photo. This is
+    # exactly the scope that would leak through if the guard regressed.
+    baseline = client.get("/api/browse/init").get_json()
+    assert baseline["total"] >= 1
+    assert len(baseline["photos"]) >= 1
+
+    visual = db.add_collection(
+        "Visual only",
+        json.dumps([]),
+        visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
+    )
+
+    resp = client.get(f"/api/browse/init?collection_id={visual}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["photos"] == []
+    assert data["total"] == 0
+    # Sidebar bootstrap payload is still there so Browse can render
+    # folders/keywords/collections while filterByCollection() takes over.
+    by_name = {c["name"]: c for c in data["collections"]}
+    assert "Visual only" in by_name
+    assert "folders" in data and "keywords" in data
+
+
+def test_browse_init_visual_collection_ignores_rules_scope(app_and_db):
+    """A visual collection whose ``rules`` would match every photo (e.g.
+    ``[]`` or an ``all`` sentinel) must not have those rules applied at
+    first paint either — the browse init endpoint has no way to combine
+    the visual clause here, so it deliberately drops the scope. Guards
+    against a future edit that "helpfully" falls back to the rules when
+    the visual clause is present (Codex review on PR #1343)."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    # Rules that would count every workspace photo — proving the fix
+    # never widens/reveals them for a visual collection.
+    visual = db.add_collection(
+        "Visual widest",
+        json.dumps([{"field": "all"}]),
+        visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
+    )
+
+    resp = client.get(f"/api/browse/init?collection_id={visual}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photos"] == []
+    assert data["total"] == 0
+
+
+def test_browse_init_plain_collection_still_scopes_normally(app_and_db):
+    """The visual-scope guard must not touch plain (rules-only)
+    collections — the first paint remains the normal rules-only path so
+    Browse deep links to smart collections still open showing the
+    matching photos before ``filterByCollection()`` runs."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    photo_ids = [
+        row["id"] for row in db.conn.execute("SELECT id FROM photos").fetchall()
+    ]
+    assert len(photo_ids) >= 1
+
+    plain = db.add_collection(
+        "Plain",
+        json.dumps([{"field": "photo_ids", "value": photo_ids[:1]}]),
+    )
+
+    resp = client.get(f"/api/browse/init?collection_id={plain}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1
+    assert [p["id"] for p in data["photos"]] == photo_ids[:1]
+
+
 def test_create_collection_pins_active_model_on_has_visual_index(
     app_and_db, monkeypatch,
 ):

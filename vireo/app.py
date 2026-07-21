@@ -4576,30 +4576,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
 
+        # ``db.get_photos(collection_id=...)`` / ``count_filtered_photos`` both
+        # expand only ``collections.rules`` — the same rules-only path guarded
+        # elsewhere by ``_reject_visual_collection``. A visual-only collection
+        # stores ``rules: []``, so running it through that path here would
+        # silently widen first paint to every workspace photo. The client's
+        # ``bootstrapBrowse()`` calls ``filterByCollection()`` right after,
+        # which reloads through ``/api/photos/query`` with the visual clause,
+        # but the wrong grid still flashes between the two — and any failure
+        # before ``filterByCollection()`` runs leaves the user staring at the
+        # widened scope. Drop the ``collection_id`` from the photo query and
+        # return an empty grid so the wrong data can never appear (Codex
+        # review on PR #1343). Folders/keywords/collections are still returned
+        # so the sidebar bootstraps.
+        visual_first_paint = False
+        if collection_id is not None:
+            coll_row = db.conn.execute(
+                "SELECT visual_json FROM collections "
+                "WHERE id = ? AND workspace_id = ?",
+                (collection_id, db._ws_id()),
+            ).fetchone()
+            if coll_row is not None and coll_row["visual_json"] is not None:
+                visual_first_paint = True
+
         # First paint is scope-only (folder / collection / sort); metadata
         # filter deep links compile into the filter bar client-side, which
         # reloads through /api/photos/query once initialized (Phase 5 —
         # legacy per-field params removed from this endpoint).
-        try:
-            photos = db.get_photos(
-                folder_id=folder_id,
-                collection_id=collection_id,
-                page=page,
-                per_page=per_page,
-                sort=sort,
-            )
-        except ValueError as exc:
-            return json_error(str(exc), 400)
-        if not any([folder_id, collection_id]):
-            total = db.count_photos()
+        if visual_first_paint:
+            photos = []
+            total = 0
         else:
             try:
-                total = db.count_filtered_photos(
+                photos = db.get_photos(
                     folder_id=folder_id,
                     collection_id=collection_id,
+                    page=page,
+                    per_page=per_page,
+                    sort=sort,
                 )
             except ValueError as exc:
                 return json_error(str(exc), 400)
+            if not any([folder_id, collection_id]):
+                total = db.count_photos()
+            else:
+                try:
+                    total = db.count_filtered_photos(
+                        folder_id=folder_id,
+                        collection_id=collection_id,
+                    )
+                except ValueError as exc:
+                    return json_error(str(exc), 400)
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
