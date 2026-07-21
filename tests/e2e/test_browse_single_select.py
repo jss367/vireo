@@ -436,16 +436,27 @@ def test_needs_identification_refreshes_after_identification_added(live_server, 
     db = live_server["db"]
     target_id = live_server["data"]["photos"][1]
     collection = db.conn.execute(
-        "SELECT id FROM collections WHERE name = 'Needs Identification'"
+        "SELECT id, rules FROM collections WHERE name = 'Needs Identification'"
     ).fetchone()
     assert collection is not None
     collection_id = collection["id"]
+    collection_rules = json.loads(collection["rules"])
+
+    def is_collection_query(response):
+        if (
+            "/api/photos/query" not in response.url
+            or response.request.method != "POST"
+            or response.status != 200
+        ):
+            return False
+        body = response.request.post_data_json or {}
+        rules = body.get("rules") or {}
+        submitted_rules = rules.get("rules", []) if isinstance(rules, dict) else rules
+        return submitted_rules == collection_rules
 
     page.goto(f"{live_server['url']}/browse")
     page.wait_for_function("window.VireoFilter && VireoFilter.isReady()")
-    with page.expect_response(
-        lambda r: "/api/photos/query" in r.url and r.status == 200
-    ):
+    with page.expect_response(is_collection_query):
         page.evaluate("(id) => filterByCollection(id)", collection_id)
 
     target_card = page.locator(f'.grid-card[data-id="{target_id}"]').first
@@ -462,7 +473,7 @@ def test_needs_identification_refreshes_after_identification_added(live_server, 
     ), page.expect_response(
         # Collections open into the filter bar now; membership-change
         # refreshes re-evaluate the expression through the query path.
-        lambda r: "/api/photos/query" in r.url and r.status == 200
+        is_collection_query
     ):
         keyword_input.press("Enter")
 
