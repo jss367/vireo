@@ -10197,6 +10197,42 @@ class Database:
         if not name:
             raise ValueError("keyword name is empty after normalization")
         if place_id is not None:
+            if reuse_location_component:
+                existing_place = self.conn.execute(
+                    "SELECT id FROM keywords WHERE place_id = ?",
+                    (place_id,),
+                ).fetchone()
+                existing_component = None
+                if existing_place is None:
+                    if parent_id is None:
+                        existing_component = self.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE name = ? AND parent_id IS NULL "
+                            "  AND type = 'location' AND place_id IS NULL "
+                            "LIMIT 1",
+                            (name,),
+                        ).fetchone()
+                    else:
+                        existing_component = self.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE name = ? AND parent_id = ? "
+                            "  AND type = 'location' AND place_id IS NULL "
+                            "LIMIT 1",
+                            (name, parent_id),
+                        ).fetchone()
+                if existing_component is not None:
+                    self.conn.execute(
+                        "UPDATE keywords SET place_id = ?, type = 'location', "
+                        "is_species = 0, taxon_id = NULL, latitude = ?, "
+                        "longitude = ? WHERE id = ?",
+                        (
+                            place_id,
+                            latitude,
+                            longitude,
+                            existing_component["id"],
+                        ),
+                    )
+                    return existing_component["id"]
             insert_sql = (
                 "INSERT INTO keywords "
                 "(name, parent_id, type, place_id, latitude, longitude) "

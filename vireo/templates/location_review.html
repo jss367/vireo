@@ -651,8 +651,8 @@ body {
     var values = [];
     var nearby = state.savedCandidates.concat(state.googleCandidates);
     nearby.sort(function(a, b) {
-      var aDistance = Number(a.distance_m);
-      var bDistance = Number(b.distance_m);
+      var aDistance = parseFloat(a.distance_m);
+      var bDistance = parseFloat(b.distance_m);
       var aHasDistance = Number.isFinite(aDistance);
       var bHasDistance = Number.isFinite(bDistance);
       if (aHasDistance && bHasDistance && aDistance !== bDistance) return aDistance - bDistance;

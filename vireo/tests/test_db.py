@@ -1820,6 +1820,41 @@ def test_place_upsert_restores_place_bearing_legacy_location(tmp_path):
     }
 
 
+def test_place_upsert_reuses_root_administrative_location(tmp_path):
+    """Selecting a country enriches its existing root instead of duplicating it."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+
+    selected_id = db.upsert_place_chain({
+        "place_id": "united-states-country",
+        "name": "United States",
+        "types": ["country"],
+        "lat": 39.8283,
+        "lng": -98.5795,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+        ],
+    })
+
+    assert selected_id == country_id
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL AND type = 'location'",
+        ("United States",),
+    ).fetchone()[0] == 1
+    country = db.conn.execute(
+        "SELECT place_id, latitude, longitude FROM keywords WHERE id = ?",
+        (country_id,),
+    ).fetchone()
+    assert dict(country) == {
+        "place_id": "united-states-country",
+        "latitude": 39.8283,
+        "longitude": -98.5795,
+    }
+
+
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
     from db import Database
