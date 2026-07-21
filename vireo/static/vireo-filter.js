@@ -1393,18 +1393,25 @@
       if (state.ready) renderLight();
     },
     visualSearch(text) { applyVisualSearch(text); },
-    loadExpression(rules, visual) {
+    loadExpression(rules, visual, opts) {
       // Open a saved Collection into the bar as editable chips. Accepts the
       // stored rules JSON (legacy flat list or grouped tree) and the
-      // visual_json clause; both become live, editable state. The
-      // 'expressionLoaded' reason lets pages preserve the photo anchor —
-      // a selected member of the opened collection should stay in place.
+      // visual_json clause; both become live, editable state.
+      //
+      // The default 'expressionLoaded' reason lets pages preserve the photo
+      // anchor — a selected member of the opened collection should stay in
+      // place. Membership-refresh callers (a keyword/tag change while the
+      // collection is open) pass ``{ reason: 'expressionRefreshed' }`` so
+      // the anchor is NOT preserved: the selected photo may have just left
+      // the collection, and loadUntilPhotoRendered would then page through
+      // the whole refreshed set looking for it (Codex review r3622521603).
       let root = { mode: 'all', rules: [] };
       if (Array.isArray(rules)) root = { mode: 'all', rules: clone(rules) };
       else if (rules && Array.isArray(rules.rules)) root = clone(rules);
       // Legacy default collections use the {"field": "all"} sentinel (no
       // condition) — opening one is simply "show everything", not a chip.
       root.rules = root.rules.filter((r) => !(r && r.field === 'all'));
+      const reason = (opts && opts.reason) || 'expressionLoaded';
       mutate(() => {
         state.root = root;
         state.muted = false;
@@ -1415,7 +1422,7 @@
                 ? visual.strength : 'balanced' }
           : null;
         state.visualInfo = null;
-      }, { reason: 'expressionLoaded' });
+      }, { reason });
     },
     getUserRules() { return userRules(); },
     addRule(field, op, value) {

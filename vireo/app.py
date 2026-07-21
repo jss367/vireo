@@ -6355,6 +6355,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         q = request.args.get("q") or None
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
+        # ``get_filter_field_values`` narrows counts through
+        # ``_build_collection_query``, which reads only ``collections.rules``.
+        # Without ``visual``, a saved visual collection would silently widen
+        # the typeahead counts to every metadata match (Codex review
+        # r3622521597).
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         # Clamp ``limit`` to a positive bounded range. Werkzeug's ``type=int``
         # cheerfully parses ``?limit=0``/``?limit=-5`` (SQLite treats a
         # negative ``LIMIT`` as "no limit" and returns everything), and
@@ -6436,6 +6444,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         year = request.args.get("year", date.today().year, type=int)
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
+        # ``get_calendar_data`` narrows through ``_build_collection_query``,
+        # which reads only ``collections.rules``. Without ``visual``, a saved
+        # visual collection would silently widen calendar counts to every
+        # metadata match (Codex review r3622521597).
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
@@ -6460,6 +6475,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
+        # ``get_browse_summary`` narrows through ``_build_collection_query``,
+        # which reads only ``collections.rules``. Without ``visual``, a saved
+        # visual collection would silently widen the summary to every
+        # metadata match (Codex review r3622521597). Browse itself clears
+        # ``activeCollectionId`` when opening a collection into the filter
+        # bar, so its ``/api/browse/summary`` calls never carry a visual
+        # collection id; this guards direct API callers.
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()

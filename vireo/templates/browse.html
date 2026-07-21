@@ -2903,9 +2903,12 @@ async function bootstrapBrowse() {
         // handle so a later membership refresh doesn't silently revert
         // the user's edits back to the collection's saved expression.
         // Our own filterByCollection() → loadExpression() fires onChange
-        // with reason 'expressionLoaded'; that path already sets
-        // openedCollectionId above, so leave it alone.
-        if (openedCollectionId && info && info.reason !== 'expressionLoaded') {
+        // with reason 'expressionLoaded' (opening) or 'expressionRefreshed'
+        // (membership-change refresh); both paths set openedCollectionId
+        // above, so leave it alone.
+        if (openedCollectionId && info &&
+            info.reason !== 'expressionLoaded' &&
+            info.reason !== 'expressionRefreshed') {
           openedCollectionId = null;
         }
         // A cleared quick search is the one filter edit where the previously
@@ -2918,7 +2921,11 @@ async function bootstrapBrowse() {
         var preserveAnchor = info && (
           info.reason === 'quickSearchCleared' ||
           // A selected member of a just-opened collection should stay
-          // anchored (it existed in the old collection view too).
+          // anchored (it existed in the old collection view too). But a
+          // membership-refresh reopen (reason 'expressionRefreshed') skips
+          // this — the selected photo may have just left the collection,
+          // and loadUntilPhotoRendered would otherwise page through the
+          // whole refreshed set looking for it (Codex review r3622521603).
           info.reason === 'expressionLoaded'
         );
         resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
@@ -3433,7 +3440,15 @@ async function filterByCollection(id, options) {
   try {
     visual = collectionMeta.visual_json ? JSON.parse(collectionMeta.visual_json) : null;
   } catch (e) { visual = null; }
-  VireoFilter.loadExpression(rules, visual);
+  // Membership-refresh callers pass {preserveAnchor: false} to avoid paging
+  // through the whole refreshed collection looking for a photo that may
+  // have just left it; propagate via a distinct reason so the shared
+  // onChange handler skips anchor preservation for that path (Codex review
+  // r3622521603).
+  var preserveAnchor = !(options && options.preserveAnchor === false);
+  VireoFilter.loadExpression(rules, visual, {
+    reason: preserveAnchor ? 'expressionLoaded' : 'expressionRefreshed',
+  });
 }
 
 /* ---------- Collection Modal ---------- */
