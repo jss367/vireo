@@ -10865,6 +10865,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"genus_id": None, "species": []})
         return jsonify(_build_explorer_species(db, genus_id))
 
+    @app.route("/api/life-list/explorer/rank")
+    def api_life_list_explorer_rank():
+        db = _get_db()
+        rank = request.args.get("rank", "family")
+        root_id = request.args.get("root", type=int)
+        return jsonify(_build_explorer_rank(db, rank, root_id=root_id))
+
     _LIFE_LIST_EXPORT_FORMATS = {
         "json": "json",
         "csv": "csv",
