@@ -33,6 +33,45 @@ def _open_browse(page, live_server):
     )
 
 
+def test_collection_open_waits_for_filter_bar_initialization(live_server, page):
+    """An early collection click is queued while filter fields are loading."""
+    collection_id = next(
+        collection["id"]
+        for collection in live_server["db"].get_collections()
+        if collection["name"] == "GPS Without Location Keyword"
+    )
+    held_routes = []
+    page.route(
+        "**/api/filters/fields",
+        lambda route: held_routes.append(route),
+    )
+
+    page.goto(live_server["url"] + "/browse")
+    page.wait_for_selector("#grid .grid-card", timeout=15000)
+    for _ in range(50):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "filter-field request was never issued"
+    assert not page.evaluate("VireoFilter.isReady()")
+
+    # Do not return the promise from page.evaluate: the collection open must
+    # remain pending until the held registry request is released.
+    page.evaluate(
+        "collectionId => { window._earlyCollectionOpen = "
+        "filterByCollection(collectionId); }",
+        collection_id,
+    )
+    held_routes[0].continue_()
+
+    page.wait_for_function(
+        "collectionId => VireoFilter.isReady() && "
+        "openedCollectionId === collectionId && VireoFilter.hasFilters()",
+        arg=collection_id,
+        timeout=15000,
+    )
+
+
 def test_quick_rating_filter_and_chip_semantics(live_server, page):
     _open_browse(page, live_server)
     assert _total(page) == 5

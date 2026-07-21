@@ -2004,6 +2004,10 @@ var dashboardCollectionScope = false;
 // the expression (so a user-edited chip set isn't silently reverted to
 // the saved collection on the next membership refresh).
 var openedCollectionId = null;
+// Sidebar collections render before the universal filter registry necessarily
+// finishes loading. Keep the init promise so an early collection click can
+// wait for the filter bar instead of being silently discarded.
+var browseFilterInitPromise = null;
 
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
@@ -2891,7 +2895,7 @@ async function bootstrapBrowse() {
     // Universal filter bar: registry + persisted/deep-linked state load
     // async; when it comes up with active filters the unfiltered first
     // paint above is stale, so reload through the rules path.
-    VireoFilter.init({
+    browseFilterInitPromise = VireoFilter.init({
       page: 'browse',
       root: document.getElementById('vireoFilterBar'),
       scopeLabel: 'Workspace \u00b7 All available photos',
@@ -2948,7 +2952,8 @@ async function bootstrapBrowse() {
         };
       },
       onCollectionSaved: function() { loadCollections(); },
-    }).then(function() {
+    });
+    browseFilterInitPromise.then(function() {
       VireoFilter.setResultTotal(totalPhotos);
       // Collection deep links must open showing exactly that collection \u2014
       // whether plain (?collection_id=..., historical endpoint behavior) or
@@ -3419,12 +3424,19 @@ async function filterByCollection(id, options) {
   // collections in the DOM before VireoFilter.init resolves. Without this
   // guard, the saved expression is pushed into the filter bar while
   // state.fields is still null and the in-flight init's restorePersisted/
-  // finish then overwrites the just-loaded rules/visual clause with the
-  // persisted Browse filters, silently dropping the collection click
-  // (Codex review r3622909557). filterByKeyword uses this same guard for
-  // the analogous race. The bootstrap deep-link caller fires from inside
-  // VireoFilter.init(...).then(...), so it is unaffected.
-  if (window.VireoFilter && !VireoFilter.isReady()) return;
+  // finish then overwrites the just-loaded rules/visual clause. Do not drop
+  // the click, though: wait for the in-flight init and apply the collection
+  // as soon as the filter bar is ready. The bootstrap deep-link caller fires
+  // from inside browseFilterInitPromise.then(...), so it proceeds immediately.
+  if (window.VireoFilter && !VireoFilter.isReady()) {
+    if (!browseFilterInitPromise) return;
+    try {
+      await browseFilterInitPromise;
+    } catch (e) {
+      return;
+    }
+    if (!VireoFilter.isReady()) return;
+  }
   // Guard: degraded (count_error) collections can't resolve their rules.
   var collectionMeta = collectionsById[id];
   if (!collectionMeta) {
