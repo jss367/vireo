@@ -14167,6 +14167,83 @@ def test_api_explorer_not_ready(app_and_db):
     assert r.get_json()['taxonomy_ready'] is False
 
 
+def test_build_explorer_rank_families(db):
+    from app import _build_explorer_rank
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    out = _build_explorer_rank(db, 'family')
+    assert out['rank'] == 'family'
+    # Seed has exactly 2 families: Passerellidae, Anatidae.
+    assert out['total'] == 2
+    by = {i['name']: i for i in out['items']}
+    assert by['Passerellidae']['found'] is True
+    assert by['Anatidae']['found'] is False
+    # order context label uses the ancestor order's common name.
+    assert by['Passerellidae']['order'] == 'Perching Birds'
+    assert by['Anatidae']['order'] == 'Waterfowl'
+    # found-first ordering
+    assert out['items'][0]['found'] is True
+    # counts equal the payload summary chip
+    from app import _build_explorer_payload
+    assert out['found'] == _build_explorer_payload(db)['summary']['family']['found']
+    assert out['total'] == _build_explorer_payload(db)['summary']['family']['total']
+
+
+def test_build_explorer_rank_species_has_photo(db):
+    from app import _build_explorer_rank
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    out = _build_explorer_rank(db, 'species')
+    assert out['rank'] == 'species'
+    # Seed has exactly 4 species.
+    assert out['total'] == 4
+    by = {i['name']: i for i in out['items']}
+    assert by['Melospiza melodia']['found'] is True
+    assert by['Melospiza melodia']['photo']['filename'] == 'a.jpg'
+    assert by['Melospiza georgiana']['found'] is False
+    assert by['Melospiza georgiana']['photo'] is None
+    # found-first ordering
+    assert out['items'][0]['found'] is True
+
+
+def test_api_explorer_rank(app_and_db):
+    app, db = app_and_db
+    ids = _seed_bird_taxonomy(db)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE name='Cardinal'",
+                    (ids['Melospiza melodia'],))
+    db.conn.commit()
+    r = app.test_client().get('/api/life-list/explorer/rank?rank=family')
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d['rank'] == 'family'
+    assert d['total'] >= 2
+    assert any(i['found'] for i in d['items'])
+
+
+def test_api_explorer_rank_defaults_bad_rank(app_and_db):
+    app, db = app_and_db
+    r = app.test_client().get('/api/life-list/explorer/rank?rank=bogus')
+    assert r.status_code == 200   # falls back to a valid rank, not 500
+
+
 def _seed_mammal_taxon(db):
     """Add a second class-rank taxon (Mammalia) so multi-class selector tests
     have somewhere to switch to. Returns the class row id."""
