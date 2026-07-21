@@ -7157,6 +7157,9 @@ function openLightbox(photoId, filename, photoList, options) {
     }
     _lbApplyTransform();
     _lbFlushDeferredOverlayApply();
+    if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
+      window._lbFlushDeferredLightboxLayoutRefresh();
+    }
     _lbPrimeAdjacentPhotos(_lbCurrentSrcKey);
     if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
   }
@@ -7178,6 +7181,9 @@ function openLightbox(photoId, filename, photoList, options) {
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
       _lbApplyTransform();
       _lbFlushDeferredOverlayApply();
+      if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
+        window._lbFlushDeferredLightboxLayoutRefresh();
+      }
       return;
     }
     _lbOriginalUnavailable = true;
@@ -7361,9 +7367,17 @@ function toggleLightboxZoom(e) {
 (function() {
   var resizeTimer = null;
   var refreshSourceTier = false;
+  var deferredRefreshPending = false;
   function scheduleLightboxLayoutRefresh(updateSourceTier) {
     var overlay = document.getElementById('lightboxOverlay');
-    if (!overlay || !overlay.classList.contains('active')) return;
+    if (!overlay || !overlay.classList.contains('active')) {
+      // Discard any refresh that was deferred while the lightbox was open
+      // so a stale intent cannot leak into the next session.
+      refreshSourceTier = false;
+      deferredRefreshPending = false;
+      if (resizeTimer) { clearTimeout(resizeTimer); resizeTimer = null; }
+      return;
+    }
     refreshSourceTier = refreshSourceTier || !!updateSourceTier;
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function() {
@@ -7375,8 +7389,15 @@ function toggleLightboxZoom(e) {
       // just before navigation may fire after the incoming metadata has
       // replaced the layout dimensions; applying it here would move the old
       // bitmap using the new photo's geometry. The image load/error handlers
-      // recompute and apply the current layout when the transition finishes.
-      if (_lbVisualTransitionPending) return;
+      // recompute and apply the current layout when the transition finishes,
+      // but they do not re-select the source tier — so preserve the pending
+      // update and let _lbFlushDeferredLightboxLayoutRefresh reschedule it
+      // once the transition clears.
+      if (_lbVisualTransitionPending) {
+        refreshSourceTier = shouldUpdateSourceTier || refreshSourceTier;
+        deferredRefreshPending = true;
+        return;
+      }
       _lbRecomputeNativeZoom();
       // A deferred 1:1 keeps _lbZoom at fit while the high-res source loads.
       // _lbSetZoom clears _lbPending1To1 (and its trailing reschedule retargets
@@ -7430,6 +7451,15 @@ function toggleLightboxZoom(e) {
       lightboxLayoutObserver.observe(wrap);
     }
   }
+  // Called by the image load/error handlers once _lbVisualTransitionPending
+  // clears. Reschedules any resize refresh that was skipped during the
+  // transition so the incoming photo can pick up a viewport/DPR change we
+  // deferred (e.g. selecting a sharper source tier after a window resize).
+  window._lbFlushDeferredLightboxLayoutRefresh = function() {
+    if (!deferredRefreshPending) return;
+    deferredRefreshPending = false;
+    scheduleLightboxLayoutRefresh(false);
+  };
 })();
 
 // Drag to pan when zoomed; single click (no drag) zooms out
