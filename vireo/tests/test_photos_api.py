@@ -334,6 +334,24 @@ def test_api_photo_search_ids_only_returns_all_matches(app_and_db, monkeypatch):
     assert "results" not in data
 
 
+def test_api_photo_search_rejects_visual_collection(app_and_db):
+    """``/api/photos/search?collection_id=<visual>`` expands the scope via
+    ``db.get_collection_photo_ids(...)`` which evaluates ``rules`` only.
+    A visual collection would silently widen the CLIP-scored candidate set
+    to every metadata match instead of the visually-matched subset
+    (Codex review r3621094501)."""
+    app, db = app_and_db
+    visual = db.add_collection(
+        "Visual",
+        json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
+        visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
+    )
+    client = app.test_client()
+    resp = client.get(f"/api/photos/search?q=bird&collection_id={visual}")
+    assert resp.status_code == 400, resp.get_json()
+    assert "visual-search clause" in resp.get_json()["error"]
+
+
 def test_api_photos_filter_rating(app_and_db):
     """GET /api/photos?rating_min= filters by minimum rating."""
     app, _ = app_and_db

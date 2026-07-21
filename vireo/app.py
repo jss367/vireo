@@ -20849,6 +20849,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids must be a list of integers")
 
         db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         if not raw_ids and collection_id is not None:
             raw_ids = [
                 p["id"]
@@ -28324,6 +28327,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ids_only = request.args.get("ids_only", "").lower() in ("1", "true", "yes")
 
         db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
 
         # Determine current model
         from models import get_active_model

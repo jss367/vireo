@@ -3423,6 +3423,21 @@ def test_jobs_previews_rejects_non_integer_collection_id(app_and_db):
         assert "must be an integer" in resp.get_json()["error"]
 
 
+def test_jobs_offline_cache_rejects_visual_collection(app_and_db):
+    """``/api/jobs/offline-cache`` expands ``collection_id`` via
+    ``db.get_collection_photos(...)`` which evaluates ``rules`` only. A
+    visual collection would silently cache every metadata match instead
+    of the visually-matched subset (Codex review r3621094501)."""
+    app, _ = app_and_db
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/offline-cache", json={"collection_id": col_id},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
 @pytest.mark.parametrize(
     "extra",
     [
