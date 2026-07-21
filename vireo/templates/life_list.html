@@ -1446,6 +1446,7 @@ async function openRankView(rank) {
   clearTimeout(rankSearchTimer);
   if (explorerRankView && explorerRankView.rank === rank) {
     explorerRankView = null;
+    explorerRankReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
     renderExplorer();
     return;
   }
@@ -1501,7 +1502,12 @@ function renderRankView() {
   html += '<div id="rankGrid"></div>';
   body.innerHTML = html;
 
-  var back = function() { clearTimeout(rankSearchTimer); explorerRankView = null; renderExplorer(); };
+  var back = function() {
+    clearTimeout(rankSearchTimer);
+    explorerRankView = null;
+    explorerRankReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
+    renderExplorer();
+  };
   var bc = document.getElementById('rankBackCrumb');
   if (bc) bc.addEventListener('click', back);
   var bb = document.getElementById('rankBackBtn');
@@ -1670,6 +1676,7 @@ function openRankItem(id) {
   var node = explorerFindNode(id);
   if (!lineage || !node) return;
   explorerRankView = null;
+  explorerRankReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the flat view over the drill
   if (node.rank === 'genus') {
     explorerPath = lineage.slice(0, -1);   // drill to the parent family
     renderExplorer();
