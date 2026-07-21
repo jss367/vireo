@@ -21721,21 +21721,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             registered_roots = sorted(
                 (
-                    os.path.normpath(r["path"])
+                    (os.path.normpath(r["path"]), r["path"])
                     for r in _mapped_new_image_roots(
                         db, db._active_workspace_id, include_missing=True,
                     )
                 ),
-                key=len,
+                key=lambda item: len(item[0]),
                 reverse=True,
             )
 
             def _registered_root_for(path):
                 candidate = os.path.normpath(path)
-                for root in registered_roots:
+                for normalized_root, stored_root in registered_roots:
                     try:
-                        if os.path.commonpath([candidate, root]) == root:
-                            return root
+                        if (
+                            os.path.commonpath([candidate, normalized_root])
+                            == normalized_root
+                        ):
+                            # Containment uses normalized paths, but scanner's
+                            # parent walk is lexical. Preserve the spelling
+                            # that produced the frozen snapshot paths so a
+                            # registered root containing ".." still meets its
+                            # restricted descendants exactly.
+                            return stored_root
                     except ValueError:
                         continue
                 return None

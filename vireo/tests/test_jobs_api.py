@@ -5875,6 +5875,34 @@ def test_import_in_place_snapshot_rejects_path_outside_registered_roots(
     assert "outside" in resp.get_json()["error"]
 
 
+def test_import_in_place_snapshot_preserves_registered_root_spelling(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    physical_root = tmp_path / "registered"
+    physical_root.mkdir()
+    lexical_root = os.path.join(
+        str(tmp_path), "registered", "..", "registered",
+    )
+    captured = os.path.join(lexical_root, "captured.jpg")
+    Image.new("RGB", (16, 16), "red").save(captured)
+    db.add_folder(lexical_root, name="registered")
+    snap_id = db.create_new_images_snapshot([captured])
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": None,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert job["result"]["imported"] == 1
+    assert job["result"]["missing"] == 0
+    assert job["result"]["unindexed"] == 0
+
+
 @pytest.mark.parametrize("body", [
     {"source_snapshot_id": "1"},
     {"source_snapshot_id": True},
