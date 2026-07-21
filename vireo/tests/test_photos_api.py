@@ -7952,6 +7952,10 @@ def test_location_review_preview_groups_coordinates_without_geocoding(
             (37.7456, -119.5936, p3),  # a separate area
         ],
     )
+    db.conn.execute(
+        "UPDATE photos SET companion_path = ? WHERE id = ?",
+        ("bird1.jpg", p1),
+    )
     db.conn.commit()
     monkeypatch.setattr(
         places,
@@ -7974,6 +7978,9 @@ def test_location_review_preview_groups_coordinates_without_geocoding(
     assert body["skipped"] == []
     assert [group["count"] for group in body["groups"]] == [2, 1]
     assert body["groups"][0]["photo_ids"] == [p1, p2]
+    assert [
+        photo["companion_path"] for photo in body["groups"][0]["photos"]
+    ] == ["bird1.jpg", None]
     assert body["groups"][0]["spread_m"] > 0
     assert body["groups"][0]["center"]["lat"] == pytest.approx(33.2552)
 

@@ -1,8 +1,11 @@
 import json
+from urllib.parse import parse_qs, urlparse
 
+import pytest
 from playwright.sync_api import expect
 
 LEAFLET_STUB = """
+window.__locationReviewLeafletMarkers = [];
 window.L = {
   tileLayer: function() { return {}; },
   map: function() {
@@ -18,12 +21,19 @@ window.L = {
   },
   divIcon: function(options) { return options; },
   marker: function(latlng) {
-    return {
+    var handlers = {};
+    var marker = {
       latlng: latlng,
       addTo: function() { return this; },
       bindTooltip: function() { return this; },
-      on: function() { return this; }
+      on: function(name, handler) { handlers[name] = handler; return this; },
+      fire: function(name) {
+        if (handlers[name]) handlers[name]({target: this});
+        return this;
+      }
     };
+    window.__locationReviewLeafletMarkers.push(marker);
+    return marker;
   }
 };
 """
@@ -133,6 +143,174 @@ def test_location_review_assigns_a_custom_name_to_coordinate_group(
         (photo_ids[0], "Anza-Borrego Desert State Park", 33.25515, -116.4051),
         (photo_ids[1], "Anza-Borrego Desert State Park", 33.25515, -116.4051),
     ]
+
+
+def test_location_review_photo_marker_opens_the_photo_preview(live_server, page):
+    """A photo dot opens its photo with the whole location group available."""
+    photo_ids = live_server["data"]["photos"][:2]
+    with live_server["db"].conn:
+        live_server["db"].conn.executemany(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            [
+                (33.2550, -116.4050, photo_ids[0]),
+                (33.2554, -116.4053, photo_ids[1]),
+            ],
+        )
+        live_server["db"].conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            ("bird1.jpg", photo_ids[0]),
+        )
+
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoIds => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: photoIds}))",
+        photo_ids,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("2 photos")
+
+    page.evaluate("window.__locationReviewLeafletMarkers[0].fire('click')")
+
+    expect(page.locator("#lightboxOverlay")).to_have_class(
+        "lightbox-overlay active"
+    )
+    expect(page.locator("#lightboxImg")).to_have_attribute(
+        "src", f"/photos/{photo_ids[0]}/full"
+    )
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 / 2")
+
+    page.evaluate("lightboxDelete()")
+    expect(page.locator("#deleteCompanionRow")).to_be_visible()
+    expect(page.locator("#deleteCompanionLabel")).to_have_text(
+        "Also delete 1 companion file"
+    )
+
+    with page.expect_request(
+        "**/api/location-review/saved-suggestions?*"
+    ) as suggestion_request:
+        page.evaluate(
+            """() => {
+              var callback = _deleteCallback;
+              hideDeleteModal();
+              callback({deleted: 1});
+              closeLightbox();
+            }"""
+        )
+    suggestion_params = parse_qs(urlparse(suggestion_request.value.url).query)
+    assert float(suggestion_params["lat"][0]) == pytest.approx(33.2554)
+    assert float(suggestion_params["lng"][0]) == pytest.approx(-116.4053)
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+    expect(page.locator(".location-review-thumb")).to_have_count(1)
+
+    page.locator("#locationReviewSearch").fill("Remaining photo location")
+    page.locator("#locationReviewCustom").click()
+    with page.expect_request("**/api/batch/location/text") as request_info:
+        page.locator("#locationReviewAssign").click()
+    assignment = request_info.value.post_data_json
+    assert assignment["photo_ids"] == [photo_ids[1]]
+    assert assignment["latitude"] == pytest.approx(33.2554)
+    assert assignment["longitude"] == pytest.approx(-116.4053)
+    expect(page.locator("#locationReviewEmptyTitle")).to_have_text(
+        "All locations reviewed"
+    )
+
+
+def test_location_review_lightbox_delete_keeps_selection_source_in_sync(
+    live_server, page,
+):
+    """Deleting a photo through the lightbox removes it from the saved selection.
+
+    Without this sync, reopening the review page reposts the deleted ID to
+    ``/api/location-review/preview``, which returns 404 and blocks the remaining
+    photos from being reviewed.
+    """
+    photo_ids = live_server["data"]["photos"][:2]
+    with live_server["db"].conn:
+        live_server["db"].conn.executemany(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            [
+                (33.2550, -116.4050, photo_ids[0]),
+                (33.2550, -116.4050, photo_ids[1]),
+            ],
+        )
+
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoIds => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: photoIds}))",
+        photo_ids,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("2 photos")
+
+    page.evaluate("window.__locationReviewLeafletMarkers[0].fire('click')")
+    expect(page.locator("#lightboxOverlay")).to_have_class(
+        "lightbox-overlay active"
+    )
+
+    page.evaluate("lightboxDelete()")
+    page.evaluate(
+        """() => {
+          var callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 1});
+          closeLightbox();
+        }"""
+    )
+
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+
+    stored = page.evaluate(
+        "() => JSON.parse(sessionStorage.getItem('vireoLocationReviewSource'))"
+    )
+    assert stored == {"photo_ids": [photo_ids[1]]}
+    selection_label = page.evaluate(
+        """() => {
+          var option = document.querySelector(
+            '#locationReviewCollection option[value=\"__selection__\"]'
+          );
+          return option && option.textContent;
+        }"""
+    )
+    assert selection_label == "Selected photos (1)"
+
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+    expect(page.locator(".location-review-thumb")).to_have_count(1)
+    expect(
+        page.locator(f'.location-review-thumb[data-photo-id="{photo_ids[1]}"]')
+    ).to_be_visible()
+
+
+def test_location_review_thumbnail_opens_the_photo_preview(live_server, page):
+    """The thumbnail strip offers the same preview affordance as map dots."""
+    photo_id = live_server["data"]["photos"][0]
+    with live_server["db"].conn:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (33.2550, -116.4050, photo_id),
+        )
+
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoId => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: [photoId]}))",
+        photo_id,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+
+    page.locator(f'.location-review-thumb[data-photo-id="{photo_id}"]').click()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class(
+        "lightbox-overlay active"
+    )
+    expect(page.locator("#lightboxImg")).to_have_attribute(
+        "src", f"/photos/{photo_id}/full"
+    )
 
 
 def test_browse_review_on_map_opens_the_selected_photos(live_server, page):
