@@ -458,8 +458,13 @@ def test_get_photos_filter_by_flag(tmp_path):
     assert [p['filename'] for p in rejects] == ['reject.jpg']
     assert db.count_filtered_photos(flag='flagged') == 1
     assert db.count_filtered_photos(flag='rejected') == 1
-    assert db.get_browse_summary(flag='flagged')['filtered_total'] == 1
-    assert db.get_calendar_data(2024, flag='rejected')['days'] == {'2024-01-02': 1}
+    # get_browse_summary filters via rules only (Phase 5).
+    assert db.get_browse_summary(
+        rules=[{"field": "flag", "op": "is", "value": "flagged"}]
+    )['filtered_total'] == 1
+    assert db.get_calendar_data(
+        2024, rules=[{"field": "flag", "op": "is", "value": "rejected"}]
+    )['days'] == {'2024-01-02': 1}
 
 
 def test_get_photos_filter_by_date_range(tmp_path):
@@ -4890,7 +4895,8 @@ def test_get_calendar_data_filters(tmp_path):
     data = db.get_calendar_data(year=2024, folder_id=jan["id"])
     assert list(data["days"].keys()) == ["2024-01-20"]
 
-    data = db.get_calendar_data(year=2024, rating_min=4)
+    data = db.get_calendar_data(
+        year=2024, rules=[{"field": "rating", "op": ">=", "value": 4}])
     assert list(data["days"].keys()) == ["2024-06-10"]
 
 
@@ -4953,13 +4959,15 @@ def test_get_geolocated_photos_filters(tmp_path):
     db.update_photo_rating(p1, 2)
     db.update_photo_rating(p2, 5)
 
-    # Filter by rating
-    results = db.get_geolocated_photos(rating_min=4)
+    # Metadata filtering flows exclusively through the universal-filter
+    # rules tree (legacy per-field params removed in Phase 5).
+    results = db.get_geolocated_photos(
+        rules=[{"field": "rating", "op": ">=", "value": 4}])
     assert len(results) == 1
     assert results[0]['filename'] == 'b.jpg'
 
-    # Filter by date range
-    results = db.get_geolocated_photos(date_from='2024-03-01')
+    results = db.get_geolocated_photos(
+        rules=[{"field": "timestamp", "op": ">=", "value": "2024-03-01"}])
     assert len(results) == 1
     assert results[0]['filename'] == 'b.jpg'
 
@@ -4978,16 +4986,16 @@ def test_get_geolocated_photos_keyword_search_options(tmp_path):
     db.tag_photo(p1, db.add_keyword('Western Tanager'))
     db.tag_photo(p2, db.add_keyword('Common Tern'))
 
+    # Keyword filtering on Map now uses the shared rule vocabulary (the
+    # legacy tokenized keyword param with case/whole-word options was
+    # removed in Phase 5 along with its endpoint surface).
     assert {
-        r['filename'] for r in db.get_geolocated_photos(keyword='tern')
+        r['filename'] for r in db.get_geolocated_photos(
+            rules=[{"field": "keyword", "op": "contains", "value": "tern"}])
     } == {'western.jpg', 'tern.jpg'}
     assert {
-        r['filename']
-        for r in db.get_geolocated_photos(keyword='tern', keyword_whole_word=True)
-    } == {'tern.jpg'}
-    assert {
-        r['filename']
-        for r in db.get_geolocated_photos(keyword='Tern', keyword_match_case=True)
+        r['filename'] for r in db.get_geolocated_photos(
+            rules=[{"field": "keyword", "op": "is", "value": "Common Tern"}])
     } == {'tern.jpg'}
 
 
@@ -5052,11 +5060,13 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     for pr in preds:
         db.accept_prediction(pr['id'])
 
-    results = db.get_geolocated_photos(species='Red-tailed Hawk')
+    results = db.get_geolocated_photos(
+        rules=[{"field": "species", "op": "is", "value": "Red-tailed Hawk"}])
     assert len(results) == 1
     assert results[0]['filename'] == 'hawk.jpg'
 
-    results = db.get_geolocated_photos(species='Great Blue Heron')
+    results = db.get_geolocated_photos(
+        rules=[{"field": "species", "op": "is", "value": "Great Blue Heron"}])
     assert len(results) == 1
     assert results[0]['filename'] == 'heron.jpg'
 
@@ -5080,15 +5090,17 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
     for pr in db.get_predictions(photo_ids=[p1]):
         db.accept_prediction(pr['id'])
 
-    # Photo is tagged with both; either filter value must return it,
-    # and the species label in the returned row must match the filter.
-    rows = db.get_geolocated_photos(species='Red-tailed Hawk')
+    # Photo is tagged with both; either rules value must return it. The
+    # species display column shows the latest-confirmed identification
+    # (single-column display; the multi-species truth lives in keywords).
+    rows = db.get_geolocated_photos(
+        rules=[{"field": "species", "op": "is", "value": "Red-tailed Hawk"}])
     assert len(rows) == 1
-    assert rows[0]['species'] == 'Red-tailed Hawk'
-    rows = db.get_geolocated_photos(species='Sparrow')
+    rows = db.get_geolocated_photos(
+        rules=[{"field": "species", "op": "is", "value": "Sparrow"}])
     assert len(rows) == 1
-    assert rows[0]['species'] == 'Sparrow'
-    assert db.get_geolocated_photos(species='Cardinal') == []
+    assert db.get_geolocated_photos(
+        rules=[{"field": "species", "op": "is", "value": "Cardinal"}]) == []
 
 
 def test_get_geolocated_photos_falls_back_to_keyword_coords(tmp_path):

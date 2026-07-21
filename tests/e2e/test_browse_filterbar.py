@@ -206,3 +206,47 @@ def test_visual_strength_control_and_popover_row(live_server, page):
     assert page.evaluate("VireoFilter.getVisual().strength") == "strict"
     page.click('.vf-visual-row [data-action="visual-remove"]')
     page.wait_for_function("!VireoFilter.getVisual()", timeout=8000)
+
+
+def test_save_as_collection_and_reopen(live_server, page):
+    """Phase 5: the bar's expression saves as a Collection and reopens into
+    the bar as editable chips (rules + visual round-trip)."""
+    _open_browse(page, live_server)
+    search = page.locator(".vf-search input")
+    search.fill("hawk")
+    search.press("Enter")
+    _wait_total(page, 3)
+    page.evaluate("VireoFilter.visualSearch('a soaring hawk')")
+    page.wait_for_selector(".vf-chip.visual", timeout=8000)
+
+    page.click(".vf-filters-btn")
+    page.click(".vf-save-collection")
+    page.wait_for_selector(".vf-save-modal:not([hidden])", timeout=8000)
+    preview = page.inner_text(".vf-save-preview")
+    assert "Visually similar" in preview
+    page.fill(".vf-save-name", "Soaring hawks")
+    page.click(".vf-save-confirm")
+    page.wait_for_function(
+        "window.collectionsById && Object.values(collectionsById)"
+        ".some(c => c.name === 'Soaring hawks')",
+        timeout=8000,
+    )
+    # Sidebar row carries the visual marker.
+    page.wait_for_selector(".collection-visual-mark", timeout=8000)
+
+    # Clear everything, then reopen the collection into the bar.
+    page.click(".vf-done")
+    page.click(".vf-clear")
+    page.wait_for_function(
+        "!VireoFilter.hasFilters()", timeout=8000,
+    )
+    cid = page.evaluate(
+        "Object.values(collectionsById).find(c => c.name === 'Soaring hawks').id"
+    )
+    page.evaluate(f"filterByCollection({cid})")
+    page.wait_for_selector(".vf-chip.visual", timeout=8000)
+    chips = page.evaluate("document.querySelector('.vf-chips').textContent")
+    assert "a soaring hawk" in chips
+    # Quick-search group round-trips too (the hawk text clause).
+    assert "hawk" in chips
+    assert page.evaluate("VireoFilter.getVisual().prompt") == "a soaring hawk"

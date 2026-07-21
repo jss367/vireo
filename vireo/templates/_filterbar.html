@@ -104,11 +104,27 @@
 
     <footer class="vf-popover-footer">
       <span class="vf-match-count"></span>
-      <button class="vf-done" type="button">Done</button>
+      <div class="vf-footer-actions">
+        <button class="vf-save-collection vf-text-btn" type="button" hidden>Save as Collection…</button>
+        <button class="vf-done" type="button">Done</button>
+      </div>
     </footer>
   </div>
 
   <div class="vf-toast" role="status" aria-live="polite" hidden><span></span><button type="button">Undo</button></div>
+
+  <div class="vf-save-backdrop" hidden></div>
+  <div class="vf-save-modal" role="dialog" aria-modal="true" aria-label="Save as Collection" hidden>
+    <h2>Save as Collection</h2>
+    <p class="vf-save-preview"></p>
+    <label>Collection name
+      <input class="vf-save-name" type="text" autocomplete="off">
+    </label>
+    <div class="vf-save-actions">
+      <button class="vf-save-cancel" type="button">Cancel</button>
+      <button class="vf-save-confirm" type="button">Save Collection</button>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -159,6 +175,16 @@
 .vf-handoff-menu button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; font-size: 12px; }
 .vf-handoff-menu button:hover { background: var(--bg-tertiary); color: var(--text-primary); }
 .vf-handoff-menu button small { color: var(--text-faint); font-size: 10px; }
+.vf-footer-actions { display: flex; align-items: center; gap: 14px; }
+.vf-save-backdrop { position: fixed; inset: 0; z-index: 6000; background: rgba(0,0,0,.45); }
+.vf-save-modal { position: fixed; z-index: 6001; top: 50%; left: 50%; width: min(400px, calc(100vw - 40px)); transform: translate(-50%, -50%); padding: 16px; border: 1px solid var(--border-secondary); border-radius: 11px; background: var(--bg-panel); box-shadow: 0 18px 50px rgba(0,0,0,.4); }
+.vf-save-modal h2 { margin: 0 0 6px; font-size: 15px; color: var(--text-primary); }
+.vf-save-preview { margin: 0 0 12px; padding: 8px 10px; border-radius: 7px; background: var(--bg-secondary); color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.vf-save-modal label { display: grid; gap: 6px; color: var(--text-muted); font-size: 12px; }
+.vf-save-modal input { height: 32px; padding: 0 9px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-input); color: var(--text-primary); }
+.vf-save-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.vf-save-cancel { padding: 6px 12px; border: 1px solid var(--border-secondary); border-radius: 7px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.vf-save-confirm { padding: 6px 14px; border: 0; border-radius: 7px; background: var(--accent); color: var(--accent-text); cursor: pointer; font-weight: 700; }
 .vf-popover { position: absolute; top: calc(100% + 8px); left: 0; z-index: 5000; width: min(680px, 100%); max-height: min(72vh, 640px); overflow-y: auto; border: 1px solid var(--border-secondary); border-radius: 11px; background: var(--bg-panel); box-shadow: 0 18px 50px rgba(0,0,0,.34); }
 .vf-popover-header { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: flex-start; padding: 13px 16px 10px; background: var(--bg-panel); border-bottom: 1px solid var(--border-primary); }
 .vf-popover-header h2 { margin: 0; font-size: 15px; color: var(--text-primary); }

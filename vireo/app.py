@@ -4569,19 +4569,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
-        rating_min = request.args.get("rating_min", None, type=int)
-        date_from = request.args.get("date_from", None)
-        date_to = request.args.get("date_to", None)
-        keyword = request.args.get("keyword", None)
-        keyword_match_case = _request_bool_arg("keyword_match_case")
-        keyword_whole_word = _request_bool_arg("keyword_whole_word")
-        color_label = request.args.get("color_label", None)
-        try:
-            flag = _request_flag_filter()
-            location_status = _request_location_status_filter()
-        except ValueError as e:
-            return json_error(str(e), 400)
 
+        # First paint is scope-only (folder / collection / sort); metadata
+        # filter deep links compile into the filter bar client-side, which
+        # reloads through /api/photos/query once initialized (Phase 5 —
+        # legacy per-field params removed from this endpoint).
         try:
             photos = db.get_photos(
                 folder_id=folder_id,
@@ -4589,34 +4581,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 page=page,
                 per_page=per_page,
                 sort=sort,
-                rating_min=rating_min,
-                date_from=date_from,
-                date_to=date_to,
-                keyword=keyword,
-                keyword_match_case=keyword_match_case,
-                keyword_whole_word=keyword_whole_word,
-                color_label=color_label,
-                flag=flag,
-                location_status=location_status,
             )
         except ValueError as exc:
             return json_error(str(exc), 400)
-        if not any([folder_id, collection_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
+        if not any([folder_id, collection_id]):
             total = db.count_photos()
         else:
             try:
                 total = db.count_filtered_photos(
                     folder_id=folder_id,
                     collection_id=collection_id,
-                    rating_min=rating_min,
-                    date_from=date_from,
-                    date_to=date_to,
-                    keyword=keyword,
-                    keyword_match_case=keyword_match_case,
-                    keyword_whole_word=keyword_whole_word,
-                    color_label=color_label,
-                    flag=flag,
-                    location_status=location_status,
                 )
             except ValueError as exc:
                 return json_error(str(exc), 400)
@@ -6373,15 +6347,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         year = request.args.get("year", date.today().year, type=int)
         folder_id = request.args.get("folder_id", None, type=int)
-        rating_min = request.args.get("rating_min", None, type=int)
-        keyword = request.args.get("keyword", None)
-        keyword_match_case = _request_bool_arg("keyword_match_case")
-        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         collection_id = request.args.get("collection_id", None, type=int)
-        color_label = request.args.get("color_label", None)
         try:
-            flag = _request_flag_filter()
-            location_status = _request_location_status_filter()
             rules = _request_rules_arg()
             visual = _request_visual_arg()
             rules, _visual_info = _apply_visual_to_rules(
@@ -6392,12 +6359,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 400)
         try:
             data = db.get_calendar_data(
-                year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
-                keyword_match_case=keyword_match_case,
-                keyword_whole_word=keyword_whole_word,
+                year=year, folder_id=folder_id,
                 collection_id=collection_id,
-                color_label=color_label, flag=flag,
-                location_status=location_status,
                 rules=rules,
             )
         except ValueError as e:
@@ -6408,17 +6371,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_browse_summary():
         db = _get_db()
         folder_id = request.args.get("folder_id", None, type=int)
-        rating_min = request.args.get("rating_min", None, type=int)
-        date_from = request.args.get("date_from", None)
-        date_to = request.args.get("date_to", None)
-        keyword = request.args.get("keyword", None)
-        keyword_match_case = _request_bool_arg("keyword_match_case")
-        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         collection_id = request.args.get("collection_id", None, type=int)
-        color_label = request.args.get("color_label", None)
         try:
-            flag = _request_flag_filter()
-            location_status = _request_location_status_filter()
             rules = _request_rules_arg()
             visual = _request_visual_arg()
             rules, _visual_info = _apply_visual_to_rules(
@@ -6430,16 +6384,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             summary = db.get_browse_summary(
                 folder_id=folder_id,
-                rating_min=rating_min,
-                date_from=date_from,
-                date_to=date_to,
-                keyword=keyword,
-                keyword_match_case=keyword_match_case,
-                keyword_whole_word=keyword_whole_word,
                 collection_id=collection_id,
-                color_label=color_label,
-                flag=flag,
-                location_status=location_status,
                 rules=rules,
             )
         except ValueError as e:
@@ -6742,13 +6687,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_photos_geo():
         db = _get_db()
         folder_id = request.args.get("folder_id", None, type=int)
-        rating_min = request.args.get("rating_min", None, type=int)
-        date_from = request.args.get("date_from", None)
-        date_to = request.args.get("date_to", None)
-        keyword = request.args.get("keyword", None)
-        keyword_match_case = _request_bool_arg("keyword_match_case")
-        keyword_whole_word = _request_bool_arg("keyword_whole_word")
-        species = request.args.get("species", None)
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
@@ -6781,13 +6719,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             photos = db.get_geolocated_photos(
                 folder_id=folder_id,
-                rating_min=rating_min,
-                date_from=date_from,
-                date_to=date_to,
-                keyword=keyword,
-                keyword_match_case=keyword_match_case,
-                keyword_whole_word=keyword_whole_word,
-                species=species,
                 rules=rules,
             )
         except ValueError as e:
@@ -10569,9 +10500,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("name required")
         try:
             db.count_photos_for_rules(rules)
+            # The visual clause is saved alongside rules — a collection
+            # saved from an expression with a visual component must
+            # reproduce the same result set on reopen, not silently drop
+            # to metadata-only.
+            visual = _validate_visual_arg(body.get("visual"))
         except ValueError as e:
             return json_error(str(e), 400)
-        cid = db.add_collection(name, json.dumps(rules))
+        cid = db.add_collection(
+            name, json.dumps(rules),
+            visual_json=json.dumps(visual) if visual else None,
+        )
         return jsonify({"ok": True, "id": cid})
 
     @app.route("/api/collections/preview", methods=["POST"])
@@ -10646,6 +10585,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error(str(e), 400)
             updates.append("rules = ?")
             params.append(json.dumps(rules))
+        if "visual" in body:
+            try:
+                visual = _validate_visual_arg(body.get("visual"))
+            except ValueError as e:
+                return json_error(str(e), 400)
+            updates.append("visual_json = ?")
+            params.append(json.dumps(visual) if visual else None)
         if updates:
             params.extend([collection_id, db._ws_id()])
             db.conn.execute(
@@ -28175,19 +28121,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
         threshold = request.args.get("threshold", 0.15, type=float)
         folder_id = request.args.get("folder_id", None, type=int)
-        rating_min = request.args.get("rating_min", None, type=int)
-        date_from = request.args.get("date_from", None)
-        date_to = request.args.get("date_to", None)
-        keyword = request.args.get("keyword", None)
-        keyword_match_case = _request_bool_arg("keyword_match_case")
-        keyword_whole_word = _request_bool_arg("keyword_whole_word")
-        color_label = request.args.get("color_label", None)
         collection_id = request.args.get("collection_id", None, type=int)
-        try:
-            flag = _request_flag_filter()
-            location_status = _request_location_status_filter()
-        except ValueError as e:
-            return json_error(str(e), 400)
         ids_only = request.args.get("ids_only", "").lower() in ("1", "true", "yes")
 
         db = _get_db()
@@ -28224,19 +28158,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error(str(e), 400)
         elif collection_id is not None:
             candidate_photo_ids = db.get_collection_photo_ids(collection_id)
-        elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
-            candidate_photo_ids = db.get_photo_ids(
-                folder_id=folder_id,
-                rating_min=rating_min,
-                date_from=date_from,
-                date_to=date_to,
-                keyword=keyword,
-                keyword_match_case=keyword_match_case,
-                keyword_whole_word=keyword_whole_word,
-                color_label=color_label,
-                flag=flag,
-                location_status=location_status,
-            )
+        elif folder_id is not None:
+            # Candidate scope arrives as rules / a collection / a folder —
+            # the legacy per-field scope params were removed in Phase 5
+            # (no caller sends them; visual search runs through
+            # /api/photos/query).
+            candidate_photo_ids = db.get_photo_ids(folder_id=folder_id)
 
         if candidate_photo_ids == []:
             if ids_only:

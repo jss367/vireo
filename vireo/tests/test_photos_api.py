@@ -171,12 +171,30 @@ def test_dashboard_and_browse_share_collection_date_scope(app_and_db):
     assert coverage.status_code == 200
     assert coverage.get_json()["overall"]["total"] == 1
 
-    for path in ("/api/browse/init", "/api/photos", "/api/photos/ids"):
+    for path in ("/api/photos", "/api/photos/ids"):
         response = client.get(f"{path}?{query}")
         assert response.status_code == 200
         body = response.get_json()
         result_ids = body.get("photo_ids") or [photo["id"] for photo in body["photos"]]
         assert result_ids == [photos[2]["id"]]
+
+    # /api/browse/init is scope-only since Phase 5: it paints the collection,
+    # and the filter bar applies the date rules through /api/photos/query.
+    init = client.get(f"/api/browse/init?collection_id={collection_id}&sort=name")
+    assert init.status_code == 200
+    assert [p["id"] for p in init.get_json()["photos"]] == [
+        photos[0]["id"], photos[2]["id"],
+    ]
+    query_resp = client.post("/api/photos/query", json={
+        "rules": [
+            {"field": "timestamp", "op": ">=", "value": "2024-06-01"},
+            {"field": "timestamp", "op": "<=", "value": "2024-06-30"},
+        ],
+        "collection_id": collection_id,
+        "ids_only": True,
+    })
+    assert query_resp.status_code == 200
+    assert query_resp.get_json()["ids"] == [photos[2]["id"]]
 
 
 def test_dashboard_options_flags_degraded_collections(app_and_db):
@@ -968,10 +986,12 @@ def test_api_photos_calendar(app_and_db):
 
 
 def test_api_photos_calendar_with_filters(app_and_db):
-    """GET /api/photos/calendar respects folder_id and rating_min filters."""
+    """GET /api/photos/calendar filters via a universal-filter rules tree."""
+    import json as _json
     app, db = app_and_db
     client = app.test_client()
-    resp = client.get("/api/photos/calendar?year=2024&rating_min=4")
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f"/api/photos/calendar?year=2024&rules={rules}")
     data = resp.get_json()
     assert list(data["days"].keys()) == ["2024-06-10"]
 
@@ -1033,8 +1053,10 @@ def test_api_photos_geo_with_filters(app_and_db):
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE filename IN ('bird1.jpg','bird3.jpg')")
     db.conn.commit()
 
+    import json as _json
     client = app.test_client()
-    resp = client.get('/api/photos/geo?rating_min=4')
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/photos/geo?rules={rules}')
     assert resp.status_code == 200
     data = resp.get_json()
     assert len(data['photos']) == 1
@@ -1065,7 +1087,9 @@ def test_api_photos_geo_includes_gps_stats(app_and_db):
     assert data['total_without_gps'] == 2
     assert data['total_photos'] == 3
     # Verify global stats stay consistent even with filters active
-    resp2 = client.get('/api/photos/geo?rating_min=5')
+    import json as _json
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    resp2 = client.get(f'/api/photos/geo?rules={rules}')
     data2 = resp2.get_json()
     assert data2['total_filtered'] == 0  # no rated-5 geo photos
     assert data2['total_with_gps'] == 1  # global count unchanged
@@ -1086,8 +1110,10 @@ def test_api_photos_geo_species_filter(app_and_db):
     for pr in preds:
         db.accept_prediction(pr['id'])
 
+    import json as _json
     client = app.test_client()
-    resp = client.get('/api/photos/geo?species=Cardinal')
+    rules = _json.dumps([{"field": "species", "op": "is", "value": "Cardinal"}])
+    resp = client.get(f'/api/photos/geo?rules={rules}')
     data = resp.get_json()
     assert len(data['photos']) == 1
     assert data['photos'][0]['species'] == 'Cardinal'
@@ -10582,3 +10608,57 @@ def test_api_predictions_surfaces_visual_status(app_and_db, monkeypatch):
     resp = client.get('/api/predictions')
     assert resp.status_code == 200
     assert "visual" not in resp.get_json()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: collections round-trip {rules, visual}.
+# ---------------------------------------------------------------------------
+
+
+def test_collection_save_and_reopen_round_trips_visual(app_and_db, monkeypatch):
+    """Saving an expression with a visual clause and reopening it must
+    reproduce the same result set — never silently drop to metadata-only."""
+    import json as _json
+    app, db = app_and_db
+    _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    client = app.test_client()
+
+    rules = [{"field": "rating", "op": ">=", "value": 3}]
+    visual = {"prompt": "a bird", "strength": "balanced"}
+    resp = client.post('/api/collections', json={
+        "name": "Visual birds", "rules": rules, "visual": visual,
+    })
+    assert resp.status_code == 200
+    cid = resp.get_json()["id"]
+
+    listed = {c["name"]: c for c in client.get('/api/collections').get_json()}
+    saved = listed["Visual birds"]
+    assert _json.loads(saved["rules"]) == rules
+    assert _json.loads(saved["visual_json"]) == visual
+
+    # Reopening = querying with the stored pair; must equal the original.
+    direct = client.post('/api/photos/query', json={
+        "rules": rules, "visual": visual, "ids_only": True,
+    }).get_json()
+    reopened = client.post('/api/photos/query', json={
+        "rules": _json.loads(saved["rules"]),
+        "visual": _json.loads(saved["visual_json"]),
+        "ids_only": True,
+    }).get_json()
+    assert reopened["ids"] == direct["ids"]
+    assert reopened["visual"]["status"] == "ok"
+
+    # Metadata-only collections keep NULL visual_json and old behavior.
+    resp = client.post('/api/collections', json={"name": "Plain", "rules": rules})
+    assert resp.status_code == 200
+    listed = {c["name"]: c for c in client.get('/api/collections').get_json()}
+    assert listed["Plain"]["visual_json"] is None
+
+    # PUT can set and clear the clause; malformed clauses 400.
+    assert client.put(f'/api/collections/{cid}', json={"visual": None}).status_code == 200
+    listed = {c["name"]: c for c in client.get('/api/collections').get_json()}
+    assert listed["Visual birds"]["visual_json"] is None
+    assert client.post('/api/collections', json={
+        "name": "Bad", "rules": [], "visual": {"prompt": "  "},
+    }).status_code == 400

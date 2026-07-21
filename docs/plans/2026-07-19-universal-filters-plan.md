@@ -147,6 +147,22 @@ Nothing user-visible changes in this phase.
    keep thin param→rules shims only where external deep links need them.
 3. Docs: update README/help for the filter bar and `\` shortcut.
 
+### Phase 5 outcome — residual legacy surface (documented, deliberate)
+
+The callerless legacy filter branches were deleted (summary, calendar,
+geo, text-search scope, browse/init). Three holdouts keep the legacy
+params on `/api/photos`, `/api/photos/ids`, and the
+`get_photos`/`get_photo_ids`/`count_filtered_photos` trio:
+
+- the Misses page's page-local filter UI (`misses.html` →
+  `_miss_filter_photo_ids`) — a future candidate for filter-bar adoption;
+- the photo editor's keyword search (`photo_editor.html`);
+- bulk "fetch everything" pipeline callers (`per_page=999999`, no filter
+  kwargs).
+
+These are shims in the plan's sense: thin, tested, and no longer
+duplicated anywhere else.
+
 ## Review-cycle regressions to guard (from prototype PR #1319)
 
 - Facet-count helper must drop the edited clause from its group

@@ -536,8 +536,8 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("(collectionId) => filterByCollection(collectionId)", collection_id)
     page.wait_for_function(
-        "(collectionId) => activeCollectionId === collectionId && photos.length === 3",
-        arg=collection_id,
+        # Collections open into the filter bar as an expression (Phase 5).
+        "() => window.VireoFilter && VireoFilter.hasFilters() && photos.length === 3",
     )
 
     page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
@@ -548,7 +548,9 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
     page.wait_for_function("() => selectedPhotos.size === 3")
 
     page.locator("#locationExifSuggestion button.accept-btn").click()
-    page.wait_for_function("() => activeCollectionId !== null && photos.length === 0")
+    page.wait_for_function(
+        "() => window.VireoFilter && VireoFilter.hasFilters() && photos.length === 0"
+    )
 
     for photo_id in photo_ids:
         row = db.conn.execute(
@@ -1702,8 +1704,8 @@ def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("(collectionId) => filterByCollection(collectionId)", collection_id)
     page.wait_for_function(
-        "(collectionId) => activeCollectionId === collectionId && photos.length === 3",
-        arg=collection_id,
+        # Collections open into the filter bar as an expression (Phase 5).
+        "() => window.VireoFilter && VireoFilter.hasFilters() && photos.length === 3",
     )
 
     page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
@@ -1715,7 +1717,9 @@ def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     inp = page.locator("#locationInput")
     inp.fill("the meadow")
     inp.press("Enter")
-    page.wait_for_function("() => activeCollectionId !== null && photos.length === 0")
+    page.wait_for_function(
+        "() => window.VireoFilter && VireoFilter.hasFilters() && photos.length === 0"
+    )
 
     for photo_id in photo_ids:
         row = db.conn.execute(

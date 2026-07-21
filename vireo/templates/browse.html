@@ -2842,17 +2842,12 @@ async function bootstrapBrowse() {
       dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
     }
     // Legacy filter deep-link params (rating_min/flag/keyword/dates/…) are
-    // compiled into an initial rule tree by VireoFilter.init below. Forward
-    // the capture-date bounds to the bootstrap endpoint as well so Dashboard
-    // drill-downs do not briefly paint the entire collection while the filter
-    // registry is still loading.
+    // compiled into an initial rule tree by VireoFilter.init below, which
+    // reloads through /api/photos/query — the bootstrap endpoint is
+    // scope-only (Phase 5 removed its legacy filter params).
     var initParams = new URLSearchParams();
     initParams.set('sort', document.getElementById('sortSelect').value);
     if (activeFolderId) initParams.set('folder_id', activeFolderId);
-    ['date_from', 'date_to'].forEach(function(name) {
-      var value = pageParams.get(name);
-      if (value) initParams.set(name, value);
-    });
     // Collection-only deep links keep their historical endpoint behavior,
     // while Dashboard links opt into composable filters via dashboard_scope.
     // The combined init endpoint still needs the collection id for first paint
@@ -2898,7 +2893,12 @@ async function bootstrapBrowse() {
         // selected photo, and loadUntilPhotoRendered would then keep paging
         // through the whole matching set (potentially many /api/photos/query
         // requests) just to prove the anchor is gone.
-        var preserveAnchor = info && info.reason === 'quickSearchCleared';
+        var preserveAnchor = info && (
+          info.reason === 'quickSearchCleared' ||
+          // A selected member of a just-opened collection should stay
+          // anchored (it existed in the old collection view too).
+          info.reason === 'expressionLoaded'
+        );
         resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
         // Summary panel (photo count, classified, top species) is a separate
         // endpoint from the grid; without this the filter changes the grid
@@ -2918,6 +2918,7 @@ async function bootstrapBrowse() {
             ? activeCollectionId : null,
         };
       },
+      onCollectionSaved: function() { loadCollections(); },
     }).then(function() {
       VireoFilter.setResultTotal(totalPhotos);
       // Collection deep links must open showing exactly that collection \u2014
@@ -2939,10 +2940,12 @@ async function bootstrapBrowse() {
       var collectionLink = !!urlParams.get('collection_id');
       if (collectionLink && !hasExplicitFilterParams && VireoFilter.hasFilters()) {
         VireoFilter.clearAll(true);
-        // Plain collection: /api/browse/init already painted the collection
-        // and there are no filters left to apply, so skip the reload
-        // entirely. Dashboard-scoped: same story \u2014 the init call included
-        // collection_id, so the just-painted grid already matches.
+      }
+      if (activeCollectionId && !dashboardCollectionScope) {
+        // Plain collection deep link: open it into the filter bar as
+        // editable chips (rules + visual round-trip), replacing the
+        // historical collection-endpoint mode.
+        filterByCollection(activeCollectionId);
         return;
       }
       if (VireoFilter.hasFilters()) {
@@ -2987,8 +2990,11 @@ function renderCollectionList(collections) {
     var trailing = unavailable
       ? '<span class="collection-unavailable-badge">unavailable</span>'
       : '<span class="count">' + (c.photo_count != null ? c.photo_count : '') + '</span>';
+    var visualMark = c.visual_json
+      ? '<span class="collection-visual-mark" title="Includes a visual search clause">\u2726</span>'
+      : '';
     html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
-      '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
+      '<span class="collection-name">' + escapeHtml(c.name) + '</span>' + visualMark +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       resolveBtn +
       trailing + '</div>';
@@ -3231,8 +3237,16 @@ function scheduleCollectionCountsRefresh() {
 }
 
 function refreshActiveCollectionAfterMembershipChange() {
-  if (!activeCollectionId) return;
-  filterByCollection(activeCollectionId, { preserveAnchor: false });
+  if (activeCollectionId) {
+    filterByCollection(activeCollectionId, { preserveAnchor: false });
+    return;
+  }
+  // Collections open into the filter bar now (Phase 5): when a membership
+  // change (tag/untag, add/remove) happens while an expression is active,
+  // re-evaluate it so photos that no longer match leave the grid.
+  if (window.VireoFilter && VireoFilter.hasFilters()) {
+    resetAndLoad({ preserveAnchor: false });
+  }
 }
 
 // When bulk-removing the keyword that currently drives the filter, the
@@ -3275,91 +3289,40 @@ function refreshBrowseSidebarCounts() {
 }
 
 async function filterByCollection(id, options) {
-  // Guard: degraded (count_error) collections would 400 /api/collections/<id>/photos.
-  // Surface the reason instead of silently reloading into an error state. The
-  // sidebar renders these rows as `.tree-item.unavailable` and the context menu
-  // suppresses "Filter by this Collection", so this branch also catches any
-  // programmatic caller (deep-link, membership-change refresh) that pre-dates
-  // the guard.
+  // Guard: degraded (count_error) collections can't resolve their rules.
   var collectionMeta = collectionsById[id];
+  if (!collectionMeta) {
+    // Programmatic callers (deep links, tests, refresh paths) can race the
+    // sidebar render — fetch the list before giving up.
+    await loadCollections();
+    collectionMeta = collectionsById[id];
+  }
   if (collectionMeta && collectionMeta.count_error) {
     if (typeof showToast === 'function') {
       showToast(
         (collectionMeta.name || 'This collection') +
-          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+          " is unavailable \u2014 its rules could not be resolved. Right-click \u2192 Edit Rules to fix it.",
         'error'
       );
     }
     return;
   }
-  var preserveAnchor = !(options && options.preserveAnchor === false);
-  var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
-  var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
+  if (!collectionMeta) return;
+  // Opening a collection loads its saved expression into the filter bar as
+  // editable chips (rules + visual clause round-trip). The expression IS
+  // the filter; loadExpression's onChange reload refreshes the grid with
+  // anchor preservation handled by the shared path.
   activeFolderId = null;
   activeKeyword = null;
-  activeCollectionId = id;
+  activeCollectionId = null;
   dashboardCollectionScope = false;
-  photos = [];
-  currentPage = 1;
-  allLoaded = false;
-  var collectionLoadEpoch = ++loadEpoch;  // invalidate any in-flight loadPhotos response
-  loading = false;     // safe to clear: the stale response will be dropped
-  // Selection cannot be safely carried across a dataset switch: a surviving
-  // Set or single-focus id can arm actions against hidden photos. A single
-  // focused photo is restored below only after proving it exists in the
-  // destination collection and no user interaction has superseded it.
-  selectedPhotos.clear();
-  selectedPhotoId = null;
-  selectedIndex = -1;
-  refreshCardSelectionVisuals();
-  updateBatchBar();
-  document.getElementById('grid').innerHTML = '';
-  document.getElementById('gridContainer').scrollTop = 0;
-  if (anchor) hideDetailPanel();
-  else closeDetail();
-  function collectionRequestIsCurrent() {
-    return collectionLoadEpoch === loadEpoch && activeCollectionId === id;
-  }
-  function anchorScanShouldContinue() {
-    return collectionRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
-  }
-  if (anchor) anchorScanDepth++;
+  var rules = [];
+  var visual = null;
+  try { rules = JSON.parse(collectionMeta.rules || '[]'); } catch (e) { rules = []; }
   try {
-    await loadPhotos();
-    if (!collectionRequestIsCurrent()) return;
-    if (!anchor) return;
-
-    var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
-    if (!collectionRequestIsCurrent()) return;
-    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
-    if (!card) {
-      clearActiveSelectionAndDetail();
-      return;
-    }
-    selectedPhotoId = anchor.photoId;
-    selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
-    refreshCardSelectionVisuals();
-    updateBatchBar();
-    if (anchor.detailVisible) loadDetail(anchor.photoId);
-    requestAnimationFrame(function() {
-      if (!collectionRequestIsCurrent()) return;
-      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
-      restorePhotoAnchor(anchor);
-      updateScrollPosition();
-    });
-  } finally {
-    if (anchor) {
-      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
-      // Auto-hydration was suppressed for every loadPhotos() call while a scan
-      // was open (including ones from unrelated folder/keyword switches). When
-      // the last scan ends, resume the normal path so the current grid fills
-      // its viewport instead of stalling on skeletons until a manual scroll.
-      if (anchorScanDepth === 0) {
-        rearmInfiniteScrollObserver();
-        requestAnimationFrame(ensureViewportHydrated);
-      }
-    }
-  }
+    visual = collectionMeta.visual_json ? JSON.parse(collectionMeta.visual_json) : null;
+  } catch (e) { visual = null; }
+  VireoFilter.loadExpression(rules, visual);
 }
 
 /* ---------- Collection Modal ---------- */

@@ -220,6 +220,10 @@
   }
 
   function ruleLabel(rule) {
+    if (rule.field === 'photo_ids') {
+      const n = Array.isArray(rule.value) ? rule.value.length : 0;
+      return `${n} hand-picked photo${n === 1 ? '' : 's'}`;
+    }
     const spec = state.fields[rule.field] || { label: rule.field, type: 'text' };
     const opLabel = OP_LABELS[rule.op] || rule.op;
     return `${spec.label} ${opLabel} ${valueLabel(spec, rule)}`;
@@ -555,6 +559,8 @@
     badge.hidden = count === 0;
     $('.vf-clear').hidden = !hasUserFilters();
     $('.vf-mute').hidden = !hasUserFilters() && !state.muted;
+    const saveBtn = $('.vf-save-collection');
+    if (saveBtn) saveBtn.hidden = !hasUserFilters();
     renderVisualNote();
     renderHandoff();
     requestAnimationFrame(updateChipOverflow);
@@ -1002,6 +1008,17 @@
       toast('Filters cleared', true);
     });
     $('.vf-toast button').addEventListener('click', () => { undo(); $('.vf-toast').hidden = true; });
+    const saveCollectionBtn = $('.vf-save-collection');
+    if (saveCollectionBtn) {
+      saveCollectionBtn.addEventListener('click', openSaveModal);
+      $('.vf-save-cancel').addEventListener('click', closeSaveModal);
+      $('.vf-save-backdrop').addEventListener('click', closeSaveModal);
+      $('.vf-save-confirm').addEventListener('click', confirmSaveCollection);
+      $('.vf-save-name').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') confirmSaveCollection();
+        else if (e.key === 'Escape') closeSaveModal();
+      });
+    }
 
     $('.vf-chip-row').addEventListener('click', (e) => {
       const x = e.target.closest('[data-chip-x]');
@@ -1197,6 +1214,60 @@
     window.addEventListener('resize', updateChipOverflow);
   }
 
+  function expressionSummary() {
+    const parts = [];
+    if (state.visual) parts.push(`✦ Visually similar to “${state.visual.prompt}” (${state.visual.strength})`);
+    chipEntries().forEach((entry) => { if (!entry.visual) parts.push(entry.label); });
+    return parts.join(' AND ') || 'No filters';
+  }
+
+  function openSaveModal() {
+    const modal = $('.vf-save-modal');
+    const backdrop = $('.vf-save-backdrop');
+    // Post-save semantics: the saved Collection reopens unmuted with the
+    // visual clause applied — preview THAT count, never the paused view's.
+    const context = state.getContextRules ? state.getContextRules() : [];
+    const rules = { mode: 'all', rules: clone(context).concat(clone(state.root.rules)) };
+    const preview = $('.vf-save-preview');
+    preview.textContent = expressionSummary();
+    fetchJson('/api/photos/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules, per_page: 1, visual: state.visual || undefined }),
+    }).then((data) => {
+      preview.textContent = `${Number(data.total).toLocaleString()} matching photo${data.total === 1 ? '' : 's'} — ${expressionSummary()}`;
+    }).catch(() => {});
+    $('.vf-save-name').value = '';
+    modal.hidden = false;
+    backdrop.hidden = false;
+    setTimeout(() => $('.vf-save-name').focus(), 0);
+  }
+
+  function closeSaveModal() {
+    $('.vf-save-modal').hidden = true;
+    $('.vf-save-backdrop').hidden = true;
+  }
+
+  function confirmSaveCollection() {
+    const name = $('.vf-save-name').value.trim();
+    if (!name) { $('.vf-save-name').focus(); return; }
+    fetchJson('/api/collections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        rules: state.root.rules.length ? state.root : [],
+        visual: state.visual || null,
+      }),
+    }).then(() => {
+      closeSaveModal();
+      toast(`Saved “${name}” as a Collection`);
+      if (state.onCollectionSaved) state.onCollectionSaved();
+    }).catch((e) => {
+      toast(`Could not save: ${e.message}`);
+    });
+  }
+
   const HANDOFF_PAGES = [
     ['browse', '/browse', 'Browse', 'Workspace · All available photos'],
     ['map', '/map', 'Map', 'Adds: plottable locations scope'],
@@ -1233,6 +1304,7 @@
       state.onChange = options.onChange || null;
       state.getContextRules = options.getContextRules || null;
       state.getScope = options.getScope || null;
+      state.onCollectionSaved = options.onCollectionSaved || null;
       rootEl = typeof options.root === 'string' ? document.querySelector(options.root) : options.root;
       if (!rootEl) return Promise.reject(new Error('VireoFilter: missing root element'));
       return loadRegistry().then(() => {
@@ -1287,6 +1359,30 @@
       if (state.ready) renderLight();
     },
     visualSearch(text) { applyVisualSearch(text); },
+    loadExpression(rules, visual) {
+      // Open a saved Collection into the bar as editable chips. Accepts the
+      // stored rules JSON (legacy flat list or grouped tree) and the
+      // visual_json clause; both become live, editable state. The
+      // 'expressionLoaded' reason lets pages preserve the photo anchor —
+      // a selected member of the opened collection should stay in place.
+      let root = { mode: 'all', rules: [] };
+      if (Array.isArray(rules)) root = { mode: 'all', rules: clone(rules) };
+      else if (rules && Array.isArray(rules.rules)) root = clone(rules);
+      // Legacy default collections use the {"field": "all"} sentinel (no
+      // condition) — opening one is simply "show everything", not a chip.
+      root.rules = root.rules.filter((r) => !(r && r.field === 'all'));
+      mutate(() => {
+        state.root = root;
+        state.muted = false;
+        state.visual = (
+          visual && typeof visual.prompt === 'string' && visual.prompt
+        ) ? { prompt: visual.prompt,
+              strength: ['broad', 'balanced', 'strict'].includes(visual.strength)
+                ? visual.strength : 'balanced' }
+          : null;
+        state.visualInfo = null;
+      }, { reason: 'expressionLoaded' });
+    },
     getUserRules() { return userRules(); },
     addRule(field, op, value) {
       mutate(() => {

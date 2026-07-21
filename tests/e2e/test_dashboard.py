@@ -74,8 +74,9 @@ def test_dashboard_collection_drill_down_is_explicitly_composable(live_server, p
     assert query["date_to"] == ["2024-06-30"]
     initial_query = parse_qs(urlparse(initial_response.value.url).query)
     assert initial_query["collection_id"] == [str(collection_id)]
-    assert initial_query["date_from"] == ["2024-06-01"]
-    assert initial_query["date_to"] == ["2024-06-30"]
+    # /api/browse/init is scope-only since Phase 5 — the date bounds compile
+    # into the filter bar client-side and apply via /api/photos/query.
+    assert "date_from" not in initial_query
     expect(page.locator(".grid-card")).to_have_count(1)
     expect(page.locator(".grid-card-name")).to_have_text("robin1.jpg")
 

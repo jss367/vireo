@@ -1502,6 +1502,17 @@ class Database:
                 "ALTER TABLE photos ADD COLUMN hash_status TEXT"
             )
 
+        # Migration: collections carry the universal filter's visual clause
+        # alongside rules — the clause deliberately lives outside the rule
+        # tree, so without this column a saved expression with a visual
+        # component would silently reopen as metadata-only.
+        try:
+            self.conn.execute("SELECT visual_json FROM collections LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE collections ADD COLUMN visual_json TEXT"
+            )
+
         # Migration: promote EXIF camera fields out of the exif_data JSON
         # blob into real columns so the universal filter engine can query
         # them with indexes and plain SQL (design:
@@ -7378,17 +7389,15 @@ class Database:
         self,
         year,
         folder_id=None,
-        rating_min=None,
-        keyword=None,
-        keyword_match_case=False,
-        keyword_whole_word=False,
         collection_id=None,
-        color_label=None,
-        flag=None,
-        location_status=None,
         rules=None,
     ):
-        """Return daily photo counts for a given year, scoped to active workspace."""
+        """Return daily photo counts for a given year, scoped to active workspace.
+
+        Metadata filtering arrives exclusively as a universal-filter ``rules``
+        tree (the legacy per-field params were removed in Phase 5 once the
+        filter bar became the only caller).
+        """
         ws = self._ws_id()
         conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
                       "substr(p.timestamp, 1, 4) = ?"]
@@ -7431,27 +7440,6 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
-        if rating_min is not None:
-            conditions.append("p.rating >= ?")
-            where_params.append(rating_min)
-        if flag is not None:
-            conditions.append("COALESCE(p.flag, 'none') = ?")
-            where_params.append(flag)
-        self._append_location_status_filter(conditions, location_status)
-        if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(
-                keyword,
-                match_case=keyword_match_case,
-                whole_word=keyword_whole_word,
-            )
-            if kw_clause:
-                conditions.append(kw_clause)
-                where_params.extend(kw_params)
-        if color_label is not None:
-            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
-            join_params.append(ws)
-            conditions.append("pcl.color = ?")
-            where_params.append(color_label)
 
         params = join_params + where_params
 
@@ -7761,16 +7749,7 @@ class Database:
     def get_browse_summary(
         self,
         folder_id=None,
-        rating_min=None,
-        date_from=None,
-        date_to=None,
-        keyword=None,
-        keyword_match_case=False,
-        keyword_whole_word=False,
         collection_id=None,
-        color_label=None,
-        flag=None,
-        location_status=None,
         rules=None,
     ):
         """Return summary stats for the browse panel, scoped to active workspace and filters.
@@ -7782,7 +7761,9 @@ class Database:
         """
         ws = self._ws_id()
 
-        # Build shared filter conditions
+        # Build shared filter conditions. Metadata filtering arrives
+        # exclusively as a universal-filter ``rules`` tree (legacy per-field
+        # params removed in Phase 5).
         conditions = ["wf.workspace_id = ?"]
         join_params = []
         where_params = [ws]
@@ -7791,19 +7772,6 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
-        if rating_min is not None:
-            conditions.append("p.rating >= ?")
-            where_params.append(rating_min)
-        if date_from is not None:
-            conditions.append("p.timestamp >= ?")
-            where_params.append(date_from)
-        if date_to is not None:
-            conditions.append("p.timestamp <= ?")
-            where_params.append(_inclusive_date_to(date_to))
-        if flag is not None:
-            conditions.append("COALESCE(p.flag, 'none') = ?")
-            where_params.append(flag)
-        self._append_location_status_filter(conditions, location_status)
 
         # When browsing a collection, restrict photos to those matching the
         # collection's rules by using a subquery from _build_collection_query.
@@ -7840,22 +7808,6 @@ class Database:
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
-        if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(
-                keyword,
-                match_case=keyword_match_case,
-                whole_word=keyword_whole_word,
-            )
-            if kw_clause:
-                conditions.append(kw_clause)
-                where_params.extend(kw_params)
-
-        if color_label is not None:
-            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
-            join_params.append(self._ws_id())
-            conditions.append("pcl.color = ?")
-            where_params.append(color_label)
-
         # join_params must precede where_params because JOIN placeholders appear
         # in the SQL before the WHERE placeholders.
         params = join_params + where_params
@@ -7957,20 +7909,14 @@ class Database:
     def get_geolocated_photos(
         self,
         folder_id=None,
-        rating_min=None,
-        date_from=None,
-        date_to=None,
-        keyword=None,
-        keyword_match_case=False,
-        keyword_whole_word=False,
-        species=None,
         rules=None,
     ):
-        """Return all geolocated photos with optional species, scoped to active workspace.
+        """Return all geolocated photos, scoped to active workspace.
 
         ``rules`` (a universal-filter rule tree) restricts the plottable set
         exactly like Browse's grid — the Map page passes the shared filter
-        bar's expression here so the full field vocabulary works on Map.
+        bar's expression here, which is the only metadata filtering this
+        method supports (legacy per-field params removed in Phase 5).
 
         Returns photos that have either non-null EXIF latitude/longitude OR a
         ``type='location'`` keyword link whose keyword has non-null coords. No
@@ -7997,15 +7943,6 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             params.extend(subtree)
-        if rating_min is not None:
-            conditions.append("p.rating >= ?")
-            params.append(rating_min)
-        if date_from is not None:
-            conditions.append("p.timestamp >= ?")
-            params.append(date_from)
-        if date_to is not None:
-            conditions.append("p.timestamp <= ?")
-            params.append(_inclusive_date_to(date_to))
         if rules is not None:
             r_folder_join, r_join_clause, r_where, r_params = (
                 self._build_query_from_rules(rules)
@@ -8040,45 +7977,18 @@ class Database:
             "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
             f"\n{location_subquery}"
         )
-        if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(
-                keyword,
-                match_case=keyword_match_case,
-                whole_word=keyword_whole_word,
-            )
-            if kw_clause:
-                conditions.append(kw_clause)
-                params.extend(kw_params)
-
-        # Match any species tag on the photo, not just MIN(name) — a photo can be
-        # tagged with multiple species keywords.
-        if species is not None:
-            conditions.append(
-                """EXISTS (SELECT 1 FROM photo_keywords pk_f
-                           JOIN keywords k_f ON k_f.id = pk_f.keyword_id
-                           WHERE pk_f.photo_id = p.id
-                             AND k_f.is_species = 1
-                             AND k_f.name = ?)"""
-            )
-            params.append(species)
-
         where = "WHERE " + " AND ".join(conditions)
 
-        # When filtering by species, surface that species in the row so the map
-        # popup/legend match the active filter. Otherwise fall back to the
-        # most-recently-tagged species keyword (highest rowid), which reflects
-        # the user's latest confirmed identification when multiple tags exist.
-        if species is not None:
-            species_col_sql = "? AS species"
-            species_col_params = [species]
-        else:
-            species_col_sql = (
-                "(SELECT k2.name FROM photo_keywords pk2 "
-                "JOIN keywords k2 ON k2.id = pk2.keyword_id "
-                "WHERE pk2.photo_id = p.id AND k2.is_species = 1 "
-                "ORDER BY pk2.rowid DESC LIMIT 1) AS species"
-            )
-            species_col_params = []
+        # Surface the most-recently-tagged species keyword (highest rowid),
+        # which reflects the user's latest confirmed identification when
+        # multiple tags exist.
+        species_col_sql = (
+            "(SELECT k2.name FROM photo_keywords pk2 "
+            "JOIN keywords k2 ON k2.id = pk2.keyword_id "
+            "WHERE pk2.photo_id = p.id AND k2.is_species = 1 "
+            "ORDER BY pk2.rowid DESC LIMIT 1) AS species"
+        )
+        species_col_params = []
 
         query = f"""
             SELECT p.id,
@@ -18782,11 +18692,18 @@ class Database:
 
     # -- Collections --
 
-    def add_collection(self, name, rules_json):
-        """Insert a smart collection. Returns the collection id."""
+    def add_collection(self, name, rules_json, visual_json=None):
+        """Insert a smart collection. Returns the collection id.
+
+        ``visual_json`` stores the universal filter's visual clause
+        (``{prompt, strength}`` JSON) when the saved expression has one, so
+        save → reopen reproduces the same result set instead of silently
+        dropping to metadata-only.
+        """
         cur = self.conn.execute(
-            "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
-            (name, rules_json, self._ws_id()),
+            "INSERT INTO collections (name, rules, workspace_id, visual_json) "
+            "VALUES (?, ?, ?, ?)",
+            (name, rules_json, self._ws_id(), visual_json),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -18794,7 +18711,8 @@ class Database:
     def get_collections(self):
         """Return all collections for the active workspace."""
         return self.conn.execute(
-            "SELECT id, name, rules FROM collections WHERE workspace_id = ? ORDER BY name",
+            "SELECT id, name, rules, visual_json FROM collections "
+            "WHERE workspace_id = ? ORDER BY name",
             (self._ws_id(),),
         ).fetchall()
 
