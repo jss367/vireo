@@ -3159,6 +3159,17 @@ function filterByFolder(folderId) {
   var hadSidebarKeyword = activeKeyword !== null;
   activeKeyword = null;
   activeCollectionId = null;
+  // Sidebar scope changes leave the "reopened collection" association
+  // stale: without this, tagging a keyword next fires
+  // refreshActiveCollectionAfterMembershipChange, which sees
+  // openedCollectionId still set and calls filterByCollection() —
+  // filterByCollection clears activeFolderId, unexpectedly replacing
+  // the user's folder-scoped view with the original collection
+  // (Codex review r3622204141). filterByKeyword goes through
+  // VireoFilter.addRule → onChange → the openedCollectionId clear at
+  // browse init, but filterByFolder's reloadBrowseResults() path
+  // bypasses VireoFilter, so clear it explicitly here.
+  openedCollectionId = null;
   document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
   });
