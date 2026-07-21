@@ -259,11 +259,34 @@
     return state.root.rules.length ? clone(state.root) : { mode: 'all', rules: [] };
   }
 
+  // AND the page-context rules with the user's root expression while
+  // preserving that expression's group mode. Concatenating
+  // ``state.root.rules`` directly into an outer ``{mode: 'all', rules: …}``
+  // wrapper would flatten a saved ``{mode: 'any'}`` or ``{mode: 'none'}``
+  // root — the Edit Rules modal in Browse can save either — from OR/NOT
+  // into AND, silently changing what the reopened collection matches
+  // (Codex review r3620791294). Non-'all' roots are wrapped as a nested
+  // child so the outer AND with the context is honored without collapsing
+  // the inner OR/NOT.
+  function composeWithContext(context, root) {
+    const ctx = clone(context);
+    const rootMode = (root && root.mode) || 'all';
+    const rootRules = (root && Array.isArray(root.rules)) ? root.rules : [];
+    if (rootMode === 'all') {
+      if (!ctx.length && !rootRules.length) return [];
+      return { mode: 'all', rules: ctx.concat(clone(rootRules)) };
+    }
+    if (!ctx.length) return clone(root);
+    return { mode: 'all', rules: ctx.concat([clone(root)]) };
+  }
+
   function effectiveRules() {
     const context = state.getContextRules ? state.getContextRules() : [];
-    const user = state.muted ? [] : state.root.rules;
-    if (!context.length && !user.length) return [];
-    return { mode: 'all', rules: clone(context).concat(clone(user)) };
+    if (state.muted) {
+      if (!context.length) return [];
+      return { mode: 'all', rules: clone(context) };
+    }
+    return composeWithContext(context, state.root);
   }
 
   function hasUserFilters() {
@@ -326,7 +349,10 @@
   function refreshWouldMatch() {
     const epoch = ++wouldMatchEpoch;
     const context = state.getContextRules ? state.getContextRules() : [];
-    const rules = { mode: 'all', rules: clone(context).concat(clone(state.root.rules)) };
+    // Mirror effectiveRules' mode-preserving compose: a paused-view
+    // "would match" counter must reflect what unpausing would apply, not
+    // an AND-flattened version of an any/none root (Codex r3620791294).
+    const rules = composeWithContext(context, state.root);
     fetchJson('/api/photos/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1232,7 +1258,10 @@
     // getContextRules() in the preview would show a folder-scoped count
     // that disagrees with what the collection actually contains on
     // reopen (CodeRabbit review r3620473554).
-    const rules = { mode: 'all', rules: clone(state.root.rules) };
+    // Preserve the root's group mode (any/none) so the count reflects
+    // what the saved collection actually matches, not an all-mode
+    // flattening of it (Codex review r3620791294).
+    const rules = state.root.rules.length ? clone(state.root) : { mode: 'all', rules: [] };
     const preview = $('.vf-save-preview');
     preview.textContent = expressionSummary();
     fetchJson('/api/photos/query', {

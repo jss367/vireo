@@ -583,3 +583,48 @@ def test_collection_photos_still_serves_plain_collection(app_and_db):
     assert resp.status_code == 200
     data = resp.get_json()
     assert "photos" in data and "total" in data
+
+
+def test_visual_collection_not_advertised_as_manual_add_target(app_and_db):
+    """A visual collection stores ``rules: []`` which
+    ``_collection_accepts_manual_photos`` treats as addable, but the
+    ``/add-photos`` endpoint only appends to ``photo_ids`` and leaves
+    ``visual_json`` alone — the added photos only surface on reopen if
+    they also match the hidden visual prompt, so the add is silently
+    ineffective. Both listing endpoints must therefore drop
+    ``can_add_photos`` for visual collections so the Browse
+    add-to-collection modal never offers one (Codex r3620791304)."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    visual = db.add_collection(
+        "Visual",
+        json.dumps([]),
+        visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
+    )
+    client.post(
+        "/api/collections",
+        json={"name": "Manual", "rules": [{"field": "photo_ids", "value": []}]},
+    )
+
+    listed = {c["name"]: c for c in client.get("/api/collections").get_json()}
+    assert listed["Visual"]["can_add_photos"] is False
+    assert listed["Visual"]["has_visual"] is True
+    # Sanity check: a plain manual collection is still addable so this
+    # test doesn't regress the picker gate for the normal case.
+    assert listed["Manual"]["can_add_photos"] is True
+
+    init = client.get("/api/browse/init").get_json()
+    by_name = {c["name"]: c for c in init["collections"]}
+    assert by_name["Visual"]["can_add_photos"] is False
+    assert by_name["Manual"]["can_add_photos"] is True
+
+    # Defense-in-depth: even if a caller reaches /add-photos directly
+    # (bookmark, hand-crafted POST), the endpoint refuses so a stale UI
+    # can't smuggle a silent no-op past the picker.
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    resp = client.post(f"/api/collections/{visual}/add-photos",
+                       json={"photo_ids": [pid]})
+    assert resp.status_code == 400
+    assert "visual collection" in resp.get_json()["error"]

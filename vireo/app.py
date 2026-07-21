@@ -4635,7 +4635,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 continue
             else:
-                d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
+                # A visual-only collection stores ``rules: []`` which
+                # ``_collection_accepts_manual_photos`` treats as addable,
+                # but ``/add-photos`` would just append to ``photo_ids``
+                # without touching ``visual_json`` — the manually added
+                # photos would only show up in the reopened collection
+                # if they also matched the hidden visual clause, making
+                # the add silently ineffective (Codex r3620791304).
+                d["can_add_photos"] = (
+                    c["visual_json"] is None
+                    and _collection_accepts_manual_photos(parsed_rules)
+                )
             collection_dicts.append(d)
 
         return jsonify(
@@ -10504,6 +10514,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # rule is bad enough to fail count, it isn't safe to merge into.
             if d.get("count_error"):
                 d["can_add_photos"] = False
+            elif c["visual_json"] is not None:
+                # Visual collections store ``rules: []`` which
+                # ``_collection_accepts_manual_photos`` treats as addable,
+                # but ``/add-photos`` would only append to ``photo_ids``
+                # and leave ``visual_json`` alone — the manually added
+                # photos would only surface in the reopened collection
+                # if they also matched the hidden visual prompt, so
+                # the add is silently ineffective (Codex r3620791304).
+                d["can_add_photos"] = False
             else:
                 try:
                     d["can_add_photos"] = _collection_accepts_manual_photos(
@@ -10658,11 +10677,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("photo_ids must be integers")
 
         row = db.conn.execute(
-            "SELECT rules FROM collections WHERE id = ? AND workspace_id = ?",
+            "SELECT rules, visual_json FROM collections WHERE id = ? AND workspace_id = ?",
             (collection_id, db._ws_id()),
         ).fetchone()
         if not row:
             return json_error("Collection not found", 404)
+
+        # Belt-and-suspenders backstop for the picker gate: a visual
+        # collection stores ``rules: []`` which passes
+        # ``_collection_accepts_manual_photos``, but appending to
+        # ``photo_ids`` here would not touch ``visual_json``, so the
+        # manually added photos would only surface on reopen if they
+        # also matched the hidden visual prompt — a silent no-op
+        # (Codex r3620791304). Reject the request explicitly so the UI
+        # picker (which already hides these) can't be bypassed by a
+        # bookmarked or hand-crafted POST.
+        if row["visual_json"] is not None:
+            return json_error(
+                "Cannot add photos to a visual collection; open it in "
+                "Browse and refine the visual clause instead.",
+                400,
+            )
 
         rules = json.loads(row["rules"])
         if not _collection_accepts_manual_photos(rules):
