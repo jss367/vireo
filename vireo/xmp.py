@@ -228,6 +228,7 @@ def read_sync_preview_metadata(xmp_path):
         "status": "missing",
         "keywords": set(),
         "rating": None,
+        "rating_writable": False,
         "flag": None,
         "location": None,
         "previous_location": None,
@@ -262,6 +263,7 @@ def read_sync_preview_metadata(xmp_path):
         "status": "ok",
         "keywords": keywords,
         "rating": desc.get(f"{{{NS_XMP}}}Rating"),
+        "rating_writable": True,
         "flag": pick_to_flag.get(raw_pick, raw_pick),
         "location": _sync_preview_gps_pair(desc),
         "previous_location": _sync_preview_gps_pair(

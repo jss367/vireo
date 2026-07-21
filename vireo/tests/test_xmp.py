@@ -240,6 +240,7 @@ def test_read_sync_preview_metadata_reports_current_and_previous_gps(sample_xmp)
     assert metadata["status"] == "ok"
     assert metadata["keywords"] == {"Bird", "Raptor"}
     assert metadata["rating"] == "4"
+    assert metadata["rating_writable"] is True
     assert metadata["flag"] == "flagged"
     assert metadata["location"]["latitude"] == pytest.approx(48.8566)
     assert metadata["location"]["longitude"] == pytest.approx(2.3522)
@@ -251,6 +252,7 @@ def test_read_sync_preview_metadata_reports_current_and_previous_gps(sample_xmp)
 def test_read_sync_preview_metadata_distinguishes_missing_and_unreadable(tmp_path):
     missing = read_sync_preview_metadata(tmp_path / "missing.xmp")
     assert missing["status"] == "missing"
+    assert missing["rating_writable"] is False
 
     corrupt = tmp_path / "corrupt.xmp"
     corrupt.write_text("not xml")

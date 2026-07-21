@@ -478,6 +478,29 @@ def test_sync_preview_explains_when_location_xmp_writes_are_disabled(
     }
 
 
+def test_sync_preview_does_not_promise_rating_write_without_sidecar(
+    client_with_photo,
+):
+    """Rating sync cannot create a sidecar, so the preview says it stays in Vireo."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "rating", "5")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP rating",
+        "action": "unchanged",
+        "before": "No XMP sidecar",
+        "after": "No XMP sidecar",
+        "after_detail": (
+            "5 stars stays in Vireo; rating sync only updates an existing, "
+            "readable XMP sidecar"
+        ),
+    }
+
+
 def test_edit_history_recorded_on_rating(app_and_db):
     """Setting a rating records an entry in edit_history."""
     app, db = app_and_db

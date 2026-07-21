@@ -307,8 +307,18 @@ def _sync_preview_presentation(
 
     if change_type == "rating":
         before = _sync_preview_rating_label(metadata.get("rating"))
-        if metadata.get("status") != "ok":
+        if not metadata.get("rating_writable"):
             before = _sync_preview_absent_xmp_value(metadata, before)
+            return {
+                "field": "XMP rating",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": (
+                    f"{_sync_preview_rating_label(value)} stays in Vireo; "
+                    "rating sync only updates an existing, readable XMP sidecar"
+                ),
+            }
         return {
             "field": "Rating",
             "action": "updated",
