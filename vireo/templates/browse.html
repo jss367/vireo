@@ -3414,6 +3414,17 @@ function refreshBrowseSidebarCounts() {
 }
 
 async function filterByCollection(id, options) {
+  // The sidebar collection list is rendered from the initial /photos payload,
+  // so a slow /api/filters/fields (or workspace) round-trip leaves clickable
+  // collections in the DOM before VireoFilter.init resolves. Without this
+  // guard, the saved expression is pushed into the filter bar while
+  // state.fields is still null and the in-flight init's restorePersisted/
+  // finish then overwrites the just-loaded rules/visual clause with the
+  // persisted Browse filters, silently dropping the collection click
+  // (Codex review r3622909557). filterByKeyword uses this same guard for
+  // the analogous race. The bootstrap deep-link caller fires from inside
+  // VireoFilter.init(...).then(...), so it is unaffected.
+  if (window.VireoFilter && !VireoFilter.isReady()) return;
   // Guard: degraded (count_error) collections can't resolve their rules.
   var collectionMeta = collectionsById[id];
   if (!collectionMeta) {
