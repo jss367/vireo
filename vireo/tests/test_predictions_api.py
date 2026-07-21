@@ -320,12 +320,11 @@ def test_predictions_include_alternatives(app_and_db):
     db.add_prediction(detection_id=det_id, species='Finch', confidence=0.05,
                       model='test-model')
     # Mark alternatives in the prediction_review table for this workspace
-    ws_id = db._active_workspace_id
     for sp in ('Sparrow', 'Finch'):
         row = db.conn.execute(
             "SELECT id FROM predictions WHERE species = ?", (sp,)
         ).fetchone()
-        db.set_review_status(row['id'], ws_id, 'alternative')
+        db.update_prediction_status(row['id'], 'alternative')
 
     client = app.test_client()
     resp = client.get('/api/predictions')
@@ -366,12 +365,11 @@ def test_predictions_alternatives_survive_row_level_rules(app_and_db):
                       model='test-model')
     db.add_prediction(detection_id=det_id, species='Finch', confidence=0.05,
                       model='test-model')
-    ws_id = db._active_workspace_id
     for sp in ('Sparrow', 'Finch'):
         row = db.conn.execute(
             "SELECT id FROM predictions WHERE species = ?", (sp,)
         ).fetchone()
-        db.set_review_status(row['id'], ws_id, 'alternative')
+        db.update_prediction_status(row['id'], 'alternative')
 
     client = app.test_client()
     rules = json.dumps([
