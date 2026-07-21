@@ -275,6 +275,7 @@ def _sync_preview_flag_label(value):
 
 def _sync_preview_presentation(
     change, metadata, *, assigned_location=None, write_locations=False,
+    sidecar_will_exist=False,
 ):
     """Translate one internal pending row into user-facing XMP before/after data."""
     change_type = change["change_type"]
@@ -288,6 +289,22 @@ def _sync_preview_presentation(
             ),
             None,
         )
+        if existing is None and change_type == "keyword_remove":
+            hierarchy = next(
+                (
+                    keyword
+                    for keyword in sorted(
+                        metadata.get("hierarchical_keywords", set())
+                    )
+                    if any(
+                        keyword_match_key(segment) == keyword_match_key(value)
+                        for segment in keyword.split("|")
+                    )
+                ),
+                None,
+            )
+            if hierarchy:
+                existing = hierarchy.replace("|", " › ")
         xmp_value = existing or _sync_preview_absent_xmp_value(
             metadata, "Not in XMP",
         )
@@ -307,7 +324,7 @@ def _sync_preview_presentation(
 
     if change_type == "rating":
         before = _sync_preview_rating_label(metadata.get("rating"))
-        if not metadata.get("rating_writable"):
+        if not metadata.get("rating_writable") and not sidecar_will_exist:
             before = _sync_preview_absent_xmp_value(metadata, before)
             return {
                 "field": "XMP rating",
@@ -317,6 +334,17 @@ def _sync_preview_presentation(
                 "after_detail": (
                     f"{_sync_preview_rating_label(value)} stays in Vireo; "
                     "rating sync only updates an existing, readable XMP sidecar"
+                ),
+            }
+        if not metadata.get("rating_writable"):
+            before = _sync_preview_absent_xmp_value(metadata, before)
+            return {
+                "field": "Rating",
+                "action": "updated",
+                "before": before,
+                "after": _sync_preview_rating_label(value),
+                "after_detail": (
+                    "Another selected change creates the XMP sidecar first"
                 ),
             }
         return {
@@ -410,6 +438,16 @@ def _sync_preview_presentation(
         "before": "Current XMP value",
         "after": value or "Cleared",
     }
+
+
+def _sync_preview_change_creates_sidecar(change, *, sync_flags=False):
+    """Mirror sync operations that create a missing XMP sidecar before rating."""
+    change_type = change["change_type"]
+    if change_type == "keyword_add":
+        return True
+    if change_type == "flag":
+        return sync_flags
+    return False
 
 
 def _rank01(value, values):
@@ -9960,11 +9998,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         import config as cfg
 
+        effective_config = db.get_effective_config(cfg.load())
         write_locations = bool(
-            db.get_effective_config(cfg.load()).get(
-                "write_assigned_location_to_xmp", False,
-            )
+            effective_config.get("write_assigned_location_to_xmp", False)
         )
+        sync_flags = bool(effective_config.get("sync_flags_to_xmp", False))
         changes_by_id = {change["id"]: change for change in changes}
         for photo in by_photo.values():
             xmp_path = os.path.join(
@@ -9979,6 +10017,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
             for change in photo["changes"]:
                 pending = changes_by_id[change["id"]]
+                change["creates_xmp_sidecar"] = (
+                    _sync_preview_change_creates_sidecar(
+                        pending,
+                        sync_flags=sync_flags,
+                    )
+                )
+
+            sidecar_will_exist = any(
+                change["creates_xmp_sidecar"] for change in photo["changes"]
+            )
+            for change in photo["changes"]:
+                pending = changes_by_id[change["id"]]
+                if (
+                    pending["change_type"] == "rating"
+                    and not metadata.get("rating_writable")
+                ):
+                    change["rating_requires_sidecar"] = True
+                    change["presentation_without_sidecar"] = (
+                        _sync_preview_presentation(
+                            pending,
+                            metadata,
+                            assigned_location=assigned_location,
+                            write_locations=write_locations,
+                            sidecar_will_exist=False,
+                        )
+                    )
+                    change["presentation_with_sidecar"] = (
+                        _sync_preview_presentation(
+                            pending,
+                            metadata,
+                            assigned_location=assigned_location,
+                            write_locations=write_locations,
+                            sidecar_will_exist=True,
+                        )
+                    )
+                    change["presentation"] = change[
+                        "presentation_with_sidecar"
+                        if sidecar_will_exist
+                        else "presentation_without_sidecar"
+                    ]
+                    continue
                 change["presentation"] = _sync_preview_presentation(
                     pending,
                     metadata,

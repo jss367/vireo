@@ -111,3 +111,40 @@ def test_location_changes_are_grouped_with_plain_language_delta(live_server, pag
         "Location: No XMP sidecar → Tallahassee, Florida"
     )
     expect(pending_detail).not_to_contain_text("effective")
+
+
+def test_rating_preview_responds_to_selected_sidecar_creator(live_server, page):
+    """Filtering out the change that creates XMP updates the rating promise."""
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+    db.queue_change(photo_id, "rating", "5")
+    db.queue_change(photo_id, "keyword_add", "Raptor")
+
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("openSyncPreview()")
+
+    overlay = page.locator("#syncPreviewOverlay")
+    expect(overlay).to_be_visible()
+    rating_group = overlay.locator(".sync-review-group").filter(
+        has_text="Rating updated"
+    )
+    expect(rating_group.locator(".sync-review-before")).to_have_text(
+        "No XMP sidecar"
+    )
+    expect(rating_group.locator(".sync-review-after")).to_have_text("5 stars")
+    expect(rating_group).to_contain_text(
+        "Another selected change creates the XMP sidecar first"
+    )
+
+    overlay.get_by_text("Keyword additions").locator("input").uncheck()
+
+    rating_group = overlay.locator(".sync-review-group").filter(
+        has_text="XMP rating unchanged"
+    )
+    expect(rating_group.locator(".sync-review-before")).to_have_text(
+        "No XMP sidecar"
+    )
+    expect(rating_group.locator(".sync-review-after")).to_have_text(
+        "No XMP sidecar"
+    )
+    expect(rating_group).to_contain_text("5 stars stays in Vireo")

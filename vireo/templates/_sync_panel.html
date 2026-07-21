@@ -208,7 +208,20 @@ function _syncChangeStyle(change) {
   return { icon: '~', color: 'var(--warning)' };
 }
 
-function _syncChangePresentation(change) {
+function _syncChangePresentation(change, photo, activeFilters) {
+  if (change.rating_requires_sidecar && photo) {
+    var sidecarWillExist = photo.changes.some(function(other) {
+      return other.id !== change.id &&
+        other.creates_xmp_sidecar &&
+        (!activeFilters || activeFilters.has(other.type));
+    });
+    if (sidecarWillExist && change.presentation_with_sidecar) {
+      return change.presentation_with_sidecar;
+    }
+    if (!sidecarWillExist && change.presentation_without_sidecar) {
+      return change.presentation_without_sidecar;
+    }
+  }
   if (change.presentation) return change.presentation;
   return {
     field: change.type.replace(/_/g, ' '),
@@ -224,7 +237,7 @@ function _syncGroupedChanges(data, activeFilters) {
   data.photos.forEach(function(photo) {
     photo.changes.forEach(function(change) {
       if (!activeFilters.has(change.type)) return;
-      var presentation = _syncChangePresentation(change);
+      var presentation = _syncChangePresentation(change, photo, activeFilters);
       var key = JSON.stringify([
         change.type,
         presentation.field,
@@ -475,7 +488,7 @@ function _syncRenderLightboxPanel(photoId) {
   var html = '<div style="font-weight:600;margin-bottom:6px;color:var(--accent);">Pending changes</div>';
   visible.forEach(function(c) {
     var style = _syncChangeStyle(c);
-    var presentation = _syncChangePresentation(c);
+    var presentation = _syncChangePresentation(c, photo, _syncActiveFilters);
     html += '<div style="display:flex;align-items:flex-start;gap:6px;padding:5px 0;">' +
       '<span style="color:' + style.color + ';font-weight:700;width:12px;text-align:center;">' + style.icon + '</span>' +
       '<div style="flex:1;min-width:0;">' +

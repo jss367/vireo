@@ -227,6 +227,7 @@ def read_sync_preview_metadata(xmp_path):
     empty = {
         "status": "missing",
         "keywords": set(),
+        "hierarchical_keywords": set(),
         "rating": None,
         "rating_writable": False,
         "flag": None,
@@ -253,15 +254,28 @@ def read_sync_preview_metadata(xmp_path):
         if li.text:
             keywords.add(li.text)
 
+    hierarchical_keywords = set()
+    for li in root.findall(
+        f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
+    ):
+        if li.text:
+            hierarchical_keywords.add(li.text)
+
     desc = root.find(f".//{{{NS_RDF}}}Description")
     if desc is None:
-        return {**empty, "status": "ok", "keywords": keywords}
+        return {
+            **empty,
+            "status": "ok",
+            "keywords": keywords,
+            "hierarchical_keywords": hierarchical_keywords,
+        }
 
     pick_to_flag = {"1": "flagged", "0": "none", "-1": "rejected"}
     raw_pick = desc.get(f"{{{NS_XMPDM}}}pick")
     return {
         "status": "ok",
         "keywords": keywords,
+        "hierarchical_keywords": hierarchical_keywords,
         "rating": desc.get(f"{{{NS_XMP}}}Rating"),
         "rating_writable": True,
         "flag": pick_to_flag.get(raw_pick, raw_pick),

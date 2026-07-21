@@ -239,6 +239,10 @@ def test_read_sync_preview_metadata_reports_current_and_previous_gps(sample_xmp)
 
     assert metadata["status"] == "ok"
     assert metadata["keywords"] == {"Bird", "Raptor"}
+    assert metadata["hierarchical_keywords"] == {
+        "Animals|Birds|Raptor",
+        "Location|Forest",
+    }
     assert metadata["rating"] == "4"
     assert metadata["rating_writable"] is True
     assert metadata["flag"] == "flagged"

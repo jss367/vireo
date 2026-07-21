@@ -499,6 +499,67 @@ def test_sync_preview_does_not_promise_rating_write_without_sidecar(
             "readable XMP sidecar"
         ),
     }
+    assert change["creates_xmp_sidecar"] is False
+    assert change["rating_requires_sidecar"] is True
+
+
+def test_sync_preview_accounts_for_selected_change_creating_rating_sidecar(
+    client_with_photo,
+):
+    """A selected keyword write creates the sidecar before rating sync runs."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "rating", "5")
+    db.queue_change(photo_id, "keyword_add", "Raptor")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    rating = changes["rating"]
+    assert changes["keyword_add"]["creates_xmp_sidecar"] is True
+    assert rating["rating_requires_sidecar"] is True
+    assert rating["presentation"] == rating["presentation_with_sidecar"]
+    assert rating["presentation_with_sidecar"] == {
+        "field": "Rating",
+        "action": "updated",
+        "before": "No XMP sidecar",
+        "after": "5 stars",
+        "after_detail": "Another selected change creates the XMP sidecar first",
+    }
+    assert rating["presentation_without_sidecar"]["action"] == "unchanged"
+
+
+def test_sync_preview_shows_hierarchical_keyword_before_removal(
+    client_with_photo,
+):
+    """A hierarchy-only keyword removal shows the XMP value it will delete."""
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords=set(),
+        hierarchical_keywords={"Animals|Birds|Raptor"},
+    )
+    db.queue_change(photo_id, "keyword_remove", "Birds")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "Keyword",
+        "action": "removed",
+        "before": "Animals › Birds › Raptor",
+        "after": "Not in XMP",
+    }
 
 
 def test_edit_history_recorded_on_rating(app_and_db):
