@@ -628,3 +628,47 @@ def test_visual_collection_not_advertised_as_manual_add_target(app_and_db):
                        json={"photo_ids": [pid]})
     assert resp.status_code == 400
     assert "visual collection" in resp.get_json()["error"]
+
+
+def test_list_collections_flags_degraded_visual_collection(app_and_db):
+    """Visual collections skip ``count_collection_photos`` (too expensive to
+    resolve embeddings on every list), but that call was also the only path
+    that surfaced malformed JSON or unresolvable rule fields. Without a
+    separate validation the sidebar reports a broken visual collection as
+    healthy and Browse only 400s later when ``filterByCollection()`` routes
+    the bad rules through ``/api/photos/query`` (Codex review r3621304875)."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    # Healthy visual collection: valid rules JSON + resolvable field.
+    healthy = db.add_collection(
+        "Healthy visual",
+        json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
+        visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
+    )
+    # Degraded visual collection: rules JSON references an unresolvable
+    # field so ``rules_resolvable`` returns False.
+    degraded = db.add_collection(
+        "Degraded visual",
+        json.dumps([{"field": "not_a_real_field", "op": "=", "value": "x"}]),
+        visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
+    )
+
+    by_name = {c["name"]: c for c in client.get("/api/collections").get_json()}
+
+    # Both are visual, so photo_count is omitted regardless.
+    assert by_name["Healthy visual"]["photo_count"] is None
+    assert by_name["Degraded visual"]["photo_count"] is None
+    # Only the degraded one carries the flag the sidebar picks up.
+    assert by_name["Healthy visual"].get("count_error") is not True
+    assert by_name["Degraded visual"].get("count_error") is True
+    # Degraded rules must also lock out manual add — same rationale as the
+    # plain-collection degraded path in browse_init.
+    assert by_name["Degraded visual"]["can_add_photos"] is False
+
+    # Sanity: the IDs round-trip cleanly.
+    assert {c["id"] for c in [by_name["Healthy visual"], by_name["Degraded visual"]]} == {
+        healthy,
+        degraded,
+    }

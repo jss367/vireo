@@ -10508,8 +10508,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # instead: the sidebar (browse.html) renders an empty count
             # span for null photo_count, and the ✦ visual marker already
             # tells users this collection is visually resolved.
+            #
+            # Still validate the metadata rules though — skipping the count
+            # was also the only validation path that caught malformed JSON
+            # or unresolvable rule fields. Without this check, a visual
+            # collection with degraded rules would look healthy in the
+            # sidebar and only 400 later when Browse routes those bad rules
+            # through ``/api/photos/query`` (Codex review r3621304875).
             if c["visual_json"] is not None:
                 d["photo_count"] = None
+                _, degraded = _collection_rules_state(db, c["rules"])
+                if degraded:
+                    d["count_error"] = True
+                    app.logger.warning(
+                        "Visual collection %s (%s) has unresolvable rules; marking degraded",
+                        c["id"],
+                        c["name"],
+                    )
             else:
                 try:
                     d["photo_count"] = db.count_collection_photos(c["id"])
