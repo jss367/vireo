@@ -2008,6 +2008,12 @@ var openedCollectionId = null;
 // finishes loading. Keep the init promise so an early collection click can
 // wait for the filter bar instead of being silently discarded.
 var browseFilterInitPromise = null;
+// Monotonic counter bumped by every sidebar scope switch
+// (filterByFolder/filterByKeyword/filterByCollection). A queued collection
+// open captures the gen at entry and aborts on resume if a later scope
+// change has advanced it — otherwise the queued click would clobber the
+// user's newer selection (Codex review r3624395785).
+var browseScopeGen = 0;
 
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
@@ -3151,6 +3157,7 @@ function toggleTree(e, el) {
 }
 
 function filterByFolder(folderId) {
+  browseScopeGen++;
   if (activeFolderId === folderId) {
     activeFolderId = null;
   } else {
@@ -3248,6 +3255,7 @@ function filterByKeyword(name) {
   // guard, addRule -> makeRule dereferences state.fields (still null)
   // and throws, leaving activeKeyword toggled but no rule/reload applied.
   if (!VireoFilter.isReady()) return;
+  browseScopeGen++;
   if (activeKeyword === name) {
     activeKeyword = null;
   } else {
@@ -3428,6 +3436,7 @@ async function filterByCollection(id, options) {
   // the click, though: wait for the in-flight init and apply the collection
   // as soon as the filter bar is ready. The bootstrap deep-link caller fires
   // from inside browseFilterInitPromise.then(...), so it proceeds immediately.
+  var myScopeGen = ++browseScopeGen;
   if (window.VireoFilter && !VireoFilter.isReady()) {
     if (!browseFilterInitPromise) return;
     try {
@@ -3436,6 +3445,11 @@ async function filterByCollection(id, options) {
       return;
     }
     if (!VireoFilter.isReady()) return;
+    // A later sidebar click (folder/keyword/collection) advanced the scope
+    // generation while we were waiting for filter-bar init. Applying this
+    // stale collection now would clobber the user's newer selection
+    // (Codex review r3624395785).
+    if (browseScopeGen !== myScopeGen) return;
   }
   // Guard: degraded (count_error) collections can't resolve their rules.
   var collectionMeta = collectionsById[id];

@@ -72,6 +72,50 @@ def test_collection_open_waits_for_filter_bar_initialization(live_server, page):
     )
 
 
+def test_queued_collection_open_yields_to_later_folder_click(live_server, page):
+    """A queued early collection open must not clobber a later folder click."""
+    collection_id = next(
+        collection["id"]
+        for collection in live_server["db"].get_collections()
+        if collection["name"] == "GPS Without Location Keyword"
+    )
+    folder_id = live_server["data"]["folders"][1]
+    held_routes = []
+    page.route(
+        "**/api/filters/fields",
+        lambda route: held_routes.append(route),
+    )
+
+    page.goto(live_server["url"] + "/browse")
+    page.wait_for_selector("#grid .grid-card", timeout=15000)
+    for _ in range(50):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "filter-field request was never issued"
+    assert not page.evaluate("VireoFilter.isReady()")
+
+    # Early collection click queues behind the pending filter-bar init...
+    page.evaluate(
+        "collectionId => { window._earlyCollectionOpen = "
+        "filterByCollection(collectionId); }",
+        collection_id,
+    )
+    # ...but a later folder click changes scope before it can resume. The
+    # queued collection open must observe the newer scope and abort instead
+    # of overwriting the folder view.
+    page.evaluate("folderId => filterByFolder(folderId)", folder_id)
+    held_routes[0].continue_()
+
+    page.wait_for_function("VireoFilter.isReady()", timeout=15000)
+    # Give the queued collection continuation a chance to run so we can
+    # assert it aborted rather than clobbering activeFolderId/openedCollectionId.
+    page.wait_for_timeout(200)
+    assert page.evaluate("activeFolderId") == folder_id
+    assert page.evaluate("openedCollectionId") is None
+    assert page.evaluate("activeCollectionId") is None
+
+
 def test_quick_rating_filter_and_chip_semantics(live_server, page):
     _open_browse(page, live_server)
     assert _total(page) == 5
