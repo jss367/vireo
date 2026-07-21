@@ -485,13 +485,32 @@ def _sync_preview_presentation(
     }
 
 
-def _sync_preview_change_creates_sidecar(change, *, sync_flags=False):
-    """Mirror sync operations that create a missing XMP sidecar before rating."""
+def _sync_preview_change_creates_sidecar(
+    change, *, sync_flags=False, write_locations=False, assigned_location=None,
+):
+    """Mirror sync operations that create a missing XMP sidecar before rating.
+
+    Matches the write order in ``sync.py``: ``write_sidecar`` (keyword_add),
+    ``write_pick_flag`` when flag sync is enabled, ``write_gps_location``
+    when location sync is enabled and the linked location has valid
+    coordinates, and ``write_edit_recipe`` with a non-empty payload all
+    create a missing sidecar via ``_load_or_create_xmp``. ``write_rating``
+    and the ``remove_*`` paths do not, so they are excluded.
+    """
     change_type = change["change_type"]
     if change_type == "keyword_add":
         return True
     if change_type == "flag":
         return sync_flags
+    if change_type == "location":
+        if not write_locations or not assigned_location:
+            return False
+        return (
+            assigned_location.get("latitude") is not None
+            and assigned_location.get("longitude") is not None
+        )
+    if change_type == "edit_recipe":
+        return bool(change["value"])
     return False
 
 
@@ -10066,6 +10085,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     _sync_preview_change_creates_sidecar(
                         pending,
                         sync_flags=sync_flags,
+                        write_locations=write_locations,
+                        assigned_location=assigned_location,
                     )
                 )
 

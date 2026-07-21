@@ -532,6 +532,98 @@ def test_sync_preview_accounts_for_selected_change_creating_rating_sidecar(
     assert rating["presentation_without_sidecar"]["action"] == "unchanged"
 
 
+def test_sync_preview_reports_rating_persisted_when_location_creates_sidecar(
+    client_with_photo,
+):
+    """Assigned GPS with the toggle on creates the sidecar before rating runs.
+
+    ``sync.py`` writes ``write_gps_location`` before ``write_rating``, so
+    the rating actually lands in the new sidecar. The preview must mirror
+    that instead of reporting the rating as staying in Vireo.
+    """
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    location_id = db.conn.execute(
+        "INSERT INTO keywords "
+        "(name, type, latitude, longitude) "
+        "VALUES ('Tallahassee', 'location', 30.4383, -84.2807)"
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, location_id)
+    db.queue_change(photo_id, "rating", "4")
+    db.queue_change(photo_id, "location", "effective")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    assert changes["location"]["creates_xmp_sidecar"] is True
+    rating = changes["rating"]
+    assert rating["presentation"] == rating["presentation_with_sidecar"]
+    assert rating["presentation_with_sidecar"]["action"] == "updated"
+    assert rating["presentation_with_sidecar"]["after"] == "4 stars"
+
+
+def test_sync_preview_does_not_persist_rating_when_location_lacks_gps(
+    client_with_photo,
+):
+    """A location keyword without coordinates cannot create the sidecar."""
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    # No latitude/longitude on the keyword -- ``sync.py`` will call
+    # ``remove_vireo_gps_location`` here, which never creates a sidecar.
+    location_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Placeholder', 'location')"
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, location_id)
+    db.queue_change(photo_id, "rating", "2")
+    db.queue_change(photo_id, "location", "effective")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    assert changes["location"]["creates_xmp_sidecar"] is False
+    assert changes["rating"]["presentation"]["action"] == "unchanged"
+
+
+def test_sync_preview_reports_rating_persisted_when_edit_recipe_creates_sidecar(
+    client_with_photo,
+):
+    """A non-empty edit recipe writes a sidecar via _load_or_create_xmp."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "rating", "5")
+    db.queue_change(photo_id, "edit_recipe", '{"exposure": 0.5}')
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    assert changes["edit_recipe"]["creates_xmp_sidecar"] is True
+    assert changes["rating"]["presentation"]["action"] == "updated"
+    assert changes["rating"]["presentation"]["after"] == "5 stars"
+
+
 def test_sync_preview_shows_hierarchical_keyword_before_removal(
     client_with_photo,
 ):
