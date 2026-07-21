@@ -13400,7 +13400,7 @@ def test_browse_filter_by_collection_guards_degraded_rows():
     assert fn_start != -1, "filterByCollection function not found"
     # Grab enough of the function body to include the guard block. The guard
     # must reference count_error and return before the normal load path runs.
-    body = text[fn_start:fn_start + 2000]
+    body = text[fn_start:fn_start + 3000]
     assert "count_error" in body, (
         "browse.html filterByCollection does not check count_error"
     )

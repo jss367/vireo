@@ -2004,6 +2004,16 @@ var dashboardCollectionScope = false;
 // the expression (so a user-edited chip set isn't silently reverted to
 // the saved collection on the next membership refresh).
 var openedCollectionId = null;
+// Sidebar collections render before the universal filter registry necessarily
+// finishes loading. Keep the init promise so an early collection click can
+// wait for the filter bar instead of being silently discarded.
+var browseFilterInitPromise = null;
+// Monotonic counter bumped by every sidebar scope switch
+// (filterByFolder/filterByKeyword/filterByCollection). A queued collection
+// open captures the gen at entry and aborts on resume if a later scope
+// change has advanced it — otherwise the queued click would clobber the
+// user's newer selection (Codex review r3624395785).
+var browseScopeGen = 0;
 
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
@@ -2891,7 +2901,7 @@ async function bootstrapBrowse() {
     // Universal filter bar: registry + persisted/deep-linked state load
     // async; when it comes up with active filters the unfiltered first
     // paint above is stale, so reload through the rules path.
-    VireoFilter.init({
+    browseFilterInitPromise = VireoFilter.init({
       page: 'browse',
       root: document.getElementById('vireoFilterBar'),
       scopeLabel: 'Workspace \u00b7 All available photos',
@@ -2948,7 +2958,25 @@ async function bootstrapBrowse() {
         };
       },
       onCollectionSaved: function() { loadCollections(); },
-    }).then(function() {
+    });
+    // Snapshot the scope generation BEFORE we register the .then so we can
+    // tell whether a user sidebar click advanced it while init was pending.
+    // The bootstrap deep-link/persisted replay below unconditionally called
+    // filterByCollection/resetAndLoad, which bumps browseScopeGen and made
+    // any queued sidebar click (e.g. collection B awaiting init) resume as
+    // stale \u2014 reopening the URL's collection A over the user's later
+    // selection (Codex review r3624637674).
+    var bootstrapScopeGen = browseScopeGen;
+    browseFilterInitPromise.then(function() {
+      // A user sidebar click (folder/keyword/collection) may have changed
+      // scope while init was pending. Their newer selection is authoritative
+      // for the collection deep-link replay below — reopening the URL's
+      // collection over the user's later selection is the bug in Codex
+      // review r3624637674. But we must still apply any restored/URL filter
+      // chips: returning early here left them rendered in the bar without
+      // ever running through resetAndLoad, so the grid didn't match the
+      // visible chips until the user edited them (Codex review r3624766665).
+      var scopeChanged = browseScopeGen !== bootstrapScopeGen;
       VireoFilter.setResultTotal(totalPhotos);
       // Collection deep links must open showing exactly that collection \u2014
       // whether plain (?collection_id=..., historical endpoint behavior) or
@@ -3020,10 +3048,12 @@ async function bootstrapBrowse() {
           );
         }
       }
-      if (activeCollectionId && !dashboardCollectionScope) {
+      if (activeCollectionId && !dashboardCollectionScope && !scopeChanged) {
         // Plain collection deep link: open it into the filter bar as
         // editable chips (rules + visual round-trip), replacing the
-        // historical collection-endpoint mode.
+        // historical collection-endpoint mode. Skipped when a user sidebar
+        // click already claimed a different scope — their queued
+        // filterByCollection/filterByFolder/filterByKeyword owns the view.
         filterByCollection(activeCollectionId);
         return;
       }
@@ -3146,6 +3176,7 @@ function toggleTree(e, el) {
 }
 
 function filterByFolder(folderId) {
+  browseScopeGen++;
   if (activeFolderId === folderId) {
     activeFolderId = null;
   } else {
@@ -3236,13 +3267,35 @@ function renderKeywordTree(keywords) {
   };
 }
 
-function filterByKeyword(name) {
+async function filterByKeyword(name) {
+  // Bump the scope generation BEFORE the readiness guard so an in-flight
+  // queued filterByCollection (awaiting browseFilterInitPromise) sees the
+  // newer intent and bails out on resume. Without this, the collection
+  // could resume after fields load and clobber the user's later click
+  // (Codex review r3624549744).
+  var myScopeGen = ++browseScopeGen;
   // The sidebar tree is rendered from the /photos init payload, so a
   // slow /api/filters/fields (or workspace) round-trip leaves clickable
   // keywords in the DOM before VireoFilter.init resolves. Without this
   // guard, addRule -> makeRule dereferences state.fields (still null)
-  // and throws, leaving activeKeyword toggled but no rule/reload applied.
-  if (!VireoFilter.isReady()) return;
+  // and throws. Dropping the click outright would leave the bootstrap
+  // grid (e.g. a ``?collection_id=A`` deep link's collection scope) in
+  // place while the user's later keyword selection is silently lost
+  // (Codex review r3624927534) — queue behind init and apply once ready,
+  // matching filterByCollection's pattern.
+  if (window.VireoFilter && !VireoFilter.isReady()) {
+    if (!browseFilterInitPromise) return;
+    try {
+      await browseFilterInitPromise;
+    } catch (e) {
+      return;
+    }
+    if (!VireoFilter.isReady()) return;
+    // A later sidebar click (folder/keyword/collection) advanced the scope
+    // while we were waiting for filter-bar init. Applying this stale
+    // keyword now would clobber the user's newer selection.
+    if (browseScopeGen !== myScopeGen) return;
+  }
   if (activeKeyword === name) {
     activeKeyword = null;
   } else {
@@ -3419,12 +3472,25 @@ async function filterByCollection(id, options) {
   // collections in the DOM before VireoFilter.init resolves. Without this
   // guard, the saved expression is pushed into the filter bar while
   // state.fields is still null and the in-flight init's restorePersisted/
-  // finish then overwrites the just-loaded rules/visual clause with the
-  // persisted Browse filters, silently dropping the collection click
-  // (Codex review r3622909557). filterByKeyword uses this same guard for
-  // the analogous race. The bootstrap deep-link caller fires from inside
-  // VireoFilter.init(...).then(...), so it is unaffected.
-  if (window.VireoFilter && !VireoFilter.isReady()) return;
+  // finish then overwrites the just-loaded rules/visual clause. Do not drop
+  // the click, though: wait for the in-flight init and apply the collection
+  // as soon as the filter bar is ready. The bootstrap deep-link caller fires
+  // from inside browseFilterInitPromise.then(...), so it proceeds immediately.
+  var myScopeGen = ++browseScopeGen;
+  if (window.VireoFilter && !VireoFilter.isReady()) {
+    if (!browseFilterInitPromise) return;
+    try {
+      await browseFilterInitPromise;
+    } catch (e) {
+      return;
+    }
+    if (!VireoFilter.isReady()) return;
+    // A later sidebar click (folder/keyword/collection) advanced the scope
+    // generation while we were waiting for filter-bar init. Applying this
+    // stale collection now would clobber the user's newer selection
+    // (Codex review r3624395785).
+    if (browseScopeGen !== myScopeGen) return;
+  }
   // Guard: degraded (count_error) collections can't resolve their rules.
   var collectionMeta = collectionsById[id];
   if (!collectionMeta) {
