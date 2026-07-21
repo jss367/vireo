@@ -10099,12 +10099,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
             for change in photo["changes"]:
                 pending = changes_by_id[change["id"]]
-                change["paired_keyword_rename"] = bool(
-                    change["type"] == "keyword_remove"
+                auto_includes_keyword_add = bool(
+                    change["type"] in {"keyword_remove", "keyword_remove_flat"}
                     and keyword_match_key(change["value"]) in keyword_add_keys
                 )
+                change["auto_includes_keyword_add"] = (
+                    auto_includes_keyword_add
+                )
+                change["paired_keyword_rename"] = bool(
+                    change["type"] == "keyword_remove"
+                    and auto_includes_keyword_add
+                )
                 change["creates_xmp_sidecar"] = (
-                    _sync_preview_change_creates_sidecar(
+                    auto_includes_keyword_add
+                    or _sync_preview_change_creates_sidecar(
                         pending,
                         sync_flags=sync_flags,
                         write_locations=write_locations,

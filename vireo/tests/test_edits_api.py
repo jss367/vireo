@@ -682,6 +682,8 @@ def test_sync_preview_preserves_hierarchy_during_paired_keyword_rename(
     }
     removal = changes["keyword_remove"]
     assert removal["paired_keyword_rename"] is True
+    assert removal["auto_includes_keyword_add"] is True
+    assert removal["creates_xmp_sidecar"] is True
     assert removal["presentation"] == {
         "field": "Keyword hierarchy",
         "action": "unchanged",
