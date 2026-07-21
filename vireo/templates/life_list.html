@@ -848,6 +848,7 @@ async function loadExplorer(rootId) {
   }
   explorerPath = [];        // reset drill path whenever a new class is loaded
   explorerRankView = null;  // and exit the flat rank view on class change
+  explorerRankReqId++;      // invalidate any in-flight /rank fetch from the old class
   renderExplorer();
 }
 
@@ -1434,6 +1435,7 @@ function renderSpeciesTile(s) {
 // returns to the normal drill cards.
 
 var rankSearchTimer = null;   // debounce for the flat-view search input
+var explorerRankReqId = 0;    // token to discard stale /rank responses (race guard)
 
 // Fetch the flat rank list for the current class and switch the body into the
 // flat view. Threads the current class root id from explorerData.root so the
@@ -1453,13 +1455,16 @@ async function openRankView(rank) {
   if (body) body.innerHTML = '<div class="ll-exp-empty">Loading…</div>';
   var url = '/api/life-list/explorer/rank?rank=' + encodeURIComponent(rank)
     + (rootId != null ? ('&root=' + encodeURIComponent(rootId)) : '');
+  var myReq = ++explorerRankReqId;   // claim a token; a later click/class-switch bumps it
   var data;
   try {
     data = await safeFetch(url);
   } catch (e) {
+    if (myReq !== explorerRankReqId) return;   // superseded — leave the newer view alone
     if (body) body.innerHTML = '<div class="ll-exp-empty">Failed to load rank breakdown.</div>';
     return;
   }
+  if (myReq !== explorerRankReqId) return;   // a newer click/class-switch won; discard this stale response
   explorerRankView = { rank: rank, data: data, search: '', missingOnly: false, showAll: false };
   renderExplorer();   // full rebuild so the chips pick up .active and the body flips
 }
