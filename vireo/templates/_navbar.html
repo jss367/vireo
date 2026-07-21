@@ -2334,7 +2334,8 @@ window.NAV_ALL_PAGES = [
   {id: 'storage',         label: 'Storage',         href: '/storage'},
   {id: 'audit',           label: 'Audit',           href: '/audit'},
   {id: 'move',            label: 'Move',            href: '/move'},
-  {id: 'compare',         label: 'Compare',         href: '/compare'},
+  {id: 'id_conflicts',    label: 'ID Conflicts',    href: '/id-conflicts',
+   keywords: 'compare conflict prediction model disagreement species keyword classify review'},
   {id: 'settings',        label: 'Settings',        href: '/settings'},
   {id: 'workspace',       label: 'Workspace',       href: '/workspace'},
   {id: 'shortcuts',       label: 'Shortcuts',       href: '/shortcuts'},
@@ -2766,14 +2767,14 @@ window.NAV_ALL_PAGES = [
     pipeline: '/pipeline', pipeline_review: '/pipeline/review',
     review: '/review', cull: '/cull', browse: '/browse', map: '/map',
     variants: '/variants', dashboard: '/dashboard', storage: '/storage', audit: '/audit',
-    compare: '/compare', workspace: '/workspace', shortcuts: '/shortcuts',
+    id_conflicts: '/id-conflicts', workspace: '/workspace', shortcuts: '/shortcuts',
     settings: '/settings', keywords: '/keywords'
   };
 
   var NAV_DEFAULTS = {
     pipeline: '', pipeline_review: '', review: '',
     cull: '', browse: '', map: '', variants: '',
-    dashboard: '', storage: '', audit: '', compare: '', workspace: '',
+    dashboard: '', storage: '', audit: '', id_conflicts: '', workspace: '',
     shortcuts: '', settings: '', keywords: ''
   };
 
@@ -2982,7 +2983,7 @@ window.NAV_ALL_PAGES = [
       import: 'Import', pipeline: 'Process', pipeline_review: 'Process Review',
       review: 'Review', cull: 'Cull', browse: 'Browse', map: 'Map',
       variants: 'Variants', dashboard: 'Dashboard', storage: 'Storage', audit: 'Audit',
-      compare: 'Compare', workspace: 'Workspace', keywords: 'Keywords',
+      id_conflicts: 'ID Conflicts', workspace: 'Workspace', keywords: 'Keywords',
       shortcuts: 'Shortcuts', settings: 'Settings',
     },
     review: {
@@ -3046,7 +3047,7 @@ window.NAV_ALL_PAGES = [
     navigation: {
       import: '', pipeline: '', pipeline_review: '', review: '',
       cull: '', browse: '', map: '', variants: '',
-      dashboard: '', storage: '', audit: '', compare: '', workspace: '',
+      dashboard: '', storage: '', audit: '', id_conflicts: '', workspace: '',
       shortcuts: '', settings: '', keywords: '',
     },
     review: { accept: 'a', skip: 's' },
@@ -8882,7 +8883,7 @@ window.handleNativeMenuCommand = async function(command) {
       }
       case 'photo_compare':
         if (typeof openBrowseCompare === 'function') openBrowseCompare();
-        else nativeMenuRoute('/compare');
+        else nativeMenuRoute('/id-conflicts');
         break;
       case 'photo_add_keyword':
         if (typeof batchAddKeyword === 'function') {

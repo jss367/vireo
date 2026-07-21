@@ -20,7 +20,7 @@ def test_compare_keyword_conflict_filter_includes_non_top_predictions(live_serve
     )
     db.conn.commit()
 
-    page.goto(f"{live_server['url']}/compare")
+    page.goto(f"{live_server['url']}/id-conflicts")
     page.locator("#filterRow button", has_text="Keyword vs models").click()
 
     row = page.locator(f'tr[data-photo-id="{photo_id}"]')
@@ -30,7 +30,7 @@ def test_compare_keyword_conflict_filter_includes_non_top_predictions(live_serve
 
 
 def test_compare_page_shows_keyword_workflow(live_server, page):
-    page.goto(f"{live_server['url']}/compare")
+    page.goto(f"{live_server['url']}/id-conflicts")
 
     expect(page.locator("#summaryGrid")).to_be_visible()
     expect(page.locator("#filterRow")).to_contain_text("Needs review")
@@ -43,7 +43,7 @@ def test_compare_page_shows_keyword_workflow(live_server, page):
 
 
 def test_compare_page_filters_conflicts_without_crashing(live_server, page):
-    page.goto(f"{live_server['url']}/compare")
+    page.goto(f"{live_server['url']}/id-conflicts")
 
     expect(page.locator("#summaryGrid")).to_be_visible()
     page.locator("#filterRow button", has_text="Matches").click()
@@ -52,7 +52,7 @@ def test_compare_page_filters_conflicts_without_crashing(live_server, page):
 
 
 def test_compare_page_exposes_disagreement_filters_and_sorts(live_server, page):
-    page.goto(f"{live_server['url']}/compare")
+    page.goto(f"{live_server['url']}/id-conflicts")
 
     expect(page.locator("#sortRow")).to_be_visible()
     expect(page.locator("#excludeRow")).to_be_visible()
@@ -72,7 +72,7 @@ def test_compare_page_exposes_disagreement_filters_and_sorts(live_server, page):
 
 
 def test_compare_page_thumbnail_opens_lightbox(live_server, page):
-    page.goto(f"{live_server['url']}/compare")
+    page.goto(f"{live_server['url']}/id-conflicts")
 
     page.locator("#filterRow button", has_text="All").click()
     first_row = page.locator(".compare-table tbody tr").first

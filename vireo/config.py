@@ -168,7 +168,7 @@ DEFAULTS = {
             "dashboard": "",
             "storage": "",
             "audit": "",
-            "compare": "",
+            "id_conflicts": "",
             "workspace": "",
             "shortcuts": "",
             "settings": "",

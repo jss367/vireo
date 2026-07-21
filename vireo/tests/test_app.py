@@ -1767,21 +1767,30 @@ def test_pages_link_base_css(app_and_db):
         assert 'vireo-base.css' in html, f"{page} missing vireo-base.css link"
 
 
-def test_compare_page(app_and_db):
-    """GET /compare returns 200."""
+def test_id_conflicts_page(app_and_db):
+    """GET /id-conflicts returns 200."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/compare')
+    resp = client.get('/id-conflicts')
     assert resp.status_code == 200
 
 
-def test_compare_link_in_navbar(app_and_db):
-    """The navbar includes a link to /compare."""
+def test_compare_legacy_redirect(app_and_db):
+    """GET /compare redirects to the renamed /id-conflicts page."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get('/compare')
-    assert b'/compare' in resp.data
-    assert b'Compare' in resp.data
+    assert resp.status_code == 302
+    assert resp.headers['Location'].endswith('/id-conflicts')
+
+
+def test_id_conflicts_link_in_navbar(app_and_db):
+    """The navbar includes a link to /id-conflicts."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/id-conflicts')
+    assert b'/id-conflicts' in resp.data
+    assert b'ID Conflicts' in resp.data
 
 
 def test_compare_predictions_api(app_and_db):
@@ -2468,7 +2477,7 @@ def test_pages_include_vireo_utils(app_and_db):
     client = app.test_client()
     pages = ['/browse', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
-             '/review', '/cull', '/variants', '/compare', '/map']
+             '/review', '/cull', '/variants', '/id-conflicts', '/map']
     for page in pages:
         resp = client.get(page)
         assert resp.status_code == 200, f"{page} returned {resp.status_code}"
@@ -2490,7 +2499,7 @@ def test_pages_no_inline_escapeHtml(app_and_db):
     client = app.test_client()
     pages = ['/browse', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
-             '/review', '/cull', '/variants', '/compare', '/map']
+             '/review', '/cull', '/variants', '/id-conflicts', '/map']
     for page in pages:
         resp = client.get(page)
         html = resp.data.decode()

@@ -14,7 +14,7 @@ PAGES = [
     "/pipeline/rapid-review",
     "/variants",
     "/workspace",
-    "/compare",
+    "/id-conflicts",
     "/storage",
     "/settings",
     "/shortcuts",

@@ -13898,7 +13898,7 @@ def test_all_nav_ids_covers_every_page():
         "import",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
         "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
-        "dashboard", "storage", "audit", "move", "compare",
+        "dashboard", "storage", "audit", "move", "id_conflicts",
         "settings", "workspace", "shortcuts",
         "keywords", "duplicates", "logs",
     }

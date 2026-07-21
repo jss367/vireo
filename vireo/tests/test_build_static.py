@@ -16,7 +16,7 @@ def test_build_static_produces_files():
         expected_pages = [
             "browse.html", "review.html", "lightroom.html", "audit.html",
             "cull.html", "pipeline.html", "pipeline_review.html",
-            "variants.html", "workspace.html", "compare.html",
+            "variants.html", "workspace.html", "id_conflicts.html",
             "settings.html", "stats.html", "logs.html",
         ]
         for page in expected_pages:
