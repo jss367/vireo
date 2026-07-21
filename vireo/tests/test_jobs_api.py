@@ -4124,19 +4124,47 @@ def test_after_process_move_accepts_digit_template_against_letter_mount_leaf(
     the guard now inspects each ``%``-bearing component's actual output
     shape via ``_strftime_template_can_render``: digit-only directives
     cannot match a letter-only mount leaf, so the request is accepted."""
+    import time as _time
+
     import config as cfg
+
     root = tmp_path / "Photos"
+
+    def _set_mount(mount_path_str):
+        """Persist a mount_path and confirm the endpoint can read it back.
+
+        cfg.save atomically replaces the config file, but on Windows CI the
+        endpoint has been observed to see the previous save's mount_path on
+        the very next request — presumably a brief file-visibility race
+        after os.replace. Polling get_remote_target here means every
+        sub-test starts against the config it just wrote, not the previous
+        one; without this the ``%B/%Y`` assertion could accept a request it
+        should reject because the reader still saw ``<root>/shoots/mixed``
+        from the prior sub-test and ``%Y`` cannot render ``mixed``.
+        """
+        target = {
+            "id": "nas1", "name": "NAS", "host": "nas.local",
+            "user": "julius", "remote_path": "/volume1/Photos",
+            "mount_path": mount_path_str,
+            "local_archive_root": str(root),
+        }
+        current = cfg.load()
+        current["remote_targets"] = [target]
+        cfg.save(current)
+        deadline = _time.time() + 2.0
+        while _time.time() < deadline:
+            saved = cfg.get_remote_target("nas1")
+            if saved and saved.get("mount_path") == mount_path_str:
+                return
+            _time.sleep(0.02)
+        raise AssertionError(
+            f"cfg.save did not make mount_path={mount_path_str!r} visible "
+            f"within 2s; last read: {cfg.get_remote_target('nas1')!r}"
+        )
+
     # Mount lives at <root>/NAS — the leaf is letters, so no strftime
     # render of ``%Y`` (four digits) can ever equal it.
-    target = {
-        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
-        "remote_path": "/volume1/Photos",
-        "mount_path": str(root / "NAS"),
-        "local_archive_root": str(root),
-    }
-    current = cfg.load()
-    current["remote_targets"] = [target]
-    cfg.save(current)
+    _set_mount(str(root / "NAS"))
     card = _import_card(tmp_path)
     cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
     client = app_and_db[0].test_client()
@@ -4154,9 +4182,7 @@ def test_after_process_move_accepts_digit_template_against_letter_mount_leaf(
 
     # Deeper mount whose leaves are letters — no digit-only template can
     # reach either component. Legal.
-    target["mount_path"] = str(root / "NAS" / "shoots")
-    current["remote_targets"] = [target]
-    cfg.save(current)
+    _set_mount(str(root / "NAS" / "shoots"))
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [card],
         "destination": str(root),
@@ -4169,9 +4195,7 @@ def test_after_process_move_accepts_digit_template_against_letter_mount_leaf(
     # Mixed literal + strftime template where the ``%``-bearing component
     # can't produce the mount leaf at its depth. ``%d`` renders 1-2 digits,
     # never ``mixed`` — the guard should not reject.
-    target["mount_path"] = str(root / "shoots" / "mixed")
-    current["remote_targets"] = [target]
-    cfg.save(current)
+    _set_mount(str(root / "shoots" / "mixed"))
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [card],
         "destination": str(root),
@@ -4186,9 +4210,7 @@ def test_after_process_move_accepts_digit_template_against_letter_mount_leaf(
     # letter-only mount leaves — some locale could plausibly render
     # ``NAS``-shaped strings, and the guard must stay at least as strict
     # as the pre-fix wildcard behavior for these tokens.
-    target["mount_path"] = str(root / "NAS")
-    current["remote_targets"] = [target]
-    cfg.save(current)
+    _set_mount(str(root / "NAS"))
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [card],
         "destination": str(root),
