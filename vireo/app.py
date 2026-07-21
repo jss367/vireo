@@ -12461,6 +12461,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 job_work_fn,
                 ephemeral=True,
                 counts_for_badge=False,
+                blocks_local_transitions=False,
                 workspace_id=ws_id,
                 config={"workspace_name": ws_name},
             )

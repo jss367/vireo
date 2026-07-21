@@ -2161,3 +2161,60 @@ def test_stage_endpoint_refuses_while_scan_is_paused(tmp_path, monkeypatch):
         finally:
             runner.cancel_job(job_id)
         wait_for_job_via_client(client, job_id)
+
+
+def test_workspace_sync_proceeds_while_observational_job_runs(
+        tmp_path, monkeypatch):
+    """Legacy workspace sync also ignores cache-safe background probes."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    folder_id = db.add_folder(str(source), name="photos")
+    workspace_id = db._active_workspace_id
+    stage_workspace(db, workspace_id, str(vireo_dir))
+    local_path = Path(db.get_folder(folder_id)["path"])
+    (local_path / "bird.jpg").write_bytes(b"edited")
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    release = threading.Event()
+    started = threading.Event()
+
+    def observational_probe(_job):
+        started.set()
+        assert release.wait(timeout=10)
+        return {"ok": True}
+
+    with app.test_client() as client:
+        probe_id = app._job_runner.start(
+            "new_images_walk",
+            observational_probe,
+            workspace_id=workspace_id,
+            blocks_local_transitions=False,
+        )
+        try:
+            assert started.wait(timeout=2)
+            assert app._job_runner.get(probe_id)["status"] == "running"
+            response = client.post(
+                "/api/workspaces/active/local-workspace/sync",
+                json={"confirm_deletions": False},
+            )
+            assert response.status_code == 202, response.get_json()
+            sync_job = wait_for_job_via_client(
+                client, response.get_json()["job_id"],
+            )
+            assert sync_job["status"] == "completed"
+            assert (source / "bird.jpg").read_bytes() == b"edited"
+        finally:
+            release.set()
+        wait_for_job_via_client(client, probe_id)
