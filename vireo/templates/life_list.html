@@ -82,7 +82,9 @@
   .ll-unmatched ul { margin:6px 0 0 16px; padding:0; columns:2; font-size:12px; }
 
   .ll-summary { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
-  .ll-sumchip { padding:6px 12px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border-primary); font-size:13px; color:var(--text-secondary); font-variant-numeric:tabular-nums; }
+  .ll-sumchip { padding:6px 12px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border-primary); font-size:13px; color:var(--text-secondary); font-variant-numeric:tabular-nums; cursor:pointer; transition:border-color 0.15s, color 0.15s; }
+  .ll-sumchip:hover { border-color:var(--accent); }
+  .ll-sumchip.active { border-color:var(--accent); color:var(--text-primary); }
   .ll-sumchip b { color:var(--text-primary); font-weight:600; }
 
   .ll-crumbs { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-bottom:16px; font-size:13px; }
@@ -923,8 +925,26 @@ function renderExplorer() {
   panel.innerHTML = html;
 
   renderSunburst();
+  wireSummaryBar();
   wireBreadcrumb(document.getElementById('explorerBody'));
   renderExplorerBody();
+}
+
+// Single delegated click listener for the summary chips. Attached once to the
+// persistent #tab-explorer panel (which survives every renderExplorer()
+// innerHTML rebuild), so re-rendering never accumulates duplicate handlers.
+// Mirrors wireBreadcrumb's delegation pattern. Reads data-rank off the clicked
+// chip and opens the flat rank breakdown for that rank.
+function wireSummaryBar() {
+  var panel = document.getElementById('tab-explorer');
+  if (!panel || panel._llSummaryWired) return;
+  panel._llSummaryWired = true;
+  panel.addEventListener('click', function(event) {
+    var chip = event.target.closest('.ll-sumchip');
+    if (!chip || !panel.contains(chip)) return;
+    var rank = chip.getAttribute('data-rank');
+    if (rank) openRankView(rank);
+  });
 }
 
 // Single delegated click listener for breadcrumb crumbs. Attached once to the
@@ -968,14 +988,19 @@ function renderSummaryBar(summary) {
   var family = summary.family || { found: 0, total: 0 };
   var genus = summary.genus || { found: 0, total: 0 };
   var species = summary.species || { found: 0, total: 0 };
-  function chip(v, label) {
-    return '<span class="ll-sumchip"><b>' + v.found + '/' + v.total + '</b> ' + label + '</span>';
+  var activeRank = explorerRankView ? explorerRankView.rank : null;
+  // Chips are clickable → open the flat rank breakdown. Fixed rank order:
+  // order/family/genus/species. The rank matching the open flat view is marked
+  // .active. Clicks are handled by the delegated listener in wireSummaryBar().
+  function chip(v, label, rank) {
+    var cls = 'll-sumchip' + (rank === activeRank ? ' active' : '');
+    return '<span class="' + cls + '" data-rank="' + rank + '"><b>' + v.found + '/' + v.total + '</b> ' + label + '</span>';
   }
   return '<div class="ll-summary">'
-    + chip(order, 'orders')
-    + chip(family, 'families')
-    + chip(genus, 'genera')
-    + chip(species, 'species')
+    + chip(order, 'orders', 'order')
+    + chip(family, 'families', 'family')
+    + chip(genus, 'genera', 'genus')
+    + chip(species, 'species', 'species')
     + '</div>';
 }
 
@@ -1363,6 +1388,7 @@ function renderSpeciesTile(s) {
 var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first open
 var explorerData = null;      // last payload from /api/life-list/explorer
 var explorerPath = [];        // [{id,name,rank}] drill path from class root down
+var explorerRankView = null;  // {rank,data,search,missingOnly,showAll} when the flat rank view is open, else null
 
 function llSwitchTab(name) {
   document.querySelectorAll('.ll-tab').forEach(function(t) {
