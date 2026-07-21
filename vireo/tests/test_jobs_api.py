@@ -5886,7 +5886,10 @@ def test_import_in_place_snapshot_preserves_registered_root_spelling(
     )
     captured = os.path.join(lexical_root, "captured.jpg")
     Image.new("RGB", (16, 16), "red").save(captured)
-    db.add_folder(lexical_root, name="registered")
+    root_id = db.add_folder(lexical_root, name="registered")
+    root_parent_before = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (root_id,),
+    ).fetchone()["parent_id"]
     snap_id = db.create_new_images_snapshot([captured])
 
     with app.test_client() as client:
@@ -5901,6 +5904,22 @@ def test_import_in_place_snapshot_preserves_registered_root_spelling(
     assert job["result"]["imported"] == 1
     assert job["result"]["missing"] == 0
     assert job["result"]["unindexed"] == 0
+
+    # The workspace-root folder row's parent_id must not have been
+    # rewritten to point at a phantom ".../registered/.." folder that
+    # _ensure_folder would invent if the scan source were the collapsed
+    # spelling.
+    root_parent_after = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (root_id,),
+    ).fetchone()["parent_id"]
+    assert root_parent_after == root_parent_before
+
+    # No phantom ".." folder rows should have been inserted alongside the
+    # legitimate registered/captured.jpg parent chain.
+    dotdot_rows = db.conn.execute(
+        "SELECT path FROM folders WHERE name = '..'",
+    ).fetchall()
+    assert dotdot_rows == []
 
 
 def test_concurrent_snapshot_imports_serialize_and_report_one_replay(
