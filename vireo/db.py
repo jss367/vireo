@@ -15237,30 +15237,69 @@ class Database:
     })
 
     def _relax_negated_prediction_leaves(self, rules):
-        """Strip prediction-field leaves that are nested inside a ``none``
-        group so ``get_predictions``'s photo-scoping subquery doesn't
+        """Strip prediction-field leaves — and mixed subgroups containing
+        them — that sit under a ``none`` group so
+        ``get_predictions``'s photo-scoping subquery doesn't
         over-restrict on row-level predicates.
 
         ``_build_query_from_rules`` compiles a ``none`` group as
-        photo-level ``NOT EXISTS(...)``; for a leaf like
+        photo-level ``NOT EXISTS(...)``. For a bare leaf like
         ``prediction_confidence >= 0.8`` that removes any photo with a
         sibling row above the threshold, even though the 0.10 sibling
-        satisfies ``none(prediction_confidence >= 0.8)`` per row.
-        ``_filter_prediction_rows_by_rules`` still evaluates the
-        ORIGINAL tree per row, so dropping these leaves from the SQL
-        broadens the photo set without weakening the row check.
+        satisfies ``none(prediction_confidence >= 0.8)`` per row —
+        dropping the leaf broadens the SQL to a no-op there and lets
+        ``_filter_prediction_rows_by_rules`` evaluate the ORIGINAL
+        tree per row.
 
-        Only leaves inside a ``none`` group are stripped; leaves in
-        ``all``/``any`` positions still pull their weight in the SQL
-        (an ``all`` narrows and an ``any`` widens correctly at the
-        photo level).
+        A mixed subgroup like ``none(all(rating >= 5, conf >= 0.8))``
+        is trickier: stripping only the prediction leaf leaves
+        ``none(all(rating >= 5))`` = ``NOT EXISTS(rating >= 5)``,
+        which excludes every rating-5 photo — including one whose only
+        high-conf row is 0.10 and should PASS the outer expression at
+        the row level (see r3618935666). Whenever a negated subgroup
+        (transitively) contains a prediction row field we therefore
+        drop the whole subgroup so SQL becomes a no-op there; the
+        row-level pass then evaluates the original expression per row
+        against the actual metadata + prediction values.
+
+        Leaves and subgroups in ``all``/``any`` positions still pull
+        their weight in the SQL — an ``all`` narrows and an ``any``
+        widens correctly at the photo level.
         """
+        def _contains_prediction_field(node):
+            if not isinstance(node, dict):
+                return False
+            if "rules" in node and "field" not in node:
+                return any(
+                    _contains_prediction_field(c)
+                    for c in node.get("rules") or []
+                )
+            return node.get("field") in self._PREDICTION_ROW_FIELDS
+
         def _walk(node, negated):
             if isinstance(node, dict) and "rules" in node and "field" not in node:
                 mode = node.get("mode", "all")
                 child_negated = negated or (mode == "none")
                 new_children = []
                 for child in node.get("rules") or []:
+                    is_group = (
+                        isinstance(child, dict)
+                        and "rules" in child
+                        and "field" not in child
+                    )
+                    # Under negation, a subgroup that mixes metadata with
+                    # prediction leaves would be compiled by the outer
+                    # ``NOT EXISTS(...)`` in a way that lets its metadata
+                    # siblings prune photos before the row filter sees
+                    # them (see docstring). Drop the whole subgroup so
+                    # SQL broadens; the row filter re-evaluates the
+                    # ORIGINAL tree per row.
+                    if (
+                        child_negated
+                        and is_group
+                        and _contains_prediction_field(child)
+                    ):
+                        continue
                     stripped = _walk(child, child_negated)
                     if stripped is not None:
                         new_children.append(stripped)

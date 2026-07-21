@@ -971,6 +971,19 @@ async function switchCollection(val) {
 // every subsequent epoch check (NaN !== 0) drops the response silently.
 var _loadPredictionsEpoch = 0;
 
+// True while a loadPredictions() request is in flight. The old
+// ``predictions`` array and action bar remain live until the new
+// response returns, so without this flag a click on Accept All (or a
+// keyboard accept/skip) between filter change and response would
+// iterate the STALE list under the newer visible chips. renderButtons()
+// / renderGrid() disable the mutation entry points while this is true,
+// and each action captures the epoch on entry so a mid-flight reload
+// aborts the loop rather than committing to now-hidden rows.
+var _predictionsReloading = false;
+function _predictionEpochStale(epoch) {
+  return epoch !== _loadPredictionsEpoch;
+}
+
 /* ---------- Bootstrap ---------- */
 applyReviewQueryParams();
 loadPredictions();
@@ -1020,6 +1033,16 @@ function renderFingerprintFilterPill() {
 
 async function loadPredictions() {
   var myEpoch = ++_loadPredictionsEpoch;
+  _predictionsReloading = true;
+  // Disable the header Accept All immediately so it cannot iterate the
+  // stale ``predictions`` array while this reload is in flight. The
+  // per-card actions are gated inline in their handlers because they
+  // are rendered by ``renderGrid()`` and cheaper to guard on click.
+  var _acceptAllReloadBtn = document.getElementById('acceptAllBtn');
+  if (_acceptAllReloadBtn) {
+    _acceptAllReloadBtn.disabled = true;
+    _acceptAllReloadBtn.textContent = 'Reloading…';
+  }
   document.getElementById('loading').style.display = 'block';
   document.getElementById('empty').style.display = 'none';
 
@@ -1093,10 +1116,15 @@ async function loadPredictions() {
     document.title = 'Vireo - Review (' + pending.length + ' pending)';
 
     document.getElementById('loading').style.display = 'none';
+    _predictionsReloading = false;
     renderAll();
   } catch(err) {
     if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
+    _predictionsReloading = false;
     document.getElementById('loading').textContent = 'Error: ' + err.message;
+    // Restore the header button state so the user isn't stuck with a
+    // permanently-disabled "Reloading…" label when the fetch fails.
+    renderButtons();
   }
 }
 
@@ -1183,6 +1211,13 @@ function switchTab(tab) {
 
 function renderButtons() {
   var acceptAllBtn = document.getElementById('acceptAllBtn');
+  if (_predictionsReloading) {
+    acceptAllBtn.style.display = '';
+    acceptAllBtn.disabled = true;
+    acceptAllBtn.textContent = 'Reloading…';
+    return;
+  }
+  acceptAllBtn.disabled = false;
   var pending = predictions.filter(function(p) { return p.status === 'pending'; }).length;
   if (pending > 0) {
     acceptAllBtn.style.display = '';
@@ -1493,27 +1528,39 @@ function groupMembersHtml(pred) {
 
 /* ---------- Actions ---------- */
 async function acceptPrediction(predId) {
+  if (_predictionsReloading) return;
+  var epoch = _loadPredictionsEpoch;
   try {
     await safeFetch('/api/predictions/' + predId + '/accept', { method: 'POST' });
   } catch(e) { return; }
+  // A reload between click and response would have swapped ``predictions``;
+  // touching the new array with a stale id would either miss (harmless) or
+  // mis-label a row that isn't the one the user clicked.
+  if (_predictionEpochStale(epoch)) return;
   var pred = predictions.find(function(p) { return p.id === predId; });
   if (pred) pred.status = 'accepted';
   renderAll();
 }
 
 async function rejectPrediction(predId) {
+  if (_predictionsReloading) return;
+  var epoch = _loadPredictionsEpoch;
   try {
     await safeFetch('/api/predictions/' + predId + '/reject', { method: 'POST' });
   } catch(e) { return; }
+  if (_predictionEpochStale(epoch)) return;
   var pred = predictions.find(function(p) { return p.id === predId; });
   if (pred) pred.status = 'rejected';
   renderAll();
 }
 
 async function acceptAlternative(altId, parentPredId) {
+  if (_predictionsReloading) return;
+  var epoch = _loadPredictionsEpoch;
   try {
     await safeFetch('/api/predictions/' + altId + '/accept', { method: 'POST' });
   } catch(e) { return; }
+  if (_predictionEpochStale(epoch)) return;
   // Update local state: mark alternative as accepted, parent as rejected
   var parent = predictions.find(function(p) { return p.id === parentPredId; });
   if (parent) parent.status = 'rejected';
@@ -1523,13 +1570,21 @@ async function acceptAlternative(altId, parentPredId) {
 }
 
 async function acceptAllPending() {
+  if (_predictionsReloading) return;
+  // Capture the epoch on entry — a filter edit / collection switch mid-loop
+  // bumps ``_loadPredictionsEpoch``; without this the loop would keep
+  // accepting rows from the pre-reload ``predictions`` array while the
+  // visible chips already show a narrower filter. See r3618935660.
+  var epoch = _loadPredictionsEpoch;
   var pending = predictions.filter(function(p) { return p.status === 'pending'; });
   for (var i = 0; i < pending.length; i++) {
+    if (_predictionEpochStale(epoch)) break;
     try {
       await safeFetch('/api/predictions/' + pending[i].id + '/accept', { method: 'POST' });
       pending[i].status = 'accepted';
     } catch(e) { break; }
   }
+  if (_predictionEpochStale(epoch)) return;
   renderAll();
 }
 
@@ -1538,6 +1593,10 @@ document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   if (mode !== 'review') return;
   if (!_shortcuts) return;
+  // Ignore A/S while a filter-driven reload is in flight — the ``predictions``
+  // array still points at the pre-reload rows, so a keystroke would
+  // accept/skip a card that no longer matches the visible chips.
+  if (_predictionsReloading) return;
   // No-op while an overlay owns the keyboard (lightbox, burst modal, etc.) —
   // otherwise A/S would invisibly accept/reject grid cards behind it.
   if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
