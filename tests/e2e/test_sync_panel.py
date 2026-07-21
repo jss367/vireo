@@ -3,6 +3,22 @@
 from playwright.sync_api import expect
 
 
+def _make_photo_folders_accessible(live_server, tmp_path, photo_ids):
+    """Point selected fixture photos at real, empty folders for XMP writes."""
+    db = live_server["db"]
+    folder_ids = {
+        db.get_photo(photo_id)["folder_id"] for photo_id in photo_ids
+    }
+    for folder_id in folder_ids:
+        folder_path = tmp_path / f"sync-photo-folder-{folder_id}"
+        folder_path.mkdir()
+        db.conn.execute(
+            "UPDATE folders SET path = ? WHERE id = ?",
+            (str(folder_path), folder_id),
+        )
+    db.conn.commit()
+
+
 def test_escape_closes_pending_changes_overlay(live_server, page):
     """Escape dismisses the Review Pending Changes overlay without leaking."""
     page.goto(f"{live_server['url']}/browse")
@@ -55,12 +71,15 @@ def test_escape_closes_lightbox_before_pending_changes_overlay(live_server, page
     expect(sync_overlay).to_be_hidden()
 
 
-def test_location_changes_are_grouped_with_plain_language_delta(live_server, page):
+def test_location_changes_are_grouped_with_plain_language_delta(
+    live_server, page, tmp_path,
+):
     """Identical location writes render once with thumbnails, not raw tokens."""
     import config as cfg
 
     db = live_server["db"]
     photo_ids = live_server["data"]["photos"][:2]
+    _make_photo_folders_accessible(live_server, tmp_path, photo_ids)
     config = cfg.load()
     config["write_assigned_location_to_xmp"] = True
     cfg.save(config)
@@ -113,10 +132,13 @@ def test_location_changes_are_grouped_with_plain_language_delta(live_server, pag
     expect(pending_detail).not_to_contain_text("effective")
 
 
-def test_rating_preview_responds_to_selected_sidecar_creator(live_server, page):
+def test_rating_preview_responds_to_selected_sidecar_creator(
+    live_server, page, tmp_path,
+):
     """Filtering out the change that creates XMP updates the rating promise."""
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
+    _make_photo_folders_accessible(live_server, tmp_path, [photo_id])
     db.queue_change(photo_id, "rating", "5")
     db.queue_change(photo_id, "keyword_add", "Raptor")
 
@@ -151,11 +173,12 @@ def test_rating_preview_responds_to_selected_sidecar_creator(live_server, page):
 
 
 def test_rating_preview_accounts_for_auto_included_keyword_pair(
-    live_server, page,
+    live_server, page, tmp_path,
 ):
     """A selected rename removal auto-includes its hidden sidecar-creating add."""
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
+    _make_photo_folders_accessible(live_server, tmp_path, [photo_id])
     db.queue_change(photo_id, "rating", "5")
     db.queue_change(photo_id, "keyword_add", "Raptor")
     db.queue_change(photo_id, "keyword_remove", "Raptor")
