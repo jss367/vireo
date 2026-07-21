@@ -253,6 +253,43 @@ def _sync_preview_absent_xmp_value(metadata, empty_value):
     return empty_value
 
 
+_SYNC_PREVIEW_FIELD_LABELS = {
+    "keyword_add": "Keyword",
+    "keyword_remove": "Keyword",
+    "keyword_remove_flat": "Keyword",
+    "rating": "Rating",
+    "flag": "Flag",
+    "location": "Location",
+    "edit_recipe": "Photo edits",
+}
+
+
+def _sync_preview_folder_offline_presentation(change_type):
+    """Presentation for a change whose photo folder isn't accessible.
+
+    ``sync_to_xmp`` calls ``os.path.isdir(os.path.dirname(xmp_path))`` before
+    every write; when it returns False the photo is recorded as
+    ``folder not accessible`` and none of the writers run. Mirror that no-op
+    in the review so a NAS-offline or unmounted-folder photo does not appear
+    to promise XMP changes that will never happen.
+    """
+    field = _SYNC_PREVIEW_FIELD_LABELS.get(
+        change_type,
+        change_type.replace("_", " ").strip().title() or "Metadata",
+    )
+    placeholder = "Folder not accessible"
+    return {
+        "field": field,
+        "action": "unchanged",
+        "before": placeholder,
+        "after": placeholder,
+        "after_detail": (
+            "Sync will skip this photo because its folder is offline; "
+            "no XMP will be written"
+        ),
+    }
+
+
 def _sync_preview_rating_label(value):
     if value in (None, "", "0", 0):
         return "Unrated"
@@ -276,10 +313,14 @@ def _sync_preview_flag_label(value):
 def _sync_preview_presentation(
     change, metadata, *, assigned_location=None, write_locations=False,
     sidecar_will_exist=False, sync_flags=False, paired_keyword_rename=False,
+    paired_add_value=None, folder_offline=False,
 ):
     """Translate one internal pending row into user-facing XMP before/after data."""
     change_type = change["change_type"]
     value = change["value"]
+
+    if folder_offline:
+        return _sync_preview_folder_offline_presentation(change_type)
 
     if change_type in {"keyword_add", "keyword_remove", "keyword_remove_flat"}:
         existing = next(
@@ -321,6 +362,29 @@ def _sync_preview_presentation(
                 "after_detail": (
                     "The matching keyword addition replaces only the "
                     "flat spelling; this hierarchy stays in XMP"
+                ),
+            }
+        # A paired flat-only rename (e.g. remove `‘apapane` + add `apapane`)
+        # is dispatched through the flat-only remove path in sync.py, and
+        # the paired write_sidecar then adds the clean spelling. Reporting
+        # the removal as `Not in XMP` hides that the keyword survives with
+        # a canonicalized flat spelling; show it as an unchanged keyword
+        # whose flat entry is being rewritten by the paired addition.
+        if (
+            change_type == "keyword_remove"
+            and paired_keyword_rename
+            and existing
+            and paired_add_value
+            and not hierarchy_display
+        ):
+            return {
+                "field": "Keyword",
+                "action": "unchanged",
+                "before": existing,
+                "after": paired_add_value,
+                "after_detail": (
+                    "The matching keyword addition rewrites this flat "
+                    "spelling; the keyword itself stays in XMP"
                 ),
             }
         xmp_value = existing or _sync_preview_absent_xmp_value(
@@ -10103,17 +10167,52 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo["folder"],
                 os.path.splitext(photo["filename"])[0] + ".xmp",
             )
-            metadata = read_sync_preview_metadata(xmp_path)
+            # Mirror the folder-accessibility guard in ``sync_to_xmp``: if
+            # the photo's folder is offline (a common NAS case), sync
+            # records the photo as ``folder not accessible`` and never
+            # runs any writer, so the review must not present writes
+            # against it either.
+            folder_offline = bool(photo["folder"]) and not os.path.isdir(
+                photo["folder"]
+            )
+            photo["folder_offline"] = folder_offline
+            if folder_offline:
+                # Skip filesystem access entirely — an unreachable XMP path
+                # would just re-derive the same "no sidecar" fallback.
+                metadata = {
+                    "status": "folder_offline",
+                    "keywords": set(),
+                    "hierarchical_keywords": set(),
+                    "rating": None,
+                    "rating_writable": False,
+                    "flag": None,
+                    "location": None,
+                    "previous_location": None,
+                    "location_source": None,
+                    "edit_recipe": None,
+                }
+            else:
+                metadata = read_sync_preview_metadata(xmp_path)
             assigned_location = None
-            if any(change["type"] == "location" for change in photo["changes"]):
+            if (
+                not folder_offline
+                and any(change["type"] == "location" for change in photo["changes"])
+            ):
                 assigned_location = _serialize_photo_location(
                     db, photo["photo_id"],
                 )
-            keyword_add_keys = {
-                keyword_match_key(change["value"])
-                for change in photo["changes"]
-                if change["type"] == "keyword_add" and change["value"]
-            }
+            # Map normalized-key -> original add value so a paired
+            # keyword_remove can display the clean spelling the paired
+            # ``write_sidecar`` will end up writing.
+            keyword_add_values_by_key = {}
+            for change in photo["changes"]:
+                if change["type"] == "keyword_add" and change["value"]:
+                    key = keyword_match_key(change["value"])
+                    if key:
+                        keyword_add_values_by_key.setdefault(
+                            key, change["value"],
+                        )
+            keyword_add_keys = set(keyword_add_values_by_key.keys())
             for change in photo["changes"]:
                 pending = changes_by_id[change["id"]]
                 auto_includes_keyword_add = bool(
@@ -10127,13 +10226,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     change["type"] == "keyword_remove"
                     and auto_includes_keyword_add
                 )
+                # An offline folder never runs any writer, so nothing
+                # creates a sidecar during that sync.
                 change["creates_xmp_sidecar"] = (
-                    auto_includes_keyword_add
-                    or _sync_preview_change_creates_sidecar(
-                        pending,
-                        sync_flags=sync_flags,
-                        write_locations=write_locations,
-                        assigned_location=assigned_location,
+                    not folder_offline
+                    and (
+                        auto_includes_keyword_add
+                        or _sync_preview_change_creates_sidecar(
+                            pending,
+                            sync_flags=sync_flags,
+                            write_locations=write_locations,
+                            assigned_location=assigned_location,
+                        )
                     )
                 )
 
@@ -10142,8 +10246,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             for change in photo["changes"]:
                 pending = changes_by_id[change["id"]]
+                paired_add_value = None
+                if change["type"] == "keyword_remove" and change[
+                    "paired_keyword_rename"
+                ]:
+                    paired_add_value = keyword_add_values_by_key.get(
+                        keyword_match_key(change["value"])
+                    )
                 if (
                     pending["change_type"] == "rating"
+                    and not folder_offline
                     and not metadata.get("rating_writable")
                 ):
                     change["rating_requires_sidecar"] = True
@@ -10158,6 +10270,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             paired_keyword_rename=change[
                                 "paired_keyword_rename"
                             ],
+                            paired_add_value=paired_add_value,
                         )
                     )
                     change["presentation_with_sidecar"] = (
@@ -10171,6 +10284,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             paired_keyword_rename=change[
                                 "paired_keyword_rename"
                             ],
+                            paired_add_value=paired_add_value,
                         )
                     )
                     change["presentation"] = change[
@@ -10186,6 +10300,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     write_locations=write_locations,
                     sync_flags=sync_flags,
                     paired_keyword_rename=change["paired_keyword_rename"],
+                    paired_add_value=paired_add_value,
+                    folder_offline=folder_offline,
                 )
 
         result = {

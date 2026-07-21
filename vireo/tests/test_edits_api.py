@@ -857,6 +857,119 @@ def test_sync_preview_treats_absent_keyword_removal_as_unchanged(
     }
 
 
+def test_sync_preview_reports_paired_flat_rename_as_replacement(
+    client_with_photo,
+):
+    """A paired keyword_add/remove targeting an existing flat variant shows as replaced.
+
+    The sync path dispatches the removal through the flat-only path and
+    then ``write_sidecar`` writes the clean spelling, so the sidecar ends
+    with the paired add's value. Reporting the remove side as
+    ``Not in XMP`` hides that the keyword survives with a canonicalized
+    spelling; the review must present it as an unchanged keyword whose
+    flat entry is rewritten by the paired addition.
+    """
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    # Existing flat variant with a smart quote; both pending values
+    # normalize to the same key so ``sync_to_xmp`` pairs them.
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords={"‘apapane"},
+        hierarchical_keywords=set(),
+    )
+    db.queue_change(photo_id, "keyword_remove", "‘apapane")
+    db.queue_change(photo_id, "keyword_add", "apapane")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    removal = changes["keyword_remove"]
+    assert removal["paired_keyword_rename"] is True
+    assert removal["auto_includes_keyword_add"] is True
+    assert removal["creates_xmp_sidecar"] is True
+    assert removal["presentation"] == {
+        "field": "Keyword",
+        "action": "unchanged",
+        "before": "‘apapane",
+        "after": "apapane",
+        "after_detail": (
+            "The matching keyword addition rewrites this flat spelling; "
+            "the keyword itself stays in XMP"
+        ),
+    }
+
+
+def test_sync_preview_skips_writes_when_folder_is_offline(client_with_photo):
+    """A photo whose folder is unmounted must not promise XMP writes.
+
+    ``sync_to_xmp`` guards every write with
+    ``os.path.isdir(os.path.dirname(xmp_path))`` and skips the photo with
+    ``folder not accessible`` when the check fails (a common NAS-offline
+    case). The preview endpoint would otherwise ask
+    ``read_sync_preview_metadata`` to inspect the unreachable path,
+    which treats it as an absent sidecar and surfaces writes such as
+    ``No XMP sidecar → Raptor`` for keyword additions that will never
+    actually run.
+    """
+    import shutil
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+
+    db.queue_change(photo_id, "keyword_add", "Raptor")
+    db.queue_change(photo_id, "rating", "4")
+
+    # Simulate the NAS going offline between when the photo was cataloged
+    # and when the preview is opened.
+    shutil.rmtree(folder)
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    photos = response.get_json()["photos"]
+    assert len(photos) == 1
+    assert photos[0]["folder_offline"] is True
+    changes = {change["type"]: change for change in photos[0]["changes"]}
+    offline_detail = (
+        "Sync will skip this photo because its folder is offline; "
+        "no XMP will be written"
+    )
+    assert changes["keyword_add"]["creates_xmp_sidecar"] is False
+    assert changes["keyword_add"]["presentation"] == {
+        "field": "Keyword",
+        "action": "unchanged",
+        "before": "Folder not accessible",
+        "after": "Folder not accessible",
+        "after_detail": offline_detail,
+    }
+    # Rating normally splits its presentation based on whether another
+    # selected change will create the sidecar. An offline folder makes
+    # sidecar creation impossible, so both variants collapse to the same
+    # "folder not accessible" message and the rating is not asked to
+    # split at all.
+    assert changes["rating"].get("rating_requires_sidecar") is not True
+    assert changes["rating"]["presentation"] == {
+        "field": "Rating",
+        "action": "unchanged",
+        "before": "Folder not accessible",
+        "after": "Folder not accessible",
+        "after_detail": offline_detail,
+    }
+
+
 def test_sync_preview_does_not_promise_edit_clear_from_unreadable_xmp(
     client_with_photo,
 ):
