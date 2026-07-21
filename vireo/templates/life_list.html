@@ -1124,12 +1124,9 @@ function renderSunburst() {
   var top = focus.children;
   explorerSunburstLineage = {};
 
-  // Total angular weight = sum of the focused node's immediate children.
-  // A selected genus has no materialized children, but its center remains
-  // visible while the species leaf is displayed below.
-  var classTotal = 0;
-  top.forEach(function(n) { classTotal += (n.total_species || 0); });
-  if (top.length && classTotal <= 0) { host.innerHTML = ''; host.style.display = 'none'; return; }
+  // Keep the selected center visible even when it has no materialized species
+  // below it. layout() partitions zero-total children equally, so incomplete
+  // reference branches still retain both their arcs and up-one navigation.
   host.style.display = 'flex';
 
   var SIZE = 360, cx = SIZE / 2, cy = SIZE / 2;

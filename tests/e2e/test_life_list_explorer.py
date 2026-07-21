@@ -12,6 +12,8 @@ def _seed_hummingbird_tree(db):
         ("Archilochus colubris", "Ruby-throated Hummingbird", "species", "Archilochus"),
         ("Selasphorus", None, "genus", "Trochilidae"),
         ("Selasphorus rufus", "Rufous Hummingbird", "species", "Selasphorus"),
+        ("Incertae sedis", "Reference gap", "family", "Apodiformes"),
+        ("Unplaced hummingbird", None, "genus", "Incertae sedis"),
     ]
     ids = {}
     for name, common_name, rank, parent_name in rows:
@@ -53,3 +55,12 @@ def test_sunburst_expands_selected_taxon(live_server, page):
     center.click()
     expect(center).to_have_attribute("data-name", "Swifts and Hummingbirds")
     expect(page.locator(".ll-card", has_text="Hummingbirds")).to_be_visible()
+
+    # Zero-total reference branches still retain the selected center, their
+    # equal-width child arcs, and therefore the one-level-up control.
+    page.locator(".ll-card", has_text="Reference gap").click()
+    expect(center).to_have_attribute("data-name", "Reference gap")
+    expect(page.locator(".ll-sb-arc")).to_have_count(1)
+    expect(page.locator(".ll-sb-arc")).to_have_attribute(
+        "data-name", "Unplaced hummingbird"
+    )
