@@ -215,6 +215,35 @@ def test_sync_to_xmp_writes_edit_recipe(tmp_path):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_sync_to_xmp_writes_rating_after_edit_recipe_creates_sidecar(tmp_path):
+    """A selected edit write creates XMP before the same-photo rating runs."""
+    from xml.etree import ElementTree as ET
+
+    from db import Database
+    from sync import sync_to_xmp
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    os.remove(xmp_path)
+
+    db.queue_change(pid, "rating", "5")
+    db.queue_change(pid, "edit_recipe", '{"exposure":0.5}')
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    desc = ET.parse(xmp_path).getroot().find(
+        ".//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description"
+    )
+    assert desc.get("{http://ns.adobe.com/xap/1.0/}Rating") == "5"
+    assert desc.get("{https://vireo.app/ns/1.0/}editRecipe") == (
+        '{"exposure":0.5}'
+    )
+
+
 def test_sync_to_xmp_clears_edit_recipe_marker(tmp_path):
     """An empty edit_recipe change removes Vireo's XMP recipe marker."""
     from db import Database
@@ -546,6 +575,50 @@ def test_sync_to_xmp_writes_effective_location(tmp_path, monkeypatch):
     assert desc.get('{http://ns.adobe.com/exif/1.0/}GPSLatitude') == '48,51.396000N'
     assert desc.get('{http://ns.adobe.com/exif/1.0/}GPSLongitude') == '2,21.132000E'
     assert desc.get('{https://vireo.app/ns/1.0/}gpsSource') == 'keyword'
+
+
+def test_sync_to_xmp_writes_rating_after_location_creates_sidecar(
+    tmp_path, monkeypatch,
+):
+    """A selected GPS write creates XMP before the same-photo rating runs."""
+    from xml.etree import ElementTree as ET
+
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    os.remove(xmp_path)
+    location_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Tallahassee', 'location', 30.4383, -84.2807)"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, location_id),
+    )
+    db.conn.commit()
+
+    db.queue_change(pid, "rating", "4")
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    desc = ET.parse(xmp_path).getroot().find(
+        ".//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description"
+    )
+    assert desc.get("{http://ns.adobe.com/xap/1.0/}Rating") == "4"
+    assert desc.get("{https://vireo.app/ns/1.0/}gpsSource") == "keyword"
 
 
 def test_sync_to_xmp_removes_stale_vireo_location_when_effective_location_missing(tmp_path, monkeypatch):
