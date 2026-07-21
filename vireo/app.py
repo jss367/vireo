@@ -6099,9 +6099,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         search (which only loads embeddings for the active model — see
         ``api_photo_text_search``) can't use it. Inject the current active
         model here so the filter and visual search agree on what "has an
-        index" means; smart-collection storage paths keep the rule
-        verbatim so a saved collection stays portable across model
-        switches.
+        index" means; smart-collection storage paths (POST/PUT
+        ``/api/collections``) also normalize before persisting so a
+        collection's saved rules match what the preview counter showed at
+        save time (Codex review r3621749904) — otherwise the sidebar
+        count and the reopened result set silently diverge from the
+        preview when embeddings from multiple models exist.
 
         When no active model is configured (fresh library, or every
         installed model was removed while cached embeddings remain), the
@@ -10602,6 +10605,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name:
             return json_error("name required")
         try:
+            # Pin ``has_visual_index`` leaves to the active model before
+            # counting/persisting so the sidebar count on reopen matches
+            # what the save-time preview counter showed — otherwise a
+            # library with embeddings from multiple models silently
+            # widens the collection to "any embedding exists" (Codex
+            # review r3621749904).
+            rules = _inject_active_visual_model(rules)
             db.count_photos_for_rules(rules)
             # The visual clause is saved alongside rules — a collection
             # saved from an expression with a visual component must
@@ -10683,6 +10693,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if "rules" in body:
             rules = body.get("rules")
             try:
+                # Same active-model pinning as POST so the persisted
+                # rules match what the save-time preview counted
+                # (Codex review r3621749904).
+                rules = _inject_active_visual_model(rules)
                 db.count_photos_for_rules(rules)
             except ValueError as e:
                 return json_error(str(e), 400)

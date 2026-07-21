@@ -672,3 +672,113 @@ def test_list_collections_flags_degraded_visual_collection(app_and_db):
         healthy,
         degraded,
     }
+
+
+def test_create_collection_pins_active_model_on_has_visual_index(
+    app_and_db, monkeypatch,
+):
+    """Saving a filter with ``has_visual_index`` must persist the active
+    visual model — otherwise the rules-only sidebar count (which treats a
+    model-less rule as "any embedding exists") silently disagrees with
+    the save-time preview counter, which /api/photos/query pins to the
+    active model. Codex review r3621749904 on PR #1343."""
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "current-model", "id": "current-model",
+                 "downloaded": True},
+    )
+
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections",
+        json={
+            "name": "Indexed",
+            "rules": [{"field": "has_visual_index", "op": "is", "value": 1}],
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+    cid = resp.get_json()["id"]
+
+    row = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()
+    stored = json.loads(row["rules"])
+    # The rule leaf now carries ``model`` matching what /api/photos/query
+    # would have counted at preview time.
+    assert stored[0]["model"] == "current-model"
+
+
+def test_update_collection_pins_active_model_on_has_visual_index(
+    app_and_db, monkeypatch,
+):
+    """PUT /api/collections/<id> mirrors POST's normalization so editing
+    a saved collection's rules can't reintroduce a model-less
+    ``has_visual_index`` leaf. Codex review r3621749904."""
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "current-model", "id": "current-model",
+                 "downloaded": True},
+    )
+
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections",
+        json={"name": "Indexed",
+              "rules": [{"field": "rating", "op": ">=", "value": 3}]},
+    )
+    cid = resp.get_json()["id"]
+
+    resp = client.put(
+        f"/api/collections/{cid}",
+        json={"rules": [{"field": "has_visual_index",
+                          "op": "is", "value": 1}]},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    row = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()
+    stored = json.loads(row["rules"])
+    assert stored[0]["model"] == "current-model"
+
+
+def test_create_collection_preserves_explicit_has_visual_index_model(
+    app_and_db, monkeypatch,
+):
+    """When a saved rule already names a model (an existing collection
+    imported/edited manually), POST must leave it alone — otherwise
+    normalization would overwrite the user's explicit choice with
+    whatever model happens to be active."""
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "current-model", "id": "current-model",
+                 "downloaded": True},
+    )
+
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections",
+        json={"name": "Indexed",
+              "rules": [{"field": "has_visual_index", "op": "is",
+                          "value": 1, "model": "legacy-model"}]},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    cid = resp.get_json()["id"]
+
+    row = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()
+    stored = json.loads(row["rules"])
+    assert stored[0]["model"] == "legacy-model"
