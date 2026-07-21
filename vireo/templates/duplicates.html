@@ -462,7 +462,15 @@
           // disappears from the page.
           _scanInProgress = false;
           if (evt.status === 'completed') {
-            renderResults(evt.result || {});
+            // Wait for any in-flight filter refresh so the initial
+            // render uses the CURRENT filter state, not the pre-edit
+            // one. If the scan completes before a slower filter query
+            // (typical with a visual clause) — or right after the user
+            // edits chips mid-scan — a raw ``renderResults`` would use
+            // the stale ``_filterMatchedIds`` (often ``null``) and
+            // briefly re-enable apply/bulk actions for groups the newly
+            // edited chips will hide once the query settles.
+            renderScanWhenFilterReady(evt.result);
           } else if (evt.status === 'cancelled') {
             hideProgress();
             scanBtn.disabled = false;
@@ -521,63 +529,97 @@
   var _filterReadyResolve;
   var _filterReady = new Promise(function(resolve) { _filterReadyResolve = resolve; });
 
+  // Currently in-flight ``refreshFilterMatches`` promise, or null.
+  // Scan-complete's ``renderResults`` awaits this so a filter edit made
+  // mid-scan can't let the initial render use the pre-edit
+  // ``_filterMatchedIds`` — otherwise groups the newly-edited chips will
+  // hide would render with apply/bulk actions enabled for the seconds
+  // between scan-complete and the filter query finally settling.
+  var _pendingFilterRefresh = null;
+
   async function refreshFilterMatches() {
     var myEpoch = ++_filterEpoch;
-    var hasFilters = window.VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
-      && !VireoFilter.isMuted();
-    var visualInfo = null;
-    var nextMatchedIds = null;
-    if (hasFilters) {
-      try {
-        var body = { rules: VireoFilter.getRules(), ids_only: true };
-        var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
-        if (visual) body.visual = visual;
-        var data = await safeFetch('/api/photos/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }, { toast: false });
-        if (myEpoch !== _filterEpoch) return;  // superseded — drop
-        nextMatchedIds = new Set(data.ids || []);
-        visualInfo = data.visual || null;
-      } catch (e) {
-        if (myEpoch !== _filterEpoch) return;  // superseded — drop
-        // Failing the query (400 on a stale/deep-linked rule, transient
-        // network error) must NOT null out _filterMatchedIds — the old
-        // behaviour let ``groupMatchesFilter`` treat null as "no filters
-        // active" and widen the render to the entire scan while the chips
-        // stayed on-screen, silently re-enabling resolve/bulk controls for
-        // groups the user meant to exclude. Empty set instead so every
-        // group correctly fails the filter and the "N hidden" empty-state
-        // renders.
-        nextMatchedIds = new Set();
-        if (typeof showToast === 'function') {
-          showToast('Filter query failed — check the rules or your connection', 'error');
+    var settlePending;
+    var thisRefresh = new Promise(function(resolve) { settlePending = resolve; });
+    _pendingFilterRefresh = thisRefresh;
+    try {
+      var hasFilters = window.VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
+        && !VireoFilter.isMuted();
+      var visualInfo = null;
+      var nextMatchedIds = null;
+      if (hasFilters) {
+        try {
+          var body = { rules: VireoFilter.getRules(), ids_only: true };
+          var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+          if (visual) body.visual = visual;
+          var data = await safeFetch('/api/photos/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }, { toast: false });
+          if (myEpoch !== _filterEpoch) return;  // superseded — drop
+          nextMatchedIds = new Set(data.ids || []);
+          visualInfo = data.visual || null;
+        } catch (e) {
+          if (myEpoch !== _filterEpoch) return;  // superseded — drop
+          // Failing the query (400 on a stale/deep-linked rule, transient
+          // network error) must NOT null out _filterMatchedIds — the old
+          // behaviour let ``groupMatchesFilter`` treat null as "no filters
+          // active" and widen the render to the entire scan while the chips
+          // stayed on-screen, silently re-enabling resolve/bulk controls for
+          // groups the user meant to exclude. Empty set instead so every
+          // group correctly fails the filter and the "N hidden" empty-state
+          // renders.
+          nextMatchedIds = new Set();
+          if (typeof showToast === 'function') {
+            showToast('Filter query failed — check the rules or your connection', 'error');
+          }
         }
       }
+      _filterMatchedIds = nextMatchedIds;
+      if (window.VireoFilter && VireoFilter.setResultTotal) {
+        VireoFilter.setResultTotal(_filterMatchedIds ? _filterMatchedIds.size : null);
+      }
+      // Surface the visual clause's status so the filter bar's visual chip
+      // can warn on fallback. Without this, a Duplicates filter with an
+      // unresolvable visual clause (no model / no embeddings / encoding
+      // failed) would show the chip while groups + bulk actions ran on the
+      // broadened metadata-only match set.
+      if (window.VireoFilter && VireoFilter.setVisualInfo) {
+        VireoFilter.setVisualInfo(visualInfo);
+      }
+      // Never re-render a cached snapshot while a new scan is in flight.
+      // ``renderResults`` hides the progress UI and re-enables the Scan
+      // button, so filter edits (or pause/resume) mid-scan would otherwise
+      // resurrect stale duplicate cards + actions and even let the user
+      // kick off a second overlapping scan.
+      if (_lastScanResult && !_scanInProgress) renderResults(_lastScanResult);
+      // Release ``tryRestoreLastScan`` — the first pass has now set
+      // ``_filterMatchedIds`` (or left it null when no filters are active),
+      // so restoring a cached scan can safely render.
+      if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
+    } finally {
+      // Only clear the pointer if a newer refresh hasn't already claimed
+      // it — otherwise we'd drop the tracker for the newest in-flight
+      // query and defeat the mid-scan wait in ``renderScanWhenFilterReady``.
+      if (_pendingFilterRefresh === thisRefresh) _pendingFilterRefresh = null;
+      settlePending();
     }
-    _filterMatchedIds = nextMatchedIds;
-    if (window.VireoFilter && VireoFilter.setResultTotal) {
-      VireoFilter.setResultTotal(_filterMatchedIds ? _filterMatchedIds.size : null);
+  }
+
+  // Await any in-flight ``refreshFilterMatches`` before rendering a
+  // just-completed scan. Loops so a filter edit that starts DURING the
+  // wait (replacing ``_pendingFilterRefresh``) is also awaited — without
+  // this the initial post-scan render would use the older refresh's
+  // ``_filterMatchedIds`` and the newer refresh's line-576 re-render
+  // would show a brief flash of the outdated filter state.
+  async function renderScanWhenFilterReady(result) {
+    while (_pendingFilterRefresh) {
+      var current = _pendingFilterRefresh;
+      try { await current; } catch (e) { /* handled inside refresh */ }
+      if (_pendingFilterRefresh === current) break;
     }
-    // Surface the visual clause's status so the filter bar's visual chip
-    // can warn on fallback. Without this, a Duplicates filter with an
-    // unresolvable visual clause (no model / no embeddings / encoding
-    // failed) would show the chip while groups + bulk actions ran on the
-    // broadened metadata-only match set.
-    if (window.VireoFilter && VireoFilter.setVisualInfo) {
-      VireoFilter.setVisualInfo(visualInfo);
-    }
-    // Never re-render a cached snapshot while a new scan is in flight.
-    // ``renderResults`` hides the progress UI and re-enables the Scan
-    // button, so filter edits (or pause/resume) mid-scan would otherwise
-    // resurrect stale duplicate cards + actions and even let the user
-    // kick off a second overlapping scan.
-    if (_lastScanResult && !_scanInProgress) renderResults(_lastScanResult);
-    // Release ``tryRestoreLastScan`` — the first pass has now set
-    // ``_filterMatchedIds`` (or left it null when no filters are active),
-    // so restoring a cached scan can safely render.
-    if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
+    renderResults(result || {});
   }
 
   function groupMatchesFilter(group) {
