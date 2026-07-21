@@ -275,7 +275,7 @@ def _sync_preview_flag_label(value):
 
 def _sync_preview_presentation(
     change, metadata, *, assigned_location=None, write_locations=False,
-    sidecar_will_exist=False,
+    sidecar_will_exist=False, sync_flags=False,
 ):
     """Translate one internal pending row into user-facing XMP before/after data."""
     change_type = change["change_type"]
@@ -314,6 +314,17 @@ def _sync_preview_presentation(
                 "action": "added",
                 "before": xmp_value,
                 "after": value,
+            }
+        if metadata.get("status") == "unreadable":
+            return {
+                "field": "XMP keyword",
+                "action": "unchanged",
+                "before": xmp_value,
+                "after": xmp_value,
+                "after_detail": (
+                    f"{value} cannot be removed because the XMP sidecar "
+                    "is unreadable"
+                ),
             }
         return {
             "field": "Keyword",
@@ -358,6 +369,17 @@ def _sync_preview_presentation(
         before = _sync_preview_flag_label(metadata.get("flag"))
         if metadata.get("status") != "ok":
             before = _sync_preview_absent_xmp_value(metadata, before)
+        if not sync_flags:
+            return {
+                "field": "XMP flag",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": (
+                    f"{_sync_preview_flag_label(value)} stays in Vireo; "
+                    "flag sync to XMP is turned off"
+                ),
+            }
         return {
             "field": "Flag",
             "action": "updated",
@@ -10041,6 +10063,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             assigned_location=assigned_location,
                             write_locations=write_locations,
                             sidecar_will_exist=False,
+                            sync_flags=sync_flags,
                         )
                     )
                     change["presentation_with_sidecar"] = (
@@ -10050,6 +10073,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             assigned_location=assigned_location,
                             write_locations=write_locations,
                             sidecar_will_exist=True,
+                            sync_flags=sync_flags,
                         )
                     )
                     change["presentation"] = change[
@@ -10063,6 +10087,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     metadata,
                     assigned_location=assigned_location,
                     write_locations=write_locations,
+                    sync_flags=sync_flags,
                 )
 
         result = {

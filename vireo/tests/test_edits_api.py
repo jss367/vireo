@@ -562,6 +562,66 @@ def test_sync_preview_shows_hierarchical_keyword_before_removal(
     }
 
 
+def test_sync_preview_treats_flag_as_unchanged_when_sync_is_disabled(
+    client_with_photo,
+):
+    """A stale queued flag does not promise an XMP write after opt-out."""
+    import config as cfg
+    from xmp import write_pick_flag
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_pick_flag(os.path.join(folder, "test.xmp"), "rejected")
+    db.queue_change(photo_id, "flag", "flagged")
+    config = cfg.load()
+    config["sync_flags_to_xmp"] = False
+    cfg.save(config)
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["creates_xmp_sidecar"] is False
+    assert change["presentation"] == {
+        "field": "XMP flag",
+        "action": "unchanged",
+        "before": "Rejected",
+        "after": "Rejected",
+        "after_detail": "Picked stays in Vireo; flag sync to XMP is turned off",
+    }
+
+
+def test_sync_preview_does_not_promise_removal_from_unreadable_xmp(
+    client_with_photo,
+):
+    """Keyword removal cannot modify a corrupt sidecar."""
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    with open(os.path.join(folder, "test.xmp"), "w") as sidecar:
+        sidecar.write("not xml")
+    db.queue_change(photo_id, "keyword_remove", "Raptor")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP keyword",
+        "action": "unchanged",
+        "before": "Unreadable XMP sidecar",
+        "after": "Unreadable XMP sidecar",
+        "after_detail": (
+            "Raptor cannot be removed because the XMP sidecar is unreadable"
+        ),
+    }
+
+
 def test_edit_history_recorded_on_rating(app_and_db):
     """Setting a rating records an entry in edit_history."""
     app, db = app_and_db
