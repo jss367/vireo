@@ -6258,6 +6258,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
+            # Fill in the active visual model on any UI-emitted
+            # ``has_visual_index`` rule that omits it. Without this a Map
+            # filter for "has index" (rule sent without a ``model`` key)
+            # would match any embedding row, so a workspace with stale
+            # embeddings from an inactive model would surface photos that
+            # are not indexed for the currently-active visual search —
+            # /api/photos/query already injects here (line 5691), so the
+            # Map path must match to stay consistent.
+            rules = _inject_active_visual_model(rules)
             # Restrict the visual candidate set to plottable photos so a
             # workspace whose only embeddings live on non-plottable photos
             # doesn't return ``status: ok`` with ids that
@@ -12750,6 +12759,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
+            # Fill in the active visual model on any UI-emitted
+            # ``has_visual_index`` rule that omits it. /api/photos/query
+            # already injects here; the Review GET path must do the same
+            # so a workspace with stale embeddings from an inactive model
+            # doesn't include predictions for photos that aren't indexed
+            # by the currently-active visual model.
+            rules = _inject_active_visual_model(rules)
             # Forward ``collection_id`` so ``visual_info`` (matched /
             # candidates / indexed) describes the collection-scoped Review
             # queue the filter bar chip is showing — not a workspace-wide

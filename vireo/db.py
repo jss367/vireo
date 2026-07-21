@@ -15236,19 +15236,18 @@ class Database:
         evaluated against the row's own values; every other leaf is treated
         as satisfied (the photo already matched via the SQL subquery).
 
-        The shortcut is only correct inside pure ``all`` intersections —
-        SQL ensured every non-prediction leaf was True at the photo level.
-        Inside an ``any`` or ``none`` group the shortcut would incorrectly
-        contribute True for a leaf that may have been False for this photo
-        (e.g. ``(rating >= 5 OR prediction_confidence >= 0.8)`` — a
-        rating-3 photo with one 0.95 and one 0.10 prediction: SQL keeps
-        both rows because of the 0.95, but the 0.10 row must not be shown
-        and shortcutting ``rating >= 5`` to True would let it through).
-        When any ``any``/``none`` group in the tree carries a non-prediction
-        leaf whose per-row truth we can't determine, skip the row-level
-        pass and return the SQL-scoped rows unchanged — the resulting grid
-        is at worst photo-scoped, but never hides rows the filter should
-        allow.
+        The satisfied-by-default shortcut is only sound inside pure ``all``
+        intersections — SQL ensured every non-prediction leaf was True at
+        the photo level. Inside an ``any`` or ``none`` group the shortcut
+        would incorrectly contribute True for a leaf that may have been
+        False for this photo (e.g. ``(rating >= 5 OR prediction_confidence
+        >= 0.8)`` — a rating-3 photo with one 0.95 and one 0.10 prediction:
+        SQL keeps both rows because of the 0.95, but the 0.10 row must not
+        be shown and shortcutting ``rating >= 5`` to True would let it
+        through). For non-prediction leaves nested inside a mixed ``any``/
+        ``none`` group we therefore resolve the leaf to its actual matching
+        photo ids and answer per-row from that set, so prediction leaves in
+        the same group still filter and the metadata leaf's truth is real.
         """
         if not rows:
             return rows
@@ -15271,27 +15270,35 @@ class Database:
         if not _touches_prediction(root):
             return rows
 
-        def _row_filter_safe(node, inside_alt=False):
-            """True iff the row-level True-shortcut is safe under ``node``.
+        # Resolve non-prediction leaves nested inside ``any``/``none`` groups
+        # to the photo-id set they actually match. Anywhere else the outer
+        # SQL subquery already proved the leaf holds for the photo, so we
+        # keep the True-shortcut. ``id(node)`` is stable across this call —
+        # the dict identity is what we look up in ``_leaf_row_match``.
+        leaf_photo_sets = {}
 
-            ``inside_alt`` propagates whether any ancestor group is ``any``
-            or ``none`` — inside such a group we can't safely treat a
-            non-prediction leaf as True because we don't know its per-row
-            (per-photo) truth. Everywhere else the SQL subquery already
-            proved the leaf holds for this photo.
-            """
+        def _collect_alt_metadata_leaves(node, inside_alt=False):
             if not isinstance(node, dict):
-                return True
+                return
             if "rules" in node and "field" not in node:
                 mode = node.get("mode", "all")
                 child_alt = inside_alt or mode in ("any", "none")
-                return all(_row_filter_safe(c, child_alt)
-                           for c in node.get("rules") or [])
-            return not (inside_alt
-                        and node.get("field") not in self._PREDICTION_ROW_FIELDS)
+                for c in node.get("rules") or []:
+                    _collect_alt_metadata_leaves(c, child_alt)
+                return
+            if inside_alt and node.get("field") not in self._PREDICTION_ROW_FIELDS:
+                key = id(node)
+                if key in leaf_photo_sets:
+                    return
+                try:
+                    leaf_photo_sets[key] = set(self.query_photo_ids([node]))
+                except (ValueError, sqlite3.Error):
+                    # Malformed / unresolvable leaf: fall back to matching
+                    # every photo the SQL subquery kept. Never hide rows
+                    # the outer filter should have allowed through.
+                    leaf_photo_sets[key] = None
 
-        if not _row_filter_safe(root):
-            return rows
+        _collect_alt_metadata_leaves(root)
 
         def _truthy(value):
             return value is True or value == 1 or value == "1" or value == "true"
@@ -15381,9 +15388,16 @@ class Database:
             if field == "needs_review":
                 is_pending = str(row["status"] or "pending") == "pending"
                 return is_pending if _truthy(value) else not is_pending
-            # Non-prediction leaf — the photo already matched via the SQL
-            # subquery, so treat as satisfied here.
-            return True
+            # Non-prediction leaf. In a pure ``all`` position the SQL
+            # subquery already proved this photo satisfies it, so shortcut
+            # to True. Inside a mixed ``any``/``none`` group we can't
+            # shortcut (SQL only proved *some* sibling matched at the
+            # photo level, not this leaf), so answer from the pre-resolved
+            # per-leaf photo-id set.
+            pset = leaf_photo_sets.get(id(rule))
+            if pset is None:
+                return True
+            return row["photo_id"] in pset
 
         def _eval(node, row):
             if "rules" in node and "field" not in node:
@@ -18884,6 +18898,14 @@ class Database:
                         "pred.classifier_model LIKE ? ESCAPE '\\'", [like]
                     )
             if field == "prediction_status":
+                # Negative predicates use a positive EXISTS ("photo has at
+                # least one prediction whose status is NOT X") rather than
+                # NOT EXISTS ("photo has no predictions matching X").
+                # NOT EXISTS drops a photo the moment it has any Rejected
+                # sibling, hiding pending rows the visible filter should
+                # keep — see r3618393423. Row-level clean-up in
+                # ``_filter_prediction_rows_by_rules`` then removes any
+                # sibling rows that don't match the predicate themselves.
                 if op in ("equals", "is"):
                     return _prediction_exists(
                         "COALESCE(prv.status, 'pending') = ?",
@@ -18891,25 +18913,22 @@ class Database:
                         review_join=True,
                     )
                 if op == "is not":
-                    exists, params = _prediction_exists(
-                        "COALESCE(prv.status, 'pending') = ?",
+                    return _prediction_exists(
+                        "COALESCE(prv.status, 'pending') != ?",
                         [value],
                         review_join=True,
                     )
-                    return "NOT " + exists, params
                 if op in ("in", "not_in"):
                     values = list(value or [])
                     if not values:
                         return ("0" if op == "in" else "1"), []
                     placeholders = ",".join("?" * len(values))
-                    exists, params = _prediction_exists(
-                        f"COALESCE(prv.status, 'pending') IN ({placeholders})",
+                    cmp_op = "IN" if op == "in" else "NOT IN"
+                    return _prediction_exists(
+                        f"COALESCE(prv.status, 'pending') {cmp_op} ({placeholders})",
                         values,
                         review_join=True,
                     )
-                    if op == "not_in":
-                        return "NOT " + exists, params
-                    return exists, params
             if field == "needs_review":
                 exists, params = _prediction_exists(
                     "COALESCE(prv.status, 'pending') = 'pending'",

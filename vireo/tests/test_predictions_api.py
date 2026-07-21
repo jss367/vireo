@@ -557,3 +557,103 @@ def test_get_predictions_all_group_still_narrows_by_prediction_confidence(app_an
         'row-level narrowing regressed for pure `all` trees; the low-'
         'confidence sibling row was not filtered out'
     )
+
+
+def test_get_predictions_any_group_mixes_metadata_and_prediction(app_and_db):
+    """``any(rating >= 5, prediction_confidence >= 0.8)`` on a rating-3
+    photo with one 0.95 and one 0.10 prediction: the SQL subquery keeps
+    the photo (the 0.95 sibling satisfies the OR at the photo level),
+    but the row-level pass must still drop the 0.10 row — shortcutting
+    ``rating >= 5`` to True inside the ``any`` group would let it through
+    even though rating is 3.
+    """
+    _, db = app_and_db
+    photos = db.get_photos()
+    # p1 has rating 3 in the fixture.
+    photo_id = photos[0]['id']
+    det = _make_detection(db, photo_id)
+    db.add_prediction(detection_id=det, species='High', confidence=0.95,
+                      model='test-model', category='new')
+    db.add_prediction(detection_id=det, species='Low', confidence=0.10,
+                      model='test-model', category='new')
+
+    rules = {
+        'mode': 'any',
+        'rules': [
+            {'field': 'rating', 'op': '>=', 'value': 5},
+            {'field': 'prediction_confidence', 'op': '>=', 'value': 0.8},
+        ],
+    }
+    preds = db.get_predictions(rules=rules)
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
+    assert returned == ['High'], (
+        'row-level narrowing regressed for mixed `any` groups; the low-'
+        'confidence sibling row leaked through because the metadata leaf '
+        'was shortcut to True'
+    )
+
+
+def test_get_predictions_status_is_not_keeps_pending_siblings(app_and_db):
+    """``prediction_status is not Rejected`` on a photo with one pending
+    and one rejected sibling must return the pending row. The previous
+    SQL translated ``is not`` as a photo-level NOT EXISTS, dropping the
+    entire photo the moment any sibling was Rejected — hiding the pending
+    row the visible filter should have surfaced.
+    """
+    _, db = app_and_db
+    photos = db.get_photos()
+    photo_id = photos[0]['id']
+    det = _make_detection(db, photo_id)
+    # Two predictions on the same detection.
+    db.add_prediction(detection_id=det, species='PendingPick', confidence=0.9,
+                      model='test-model', category='new')
+    db.add_prediction(detection_id=det, species='RejectedPick', confidence=0.5,
+                      model='test-model', category='new')
+    rejected = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
+        (det,),
+    ).fetchone()
+    db.update_prediction_status(rejected['id'], 'rejected')
+
+    rules = [{'field': 'prediction_status', 'op': 'is not', 'value': 'rejected'}]
+    preds = db.get_predictions(rules=rules)
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
+    assert 'PendingPick' in returned, (
+        'is-not translated to NOT EXISTS at the photo level and dropped '
+        'the whole photo, hiding the pending sibling the filter should '
+        'have kept'
+    )
+    assert 'RejectedPick' not in returned, (
+        'row-level pass failed to drop the rejected sibling from the '
+        'is-not result set'
+    )
+
+
+def test_get_predictions_status_not_in_keeps_pending_siblings(app_and_db):
+    """Same sibling-visibility guarantee for ``not_in`` — the multi-value
+    form must not use NOT EXISTS at the photo level and drop photos with
+    a single Rejected sibling.
+    """
+    _, db = app_and_db
+    photos = db.get_photos()
+    photo_id = photos[0]['id']
+    det = _make_detection(db, photo_id)
+    db.add_prediction(detection_id=det, species='PendingPick', confidence=0.9,
+                      model='test-model', category='new')
+    db.add_prediction(detection_id=det, species='RejectedPick', confidence=0.5,
+                      model='test-model', category='new')
+    rejected = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
+        (det,),
+    ).fetchone()
+    db.update_prediction_status(rejected['id'], 'rejected')
+
+    rules = [{'field': 'prediction_status', 'op': 'not_in',
+              'value': ['rejected', 'accepted']}]
+    preds = db.get_predictions(rules=rules)
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
+    assert returned == ['PendingPick'], (
+        'not_in translated to NOT EXISTS at the photo level and dropped '
+        'the whole photo, hiding the pending sibling the filter should '
+        'have kept'
+    )
