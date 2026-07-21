@@ -10228,6 +10228,7 @@ class Database:
                         existing_component["type"] == "location"
                         or self._restore_misclassified_location_ancestor(
                             existing_component["id"],
+                            allow_leaf=True,
                         )
                     )
                 ):
@@ -10288,6 +10289,7 @@ class Database:
                                 clash["type"] == "location"
                                 or self._restore_misclassified_location_ancestor(
                                     clash["id"],
+                                    allow_leaf=True,
                                 )
                             )
                         ):
@@ -10347,7 +10349,10 @@ class Database:
         if existing:
             if existing["type"] == "location":
                 return existing["id"]
-            if self._restore_misclassified_location_ancestor(existing["id"]):
+            if self._restore_misclassified_location_ancestor(
+                existing["id"],
+                allow_leaf=reuse_location_component,
+            ):
                 return existing["id"]
 
         try:
@@ -10387,7 +10392,10 @@ class Database:
                 # Defensive: our narrow SELECT missed it (shouldn't happen,
                 # but reusing it is safe and idempotent).
                 return clash["id"]
-            if self._restore_misclassified_location_ancestor(clash["id"]):
+            if self._restore_misclassified_location_ancestor(
+                clash["id"],
+                allow_leaf=reuse_location_component,
+            ):
                 # Older taxonomy marking could retype an administrative
                 # location node such as United States -> California even
                 # though location children still hung below it. Reuse the
@@ -10399,7 +10407,9 @@ class Database:
                 f"type={clash['type']!r}, can't reuse for location chain"
             ) from integrity_err
 
-    def _restore_misclassified_location_ancestor(self, keyword_id):
+    def _restore_misclassified_location_ancestor(
+        self, keyword_id, allow_leaf=False,
+    ):
         """Restore one legacy taxonomy row that is structurally a location.
 
         Before explicit keyword types were protected during taxonomy marking,
@@ -10407,7 +10417,10 @@ class Database:
         location into taxonomy. A taxonomy root, or a taxonomy row below a
         location parent, that sits above a location descendant connected only
         through other taxonomy rows is an administrative location-tree node.
-        Clear the stale taxonomy metadata and restore its original type.
+        A place-bearing row is also unambiguously a location. ``allow_leaf``
+        is reserved for an explicit Google administrative-component match,
+        where the place response supplies the evidence a coordless leaf lacks
+        during startup. Clear stale taxonomy metadata and restore its type.
         """
         row = self.conn.execute(
             "WITH RECURSIVE descendants(id, type) AS ("
@@ -10422,10 +10435,10 @@ class Database:
             "LEFT JOIN keywords parent ON parent.id = k.parent_id "
             "WHERE k.id = ? AND k.type = 'taxonomy' "
             "  AND (k.parent_id IS NULL OR parent.type = 'location') "
-            "  AND EXISTS ("
+            "  AND (k.place_id IS NOT NULL OR ? OR EXISTS ("
             "    SELECT 1 FROM descendants WHERE type = 'location'"
-            "  )",
-            (keyword_id, keyword_id),
+            "  ))",
+            (keyword_id, keyword_id, allow_leaf),
         ).fetchone()
         if row is None:
             return False

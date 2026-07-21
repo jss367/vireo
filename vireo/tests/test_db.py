@@ -1662,6 +1662,26 @@ def test_repair_misclassified_location_ancestors_ignores_pure_taxonomy_root(
     assert row["type"] == "taxonomy"
 
 
+def test_repair_misclassified_location_ancestors_restores_place_leaf(tmp_path):
+    """A place-bearing taxonomy leaf has enough evidence for startup repair."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("california-region", state_id),
+    )
+
+    assert db.repair_misclassified_location_ancestors() == 1
+    assert db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (state_id,),
+    ).fetchone()["type"] == "location"
+
+
 def test_repair_misclassified_location_ancestors_restores_root_chain(tmp_path):
     """Repair a taxonomy-typed country at the root of a location hierarchy."""
     from db import Database
@@ -2003,6 +2023,39 @@ def test_place_upsert_repairs_taxonomy_root_while_building_parents(tmp_path):
         "SELECT COUNT(*) FROM keywords WHERE name = ? AND parent_id IS NULL",
         ("United States",),
     ).fetchone()[0] == 1
+
+
+def test_place_upsert_repairs_coordless_taxonomy_leaf_component(tmp_path):
+    """An explicit admin component heals a stale leaf without descendants."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+
+    park_id = db.upsert_place_chain({
+        "place_id": "nearby-park",
+        "name": "Nearby Park",
+        "types": ["park"],
+        "lat": 32.75,
+        "lng": -117.0,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+
+    assert db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (state_id,),
+    ).fetchone()["type"] == "location"
+    assert db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (park_id,),
+    ).fetchone()["parent_id"] == state_id
 
 
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
