@@ -10483,7 +10483,11 @@ class Database:
         taxonomy chain between location nodes is changed. Each pass restores
         the next node from the location parent downward. Genuine taxonomy
         keywords and cross-type name collisions keep the existing conflict
-        protection.
+        protection. A final pass collapses same-name location roots that a
+        prior retype could have left alongside a pre-existing coordless
+        root — SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
+        ``parent_id IS NULL``, so without this later child-place upserts
+        would settle on one root and orphan the other's descendants.
         """
         repaired = 0
         while True:
@@ -10500,9 +10504,92 @@ class Database:
                     repaired_this_pass += 1
             if not repaired_this_pass:
                 break
-        if repaired:
+        merged_roots = self._merge_duplicate_location_roots()
+        if repaired or merged_roots:
             self.conn.commit()
+        if repaired:
+            log.info(
+                "repaired %d misclassified location ancestor keyword(s)",
+                repaired,
+            )
+        if merged_roots:
+            log.info(
+                "merged %d duplicate location root keyword(s)",
+                merged_roots,
+            )
         return repaired
+
+    def _merge_duplicate_location_roots(self):
+        """Collapse same-name ``type='location'`` roots into a single row.
+
+        Retyping a place-bearing taxonomy root at startup can leave two
+        location rows with the same ``name`` and ``parent_id IS NULL``
+        because SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
+        NULL parents. Later child-place upserts pick the lowest-id root and
+        silently orphan the other's descendants. Merge the survivors so a
+        single root owns every child. Rows with distinct non-null
+        ``place_id`` values describe different Google places that happen to
+        share a name and are left alone.
+        """
+        duplicates = self.conn.execute(
+            "SELECT name FROM keywords "
+            "WHERE type = 'location' AND parent_id IS NULL "
+            "GROUP BY name HAVING COUNT(*) > 1"
+        ).fetchall()
+        merged = 0
+        for dup in duplicates:
+            candidates = self.conn.execute(
+                "SELECT id, place_id, latitude, longitude FROM keywords "
+                "WHERE name = ? AND parent_id IS NULL AND type = 'location' "
+                "ORDER BY id",
+                (dup["name"],),
+            ).fetchall()
+            if len(candidates) < 2:
+                continue
+            survivor = dict(candidates[0])
+            for cand in candidates[1:]:
+                if (
+                    survivor["place_id"] is not None
+                    and cand["place_id"] is not None
+                    and survivor["place_id"] != cand["place_id"]
+                ):
+                    # Two distinct Google places — leave both in place.
+                    continue
+                if (
+                    survivor["place_id"] is None
+                    and cand["place_id"] is not None
+                ):
+                    # Promote the source's place metadata onto the survivor
+                    # before deleting it. UNIQUE(place_id) requires clearing
+                    # the source first so the value can move to the peer.
+                    self.conn.execute(
+                        "UPDATE keywords SET place_id = NULL WHERE id = ?",
+                        (cand["id"],),
+                    )
+                    self.conn.execute(
+                        "UPDATE keywords SET place_id = ?, "
+                        "latitude = COALESCE(latitude, ?), "
+                        "longitude = COALESCE(longitude, ?) WHERE id = ?",
+                        (
+                            cand["place_id"],
+                            cand["latitude"],
+                            cand["longitude"],
+                            survivor["id"],
+                        ),
+                    )
+                    survivor["place_id"] = cand["place_id"]
+                    survivor["latitude"] = (
+                        survivor["latitude"]
+                        if survivor["latitude"] is not None
+                        else cand["latitude"]
+                    )
+                    survivor["longitude"] = (
+                        survivor["longitude"]
+                        if survivor["longitude"] is not None
+                        else cand["longitude"]
+                    )
+                merged += self._merge_keyword_into(cand["id"], survivor["id"])
+        return merged
 
     @staticmethod
     def _location_component_rank(component):

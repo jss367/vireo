@@ -1739,6 +1739,110 @@ def test_repair_misclassified_location_ancestors_ignores_taxonomy_root_with_loca
     assert dict(row) == {"type": "taxonomy", "is_species": 1}
 
 
+def test_repair_misclassified_location_ancestors_merges_duplicate_roots(
+    tmp_path,
+):
+    """Startup repair collapses same-name location roots into one row.
+
+    Regression: SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
+    ``parent_id IS NULL``, so a coordless legacy ``United States`` location
+    root and a place-bearing taxonomy ``United States`` root could coexist.
+    Retyping the taxonomy row without merging left later child-place
+    upserts picking the lowest-id root and orphaning the other's
+    descendants. Repair must fold the retyped root into the survivor,
+    transfer its place metadata, and move its subtree.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    coordless_root = db.add_keyword("United States", kw_type="location")
+    db.add_keyword(
+        "Legacy Park", parent_id=coordless_root, kw_type="location",
+    )
+    place_bearing_root = db.add_keyword("United States", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+        "WHERE id = ?",
+        (
+            "united-states-country",
+            39.5,
+            -98.35,
+            place_bearing_root,
+        ),
+    )
+    stale_state = db.add_keyword(
+        "California", parent_id=place_bearing_root, kw_type="location",
+    )
+    db.conn.commit()
+
+    assert db.repair_misclassified_location_ancestors() == 1
+    roots = db.conn.execute(
+        "SELECT id, place_id, latitude, longitude FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL ORDER BY id",
+        ("United States",),
+    ).fetchall()
+    assert [row["id"] for row in roots] == [coordless_root]
+    assert dict(roots[0]) == {
+        "id": coordless_root,
+        "place_id": "united-states-country",
+        "latitude": 39.5,
+        "longitude": -98.35,
+    }
+    survivor_children = db.conn.execute(
+        "SELECT id, name, type FROM keywords WHERE parent_id = ? ORDER BY name",
+        (coordless_root,),
+    ).fetchall()
+    assert [dict(row) for row in survivor_children] == [
+        {"id": stale_state, "name": "California", "type": "location"},
+        {
+            "id": db.conn.execute(
+                "SELECT id FROM keywords WHERE name = ? AND parent_id = ?",
+                ("Legacy Park", coordless_root),
+            ).fetchone()["id"],
+            "name": "Legacy Park",
+            "type": "location",
+        },
+    ]
+    # The retyped root row itself is gone — only the survivor remains.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE id = ?",
+        (place_bearing_root,),
+    ).fetchone()[0] == 0
+    # Second call is a no-op.
+    assert db.repair_misclassified_location_ancestors() == 0
+
+
+def test_repair_misclassified_location_ancestors_keeps_distinct_place_roots(
+    tmp_path,
+):
+    """Two roots with distinct place_ids are different places — do not merge."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    natural_root = db.add_keyword("Georgia", kw_type="location")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("georgia-country", natural_root),
+    )
+    homonym_root = db.add_keyword("Georgia", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("georgia-state", homonym_root),
+    )
+    db.conn.commit()
+
+    assert db.repair_misclassified_location_ancestors() == 1
+    roots = db.conn.execute(
+        "SELECT id, place_id, type FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL ORDER BY id",
+        ("Georgia",),
+    ).fetchall()
+    assert [(row["id"], row["place_id"], row["type"]) for row in roots] == [
+        (natural_root, "georgia-country", "location"),
+        (homonym_root, "georgia-state", "location"),
+    ]
+
+
 def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
     tmp_path,
 ):
