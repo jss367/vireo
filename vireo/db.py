@@ -10204,6 +10204,9 @@ class Database:
                 "ON CONFLICT(place_id) WHERE place_id IS NOT NULL DO UPDATE SET "
                 "  name = excluded.name, "
                 "  parent_id = excluded.parent_id, "
+                "  type = 'location', "
+                "  is_species = 0, "
+                "  taxon_id = NULL, "
                 "  latitude = excluded.latitude, "
                 "  longitude = excluded.longitude "
                 "RETURNING id"
@@ -10343,10 +10346,10 @@ class Database:
 
         Before explicit keyword types were protected during taxonomy marking,
         geographic homonyms such as ``California`` could be changed from a
-        location into taxonomy. A coordless taxonomy row below a location
-        parent and above a location descendant, connected only through other
-        taxonomy rows, is an administrative location-tree node. Clear the
-        stale taxonomy metadata and restore its original type.
+        location into taxonomy. A taxonomy row below a location parent and
+        above a location descendant, connected only through other taxonomy
+        rows, is an administrative location-tree node. Clear the stale
+        taxonomy metadata and restore its original type.
         """
         row = self.conn.execute(
             "WITH RECURSIVE descendants(id, type) AS ("
@@ -10360,7 +10363,7 @@ class Database:
             "SELECT k.id FROM keywords k "
             "JOIN keywords parent ON parent.id = k.parent_id "
             "WHERE k.id = ? AND k.type = 'taxonomy' "
-            "  AND k.place_id IS NULL AND parent.type = 'location' "
+            "  AND parent.type = 'location' "
             "  AND EXISTS ("
             "    SELECT 1 FROM descendants WHERE type = 'location'"
             "  )",
@@ -10379,18 +10382,17 @@ class Database:
         """Restore every location-tree node damaged by legacy taxonomy marking.
 
         This is intentionally idempotent and narrowly structural: only a
-        coordless taxonomy chain between location nodes is changed. Each pass
-        restores the next node from the location parent downward. Genuine
-        taxonomy keywords and cross-type name collisions keep the existing
-        conflict protection.
+        taxonomy chain between location nodes is changed. Each pass restores
+        the next node from the location parent downward. Genuine taxonomy
+        keywords and cross-type name collisions keep the existing conflict
+        protection.
         """
         repaired = 0
         while True:
             rows = self.conn.execute(
                 "SELECT k.id FROM keywords k "
                 "JOIN keywords parent ON parent.id = k.parent_id "
-                "WHERE k.type = 'taxonomy' AND k.place_id IS NULL "
-                "  AND parent.type = 'location'"
+                "WHERE k.type = 'taxonomy' AND parent.type = 'location'"
             ).fetchall()
             repaired_this_pass = 0
             for row in rows:

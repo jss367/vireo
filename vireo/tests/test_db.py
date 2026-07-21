@@ -1615,17 +1615,32 @@ def test_repair_misclassified_location_ancestors_restores_adjacent_nodes(
     db.add_keyword(
         "San Diego", parent_id=county_id, kw_type="location",
     )
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, is_species = 1 WHERE id = ?",
+        ("san-diego-county-region", county_id),
+    )
 
     repaired = db.repair_misclassified_location_ancestors()
 
     assert repaired == 2
     rows = db.conn.execute(
-        "SELECT name, type FROM keywords WHERE id IN (?, ?) ORDER BY name",
+        "SELECT name, type, place_id, is_species FROM keywords "
+        "WHERE id IN (?, ?) ORDER BY name",
         (state_id, county_id),
     ).fetchall()
     assert [dict(row) for row in rows] == [
-        {"name": "California", "type": "location"},
-        {"name": "San Diego County", "type": "location"},
+        {
+            "name": "California",
+            "type": "location",
+            "place_id": None,
+            "is_species": 0,
+        },
+        {
+            "name": "San Diego County",
+            "type": "location",
+            "place_id": "san-diego-county-region",
+            "is_species": 0,
+        },
     ]
     assert db.repair_misclassified_location_ancestors() == 0
 
@@ -1759,6 +1774,50 @@ def test_place_upsert_reuses_misclassified_administrative_leaf(tmp_path):
         "SELECT parent_id FROM keywords WHERE id = ?", (park_id,),
     ).fetchone()
     assert park["parent_id"] == county_id
+
+
+def test_place_upsert_restores_place_bearing_legacy_location(tmp_path):
+    """Re-selecting a legacy place id restores its location type directly."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, is_species = 1 WHERE id = ?",
+        ("california-region", state_id),
+    )
+
+    selected_id = db.upsert_place_chain({
+        "place_id": "california-region",
+        "name": "California",
+        "types": ["administrative_area_level_1"],
+        "lat": 36.7783,
+        "lng": -119.4179,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+
+    assert selected_id == state_id
+    state = db.conn.execute(
+        "SELECT type, is_species, taxon_id, latitude, longitude "
+        "FROM keywords WHERE id = ?",
+        (state_id,),
+    ).fetchone()
+    assert dict(state) == {
+        "type": "location",
+        "is_species": 0,
+        "taxon_id": None,
+        "latitude": 36.7783,
+        "longitude": -119.4179,
+    }
 
 
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
