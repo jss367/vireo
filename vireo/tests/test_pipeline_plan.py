@@ -2700,6 +2700,59 @@ def test_api_pipeline_plan_collection_scope(app_and_db):
     assert data["stages"]["Extract"]["detail"]["eligible"] == 0
 
 
+def test_api_pipeline_plan_rejects_visual_collection(app_and_db):
+    """A visual collection posted to /api/pipeline/plan must 400 rather
+    than be planned via the rules-only scope. ``compute_plan`` →
+    ``pipeline._resolve_collection_photo_ids()`` → ``get_collection_photos()``
+    evaluates ``rules`` only; without this guard a stale/bookmarked Process
+    page body would advertise a widened runnable job over every metadata
+    match even though ``/api/jobs/pipeline`` already rejects the same id
+    (Codex review r3622041639).
+    """
+    import json as json_mod
+
+    app, db = app_and_db
+    cid = db.add_collection(
+        "Visual pipeline scope",
+        json_mod.dumps([]),
+        visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
+    )
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "collection_id": cid,
+            "skip_classify": True,
+            "skip_eye_keypoints": True,
+            "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 400
+    assert "visual" in resp.get_json()["error"].lower()
+
+
+def test_api_pipeline_plan_rejects_stringly_typed_collection_id(app_and_db):
+    """The stringly-typed coercion guard must fire before the visual lookup
+    too: ``{"collection_id": "not-an-int"}`` would otherwise be forwarded to
+    ``PipelinePlanParams(collection_id=...)`` and blow up later, or worse,
+    a string that happens to parse as int could still slip past the
+    visual-json check (Codex review r3620636582 pattern).
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "collection_id": "not-an-int",
+            "skip_classify": True,
+            "skip_eye_keypoints": True,
+            "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 400
+    assert "collection_id" in resp.get_json()["error"]
+
+
 # -------- compute_plan: import-mode honesty --------
 #
 # These tests pin the core bug fix: when the user is about to import a

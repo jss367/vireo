@@ -5020,8 +5020,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"eye_detect_override must be boolean, got "
                 f"{type(eye_detect_override_body).__name__}", 400,
             )
+        # Reject visual collections before the plan resolves the scope:
+        # ``compute_plan`` → ``pipeline._resolve_collection_photo_ids()`` →
+        # ``get_collection_photos()`` evaluates ``rules`` only and ignores
+        # ``visual_json``. Without this guard, an API caller or stale/bookmarked
+        # Process page body posting a visual collection id would receive a plan
+        # computed over every metadata match — advertising a widened runnable
+        # job even though ``/api/jobs/pipeline`` already rejects the same id at
+        # start time (Codex review r3622041639).
+        db = _get_db()
+        collection_id = _coerce_collection_id(body.get("collection_id"))
+        if collection_id is False:
+            return json_error("collection_id must be an integer", 400)
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         params = PipelinePlanParams(
-            collection_id=body.get("collection_id"),
+            collection_id=collection_id,
             photo_ids=scope_photo_ids,
             exclude_photo_ids=body.get("exclude_photo_ids") or [],
             skip_classify=bool(body.get("skip_classify")),
@@ -5039,7 +5054,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             preview_max_size=body.get("preview_max_size"),
             review_mode=review_mode,
         )
-        db = _get_db()
         return jsonify(compute_plan(db, params, db_path))
 
     @app.route("/api/folders")
