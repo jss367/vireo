@@ -12895,7 +12895,8 @@ class Database:
         # Reparent children onto the destination before deleting, or the
         # keywords.parent_id FK aborts the merge mid-way.
         children = self.conn.execute(
-            "SELECT id, name, type FROM keywords WHERE parent_id = ?", (src_id,)
+            "SELECT id, name, type, place_id FROM keywords WHERE parent_id = ?",
+            (src_id,),
         ).fetchall()
         for child in children:
             try:
@@ -12905,10 +12906,32 @@ class Database:
                 )
             except sqlite3.IntegrityError:
                 existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE parent_id = ? AND name = ?",
+                    "SELECT id, type, place_id FROM keywords "
+                    "WHERE parent_id = ? AND name = ?",
                     (dst_id, child["name"]),
                 ).fetchone()
-                if existing["type"] == child["type"]:
+                if (
+                    existing["type"] == "location"
+                    and child["type"] == "location"
+                    and existing["place_id"] is not None
+                    and child["place_id"] is not None
+                    and existing["place_id"] != child["place_id"]
+                ):
+                    # Two location siblings sharing (name, parent_id) but
+                    # pointing at distinct Google places (e.g. two direct
+                    # ``United States -> Springfield`` rows created from
+                    # different place IDs). A recursive merge here would
+                    # delete the migrating row and silently retag its
+                    # photos onto a sibling that represents a different
+                    # Google place. Disambiguate the migrating child with a
+                    # place-id suffix so both Google places survive.
+                    suffix = child["place_id"][-8:]
+                    disambiguated = f"{child['name']} ({suffix})"
+                    self.conn.execute(
+                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
+                        (dst_id, disambiguated, child["id"]),
+                    )
+                elif existing["type"] == child["type"]:
                     merged += self._merge_keyword_into(child["id"], existing["id"])
                 else:
                     # Same name + parent but different type: outside the

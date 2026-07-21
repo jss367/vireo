@@ -1888,6 +1888,104 @@ def test_repair_misclassified_location_ancestors_preserves_child_place_id(
     assert [row["id"] for row in all_california] == [coordless_state]
 
 
+def test_repair_misclassified_location_ancestors_disambiguates_distinct_place_children(
+    tmp_path,
+):
+    """Recursive child merge must not collapse distinct Google places.
+
+    Regression: when duplicate roots each already carry a same-name child
+    row with a *different* non-null ``place_id`` (e.g. two direct
+    ``United States -> Springfield`` rows created from different Google
+    places), collapsing the roots reparents the migrating child onto the
+    survivor and hits ``UNIQUE(name, parent_id)``. The recursive
+    ``_merge_keyword_into`` fallback would delete the migrating row and
+    silently retag its photos onto the sibling that represents a
+    different Google place. Instead, disambiguate the migrating child
+    with a place-id suffix so both distinct places survive.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    coordless_root = db.add_keyword("United States", kw_type="location")
+    springfield_illinois = db.add_keyword(
+        "Springfield", parent_id=coordless_root, kw_type="location",
+    )
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+        "WHERE id = ?",
+        ("springfield-illinois-12345678", 39.78, -89.65, springfield_illinois),
+    )
+    taxonomy_root = db.add_keyword("United States", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+        "WHERE id = ?",
+        ("united-states-country", 39.5, -98.35, taxonomy_root),
+    )
+    springfield_missouri = db.add_keyword(
+        "Springfield", parent_id=taxonomy_root, kw_type="location",
+    )
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+        "WHERE id = ?",
+        ("springfield-missouri-abcdefgh", 37.21, -93.29, springfield_missouri),
+    )
+    fid = db.add_folder("/photos", name="photos")
+    photo_a = db.add_photo(
+        folder_id=fid, filename="springfield-il.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    photo_b = db.add_photo(
+        folder_id=fid, filename="springfield-mo.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (photo_a, springfield_illinois),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (photo_b, springfield_missouri),
+    )
+    db.conn.commit()
+
+    assert db.repair_misclassified_location_ancestors() == 1
+
+    springfields = db.conn.execute(
+        "SELECT id, name, place_id, parent_id FROM keywords "
+        "WHERE place_id IN (?, ?) ORDER BY place_id",
+        (
+            "springfield-illinois-12345678",
+            "springfield-missouri-abcdefgh",
+        ),
+    ).fetchall()
+    # Both distinct Google places survive under the surviving root.
+    assert len(springfields) == 2
+    by_place = {row["place_id"]: dict(row) for row in springfields}
+    illinois = by_place["springfield-illinois-12345678"]
+    missouri = by_place["springfield-missouri-abcdefgh"]
+    assert illinois["parent_id"] == coordless_root
+    assert missouri["parent_id"] == coordless_root
+    # The pre-existing survivor keeps its natural name; the migrating row
+    # gets a place-id suffix so the (name, parent_id) UNIQUE index does
+    # not force one to be deleted.
+    assert illinois["id"] == springfield_illinois
+    assert illinois["name"] == "Springfield"
+    assert missouri["id"] == springfield_missouri
+    assert missouri["name"] == "Springfield (abcdefgh)"
+    # Photo associations remain on the correct Google place — neither
+    # photo has been silently retagged onto the wrong Springfield.
+    photo_tags = db.conn.execute(
+        "SELECT pk.photo_id, k.place_id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id IN (?, ?) ORDER BY pk.photo_id",
+        (photo_a, photo_b),
+    ).fetchall()
+    assert [(row["photo_id"], row["place_id"]) for row in photo_tags] == [
+        (photo_a, "springfield-illinois-12345678"),
+        (photo_b, "springfield-missouri-abcdefgh"),
+    ]
+
+
 def test_repair_misclassified_location_ancestors_keeps_distinct_place_roots(
     tmp_path,
 ):
