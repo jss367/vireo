@@ -19,7 +19,7 @@ pub mod ids {
     pub const NAV_MAP: &str = "nav_map";
     pub const NAV_VARIANTS: &str = "nav_variants";
     pub const NAV_AUDIT: &str = "nav_audit";
-    pub const NAV_COMPARE: &str = "nav_compare";
+    pub const NAV_ID_CONFLICTS: &str = "nav_id_conflicts";
     pub const NAV_JOBS: &str = "nav_jobs";
     pub const NAV_DUPLICATES: &str = "nav_duplicates";
     pub const NAV_LIGHTROOM: &str = "nav_lightroom";
@@ -99,7 +99,7 @@ pub fn route_for_id(id: &str) -> Option<&'static str> {
         ids::NAV_MAP => Some("/map"),
         ids::NAV_VARIANTS => Some("/variants"),
         ids::NAV_AUDIT => Some("/audit"),
-        ids::NAV_COMPARE => Some("/compare"),
+        ids::NAV_ID_CONFLICTS => Some("/id-conflicts"),
         ids::NAV_JOBS => Some("/jobs"),
         ids::NAV_DUPLICATES => Some("/duplicates"),
         ids::NAV_LIGHTROOM => Some("/lightroom"),
@@ -300,7 +300,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id(ids::NAV_COMPARE, "Compare")
+            &MenuItemBuilder::with_id(ids::NAV_ID_CONFLICTS, "ID Conflicts")
                 .accelerator("CmdOrCtrl+0")
                 .build(app)?,
         )
