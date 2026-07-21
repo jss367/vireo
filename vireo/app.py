@@ -3705,6 +3705,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # tags or stale XMP. The method is idempotent (db_meta-gated) so
     # subsequent boots are a cheap SELECT.
     init_db.normalize_keyword_data()
+    repaired_location_ancestors = init_db.repair_misclassified_location_ancestors()
+    if repaired_location_ancestors:
+        log.info(
+            "Restored %d location hierarchy nodes misclassified as taxonomy",
+            repaired_location_ancestors,
+        )
 
     def _sync_mark_species_only(db, log_label):
         """Load taxonomy and run mark_species_keywords synchronously.

@@ -38,6 +38,64 @@ window.L = {
 };
 """
 
+GOOGLE_MAPS_STUB = """
+(function() {
+  function LatLng(lat, lng) {
+    this.lat = function() { return lat; };
+    this.lng = function() { return lng; };
+  }
+  function Map() {
+    this.fitBounds = function() {};
+    this.getZoom = function() { return 14; };
+    this.setZoom = function() {};
+    this.addListener = function() {};
+  }
+  function Marker() {
+    this.addListener = function() {};
+    this.setMap = function() {};
+  }
+  function PlacesService() {
+    this.nearbySearch = function(request, callback) {
+      if (request.type === 'park') {
+        callback([{
+          place_id: 'nearby-park',
+          name: 'Nearby Park',
+          types: ['park'],
+          vicinity: '100 Nearby Street',
+          geometry: {location: new LatLng(32.751, -117.001)}
+        }], 'OK');
+      } else {
+        callback([], 'ZERO_RESULTS');
+      }
+    };
+  }
+  function Geocoder() {
+    this.geocode = function(request, callback) { callback([], 'ZERO_RESULTS'); };
+  }
+  function Autocomplete() {
+    this.bindTo = function() {};
+    this.addListener = function() {};
+    this.getPlace = function() { return {}; };
+  }
+  window.google = {maps: {
+    Map: Map,
+    Marker: Marker,
+    LatLng: LatLng,
+    LatLngBounds: function() { this.extend = function() {}; },
+    Geocoder: Geocoder,
+    SymbolPath: {CIRCLE: 'circle'},
+    MapTypeControlStyle: {HORIZONTAL_BAR: 'horizontal'},
+    event: {addListenerOnce: function(map, event, callback) { callback(); }},
+    places: {
+      PlacesService: PlacesService,
+      PlacesServiceStatus: {OK: 'OK'},
+      Autocomplete: Autocomplete
+    }
+  }};
+  window._vireoLocationReviewMapsReady();
+})();
+"""
+
 
 def _stub_leaflet(route):
     if route.request.url.endswith(".css"):
@@ -143,6 +201,56 @@ def test_location_review_assigns_a_custom_name_to_coordinate_group(
         (photo_ids[0], "Anza-Borrego Desert State Park", 33.25515, -116.4051),
         (photo_ids[1], "Anza-Borrego Desert State Park", 33.25515, -116.4051),
     ]
+
+
+def test_location_review_ranks_saved_and_google_places_by_distance(
+    live_server, page,
+):
+    """A far saved place must not outrank a nearby Google suggestion."""
+    target_id, saved_photo_id = live_server["data"]["photos"][:2]
+    with live_server["db"].conn:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (32.750, -117.000, target_id),
+        )
+        saved_id = live_server["db"]._upsert_one_keyword(
+            "Far Saved Place", None, latitude=32.938, longitude=-117.000,
+        )
+        live_server["db"].conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (saved_photo_id, saved_id),
+        )
+
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(json={"google_maps_api_key": "test-key"}),
+    )
+    page.route(
+        "https://maps.googleapis.com/maps/api/js**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/javascript",
+            body=GOOGLE_MAPS_STUB,
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoId => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: [photoId]}))",
+        target_id,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+
+    candidates = page.locator(".location-review-candidate")
+    expect(candidates).to_have_count(2)
+    expect(candidates.first).to_contain_text("Nearby Park")
+    saved_candidate = candidates.filter(has_text="Far Saved Place")
+    expect(saved_candidate.locator(".location-review-candidate-badge")).to_have_text(
+        "Previously used"
+    )
+    expect(saved_candidate.locator(".location-review-candidate-meta")).not_to_contain_text(
+        "Saved location"
+    )
 
 
 def test_location_review_photo_marker_opens_the_photo_preview(live_server, page):

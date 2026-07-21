@@ -7445,6 +7445,65 @@ def test_batch_photo_location_sets_all_selected_photos(app_and_db, monkeypatch):
     assert entry["item_count"] == len(photo_ids)
 
 
+def test_map_review_assignment_repairs_legacy_california_taxonomy_node(
+    app_and_db,
+):
+    """Map assignment heals the pre-type-preservation California corruption."""
+    app, db = app_and_db
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+    county_id = db.add_keyword(
+        "San Diego County", parent_id=state_id, kw_type="location",
+    )
+    photo_id = db.get_photos()[0]["id"]
+
+    response = app.test_client().post(
+        "/api/batch/location",
+        json={
+            "photo_ids": [photo_id],
+            "place_id": "nearby-park",
+            "place": {
+                "place_id": "nearby-park",
+                "name": "Nearby Park",
+                "types": ["park"],
+                "lat": 32.75,
+                "lng": -117.0,
+                "address_components": [
+                    {"name": "United States", "types": ["country"]},
+                    {
+                        "name": "California",
+                        "types": ["administrative_area_level_1"],
+                    },
+                    {
+                        "name": "San Diego County",
+                        "types": ["administrative_area_level_2"],
+                    },
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    state = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (state_id,),
+    ).fetchone()
+    location = db.conn.execute(
+        "SELECT k.name, k.parent_id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (photo_id,),
+    ).fetchone()
+    assert dict(state) == {
+        "type": "location",
+        "is_species": 0,
+        "taxon_id": None,
+    }
+    assert dict(location) == {"name": "Nearby Park", "parent_id": county_id}
+
+
 def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
     """Batch free-text location POST stores one location across selected photos."""
     app, db = app_and_db

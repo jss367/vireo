@@ -10257,6 +10257,7 @@ class Database:
 
     def _upsert_one_keyword(
         self, name, parent_id, place_id=None, latitude=None, longitude=None,
+        reuse_location_component=False,
     ):
         """Insert-or-fetch a single ``type='location'`` keyword row.
 
@@ -10270,6 +10271,11 @@ class Database:
           whose ``place_id`` is also NULL. SELECT-then-INSERT (rather than
           ``INSERT OR IGNORE``) so we never collide a coordless parent row
           with a place_id-bearing leaf that happens to share a name+parent.
+        * ``reuse_location_component`` is true only for administrative address
+          components. In that case, a matching location hierarchy row can be
+          reused even if it already carries a place id. A coordless matching
+          row can also absorb the selected administrative place's id and
+          coordinates instead of creating a suffixed duplicate.
 
         Cross-type collision handling: the table-level ``UNIQUE(name,
         parent_id)`` constraint doesn't filter by ``type``, so a pre-existing
@@ -10286,6 +10292,67 @@ class Database:
         if not name:
             raise ValueError("keyword name is empty after normalization")
         if place_id is not None:
+            if reuse_location_component:
+                existing_place = self.conn.execute(
+                    "SELECT id FROM keywords WHERE place_id = ?",
+                    (place_id,),
+                ).fetchone()
+                if parent_id is None:
+                    existing_component = self.conn.execute(
+                        "SELECT id, type FROM keywords "
+                        "WHERE name = ? AND parent_id IS NULL "
+                        "  AND place_id IS NULL "
+                        "ORDER BY CASE WHEN type = 'location' THEN 0 "
+                        "  WHEN type = 'taxonomy' THEN 1 ELSE 2 END, id "
+                        "LIMIT 1",
+                        (name,),
+                    ).fetchone()
+                else:
+                    existing_component = self.conn.execute(
+                        "SELECT id, type FROM keywords "
+                        "WHERE name = ? AND parent_id = ? "
+                        "  AND place_id IS NULL "
+                        "LIMIT 1",
+                        (name, parent_id),
+                    ).fetchone()
+                if (
+                    existing_component is not None
+                    and (
+                        existing_component["type"] == "location"
+                        or self._restore_misclassified_location_ancestor(
+                            existing_component["id"],
+                            allow_leaf=True,
+                        )
+                    )
+                ):
+                    if (
+                        existing_place is not None
+                        and existing_place["id"] != existing_component["id"]
+                    ):
+                        # Legacy admin disambiguation could leave a suffixed
+                        # place-bearing row (e.g. "California (suffix)")
+                        # alongside the matching coordless hierarchy row.
+                        # Re-selecting the same Google place would otherwise
+                        # fail the ON CONFLICT(place_id) DO UPDATE with
+                        # UNIQUE(name, parent_id) and re-suffix instead of
+                        # reusing the hierarchy row. Merge the suffixed row
+                        # into the hierarchy row and let it own the place
+                        # metadata so future assignments settle on one row.
+                        self._merge_keyword_into(
+                            existing_place["id"], existing_component["id"],
+                        )
+                    self.conn.execute(
+                        "UPDATE keywords SET place_id = ?, type = 'location', "
+                        "is_species = 0, taxon_id = NULL, latitude = ?, "
+                        "longitude = ? WHERE id = ?",
+                        (
+                            place_id,
+                            latitude,
+                            longitude,
+                            existing_component["id"],
+                        ),
+                    )
+                    return existing_component["id"]
             insert_sql = (
                 "INSERT INTO keywords "
                 "(name, parent_id, type, place_id, latitude, longitude) "
@@ -10293,6 +10360,9 @@ class Database:
                 "ON CONFLICT(place_id) WHERE place_id IS NOT NULL DO UPDATE SET "
                 "  name = excluded.name, "
                 "  parent_id = excluded.parent_id, "
+                "  type = 'location', "
+                "  is_species = 0, "
+                "  taxon_id = NULL, "
                 "  latitude = excluded.latitude, "
                 "  longitude = excluded.longitude "
                 "RETURNING id"
@@ -10303,6 +10373,41 @@ class Database:
                 )
                 return cur.fetchone()["id"]
             except sqlite3.IntegrityError:
+                if reuse_location_component:
+                    place_row = self.conn.execute(
+                        "SELECT id FROM keywords WHERE place_id = ?",
+                        (place_id,),
+                    ).fetchone()
+                    if place_row is None:
+                        if parent_id is None:
+                            clash = self.conn.execute(
+                                "SELECT id, type, place_id FROM keywords "
+                                "WHERE name = ? AND parent_id IS NULL",
+                                (name,),
+                            ).fetchone()
+                        else:
+                            clash = self.conn.execute(
+                                "SELECT id, type, place_id FROM keywords "
+                                "WHERE name = ? AND parent_id = ?",
+                                (name, parent_id),
+                            ).fetchone()
+                        if (
+                            clash is not None
+                            and clash["place_id"] is None
+                            and (
+                                clash["type"] == "location"
+                                or self._restore_misclassified_location_ancestor(
+                                    clash["id"],
+                                    allow_leaf=True,
+                                )
+                            )
+                        ):
+                            self.conn.execute(
+                                "UPDATE keywords SET place_id = ?, latitude = ?, "
+                                "longitude = ? WHERE id = ?",
+                                (place_id, latitude, longitude, clash["id"]),
+                            )
+                            return clash["id"]
                 # ON CONFLICT(place_id) handles same-place-id re-picks. The
                 # remaining failure mode is the table-level UNIQUE(name,
                 # parent_id): a *different* keyword (different place_id, or
@@ -10326,21 +10431,56 @@ class Database:
                     ) from inner_err
 
         if parent_id is None:
-            existing = self.conn.execute(
-                "SELECT id FROM keywords "
-                "WHERE name = ? AND parent_id IS NULL "
-                "  AND type = 'location' AND place_id IS NULL",
-                (name,),
-            ).fetchone()
+            if reuse_location_component:
+                # Google's address_components carry no per-component
+                # place_id, so when the DB has any place-bearing root at
+                # this name (e.g. Georgia the state saved with a
+                # place_id), we cannot prove that a component-only parent
+                # of the same name refers to that specific Google place —
+                # a later same-name second place (Georgia the country)
+                # would misparent under the first one's root. Reuse a
+                # coordless root when one exists (safe shared anchor);
+                # otherwise fall through to inserting a fresh coordless
+                # anchor rather than silently attaching under whichever
+                # place-bearing row happens to have the lower id.
+                candidates = self.conn.execute(
+                    "SELECT id, type, place_id FROM keywords "
+                    "WHERE name = ? AND parent_id IS NULL "
+                    "  AND type IN ('location', 'taxonomy') "
+                    "ORDER BY "
+                    "  CASE WHEN type = 'location' THEN 0 ELSE 1 END, "
+                    "  CASE WHEN place_id IS NULL THEN 0 ELSE 1 END, "
+                    "  id",
+                    (name,),
+                ).fetchall()
+                existing = None
+                if candidates:
+                    top = candidates[0]
+                    if top["place_id"] is None:
+                        existing = top
+            else:
+                existing = self.conn.execute(
+                    "SELECT id, type FROM keywords "
+                    "WHERE name = ? AND parent_id IS NULL "
+                    "  AND type = 'location' AND place_id IS NULL",
+                    (name,),
+                ).fetchone()
         else:
             existing = self.conn.execute(
-                "SELECT id FROM keywords "
+                "SELECT id, type FROM keywords "
                 "WHERE name = ? AND parent_id = ? "
-                "  AND type = 'location' AND place_id IS NULL",
+                "  AND type = 'location' "
+                + ("" if reuse_location_component else "AND place_id IS NULL"),
                 (name, parent_id),
             ).fetchone()
         if existing:
-            return existing["id"]
+            if existing["type"] == "location":
+                return existing["id"]
+            if self._restore_misclassified_location_ancestor(
+                existing["id"],
+                allow_leaf=reuse_location_component,
+            ):
+                return existing["id"]
 
         try:
             cur = self.conn.execute(
@@ -10369,14 +10509,202 @@ class Database:
                 # Should be unreachable — re-raise the original error
                 # rather than swallow it.
                 raise
-            if clash["type"] == "location" and clash["place_id"] is None:
+            if (
+                clash["type"] == "location"
+                and (
+                    clash["place_id"] is None
+                    or reuse_location_component
+                )
+            ):
                 # Defensive: our narrow SELECT missed it (shouldn't happen,
                 # but reusing it is safe and idempotent).
+                return clash["id"]
+            if self._restore_misclassified_location_ancestor(
+                clash["id"],
+                allow_leaf=reuse_location_component,
+            ):
+                # Older taxonomy marking could retype an administrative
+                # location node such as United States -> California even
+                # though location children still hung below it. Reuse the
+                # repaired node instead of making every later Google-place
+                # assignment fail on the stale type.
                 return clash["id"]
             raise RuntimeError(
                 f"keyword '{name}' (parent_id={parent_id}) exists with "
                 f"type={clash['type']!r}, can't reuse for location chain"
             ) from integrity_err
+
+    def _restore_misclassified_location_ancestor(
+        self, keyword_id, allow_leaf=False,
+    ):
+        """Restore one legacy taxonomy row that is structurally a location.
+
+        Before explicit keyword types were protected during taxonomy marking,
+        geographic homonyms such as ``California`` could be changed from a
+        location into taxonomy. A taxonomy row below a location parent that
+        sits above a location descendant connected only through other
+        taxonomy rows is an administrative location-tree node. A place-
+        bearing row is also unambiguously a location, regardless of where
+        it sits. ``allow_leaf`` is reserved for an explicit Google
+        administrative-component match, where the place response supplies
+        the evidence a coordless leaf lacks during startup.
+
+        Root rows (``parent_id IS NULL``) lack a location parent proving
+        they belong to a legacy location chain, so a location descendant
+        alone is not enough evidence — a genuine taxonomy root with a
+        mixed-hierarchy location descendant (e.g. ``Ardea`` → ``Backyard``)
+        would otherwise be retyped and lose its taxonomy metadata. A bare
+        name collision from ``allow_leaf`` is also not enough: a genuine
+        root taxonomy homonym such as ``Turkey`` (the species) would be
+        clobbered when the user later saves the Google country ``Turkey``.
+        SQLite permits multiple ``parent_id IS NULL`` rows with the same
+        name, so the caller can safely insert a separate location root
+        instead. Roots therefore need stronger structural evidence: an
+        existing ``place_id`` or a location descendant reachable through
+        taxonomy rows. Clear stale taxonomy metadata and restore the
+        row's type when evidence is sufficient.
+        """
+        row = self.conn.execute(
+            "WITH RECURSIVE descendants(id, type) AS ("
+            "  SELECT child.id, child.type FROM keywords child "
+            "  WHERE child.parent_id = ? "
+            "  UNION "
+            "  SELECT child.id, child.type FROM keywords child "
+            "  JOIN descendants parent ON child.parent_id = parent.id "
+            "  WHERE parent.type = 'taxonomy'"
+            ") "
+            "SELECT k.id FROM keywords k "
+            "LEFT JOIN keywords parent ON parent.id = k.parent_id "
+            "WHERE k.id = ? AND k.type = 'taxonomy' "
+            "  AND (k.parent_id IS NULL OR parent.type = 'location') "
+            "  AND ("
+            "    k.place_id IS NOT NULL "
+            "    OR (parent.type = 'location' AND ("
+            "      ? OR EXISTS ("
+            "        SELECT 1 FROM descendants WHERE type = 'location'"
+            "      )"
+            "    ))"
+            "    OR (? AND EXISTS ("
+            "      SELECT 1 FROM descendants WHERE type = 'location'"
+            "    ))"
+            "  )",
+            (keyword_id, keyword_id, allow_leaf, allow_leaf),
+        ).fetchone()
+        if row is None:
+            return False
+        self.conn.execute(
+            "UPDATE keywords SET type = 'location', is_species = 0, "
+            "taxon_id = NULL WHERE id = ?",
+            (keyword_id,),
+        )
+        return True
+
+    def repair_misclassified_location_ancestors(self):
+        """Restore every location-tree node damaged by legacy taxonomy marking.
+
+        This is intentionally idempotent and narrowly structural: only a
+        taxonomy chain between location nodes is changed. Each pass restores
+        the next node from the location parent downward. Genuine taxonomy
+        keywords and cross-type name collisions keep the existing conflict
+        protection. A final pass collapses same-name location roots that a
+        prior retype could have left alongside a pre-existing coordless
+        root — SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
+        ``parent_id IS NULL``, so without this later child-place upserts
+        would settle on one root and orphan the other's descendants.
+        """
+        repaired = 0
+        while True:
+            rows = self.conn.execute(
+                "SELECT k.id FROM keywords k "
+                "LEFT JOIN keywords parent ON parent.id = k.parent_id "
+                "WHERE k.type = 'taxonomy' "
+                "  AND (k.parent_id IS NULL OR parent.type = 'location')"
+            ).fetchall()
+            repaired_this_pass = 0
+            for row in rows:
+                if self._restore_misclassified_location_ancestor(row["id"]):
+                    repaired += 1
+                    repaired_this_pass += 1
+            if not repaired_this_pass:
+                break
+        merged_roots = self._merge_duplicate_location_roots()
+        if repaired or merged_roots:
+            self.conn.commit()
+        if repaired:
+            log.info(
+                "repaired %d misclassified location ancestor keyword(s)",
+                repaired,
+            )
+        if merged_roots:
+            log.info(
+                "merged %d duplicate location root keyword(s)",
+                merged_roots,
+            )
+        return repaired
+
+    def _merge_duplicate_location_roots(self):
+        """Collapse same-name ``type='location'`` roots into a single row.
+
+        Retyping a place-bearing taxonomy root at startup can leave two
+        location rows with the same ``name`` and ``parent_id IS NULL``
+        because SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
+        NULL parents. Multiple coordless duplicates without any competing
+        place-bearing root describe the same neutral hierarchy anchor and
+        must collapse so children stay under one shared parent.
+
+        Whenever any place-bearing root exists at this name, coordless
+        roots are neutral hierarchy anchors that
+        ``_upsert_one_keyword`` installs (or preserves) for
+        component-only references — Google's per-component
+        ``address_components`` carry no ``place_id``, so we cannot prove
+        which specific Google place the caller meant. Merging a
+        coordless anchor into the place-bearing root would silently
+        reparent its descendants under that Google place — the wrong
+        answer once a second same-name Google place appears. Leave
+        place-bearing roots and their coordless anchors alone; only
+        consolidate coordless duplicates so ambiguous children still
+        share one shared parent.
+        """
+        duplicates = self.conn.execute(
+            "SELECT name FROM keywords "
+            "WHERE type = 'location' AND parent_id IS NULL "
+            "GROUP BY name HAVING COUNT(*) > 1"
+        ).fetchall()
+        merged = 0
+        for dup in duplicates:
+            candidates = self.conn.execute(
+                "SELECT id, place_id, latitude, longitude FROM keywords "
+                "WHERE name = ? AND parent_id IS NULL AND type = 'location' "
+                "ORDER BY id",
+                (dup["name"],),
+            ).fetchall()
+            if len(candidates) < 2:
+                continue
+            place_bearing = [c for c in candidates if c["place_id"] is not None]
+            coordless = [c for c in candidates if c["place_id"] is None]
+            if place_bearing:
+                # Any place-bearing root at this name means coordless
+                # anchors cannot be safely merged into it: address
+                # components have no place_id, so coordless-anchor
+                # descendants may refer to a different Google place with
+                # the same name. Preserve place-bearing roots alongside
+                # coordless anchors; only collapse coordless duplicates
+                # into a single shared anchor.
+                if len(coordless) < 2:
+                    continue
+                survivor_id = coordless[0]["id"]
+                for cand in coordless[1:]:
+                    merged += self._merge_keyword_into(
+                        cand["id"], survivor_id,
+                    )
+                continue
+            # No place-bearing roots — every candidate is coordless.
+            # Legacy duplicate anchors describe the same neutral parent
+            # and can safely merge into the oldest survivor.
+            survivor_id = candidates[0]["id"]
+            for cand in candidates[1:]:
+                merged += self._merge_keyword_into(cand["id"], survivor_id)
+        return merged
 
     @staticmethod
     def _location_component_rank(component):
@@ -10452,28 +10780,40 @@ class Database:
         normalized.sort(key=lambda item: (item[0], item[1]))
         return [item[2] for item in normalized]
 
-    def _upsert_location_parent_chain(self, components, leaf_name="", leaf_types=None):
+    def _upsert_location_parent_chain(
+        self,
+        components,
+        leaf_name="",
+        leaf_types=None,
+        exclude_keyword_id=None,
+    ):
         """Upsert a chain of parent location keywords from ``address_components``.
 
         Walks broadest → narrowest, returning the list of visited keyword ids
         in broadest → narrowest order. Returns an empty list if ``components``
         is empty / all entries lack a name. The deepest (narrowest) parent is
-        ``chain[-1]`` if non-empty. Caller is responsible for the surrounding
-        transaction.
+        ``chain[-1]`` if non-empty. ``exclude_keyword_id`` prevents an
+        existing selected place from being reused as its own parent when its
+        display name differs from the matching address component. Caller is
+        responsible for the surrounding transaction.
         """
         chain: list[int] = []
         parent_id = None
         for comp in self._location_parent_components(components, leaf_name, leaf_types):
             if not comp.get("name"):
                 continue
-            parent_id = self._upsert_one_keyword(
+            component_id = self._upsert_one_keyword(
                 name=comp["name"],
                 parent_id=parent_id,
                 place_id=None,
                 latitude=None,
                 longitude=None,
+                reuse_location_component=True,
             )
-            chain.append(parent_id)
+            if component_id == exclude_keyword_id:
+                continue
+            parent_id = component_id
+            chain.append(component_id)
         return chain
 
     def upsert_place_chain(self, details):
@@ -10502,10 +10842,17 @@ class Database:
         components = details.get("address_components") or []
 
         with self.conn:
+            existing_leaf = self.conn.execute(
+                "SELECT id FROM keywords WHERE place_id = ?",
+                (details["place_id"],),
+            ).fetchone()
             chain = self._upsert_location_parent_chain(
                 components,
                 leaf_name=name,
                 leaf_types=details.get("types"),
+                exclude_keyword_id=(
+                    existing_leaf["id"] if existing_leaf is not None else None
+                ),
             )
             parent_id = chain[-1] if chain else None
             leaf_id = self._upsert_one_keyword(
@@ -10514,6 +10861,11 @@ class Database:
                 place_id=details["place_id"],
                 latitude=lat,
                 longitude=lng,
+                reuse_location_component=(
+                    self._location_component_rank({
+                        "types": details.get("types"),
+                    }) is not None
+                ),
             )
         return leaf_id
 
@@ -12158,14 +12510,46 @@ class Database:
         """
         merged = 1
         src = self.conn.execute(
-            "SELECT name, type, is_species, latitude, longitude, taxon_id "
-            "FROM keywords WHERE id = ?",
+            "SELECT name, type, is_species, latitude, longitude, taxon_id, "
+            "place_id FROM keywords WHERE id = ?",
             (src_id,),
         ).fetchone()
         dst = self.conn.execute(
-            "SELECT name, type, is_species FROM keywords WHERE id = ?",
+            "SELECT name, type, is_species, place_id FROM keywords WHERE id = ?",
             (dst_id,),
         ).fetchone()
+        # Transfer the source's Google ``place_id`` onto the destination when
+        # the destination lacks one before the row is deleted below. Without
+        # this, merging a coordless sibling on top of a place-bearing sibling
+        # (or the reverse) silently drops the Google place link — repeat
+        # startup repair of duplicate location roots would otherwise strip
+        # the place ID from a repaired child (e.g. ``United States ->
+        # California`` present as both a coordless branch and a place-bearing
+        # branch). The partial ``UNIQUE(place_id) WHERE place_id IS NOT NULL``
+        # index requires clearing the source first before moving the value.
+        # When the transfer happens, force the destination's coordinates to
+        # match the source's — the metadata fold below only fills coordless
+        # rows via ``COALESCE(latitude, ?)``, so a destination that carried
+        # unrelated stale coords would otherwise represent the incoming
+        # Google place at the wrong point (saved-suggestion ranking and map
+        # markers then use the stale location instead of the place's actual
+        # coordinates).
+        place_id_transferred = (
+            src is not None
+            and dst is not None
+            and src["place_id"] is not None
+            and dst["place_id"] is None
+        )
+        if place_id_transferred:
+            self.conn.execute(
+                "UPDATE keywords SET place_id = NULL WHERE id = ?",
+                (src_id,),
+            )
+            self.conn.execute(
+                "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+                "WHERE id = ?",
+                (src["place_id"], src["latitude"], src["longitude"], dst_id),
+            )
         if src is not None:
             # A species-bearing row being RETYPED into a non-taxonomy
             # destination must not leak its species flag or taxon link
@@ -12635,7 +13019,8 @@ class Database:
         # Reparent children onto the destination before deleting, or the
         # keywords.parent_id FK aborts the merge mid-way.
         children = self.conn.execute(
-            "SELECT id, name, type FROM keywords WHERE parent_id = ?", (src_id,)
+            "SELECT id, name, type, place_id FROM keywords WHERE parent_id = ?",
+            (src_id,),
         ).fetchall()
         for child in children:
             try:
@@ -12645,10 +13030,32 @@ class Database:
                 )
             except sqlite3.IntegrityError:
                 existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE parent_id = ? AND name = ?",
+                    "SELECT id, type, place_id FROM keywords "
+                    "WHERE parent_id = ? AND name = ?",
                     (dst_id, child["name"]),
                 ).fetchone()
-                if existing["type"] == child["type"]:
+                if (
+                    existing["type"] == "location"
+                    and child["type"] == "location"
+                    and existing["place_id"] is not None
+                    and child["place_id"] is not None
+                    and existing["place_id"] != child["place_id"]
+                ):
+                    # Two location siblings sharing (name, parent_id) but
+                    # pointing at distinct Google places (e.g. two direct
+                    # ``United States -> Springfield`` rows created from
+                    # different place IDs). A recursive merge here would
+                    # delete the migrating row and silently retag its
+                    # photos onto a sibling that represents a different
+                    # Google place. Disambiguate the migrating child with a
+                    # place-id suffix so both Google places survive.
+                    suffix = child["place_id"][-8:]
+                    disambiguated = f"{child['name']} ({suffix})"
+                    self.conn.execute(
+                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
+                        (dst_id, disambiguated, child["id"]),
+                    )
+                elif existing["type"] == child["type"]:
                     merged += self._merge_keyword_into(child["id"], existing["id"])
                 else:
                     # Same name + parent but different type: outside the
