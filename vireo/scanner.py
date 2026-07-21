@@ -1670,10 +1670,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # instead; the base stays linked but is_root=0. See
     # ``new_images.mapped_roots``. ``effective_restrict_dirs`` (bundle-filtered)
     # is the set actually enumerated, so root marking matches what was scanned.
+    _effective_restrict_paths = None
     _restrict_root_paths = None
     if restrict_dirs is not None:
+        _effective_restrict_paths = {
+            os.path.normpath(str(d)) for d in effective_restrict_dirs
+        }
         _restrict_root_paths = (
-            {os.path.normpath(str(d)) for d in effective_restrict_dirs}
+            _effective_restrict_paths
             if register_restrict_dirs_as_roots else set()
         )
 
@@ -1702,10 +1706,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # subtrees from prior scans / other workspaces) into the active
         # workspace. Only the ``_restrict_root_paths`` themselves should
         # link. See PR #1107 review (line 1186).
+        normalized_folder = os.path.normpath(folder_str)
+        is_restrict_target = (
+            _effective_restrict_paths is not None
+            and normalized_folder in _effective_restrict_paths
+        )
         link_to_ws = (
-            _restrict_root_paths is None
-            or not register_restrict_dirs_as_roots
-            or os.path.normpath(folder_str) in _restrict_root_paths
+            _effective_restrict_paths is None
+            or (register_restrict_dirs_as_roots and is_restrict_target)
         )
 
         folder_id = db.add_folder(
@@ -1715,6 +1723,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             workspace_root=is_ws_root,
             link_to_workspace=link_to_ws,
         )
+        if (
+            is_restrict_target
+            and not register_restrict_dirs_as_roots
+            and db._active_workspace_id is not None
+        ):
+            # Snapshot imports and metadata repair select exact leaf folders
+            # below an existing workspace root. Link only that leaf: the
+            # regular subtree-linking API would also attach unrelated known
+            # descendants that this restricted scan never touched.
+            db.add_workspace_folder_exact(
+                db._active_workspace_id, folder_id, is_root=False,
+            )
         folder_cache[folder_str] = folder_id
         return folder_id
 
