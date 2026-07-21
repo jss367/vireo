@@ -397,6 +397,17 @@
       // would re-enable the scan button and risk overlapping scan jobs.
       if (_scanInProgress) return;
       if (!data || !data.found) return;
+      // Wait for the first ``refreshFilterMatches`` pass to populate
+      // ``_filterMatchedIds`` before rendering. Without this, a persisted /
+      // deep-linked filter races against ``VireoFilter.init`` on
+      // DOMContentLoaded — if the last-scan fetch resolves first, groups
+      // the filter would hide still render with their resolve/trash actions
+      // enabled until the filter query later re-renders (r3619553534).
+      // ``_filterReady`` always resolves (even without filters: the no-op
+      // pass in ``refreshFilterMatches`` still marks the epoch ready), so
+      // this never blocks indefinitely.
+      await _filterReady;
+      if (_scanInProgress) return;
       renderResults(data.result || {});
       var banner = document.getElementById('restoredBanner');
       document.getElementById('restoredAgo').textContent =
@@ -501,6 +512,15 @@
   // apply/bulk-resolve on groups outside the current chips.
   var _filterEpoch = 0;
 
+  // Resolves the first time ``refreshFilterMatches`` finishes (with or
+  // without active filters). ``tryRestoreLastScan`` awaits this so a
+  // persisted/deep-linked filter can't race the last-scan render and
+  // briefly expose groups the filter should hide. Both paths still work
+  // when no filter is active — the no-op branch of
+  // ``refreshFilterMatches`` still resolves this.
+  var _filterReadyResolve;
+  var _filterReady = new Promise(function(resolve) { _filterReadyResolve = resolve; });
+
   async function refreshFilterMatches() {
     var myEpoch = ++_filterEpoch;
     var hasFilters = window.VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
@@ -554,6 +574,10 @@
     // resurrect stale duplicate cards + actions and even let the user
     // kick off a second overlapping scan.
     if (_lastScanResult && !_scanInProgress) renderResults(_lastScanResult);
+    // Release ``tryRestoreLastScan`` — the first pass has now set
+    // ``_filterMatchedIds`` (or left it null when no filters are active),
+    // so restoring a cached scan can safely render.
+    if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
   }
 
   function groupMatchesFilter(group) {
@@ -1704,7 +1728,14 @@
     root: document.getElementById('vireoFilterBar'),
     scopeLabel: 'Duplicates \u00b7 Grouped matches',
     onChange: refreshFilterMatches,
-  }).then(refreshFilterMatches).catch(function() {});
+  }).then(refreshFilterMatches).catch(function() {
+    // VireoFilter.init failing means no filter chips will ever load, so
+    // there are no filters for the render to respect. Release
+    // ``tryRestoreLastScan`` immediately \u2014 otherwise a cached last scan
+    // would hang unrendered forever waiting for a filter query that
+    // never runs.
+    if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
+  });
 </script>
 </body>
 </html>

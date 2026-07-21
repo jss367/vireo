@@ -19128,12 +19128,39 @@ class Database:
                     )
                     return "NOT " + exists, params
             if field == "needs_review":
+                # Splits by caller, mirroring prediction_status "is not":
+                #   row_scoped=True (get_predictions) → for the False case,
+                #     positive EXISTS on a non-pending row so a photo with
+                #     mixed pending + accepted/rejected siblings still
+                #     surfaces the non-pending row that satisfies "Needs
+                #     review is No". NOT EXISTS(pending) would drop the
+                #     whole photo the moment any sibling is pending, hiding
+                #     rows the visible filter should keep (r3619118948).
+                #     The row-level pass in
+                #     ``_filter_prediction_rows_by_rules`` then removes the
+                #     pending sibling rows.
+                #   row_scoped=False (default; photo queries, saved
+                #     collections) → broad NOT EXISTS so photos with no
+                #     pending prediction (including none at all) satisfy
+                #     "Needs review is No".
+                if _truthy(value):
+                    return _prediction_exists(
+                        "COALESCE(prv.status, 'pending') = 'pending'",
+                        [],
+                        review_join=True,
+                    )
+                if row_scoped:
+                    return _prediction_exists(
+                        "COALESCE(prv.status, 'pending') != 'pending'",
+                        [],
+                        review_join=True,
+                    )
                 exists, params = _prediction_exists(
                     "COALESCE(prv.status, 'pending') = 'pending'",
                     [],
                     review_join=True,
                 )
-                return (exists if _truthy(value) else "NOT " + exists), params
+                return "NOT " + exists, params
             if field == "has_mask":
                 has = "p.mask_path IS NOT NULL"
                 return (has if _truthy(value) else f"NOT ({has})"), []

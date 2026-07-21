@@ -738,6 +738,41 @@ def test_get_predictions_status_not_in_keeps_pending_siblings(app_and_db):
     )
 
 
+def test_get_predictions_needs_review_no_keeps_non_pending_siblings(app_and_db):
+    """``Needs review is No`` on a photo with one pending and one rejected
+    sibling must return the rejected row. The previous SQL translated the
+    False case as a photo-level ``NOT EXISTS(pending)``, dropping the whole
+    photo the moment any sibling was pending — hiding the non-pending row
+    the visible filter should have surfaced (r3619118948).
+    """
+    _, db = app_and_db
+    photos = db.get_photos()
+    photo_id = photos[0]['id']
+    det = _make_detection(db, photo_id)
+    db.add_prediction(detection_id=det, species='PendingPick', confidence=0.9,
+                      model='test-model', category='new')
+    db.add_prediction(detection_id=det, species='RejectedPick', confidence=0.5,
+                      model='test-model', category='new')
+    rejected = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
+        (det,),
+    ).fetchone()
+    db.update_prediction_status(rejected['id'], 'rejected')
+
+    rules = [{'field': 'needs_review', 'op': 'is', 'value': False}]
+    preds = db.get_predictions(rules=rules)
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
+    assert 'RejectedPick' in returned, (
+        'needs_review=false translated to NOT EXISTS(pending) at the photo '
+        'level and dropped the whole photo, hiding the non-pending sibling '
+        'the filter should have kept'
+    )
+    assert 'PendingPick' not in returned, (
+        'row-level pass failed to drop the pending sibling from the '
+        'needs_review=false result set'
+    )
+
+
 def test_get_predictions_classifier_model_is_not_keeps_other_model_siblings(app_and_db):
     """``classifier_model is not X`` on a photo with predictions from
     both model X and model Y must return the Y row. The previous SQL
