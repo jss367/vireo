@@ -1308,7 +1308,7 @@ body {
           method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
         });
       }
-      showToast('Assigned “' + choice.name + '” to ' + formatNumber(group.count) + (group.count === 1 ? ' photo' : ' photos'));
+      showToast('Assigned “' + choice.name + '” to ' + formatNumber(group.count) + (group.count === 1 ? ' photo' : ' photos'), 'success');
       state.groups.splice(state.currentIndex, 1);
       state.assignedGroups += 1;
       if (state.currentIndex >= state.groups.length) state.currentIndex = Math.max(0, state.groups.length - 1);
