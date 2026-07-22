@@ -514,6 +514,14 @@ var selection = new Set();
 var missLoadRequestId = 0;
 var appliedMissFilters = { rules: [], visual: null };
 var initializingMissFilters = true;
+// Set when a ?collection_id=/?folder_id= deep link points at a scope we can't
+// resolve at boot (deleted collection/folder, degraded collection, or a
+// /api/collections|/api/folders fetch failure). Skipping the missing rule
+// silently would widen the initial /api/misses POST to the entire workspace,
+// and bulk reject/recompute would then operate on photos the user never
+// scoped. Fail closed instead: render an empty grid with an explanatory
+// banner and block recompute until the user edits the filter bar.
+var legacyScopeError = null;
 var MISS_TUNING_CONTROL_IDS = [
   'missCfgDetectorFloor',
   'missCfgNoSubject',
@@ -620,11 +628,26 @@ function missRulesContainField(node, field) {
 
 function applyMissFilters() {
   if (initializingMissFilters) return;
+  // A user-driven filter change replaces the unresolved deep-link scope with
+  // whatever they typed, so the fail-closed guard no longer applies.
+  clearLegacyScopeError();
   invalidateMissPreview();
   selection.clear();
   focusedCategory = null;
   focusedIndex = -1;
   loadMisses();
+}
+
+function clearLegacyScopeError() {
+  if (!legacyScopeError) return;
+  legacyScopeError = null;
+  var b = document.getElementById('scopeBanner');
+  if (b) {
+    b.hidden = true;
+    b.textContent = '';
+  }
+  // Recompute stays disabled until loadMissConfig re-enables it via its
+  // normal control-enablement path; don't force it on here.
 }
 
 function normalizedRuleRoot(raw) {
@@ -641,6 +664,28 @@ function appendRuleRoot(target, source) {
   } else {
     target.rules.push(root);
   }
+}
+
+function noteLegacyScopeError(message) {
+  // Append when multiple deep-link params fail (e.g. a link with both a
+  // missing collection and a missing folder) so the banner surfaces both.
+  legacyScopeError = legacyScopeError
+    ? legacyScopeError + ' ' + message
+    : message;
+  if (typeof showToast === 'function') showToast(message, 'error');
+  var b = document.getElementById('scopeBanner');
+  if (b) {
+    // Rebuild via textContent + a fresh anchor node so a collection name
+    // that contains HTML metacharacters can't inject markup into the page.
+    b.textContent = legacyScopeError + ' ';
+    var reset = document.createElement('a');
+    reset.href = '/misses';
+    reset.textContent = 'Show all misses';
+    b.appendChild(reset);
+    b.hidden = false;
+  }
+  var recomputeBtn = document.getElementById('missRecomputeBtn');
+  if (recomputeBtn) recomputeBtn.disabled = true;
 }
 
 async function applyLegacyMissScopes() {
@@ -665,36 +710,77 @@ async function applyLegacyMissScopes() {
     ? VireoFilter.getVisual()
     : null;
 
+  // Track fetch failures separately from empty responses: a failed
+  // /api/collections must fail closed instead of being treated as an
+  // empty list (which would silently drop the collection rule and load
+  // every miss in the workspace).
+  var collectionsFetchFailed = false;
+  var foldersFetchFailed = false;
   var requests = [];
   requests.push(
     isNaN(collectionId)
       ? Promise.resolve([])
-      : fetch('/api/collections').then(function(r) { return r.ok ? r.json() : []; })
-          .catch(function() { return []; })
+      : fetch('/api/collections').then(function(r) {
+          if (!r.ok) { collectionsFetchFailed = true; return []; }
+          return r.json();
+        }).catch(function() { collectionsFetchFailed = true; return []; })
   );
   requests.push(
     isNaN(folderId)
       ? Promise.resolve([])
-      : fetch('/api/folders').then(function(r) { return r.ok ? r.json() : []; })
-          .catch(function() { return []; })
+      : fetch('/api/folders').then(function(r) {
+          if (!r.ok) { foldersFetchFailed = true; return []; }
+          return r.json();
+        }).catch(function() { foldersFetchFailed = true; return []; })
   );
   var results = await Promise.all(requests);
 
   if (!isNaN(collectionId)) {
-    var collection = (results[0] || []).find(function(c) { return c.id === collectionId; });
-    if (collection && !collection.count_error) {
-      try { appendRuleRoot(combined, JSON.parse(collection.rules || '[]')); } catch (e) {}
-      try {
-        if (collection.visual_json) visual = JSON.parse(collection.visual_json);
-      } catch (e) {}
+    if (collectionsFetchFailed) {
+      noteLegacyScopeError(
+        'Could not load collections to resolve the ?collection_id=' +
+        collectionId + ' deep link. Showing no misses to avoid ' +
+        'bulk-rejecting the whole workspace.'
+      );
+    } else {
+      var collection = (results[0] || []).find(function(c) { return c.id === collectionId; });
+      if (!collection) {
+        noteLegacyScopeError(
+          'Collection #' + collectionId + ' is missing or was deleted. ' +
+          'Showing no misses so bulk actions do not touch the whole workspace.'
+        );
+      } else if (collection.count_error) {
+        noteLegacyScopeError(
+          'Collection "' + (collection.name || ('#' + collectionId)) +
+          '" is degraded (' + collection.count_error + '). ' +
+          'Showing no misses so bulk actions do not touch the whole workspace.'
+        );
+      } else {
+        try { appendRuleRoot(combined, JSON.parse(collection.rules || '[]')); } catch (e) {}
+        try {
+          if (collection.visual_json) visual = JSON.parse(collection.visual_json);
+        } catch (e) {}
+      }
     }
   }
   if (!isNaN(folderId)) {
-    var folder = (results[1] || []).find(function(f) { return f.id === folderId; });
-    if (folder) {
-      combined.rules.push({
-        field: 'folder', op: 'under', value: folder.path || folder.name || '',
-      });
+    if (foldersFetchFailed) {
+      noteLegacyScopeError(
+        'Could not load folders to resolve the ?folder_id=' + folderId +
+        ' deep link. Showing no misses to avoid bulk-rejecting the whole workspace.'
+      );
+    } else {
+      var folder = (results[1] || []).find(function(f) { return f.id === folderId; });
+      if (folder) {
+        combined.rules.push({
+          field: 'folder', op: 'under', value: folder.path || folder.name || '',
+        });
+      } else {
+        noteLegacyScopeError(
+          'Folder #' + folderId + ' is missing or was removed. ' +
+          'Showing no misses so bulk actions do not touch the whole workspace.'
+        );
+      }
     }
   }
   VireoFilter.loadExpression(combined, visual, { reason: 'legacyScopeLoaded' });
@@ -942,7 +1028,21 @@ async function loadMisses() {
   var requestId = ++missLoadRequestId;
   var since = getSinceParam();
   var b = document.getElementById('scopeBanner');
-  if (b) b.hidden = !since;
+  // The scope banner doubles as the deep-link error surface; only reset it
+  // to the ``since`` label when we're not currently reporting a failure.
+  if (b && !legacyScopeError) b.hidden = !since;
+  if (legacyScopeError) {
+    // Deep link couldn't be resolved: render an empty grid so bulk reject
+    // and recompute have nothing to accidentally widen to. The applied
+    // filter snapshot stays empty; a subsequent user filter edit calls
+    // clearLegacyScopeError() and loadMisses() again with the new scope.
+    missesData = { no_subject: [], clipped: [], oof: [] };
+    appliedMissFilters = cloneMissFilterPayload(missFilterPayload());
+    render();
+    var recomputeBtn = document.getElementById('missRecomputeBtn');
+    if (recomputeBtn) recomputeBtn.disabled = true;
+    return;
+  }
   if (previewActive) {
     // Re-derive from the preview endpoint with the live slider values
     // instead of replaying a cached payload that a mutating action may

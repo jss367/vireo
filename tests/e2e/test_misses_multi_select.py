@@ -70,6 +70,71 @@ def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
     ).to_be_visible()
 
 
+def test_missing_collection_deep_link_fails_closed(live_server, page):
+    """A ?collection_id=<gone> deep link must not silently widen to every
+    miss in the workspace — bulk reject/recompute would otherwise operate
+    on photos the user never scoped."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?collection_id=999999")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text("999999")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+    # Editing the filter bar clears the fail-closed guard and loads normally.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    expect(page.locator("#scopeBanner")).to_be_hidden()
+
+
+def test_missing_folder_deep_link_fails_closed(live_server, page):
+    """A ?folder_id=<gone> deep link must not silently widen to every miss."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?folder_id=999999")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text("999999")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+
+def test_collections_fetch_failure_fails_closed(live_server, page):
+    """If /api/collections itself errors, the deep-link resolver must fail
+    closed rather than treating the empty list as "no collection matches"
+    and dropping the scope."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    collection_id = db.add_collection(
+        "Hawk review",
+        json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
+    )
+
+    page.add_init_script("""(() => {
+      const realFetch = window.fetch.bind(window);
+      window.fetch = (url, options) => {
+        if (String(url).includes('/api/collections')
+            && !String(url).includes('/api/collections/')) {
+          return Promise.resolve(new Response('boom', {status: 500}));
+        }
+        return realFetch(url, options);
+      };
+    })()""")
+
+    page.goto(f"{url}/misses?collection_id={collection_id}")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text("Could not load collections")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+
+
 def test_filter_change_ignores_older_threshold_preview(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
