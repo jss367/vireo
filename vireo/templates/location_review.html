@@ -227,6 +227,29 @@ body {
   white-space: nowrap;
 }
 .location-review-coordinate-toggle input { margin: 0; accent-color: var(--accent); }
+.location-review-suggestion-mode {
+  display: flex;
+  width: max-content;
+  margin: -1px 0 9px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--bg-primary);
+}
+.location-review-suggestion-mode button {
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.location-review-suggestion-mode button:hover { color: var(--text-primary); }
+.location-review-suggestion-mode button.active {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+}
 .location-review-candidates { display: flex; flex-direction: column; gap: 7px; }
 .location-review-candidate {
   display: grid;
@@ -429,6 +452,10 @@ body {
               <small id="locationReviewSuggestionStatus">Looking nearby…</small>
             </div>
           </div>
+          <div class="location-review-suggestion-mode location-review-hidden" id="locationReviewSuggestionMode" role="group" aria-label="Suggested location categories">
+            <button class="active" type="button" data-suggestion-mode="nature" aria-pressed="true">Parks &amp; nature</button>
+            <button type="button" data-suggestion-mode="all" aria-pressed="false">All nearby</button>
+          </div>
           <div class="location-review-candidates" id="locationReviewCandidates">
             <div class="location-review-loading">Finding saved and nearby locations…</div>
           </div>
@@ -480,8 +507,11 @@ body {
     includeCoordinates: false,
     savedCandidates: [],
     googleCandidates: [],
+    googleCandidatesByMode: {nature: null, all: null},
     regionCandidates: [],
+    regionCandidatesLoaded: false,
     searchedCandidate: null,
+    suggestionMode: 'nature',
     config: null,
     mapMode: null,
     map: null,
@@ -495,7 +525,8 @@ body {
   var NATURAL_TYPES = {
     park: 'Park', state_park: 'State park', national_park: 'National park',
     wildlife_refuge: 'Wildlife refuge', nature_preserve: 'Nature preserve',
-    natural_feature: 'Natural feature', hiking_area: 'Hiking area',
+    natural_feature: 'Natural feature', hiking_area: 'Hiking area', campground: 'Campground',
+    rv_park: 'RV park',
     scenic_spot: 'Scenic spot', tourist_attraction: 'Place of interest',
   };
 
@@ -925,7 +956,9 @@ body {
     state.selectedChoice = null;
     state.savedCandidates = [];
     state.googleCandidates = [];
+    state.googleCandidatesByMode = {nature: null, all: null};
     state.regionCandidates = [];
+    state.regionCandidatesLoaded = false;
     state.searchedCandidate = null;
     document.getElementById('locationReviewSearch').value = '';
     var assign = document.getElementById('locationReviewAssign');
@@ -982,14 +1015,26 @@ body {
     });
   }
 
-  async function loadGoogleSuggestions(group, token) {
+  async function loadGoogleSuggestions(group, token, mode) {
     if (state.mapMode !== 'google' || !state.placesService) return;
+    mode = mode || state.suggestionMode;
+    var cached = state.googleCandidatesByMode[mode];
+    if (cached) {
+      if (token === state.renderToken && mode === state.suggestionMode) {
+        state.googleCandidates = cached;
+      }
+      return;
+    }
     var location = new google.maps.LatLng(group.center.lat, group.center.lng);
     var radius = Math.min(50000, Math.max(10000, Number(group.spread_m || 0) + 12000));
-    var resultSets = await Promise.all([
-      nearbySearch({location: location, radius: radius, type: 'park'}),
-      nearbySearch({location: location, radius: radius, keyword: 'state park wildlife refuge nature preserve hiking area'}),
-    ]);
+    var requests = mode === 'all'
+      ? [{location: location, radius: radius}]
+      : [
+          {location: location, radius: radius, type: 'park'},
+          {location: location, radius: radius, type: 'campground'},
+          {location: location, radius: radius, keyword: 'state park wildlife refuge nature preserve hiking area'},
+        ];
+    var resultSets = await Promise.all(requests.map(nearbySearch));
     if (token !== state.renderToken) return;
     var center = group.center;
     var choices = [];
@@ -1002,32 +1047,42 @@ body {
       });
     });
     choices.sort(function(a, b) { return a.distance_m - b.distance_m; });
-    state.googleCandidates = choices.slice(0, 8);
+    var seenPlaceIds = {};
+    choices = choices.filter(function(choice) {
+      if (seenPlaceIds[choice.place_id]) return false;
+      seenPlaceIds[choice.place_id] = true;
+      return true;
+    }).slice(0, 8);
+    state.googleCandidatesByMode[mode] = choices;
+    if (mode === state.suggestionMode) state.googleCandidates = choices;
 
-    var geocoder = new google.maps.Geocoder();
-    geocoder.geocode({location: location}, function(results, status) {
-      if (token !== state.renderToken || status !== 'OK') return;
-      var allowed = ['locality', 'administrative_area_level_2', 'administrative_area_level_1', 'country'];
-      var regionChoices = [];
-      (results || []).forEach(function(result) {
-        var matchedType = allowed.find(function(type) { return (result.types || []).indexOf(type) !== -1; });
-        if (!matchedType) return;
-        var component = (result.address_components || []).find(function(item) {
-          return (item.types || []).indexOf(matchedType) !== -1;
+    if (!state.regionCandidatesLoaded) {
+      state.regionCandidatesLoaded = true;
+      var geocoder = new google.maps.Geocoder();
+      geocoder.geocode({location: location}, function(results, status) {
+        if (token !== state.renderToken || status !== 'OK') return;
+        var allowed = ['locality', 'administrative_area_level_2', 'administrative_area_level_1', 'country'];
+        var regionChoices = [];
+        (results || []).forEach(function(result) {
+          var matchedType = allowed.find(function(type) { return (result.types || []).indexOf(type) !== -1; });
+          if (!matchedType) return;
+          var component = (result.address_components || []).find(function(item) {
+            return (item.types || []).indexOf(matchedType) !== -1;
+          });
+          if (!component) return;
+          var namedResult = Object.assign({}, result, {name: component.long_name});
+          var choice = googleResultToChoice(namedResult, {
+            locality: 'City or town', administrative_area_level_2: 'County or region',
+            administrative_area_level_1: 'State or province', country: 'Country'
+          }[matchedType]);
+          if (!choice) return;
+          choice.address_components = result.address_components;
+          regionChoices.push(choice);
         });
-        if (!component) return;
-        var namedResult = Object.assign({}, result, {name: component.long_name});
-        var choice = googleResultToChoice(namedResult, {
-          locality: 'City or town', administrative_area_level_2: 'County or region',
-          administrative_area_level_1: 'State or province', country: 'Country'
-        }[matchedType]);
-        if (!choice) return;
-        choice.address_components = result.address_components;
-        regionChoices.push(choice);
+        state.regionCandidates = regionChoices.slice(0, 4);
+        finishSuggestionRender(token);
       });
-      state.regionCandidates = regionChoices.slice(0, 4);
-      finishSuggestionRender(token);
-    });
+    }
   }
 
   function finishSuggestionRender(token) {
@@ -1039,8 +1094,41 @@ body {
   }
 
   async function loadSuggestions(group, token) {
-    await Promise.all([loadSavedSuggestions(group, token), loadGoogleSuggestions(group, token)]);
+    await Promise.all([
+      loadSavedSuggestions(group, token),
+      loadGoogleSuggestions(group, token, state.suggestionMode),
+    ]);
     finishSuggestionRender(token);
+  }
+
+  function updateSuggestionModeControls() {
+    document.querySelectorAll('[data-suggestion-mode]').forEach(function(button) {
+      var active = button.dataset.suggestionMode === state.suggestionMode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  async function setSuggestionMode(mode) {
+    if ((mode !== 'nature' && mode !== 'all') || mode === state.suggestionMode) return;
+    var group = currentGroup();
+    if (!group) return;
+    state.suggestionMode = mode;
+    state.selectedChoice = null;
+    state.googleCandidates = state.googleCandidatesByMode[mode] || [];
+    updateSuggestionModeControls();
+    var assign = document.getElementById('locationReviewAssign');
+    assign.disabled = true;
+    assign.textContent = 'Select a location';
+    renderCandidates();
+    renderCandidateMarkers();
+    if (state.googleCandidatesByMode[mode]) {
+      finishSuggestionRender(state.renderToken);
+      return;
+    }
+    document.getElementById('locationReviewSuggestionStatus').textContent = 'Looking nearby…';
+    await loadGoogleSuggestions(group, state.renderToken, mode);
+    if (mode === state.suggestionMode) finishSuggestionRender(state.renderToken);
   }
 
   function distanceBetween(lat1, lng1, lat2, lng2) {
@@ -1098,6 +1186,7 @@ body {
           streetViewControl: false, fullscreenControl: true, clickableIcons: true,
         });
         state.placesService = new google.maps.places.PlacesService(state.map);
+        document.getElementById('locationReviewSuggestionMode').classList.remove('location-review-hidden');
         bindGoogleSearch();
         state.map.addListener('click', function(event) {
           if (!event.placeId) return;
@@ -1251,6 +1340,11 @@ body {
     renderCurrentGroup();
   });
   document.getElementById('locationReviewAssign').addEventListener('click', assignCurrentGroup);
+  document.querySelectorAll('[data-suggestion-mode]').forEach(function(button) {
+    button.addEventListener('click', function() {
+      setSuggestionMode(button.dataset.suggestionMode);
+    });
+  });
   document.getElementById('locationReviewCustom').addEventListener('click', function() {
     var name = document.getElementById('locationReviewSearch').value.trim();
     if (!name) { showToast('Enter a friendly location name first.', 'error'); return; }

@@ -56,6 +56,11 @@ GOOGLE_MAPS_STUB = """
   }
   function PlacesService() {
     this.nearbySearch = function(request, callback) {
+      window.__locationReviewNearbyRequests = window.__locationReviewNearbyRequests || [];
+      window.__locationReviewNearbyRequests.push({
+        type: request.type || null,
+        keyword: request.keyword || null
+      });
       if (request.type === 'park') {
         callback([{
           place_id: 'nearby-park',
@@ -63,6 +68,22 @@ GOOGLE_MAPS_STUB = """
           types: ['park'],
           vicinity: '100 Nearby Street',
           geometry: {location: new LatLng(32.751, -117.001)}
+        }], 'OK');
+      } else if (request.type === 'campground' && request.location.lat() > 33) {
+        callback([{
+          place_id: 'tamarisk-grove-campground',
+          name: 'Tamarisk Grove Campground',
+          types: ['campground', 'park'],
+          vicinity: 'Yaqui Pass Road',
+          geometry: {location: new LatLng(33.255, -116.405)}
+        }], 'OK');
+      } else if (!request.type && !request.keyword) {
+        callback([{
+          place_id: 'nearby-general-store',
+          name: 'Nearby General Store',
+          types: ['store'],
+          vicinity: '1 Main Street',
+          geometry: {location: request.location}
         }], 'OK');
       } else {
         callback([], 'ZERO_RESULTS');
@@ -266,6 +287,64 @@ def test_location_review_ranks_saved_and_google_places_by_distance(
 
     coordinate_toggle.uncheck()
     expect(candidates.locator(".location-review-candidate-coordinates")).to_have_count(0)
+
+
+def test_location_review_suggests_campgrounds_and_can_show_all_nearby_places(
+    live_server, page,
+):
+    """Focused suggestions include campgrounds; the toggle broadens categories."""
+    photo_id = live_server["data"]["photos"][0]
+    with live_server["db"].conn:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (33.2550, -116.4050, photo_id),
+        )
+
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(json={"google_maps_api_key": "test-key"}),
+    )
+    page.route(
+        "https://maps.googleapis.com/maps/api/js**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/javascript",
+            body=GOOGLE_MAPS_STUB,
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoId => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: [photoId]}))",
+        photo_id,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+
+    nature_button = page.locator('[data-suggestion-mode="nature"]')
+    all_button = page.locator('[data-suggestion-mode="all"]')
+    expect(nature_button).to_have_attribute("aria-pressed", "true")
+    campground = page.locator(
+        ".location-review-candidate", has_text="Tamarisk Grove Campground"
+    )
+    expect(campground).to_be_visible()
+    expect(campground.locator(".location-review-candidate-meta")).to_contain_text(
+        "Campground"
+    )
+
+    all_button.click()
+
+    expect(all_button).to_have_attribute("aria-pressed", "true")
+    expect(nature_button).to_have_attribute("aria-pressed", "false")
+    expect(
+        page.locator(".location-review-candidate", has_text="Nearby General Store")
+    ).to_be_visible()
+    expect(campground).to_have_count(0)
+
+    requested_types = page.evaluate(
+        "() => window.__locationReviewNearbyRequests.map(request => request.type)"
+    )
+    assert "campground" in requested_types
+    assert None in requested_types
 
 
 def test_location_review_photo_marker_opens_the_photo_preview(live_server, page):
