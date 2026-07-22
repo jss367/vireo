@@ -171,6 +171,44 @@ def test_filter_bootstrap_failure_keeps_requested_scope_closed(
     expect(page.locator("#missRecomputeBtn")).to_be_disabled()
 
 
+@pytest.mark.parametrize(
+    ("label", "bad_payload"),
+    [
+        # Truncated JSON (URL cut off mid-array).
+        ("truncated_json",
+         "%7B%22root%22%3A%7B%22mode%22%3A%22all%22%2C%22rules%22%3A%5B"),
+        # Well-formed JSON with the wrong shape (missing ``root.rules``).
+        ("missing_rules", "%7B%22root%22%3A%7B%22mode%22%3A%22all%22%7D%7D"),
+        # Non-JSON garbage.
+        ("garbage", "not-a-json-object"),
+    ],
+    ids=["truncated_json", "missing_rules", "garbage"],
+)
+def test_malformed_misses_handoff_filters_fails_closed(
+    live_server, page, label, bad_payload,
+):
+    """A present-but-invalid ``filters=...`` handoff payload on /misses
+    must not silently fall through to legacy params or persisted filters.
+    ``VireoFilter.init`` rejects on any malformed payload and the page
+    installs the fail-closed banner so bulk reject/recompute cannot
+    escape the intended handoff scope (Codex review r3627693292)."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?filters={bad_payload}")
+
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text(
+        "Could not initialize the requested filters"
+    )
+    expect(
+        page.locator("[data-testid^='miss-card-no_subject-']")
+    ).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+
 def test_unresolved_scope_freezes_preview_controls(live_server, page):
     """When a deep link fails closed, moving a threshold slider must not
     fire /api/misses/preview and repopulate the grid with photos outside

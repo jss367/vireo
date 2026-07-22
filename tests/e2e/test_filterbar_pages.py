@@ -255,6 +255,48 @@ def test_handoff_keeps_misses_for_compatible_rejected_rules(
     ).count() == 1
 
 
+def test_handoff_hides_misses_when_source_has_folder_scope(live_server, page):
+    """A source page with an external scope (Browse sidebar folder,
+    dashboard collection) that lives outside ``state.root`` would lose
+    that scope when the handoff payload — ``{root, visual}`` only — lands
+    on Misses; bulk reject/recompute would then act workspace-wide on
+    photos beyond the source scope. Hide Misses when the source reports
+    such a scope (Codex review r3627693288)."""
+    url = live_server["url"]
+    folder_id = live_server["data"]["folders"][0]
+    page.goto(f"{url}/browse?folder_id={folder_id}")
+    _wait_bar(page)
+    # A rule is required to reveal the handoff button.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 0
+    # Non-destructive targets remain — this is a Misses-specific guard.
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1
+
+
+def test_handoff_shows_misses_when_source_has_no_external_scope(
+    live_server, page,
+):
+    """Sanity check the guard doesn't hide Misses when there is no
+    external folder/collection scope to lose on handoff."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    _wait_bar(page)
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 1
+
+
 def test_handoff_to_misses_strips_rejected_flag(live_server, page):
     """A cross-page handoff payload that pins Flag=Rejected must not
     smuggle that rule into Misses: /api/misses excludes rejected rows

@@ -1386,6 +1386,21 @@
   };
 
   function handoffPageAvailable(page) {
+    // Misses has bulk reject/recompute over the whole result set. The
+    // handoff payload serializes only ``state.root``/``state.visual`` —
+    // it drops any external scope the source page keeps outside the
+    // filter tree (Browse sidebar folder, dashboard collection). Hand
+    // off from ``folder A ∩ hawk`` → Misses would otherwise widen to
+    // every ``hawk`` miss in the workspace and expose them to bulk
+    // actions the user never asked for. Hide Misses whenever the source
+    // exposes an external scope; the user can navigate manually if they
+    // really want the workspace-wide view.
+    if (page === 'misses' && state.getScope) {
+      const scope = state.getScope();
+      if (scope && (scope.folder_id != null || scope.collection_id != null)) {
+        return false;
+      }
+    }
     const exclusions = HANDOFF_EXCLUDED_VALUES[page];
     if (!exclusions) return true;
     return !allLeaves(state.root).some((rule) => {
@@ -1439,27 +1454,36 @@
         let fromUrl = false;
         const handoffRaw = urlParams.get('filters');
         if (handoffRaw) {
-          try {
-            const payload = JSON.parse(handoffRaw);
-            if (payload && payload.root && Array.isArray(payload.root.rules)) {
-              // Strip page-excluded values before adopting the payload so
-              // a Browse expression like ``flag=rejected`` doesn't render
-              // an empty Misses grid when handed off.
-              state.root = sanitizeRoot(payload.root);
-              // Reconstruct the visual clause from the allowed fields
-              // rather than trusting the parsed URL payload — an invalid
-              // ``strength`` (or an unknown extra key) would otherwise
-              // ride through to ``/api/photos/query`` and 500 the request.
-              // Mirrors ``restorePersisted()``.
-              state.visual = (
-                payload.visual && typeof payload.visual.prompt === 'string' && payload.visual.prompt
-              ) ? { prompt: payload.visual.prompt,
-                    strength: ['broad', 'balanced', 'strict'].includes(payload.visual.strength)
-                      ? payload.visual.strength : 'balanced' }
-                : null;
-              fromUrl = true;
-            }
-          } catch (e) { /* malformed handoff param — fall through */ }
+          let payload = null;
+          try { payload = JSON.parse(handoffRaw); }
+          catch (e) { payload = null; }
+          if (payload && payload.root && Array.isArray(payload.root.rules)) {
+            // Strip page-excluded values before adopting the payload so
+            // a Browse expression like ``flag=rejected`` doesn't render
+            // an empty Misses grid when handed off.
+            state.root = sanitizeRoot(payload.root);
+            // Reconstruct the visual clause from the allowed fields
+            // rather than trusting the parsed URL payload — an invalid
+            // ``strength`` (or an unknown extra key) would otherwise
+            // ride through to ``/api/photos/query`` and 500 the request.
+            // Mirrors ``restorePersisted()``.
+            state.visual = (
+              payload.visual && typeof payload.visual.prompt === 'string' && payload.visual.prompt
+            ) ? { prompt: payload.visual.prompt,
+                  strength: ['broad', 'balanced', 'strict'].includes(payload.visual.strength)
+                    ? payload.visual.strength : 'balanced' }
+              : null;
+            fromUrl = true;
+          } else {
+            // A present-but-invalid handoff payload (truncated URL, bad
+            // JSON, missing ``root.rules``) must not fall through to
+            // legacy params or persisted state — that would silently
+            // widen the page beyond the intended handoff scope and, on
+            // Misses, expose bulk reject/recompute to unrelated photos.
+            // Reject init so the destination page can install its
+            // fail-closed banner (see misses.html bootstrap catch).
+            throw new Error('VireoFilter: invalid filters handoff payload');
+          }
         }
         if (!fromUrl) fromUrl = applyLegacyParams(urlParams);
         // ``applyLegacyParams`` builds rules directly from raw URL params
