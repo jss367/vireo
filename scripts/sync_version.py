@@ -8,6 +8,14 @@ import json
 import re
 import sys
 
+SEMVER_PATTERN = re.compile(
+    r"(?:0|[1-9]\d*)\."
+    r"(?:0|[1-9]\d*)\."
+    r"(?:0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+
 
 def update_json_file(path, version):
     """Update the 'version' field in a JSON file."""
@@ -112,7 +120,11 @@ def main():
         print(f"Usage: {sys.argv[0]} <version> [--include-website] [--platform LABEL]")
         sys.exit(1)
 
-    version = positional[0].lstrip("v")
+    version = positional[0].removeprefix("v")
+    if not SEMVER_PATTERN.fullmatch(version):
+        print(f"Invalid version: {positional[0]!r}", file=sys.stderr)
+        sys.exit(1)
+
     if platform_flags:
         path = "website/src/pages/download.astro"
         for plat in platform_flags:
