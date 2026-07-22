@@ -51,3 +51,42 @@ def test_photo_editor_saves_and_restores_advanced_color(live_server, page):
     expect(page.locator("#hslSaturationRange")).to_have_value("30")
     expect(page.locator("#colorGradeHueRange")).to_have_value("220")
     expect(page.locator("#colorGradeSaturationRange")).to_have_value("18")
+
+
+def test_reset_adjustments_preserves_advanced_color(live_server, page):
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(f"{url}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+
+    # Basic adjustments the Reset button owns, plus advanced sections that
+    # each have their own dedicated reset control.
+    _set_range(page, "#exposureRange", 1.2)
+    _set_range(page, "#contrastRange", 25)
+    _set_range(page, "#curve_midtonesRange", 62)
+    page.locator("#hslColorSelect").select_option("orange")
+    _set_range(page, "#hslSaturationRange", 30)
+    page.locator("#colorGradeZoneSelect").select_option("shadows")
+    _set_range(page, "#colorGradeHueRange", 220)
+    _set_range(page, "#colorGradeSaturationRange", 18)
+
+    page.locator('button[onclick="resetAdjustments()"]').click()
+
+    # Basic sliders return to neutral, but advanced sections stay intact.
+    expect(page.locator("#exposureRange")).to_have_value("0")
+    expect(page.locator("#contrastRange")).to_have_value("0")
+    expect(page.locator("#curve_midtonesRange")).to_have_value("62")
+    page.locator("#hslColorSelect").select_option("orange")
+    expect(page.locator("#hslSaturationRange")).to_have_value("30")
+    page.locator("#colorGradeZoneSelect").select_option("shadows")
+    expect(page.locator("#colorGradeHueRange")).to_have_value("220")
+    expect(page.locator("#colorGradeSaturationRange")).to_have_value("18")
+
+    adjustments = page.evaluate("() => editorState.recipe.adjustments || {}")
+    assert "exposure" not in adjustments
+    assert "contrast" not in adjustments
+    assert adjustments.get("tone_curve") == {"midtones": 62.0}
+    assert adjustments.get("hsl") == {"orange": {"saturation": 30.0}}
+    assert adjustments.get("color_grading") == {
+        "shadows": {"hue": 220.0, "saturation": 18.0},
+    }

@@ -1604,10 +1604,15 @@ function setAdjustment(key, value) {
 }
 
 function resetAdjustments() {
-  // Detail lives in its own panel band; only clear the tone/color keys.
+  // Detail, tone curve, color mixer, and color grading each live in their
+  // own panel band with a dedicated reset button; only clear the basic
+  // tone/white-balance keys owned by this panel.
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   var kept = {};
-  ['sharpen', 'sharpen_radius', 'noise_reduction'].forEach(function(key) {
+  [
+    'sharpen', 'sharpen_radius', 'noise_reduction',
+    'tone_curve', 'hsl', 'color_grading',
+  ].forEach(function(key) {
     if (adj[key]) kept[key] = adj[key];
   });
   if (Object.keys(kept).length) editorState.recipe.adjustments = kept;
