@@ -108,6 +108,64 @@ def test_missing_folder_deep_link_fails_closed(live_server, page):
     expect(page.locator("#missRecomputeBtn")).to_be_disabled()
 
 
+def test_unresolved_scope_freezes_preview_controls(live_server, page):
+    """When a deep link fails closed, moving a threshold slider must not
+    fire /api/misses/preview and repopulate the grid with photos outside
+    the unresolved scope. The whole tuning group (sliders, save-defaults,
+    reset, Recompute) stays disabled until the user edits the filter bar
+    and the replacement scope loads."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?collection_id=999999")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    for control_id in (
+        "missCfgDetectorFloor",
+        "missCfgNoSubject",
+        "missCfgClassifierRescue",
+        "missCfgBboxMin",
+        "missCfgOofRatio",
+        "missSaveDefaults",
+        "missRecomputeBtn",
+        "missResetPreviewBtn",
+    ):
+        expect(page.locator(f"#{control_id}")).to_be_disabled()
+
+    # Any /api/misses/preview call while the scope is unresolved would widen
+    # results to every miss outside the failed scope; track and assert none
+    # fire even if a slider input is dispatched programmatically.
+    page.evaluate("""() => {
+      window.previewCalls = 0;
+      const realFetch = window.fetch.bind(window);
+      window.fetch = (url, options) => {
+        if (String(url).includes('/api/misses/preview')) window.previewCalls++;
+        return realFetch(url, options);
+      };
+    }""")
+    page.locator("#missCfgNoSubject").evaluate("""el => {
+      el.value = String(Number(el.value) + 1);
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+    }""")
+    page.wait_for_timeout(400)
+    assert page.evaluate("window.previewCalls") == 0
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+
+    # Editing the filter bar replaces the failed scope; once the follow-up
+    # load succeeds, the tuning controls become interactive again.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    for control_id in (
+        "missCfgDetectorFloor",
+        "missSaveDefaults",
+        "missRecomputeBtn",
+        "missResetPreviewBtn",
+    ):
+        expect(page.locator(f"#{control_id}")).to_be_enabled()
+
+
 def test_collections_fetch_failure_fails_closed(live_server, page):
     """If /api/collections itself errors, the deep-link resolver must fail
     closed rather than treating the empty list as "no collection matches"

@@ -642,9 +642,11 @@ function applyMissFilters() {
 function clearLegacyScopeError() {
   if (!legacyScopeError) return;
   legacyScopeError = null;
-  // Keep Recompute disabled until the replacement expression has loaded.
-  // Re-enabling it here would briefly let a fast click recompute the empty
-  // fail-closed snapshot (effectively the whole workspace).
+  // Keep the tuning controls (sliders, save-defaults, reset, Recompute)
+  // disabled until the replacement expression has loaded. Re-enabling them
+  // here would briefly let a slider nudge preview — or a fast Recompute
+  // click — operate on the empty fail-closed snapshot, which the preview
+  // endpoint would widen back to the whole workspace.
   legacyScopeRecoveryPending = true;
   renderMissScopeBanner();
 }
@@ -673,8 +675,12 @@ function noteLegacyScopeError(message) {
     : message;
   if (typeof showToast === 'function') showToast(message, 'error');
   renderMissScopeBanner();
-  var recomputeBtn = document.getElementById('missRecomputeBtn');
-  if (recomputeBtn) recomputeBtn.disabled = true;
+  // Freeze the whole tuning group — not just Recompute. Preview and reset
+  // still call /api/misses/preview with the current (empty) rules, which
+  // widens results to every miss outside the unresolved scope; card and
+  // selection handlers on that grid could then mutate photos the user
+  // never scoped. Sliders re-enable once a replacement scope loads.
+  setMissTuningDisabled(true);
 }
 
 function renderMissScopeBanner() {
@@ -890,7 +896,10 @@ async function loadMissConfig() {
     originalMissConfig = Object.assign({}, missConfig);
     setMissSliders(missConfig);
     missConfigLoaded = true;
-    setMissTuningDisabled(false);
+    // Keep the tuning group frozen when a fail-closed scope is in effect;
+    // loadMisses() will re-enable it once a user-supplied replacement
+    // filter loads successfully.
+    if (!legacyScopeError) setMissTuningDisabled(false);
     setMissTuningStatus('Preview uses current sliders');
   } catch (e) {
     setMissTuningStatus('Thresholds unavailable');
@@ -899,12 +908,18 @@ async function loadMissConfig() {
 
 function scheduleMissPreview() {
   if (!missConfigLoaded) return;
+  if (legacyScopeError) return;
   if (previewTimer) clearTimeout(previewTimer);
   previewTimer = setTimeout(previewMisses, 250);
 }
 
 async function previewMisses() {
   if (!missConfigLoaded) return;
+  // Defense in depth: sliders are disabled while a deep-link scope is
+  // unresolved, but any caller that reaches here anyway must not POST the
+  // empty rule payload to /api/misses/preview and repopulate the grid with
+  // photos outside the user's scope.
+  if (legacyScopeError) return;
   if (previewTimer) {
     clearTimeout(previewTimer);
     previewTimer = null;
@@ -939,6 +954,7 @@ async function previewMisses() {
 
 async function recomputeMisses() {
   if (!missConfigLoaded) return;
+  if (legacyScopeError) return;
   invalidateMissPreview();
   var requestId = ++missLoadRequestId;
   var btn = document.getElementById('missRecomputeBtn');
@@ -1000,6 +1016,7 @@ async function recomputeMisses() {
 
 function resetMissThresholds() {
   if (!missConfigLoaded || !originalMissConfig) return;
+  if (legacyScopeError) return;
   invalidateMissPreview();
   setMissSliders(originalMissConfig);
   previewActive = false;
@@ -1074,8 +1091,7 @@ async function loadMisses() {
   applyMissesPayload(data);
   if (legacyScopeRecoveryPending) {
     legacyScopeRecoveryPending = false;
-    var recomputeBtn = document.getElementById('missRecomputeBtn');
-    if (recomputeBtn && missConfigLoaded) recomputeBtn.disabled = false;
+    if (missConfigLoaded) setMissTuningDisabled(false);
   }
 }
 
