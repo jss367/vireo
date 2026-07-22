@@ -127,6 +127,64 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
     assert data["oof"] == []
 
 
+def test_api_misses_accepts_universal_filter_rules(client, db_with_misses):
+    _, db, ids = db_with_misses
+    db.update_photo_rating(ids["no_subject"], 2)
+    db.update_photo_rating(ids["clipped"], 5)
+    rules = {
+        "mode": "all",
+        "rules": [
+            {"field": "rating", "op": ">=", "value": 4},
+            {"field": "filename", "op": "contains", "value": "clip"},
+        ],
+    }
+
+    r = client.post("/api/misses", json={"rules": rules})
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["no_subject"] == []
+    assert [p["id"] for p in data["clipped"]] == [ids["clipped"]]
+    assert data["oof"] == []
+
+
+def test_api_misses_actions_accept_universal_filter_rules(
+    client, db_with_misses,
+):
+    _, db, ids = db_with_misses
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id=?", (ids["no_subject"],)
+    )
+    db.conn.commit()
+    rules = {
+        "mode": "all",
+        "rules": [{"field": "photo_ids", "op": "in", "value": [ids["clipped"]]}],
+    }
+
+    reject = client.post(
+        "/api/misses/reject",
+        data=json.dumps({"category": "clipped", "rules": rules}),
+        content_type="application/json",
+    )
+
+    assert reject.status_code == 200
+    assert reject.get_json()["rejected"] == 1
+    assert db.get_photo(ids["clipped"])["flag"] == "rejected"
+    assert db.get_photo(ids["no_subject"])["flag"] != "rejected"
+
+
+def test_api_misses_rejects_malformed_universal_rules(client):
+    r = client.get("/api/misses", query_string={"rules": "not-json"})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "rules and visual must be valid JSON"
+
+
+def test_api_misses_post_requires_object_body(client):
+    r = client.post("/api/misses", json=[])
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "request body must be a JSON object"
+
+
 def test_api_misses_reject_and_recompute_honor_collection_filter(
     client, db_with_misses,
 ):
@@ -505,14 +563,11 @@ def test_api_misses_since_restricts_to_recent_run(client, db_with_misses):
 
 
 def test_api_misses_rejects_visual_collection(client, db_with_misses):
-    """The Misses page filter funnels ``collection_id`` through
-    ``collection_photo_ids``, which evaluates ``rules`` only. A visual
-    collection would silently widen the miss scope to every metadata
-    match instead of the visually-matched subset — Codex review
-    r3620423210 on PR #1343 flagged the equivalent risk for
-    ``/api/collections/<id>/photos``; the misses filter has the same
-    boundary. Reject with 400 so the front-end picker (which disables
-    the same options) has a defense-in-depth backstop.
+    """The legacy Misses ``collection_id`` shim evaluates ``rules`` only.
+
+    A visual collection would silently widen the miss scope to every metadata
+    match instead of the visually matched subset. The shared-bar page sends
+    rules + visual directly, but old API callers still need this boundary.
     """
     _, db, _ = db_with_misses
     visual_cid = db.add_collection(

@@ -54,17 +54,16 @@ def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
         json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
     )
 
-    page.goto(f"{url}/misses")
+    page.goto(f"{url}/misses?collection_id={collection_id}")
     page.locator("[data-testid^='miss-card-no_subject-']").first.wait_for(
         state="visible", timeout=3000,
     )
-    page.locator("#missCollectionFilter").select_option(str(collection_id))
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(3)
     assert f"collection_id={collection_id}" in page.url
 
     # The shared E2E fixture gives the first hawk four stars; the other two
     # have no rating, so composing filters should leave exactly that miss.
-    page.locator("#missRatingFilter").select_option("4")
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
     expect(
         page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']")
@@ -98,7 +97,7 @@ def test_filter_change_ignores_older_threshold_preview(live_server, page):
     }""")
     page.wait_for_function("window.releaseHeldPreview != null")
 
-    page.locator("#missRatingFilter").select_option("4")
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
     page.evaluate("window.releaseHeldPreview()")
     page.wait_for_timeout(400)
@@ -140,7 +139,7 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
     page.locator("#missRecomputeBtn").click()
     page.wait_for_function("window.releaseHeldRecompute != null")
 
-    page.locator("#missRatingFilter").select_option("4")
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
     calls_before_release = page.evaluate(
         "window.missesFetchCalls.filter(u => u.startsWith('/api/misses') && !u.includes('/recompute') && !u.includes('/preview')).length"
@@ -180,7 +179,7 @@ def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page)
         return realFetch(url, options);
       };
     }""")
-    page.locator("#missRatingFilter").select_option("")
+    page.evaluate("VireoFilter.removeField('rating')")
     page.wait_for_function("window.releaseHeldFilterLoad != null")
 
     page.once("dialog", lambda dialog: dialog.accept())
@@ -211,7 +210,7 @@ def test_recompute_uses_filters_that_rendered_visible_cards(live_server, page):
         return realFetch(url, options);
       };
     }""")
-    page.locator("#missRatingFilter").select_option("")
+    page.evaluate("VireoFilter.removeField('rating')")
     page.wait_for_function("window.releaseHeldFilterLoad != null")
 
     page.locator("#missRecomputeBtn").click()
@@ -238,7 +237,9 @@ def test_initial_recompute_uses_url_filters_before_grid_loads(live_server, page)
       const realFetch = window.fetch.bind(window);
       let held = false;
       window.fetch = (url, options) => {
-        if (!held && String(url).includes('/api/misses?rating_min=4')) {
+        const parsed = new URL(String(url), window.location.origin);
+        const body = options && options.body ? JSON.parse(options.body) : {};
+        if (!held && parsed.pathname === '/api/misses' && body.rules) {
           held = true;
           return new Promise(resolve => {
             window.releaseInitialMissesLoad = () => realFetch(url, options).then(resolve);
@@ -256,7 +257,12 @@ def test_initial_recompute_uses_url_filters_before_grid_loads(live_server, page)
     expect(page.locator("#missRecomputeBtn")).to_be_enabled()
     page.locator("#missRecomputeBtn").click()
     page.wait_for_function("window.initialRecomputeBody != null")
-    assert page.evaluate("window.initialRecomputeBody.rating_min") == "4"
+    assert page.evaluate("""() => {
+      const rules = window.initialRecomputeBody.rules;
+      const leaves = Array.isArray(rules) ? rules : (rules.rules || []);
+      const rating = leaves.find(rule => rule.field === 'rating');
+      return rating && rating.op === '>=' && rating.value === 4;
+    }""")
     page.evaluate("window.releaseInitialMissesLoad()")
 
 

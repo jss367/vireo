@@ -1,4 +1,4 @@
-/* Universal photo filter bar — shared across Browse/Map/Review/Duplicates.
+/* Universal photo filter bar — shared across Browse/Map/Review/Duplicates/Misses.
  *
  * Owns the filter expression (a smart-collection rule tree, the same JSON
  * collections store), its UI (quick search, chips, popover with quick
@@ -1314,8 +1314,9 @@
   const HANDOFF_PAGES = [
     ['browse', '/browse', 'Browse', 'Workspace · All available photos'],
     ['map', '/map', 'Map', 'Adds: plottable locations scope'],
-    ['review', '/review', 'Review', 'Adds: pending predictions scope'],
+    ['review', '/review', 'Review', 'Adds: predictions scope'],
     ['duplicates', '/duplicates', 'Duplicates', 'Adds: duplicate groups scope'],
+    ['misses', '/misses', 'Misses', 'Adds: detected misses scope'],
   ];
 
   function renderHandoff() {

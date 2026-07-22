@@ -1,4 +1,4 @@
-"""E2E: universal filter bar on Map, Review, and Duplicates (Phase 4),
+"""E2E: universal filter bar on Map, Review, Duplicates, and Misses,
 plus the cross-page "Open results in…" handoff.
 
 Seed data (conftest): 3 hawk photos in /photos/park, 2 robins in
@@ -50,7 +50,7 @@ def test_map_page_uses_filter_bar(live_server, page):
 def test_review_page_uses_filter_bar(live_server, page):
     page.goto(live_server["url"] + "/review")
     _wait_bar(page)
-    assert "Pending predictions" in page.inner_text(".vf-scope-chip")
+    assert "Review · Predictions" in page.inner_text(".vf-scope-chip")
     page.wait_for_selector(".pred-card, .grid .card, #grid > *", timeout=15000)
     before = page.evaluate("predictions.length")
     assert before == 5
@@ -67,6 +67,34 @@ def test_review_page_uses_filter_bar(live_server, page):
     page.click(".vf-add-filter")
     page.fill(".vf-field-search", "prediction status")
     page.wait_for_selector('[data-add-field="prediction_status"]', timeout=8000)
+
+
+def test_misses_page_uses_filter_bar(live_server, page):
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"]
+    with db.conn:
+        db.conn.executemany(
+            "UPDATE photos SET miss_no_subject=1, miss_computed_at='2026-04-22' "
+            "WHERE id=?",
+            [(photo_id,) for photo_id in photo_ids],
+        )
+
+    page.goto(live_server["url"] + "/misses")
+    _wait_bar(page)
+    assert "Misses · Detected misses" in page.inner_text(".vf-scope-chip")
+    assert _total(page) == 5
+
+    search = page.locator(".vf-search input")
+    search.fill("robin")
+    search.press("Enter")
+    page.wait_for_function(
+        "document.querySelector('.vf-total strong').textContent === '2'",
+        timeout=8000,
+    )
+    assert page.locator("[data-testid^='miss-card-no_subject-']").count() == 2
+
+    page.click(".vf-handoff")
+    page.wait_for_selector('.vf-handoff-menu [data-handoff-path="/browse"]')
 
 
 def test_browse_picker_hides_review_only_fields(live_server, page):

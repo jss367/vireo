@@ -150,18 +150,19 @@ Nothing user-visible changes in this phase.
 ### Phase 5 outcome — residual legacy surface (documented, deliberate)
 
 The callerless legacy filter branches were deleted (summary, calendar,
-geo, text-search scope, browse/init). Three holdouts keep the legacy
+geo, text-search scope, browse/init). Three compatibility paths keep the legacy
 params on `/api/photos`, `/api/photos/ids`, and the
 `get_photos`/`get_photo_ids`/`count_filtered_photos` trio:
 
-- the Misses page's page-local filter UI (`misses.html` →
-  `_miss_filter_photo_ids`) — a future candidate for filter-bar adoption;
+- the Misses API's scalar-param shim for old bookmarks and callers (the page
+  itself now sends the universal rule tree and visual clause);
 - the photo editor's keyword search (`photo_editor.html`);
 - bulk "fetch everything" pipeline callers (`per_page=999999`, no filter
   kwargs).
 
-These are shims in the plan's sense: thin, tested, and no longer
-duplicated anywhere else.
+The Misses page adopted the shared filter bar after Phase 5. These remaining
+paths are shims in the plan's sense: thin, tested, and no longer duplicated
+anywhere else.
 
 ## Review-cycle regressions to guard (from prototype PR #1319)
 
