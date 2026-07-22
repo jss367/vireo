@@ -138,9 +138,9 @@
       if (spec.type === 'date') return ['2025-01-01', new Date().toISOString().slice(0, 10)];
       return [0, 100];
     }
-    if (op === 'in' || op === 'not_in') return spec.values ? [spec.values[0]] : [];
+    if (op === 'in' || op === 'not_in') return spec.values && spec.values.length ? [spec.values[0]] : [];
     if (spec.type === 'boolean') return 1;
-    if (spec.type === 'enum') return (spec.values || [''])[0];
+    if (spec.type === 'enum') return spec.values && spec.values.length ? spec.values[0] : '';
     if (spec.type === 'rating') return 3;
     if (spec.type === 'number') return 0;
     if (spec.type === 'date') return new Date().toISOString().slice(0, 10);
@@ -162,7 +162,9 @@
     }
     if (Array.isArray(prev)) return prev.length ? prev[0] : defaultValue(spec, op);
     if (prev && typeof prev === 'object') return defaultValue(spec, op);
-    if (spec.type === 'enum' && spec.values && !spec.values.includes(prev)) return spec.values[0];
+    if (spec.type === 'enum' && spec.values && !spec.values.includes(prev)) {
+      return spec.values.length ? spec.values[0] : '';
+    }
     if (prev == null || prev === '') return defaultValue(spec, op);
     return prev;
   }
@@ -805,7 +807,7 @@
     }
     const spec = fieldSpec(node.field) || { label: node.field, type: 'text', ops: ['is'] };
     const fieldOptions = state.fieldOrder.filter((key) =>
-      fieldAvailable(state.fields[key]) || key === node.field).map((key) =>
+      fieldAvailable(key) || key === node.field).map((key) =>
       `<option value="${key}" ${key === node.field ? 'selected' : ''}>${esc(state.fields[key].label)}</option>`).join('');
     const opOptions = spec.ops.map((op) =>
       `<option value="${esc(op)}" ${op === node.op ? 'selected' : ''}>${esc(OP_LABELS[op] || op)}</option>`).join('');
@@ -913,7 +915,10 @@
     if (shouldOpen) renderRules();
   }
 
-  function fieldAvailable(spec) {
+  function fieldAvailable(field) {
+    const spec = fieldSpec(field);
+    if (!spec) return false;
+    if (spec.type === 'enum' && Array.isArray(spec.values) && !spec.values.length) return false;
     return !spec.pages || spec.pages.includes(state.page);
   }
 
@@ -921,8 +926,8 @@
     const needle = String(query || '').trim().toLowerCase();
     const byCategory = new Map();
     state.fieldOrder.forEach((key) => {
-      const spec = state.fields[key];
-      if (!fieldAvailable(spec)) return;
+      const spec = fieldSpec(key);
+      if (!fieldAvailable(key)) return;
       if (needle && !`${spec.label} ${spec.category}`.toLowerCase().includes(needle)) return;
       if (!byCategory.has(spec.category)) byCategory.set(spec.category, []);
       byCategory.get(spec.category).push([key, spec]);
@@ -1335,6 +1340,20 @@
     ['duplicates', '/duplicates', 'Duplicates', 'Adds: duplicate groups scope'],
     ['misses', '/misses', 'Misses', 'Adds: detected misses scope'],
   ];
+  const HANDOFF_EXCLUDED_VALUES = {
+    misses: { flag: ['rejected'] },
+  };
+
+  function handoffPageAvailable(page) {
+    const exclusions = HANDOFF_EXCLUDED_VALUES[page];
+    if (!exclusions) return true;
+    return !allLeaves(state.root).some((rule) => {
+      const excluded = exclusions[rule.field];
+      if (!excluded) return false;
+      const values = Array.isArray(rule.value) ? rule.value : [rule.value];
+      return values.some((value) => excluded.includes(value));
+    });
+  }
 
   function renderHandoff() {
     const btn = $('.vf-handoff');
@@ -1345,7 +1364,8 @@
   function openHandoffMenu() {
     const menu = $('.vf-handoff-menu');
     if (!menu.hidden) { menu.hidden = true; return; }
-    menu.innerHTML = HANDOFF_PAGES.filter(([key]) => key !== state.page).map(([key, path, label, detail]) =>
+    menu.innerHTML = HANDOFF_PAGES.filter(([key]) =>
+      key !== state.page && handoffPageAvailable(key)).map(([key, path, label, detail]) =>
       `<button type="button" data-handoff-path="${path}"><span>${label}</span><small>${esc(detail)}</small></button>`).join('');
     menu.hidden = false;
   }

@@ -112,6 +112,29 @@ def test_misses_page_hides_rejected_flag_filter(live_server, page):
     ).count() == 0
 
 
+def test_enum_field_is_unavailable_when_page_excludes_every_value(
+    live_server, page,
+):
+    def leave_only_rejected_flag(route):
+        response = route.fetch()
+        body = response.json()
+        flag = next(field for field in body["fields"] if field["key"] == "flag")
+        flag["values"] = ["rejected"]
+        route.fulfill(response=response, json=body)
+
+    page.route("**/api/filters/fields", leave_only_rejected_flag)
+    page.goto(live_server["url"] + "/misses")
+    _wait_bar(page)
+
+    page.click(".vf-filters-btn")
+    expect_flag_buttons = page.locator(".vf-quick-flags button")
+    for index in range(expect_flag_buttons.count()):
+        assert expect_flag_buttons.nth(index).is_hidden()
+    page.click(".vf-add-filter")
+    page.fill(".vf-field-search", "flag")
+    assert page.locator('[data-add-field="flag"]').count() == 0
+
+
 def test_browse_picker_hides_review_only_fields(live_server, page):
     page.goto(live_server["url"] + "/browse")
     _wait_bar(page)
@@ -185,3 +208,18 @@ def test_handoff_carries_expression_to_map(live_server, page):
     assert "hawk" in chips
     assert "Plottable locations" in page.inner_text(".vf-scope-chip")
     assert _total(page) == 1
+
+
+def test_handoff_hides_misses_for_rejected_flag(live_server, page):
+    page.goto(live_server["url"] + "/browse")
+    _wait_bar(page)
+    page.evaluate("VireoFilter.addRule('flag', 'is', 'rejected')")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 0
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1

@@ -14557,6 +14557,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rules_raw = value("rules")
         visual_raw = value("visual")
         if rules_raw is not None or visual_raw is not None:
+            collection_ids = None
+            if collection_id is not None:
+                # Validate before rules/visual resolution so both paths can
+                # safely use the collection as their candidate scope while
+                # preserving the friendlier legacy error messages.
+                valid = {c["id"]: c for c in db.get_collections()}
+                if collection_id not in valid:
+                    raise ValueError("collection not found")
+                if valid[collection_id]["visual_json"] is not None:
+                    raise ValueError(
+                        "visual collections have no rules-only expansion; "
+                        "open the collection from Browse instead"
+                    )
+                collection_ids = db.collection_photo_ids(collection_id)
             try:
                 rules = (
                     json.loads(rules_raw)
@@ -14578,24 +14592,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             visual_info = None
             photo_ids = None
             if visual is not None:
-                visual_info, ordered_ids, _ = _resolve_visual(db, rules, visual)
+                visual_info, ordered_ids, _ = _resolve_visual(
+                    db, rules, visual, collection_id=collection_id,
+                )
                 if ordered_ids is not None:
                     photo_ids = set(ordered_ids)
             if photo_ids is None and rules:
-                photo_ids = set(db.query_photo_ids(rules))
+                photo_ids = set(db.query_photo_ids(
+                    rules, collection_id=collection_id,
+                ))
 
             # ``collection_id`` can still accompany the universal expression
             # for compatibility with an old composed Misses deep link.
             if collection_id is not None:
-                valid = {c["id"]: c for c in db.get_collections()}
-                if collection_id not in valid:
-                    raise ValueError("collection not found")
-                if valid[collection_id]["visual_json"] is not None:
-                    raise ValueError(
-                        "visual collections have no rules-only expansion; "
-                        "open the collection from Browse instead"
-                    )
-                collection_ids = db.collection_photo_ids(collection_id)
                 photo_ids = (
                     collection_ids
                     if photo_ids is None
@@ -14693,7 +14702,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )]
             _attach_species_representatives(db, photos)
             _attach_edit_recipes(db, photos)
-            return jsonify({"photos": photos, "category": category})
+            response = {"photos": photos, "category": category}
+            if visual_info is not None:
+                response["visual"] = visual_info
+            return jsonify(response)
         grouped = {
             "no_subject": db.list_misses(category="no_subject", since=since, photo_ids=photo_ids),
             "clipped":    db.list_misses(category="clipped", since=since, photo_ids=photo_ids),

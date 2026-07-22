@@ -99,6 +99,24 @@ def test_api_misses_filter_by_category(client, db_with_misses):
     assert len(data["photos"]) == 1
 
 
+def test_api_misses_category_preserves_visual_info(
+    client, db_with_misses, monkeypatch,
+):
+    import models
+
+    monkeypatch.setattr(models, "get_active_model", lambda: None)
+    r = client.post("/api/misses", json={
+        "category": "clipped",
+        "rules": [],
+        "visual": {"prompt": "bird", "strength": "balanced"},
+    })
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["category"] == "clipped"
+    assert data["visual"]["status"] == "no_model"
+
+
 def test_api_misses_filters_by_collection_and_browse_attributes(
     client, db_with_misses,
 ):
@@ -146,6 +164,54 @@ def test_api_misses_accepts_universal_filter_rules(client, db_with_misses):
     assert data["no_subject"] == []
     assert [p["id"] for p in data["clipped"]] == [ids["clipped"]]
     assert data["oof"] == []
+
+
+def test_api_misses_forwards_collection_to_rule_and_visual_queries(
+    client, db_with_misses, monkeypatch,
+):
+    import models
+
+    _, db, ids = db_with_misses
+    collection_id = db.add_collection(
+        "One miss",
+        json.dumps([{
+            "field": "photo_ids",
+            "value": [ids["clipped"]],
+        }]),
+    )
+    original = type(db).query_photo_ids
+    seen_collection_ids = []
+
+    def tracked_query_photo_ids(self, rules, *args, **kwargs):
+        seen_collection_ids.append(kwargs.get("collection_id"))
+        return original(self, rules, *args, **kwargs)
+
+    monkeypatch.setattr(type(db), "query_photo_ids", tracked_query_photo_ids)
+    r = client.post("/api/misses", json={
+        "collection_id": collection_id,
+        "rules": [{"field": "rating", "op": ">=", "value": 0}],
+    })
+
+    assert r.status_code == 200
+    assert collection_id in seen_collection_ids
+    assert [p["id"] for p in r.get_json()["clipped"]] == [ids["clipped"]]
+
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "name": "test-model",
+        "model_type": "bioclip",
+        "model_str": "test-model",
+    })
+    visual = client.post("/api/misses", json={
+        "collection_id": collection_id,
+        "rules": [],
+        "visual": {"prompt": "bird", "strength": "balanced"},
+    })
+
+    assert visual.status_code == 200
+    visual_info = visual.get_json()["visual"]
+    assert visual_info["status"] == "no_embeddings"
+    assert visual_info["candidates"] == 1
+    assert seen_collection_ids.count(collection_id) >= 2
 
 
 def test_api_misses_actions_accept_universal_filter_rules(
