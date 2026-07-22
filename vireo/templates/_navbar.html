@@ -5642,26 +5642,19 @@ function _lbCaptureEyeTrackingAnchor() {
       : null;
   }
   var photo = _lbPhotoData(_lightboxCurrentId);
-  var eyeKnown = !!(photo && Object.prototype.hasOwnProperty.call(photo, 'eye_x'));
   var point = _lbPhotoEyePoint(_lightboxCurrentId, photo);
   var overlaysAvailable = _lbSourceOverlaysAvailable();
-  // If the current photo is known to be unusable for eye alignment — either
-  // its metadata has resolved without an eye, or the active source cannot
-  // align overlays (JPEG pair or geometric edit) — drop any cached anchor
-  // instead of propagating it. Otherwise, after the user pans on this
-  // paused/no-eye frame, _lbTryApplyPendingEyeTrack would apply a prior
-  // photo's anchor on the next eyed photo and jump the viewport to an
-  // unrelated eye position.
-  if ((eyeKnown && !point) || !overlaysAvailable) {
-    _lbEyeTrackScreenAnchor = null;
-    return null;
-  }
   var metrics = _lbUpdateLayoutMetrics();
-  var state = _lbViewportStateFromCurrent();
-  if (!point || !metrics || !state) {
-    // Truly uncertain state (destination metadata not yet cached or the layout
-    // has not been measured). Reuse the last trustworthy anchor so a later
-    // eyed frame can still align.
+  var state = point && overlaysAvailable ? _lbViewportStateFromCurrent() : null;
+  if (!point || !overlaysAvailable || !metrics || !state) {
+    // Current frame is unusable for a fresh measurement — either its metadata
+    // has resolved without an eye, the active source cannot align overlays
+    // (JPEG pair or geometric edit), the destination metadata is not yet
+    // cached, or the layout has not been measured. Reuse the last trustworthy
+    // anchor so a later eyed frame can still resume alignment across the
+    // paused sequence. User pan/zoom paths clear the cached anchor via
+    // _lbClearPendingViewportRestore, so a manual viewport change on this
+    // paused frame will not carry a stale eye offset to the next eyed photo.
     return _lbEyeTrackScreenAnchor
       ? { offsetX: _lbEyeTrackScreenAnchor.offsetX, offsetY: _lbEyeTrackScreenAnchor.offsetY }
       : null;
@@ -5834,11 +5827,17 @@ function _lbClearPendingViewportRestore() {
   // loading before /api/photos/<id> returns, _lbPendingEyeTrack stays
   // armed until the metadata callback fires _lbTryApplyPendingEyeTrack,
   // and a user pan/zoom in that window must not be overwritten by the
-  // previous photo's eye anchor. Programmatic restore paths
+  // previous photo's eye anchor. Dropping the cached screen anchor here
+  // — instead of eagerly on every known no-eye frame — lets tracking
+  // resume across an eyed → no-eye → eyed sequence when the user did not
+  // pan or zoom the paused frame, while still preventing a stale offset
+  // from being carried onto the next eyed photo after a manual pan/zoom
+  // on the paused frame. Programmatic restore paths
   // (_lbTryApplyPendingViewportState, _lbTryApplyPendingEyeTrack) own
   // clearing their own state and must not route through here.
   _lbPendingViewportState = null;
   _lbPendingEyeTrack = null;
+  _lbEyeTrackScreenAnchor = null;
 }
 
 function _lbTryApplyPendingViewportState() {
