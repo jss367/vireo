@@ -5676,6 +5676,18 @@ function _lbTryApplyPendingEyeTrack(photo) {
   }
   if (!metrics || _lbVisualTransitionPending) return false;
 
+  // A deferred 1:1 snap is still armed — the loader is holding the current
+  // display upscaled while a sharper source (2560/3840 or /original) swap
+  // completes. Applying the viewport here would re-enter
+  // _lbApplyViewportState(), whose one-to-one branch would either clear
+  // _lbPending1To1 (when nativeZoom is known) or leave it armed but whose
+  // trailing _lbScheduleSourceSwap() can retarget back to /full when
+  // /original is unavailable and nativeZoom is not yet known — cancelling
+  // the sharp fallback and leaving the user on a soft view. Wait for the
+  // deferred source swap to land and _lbApplyPendingOneToOneZoom() to
+  // finish before aligning the eye.
+  if (_lbPending1To1) return false;
+
   var state = _lbViewportStateFromCurrent();
   if (!state || _lbZoom <= 1.001 || !metrics.scale) return false;
   state.centerX = point.x - (Number(pending.offsetX) || 0) / (metrics.w * metrics.scale);
@@ -9147,6 +9159,10 @@ function _lbScheduleSourceSwap(targetZoom) {
         // honored — completing with a recentered zoom would make a deferred 1:1
         // jump away from the point the user clicked.
         _lbApplyPendingOneToOneZoom();
+        // Track Eye alignment is deferred while _lbPending1To1 is armed so it
+        // cannot cancel the deferred sharp-source fallback. Re-apply now that
+        // the source has landed and any pending 1:1 has snapped.
+        _lbTryApplyPendingEyeTrack();
         _lbApplyTransform();
       });
       img.src = url;
