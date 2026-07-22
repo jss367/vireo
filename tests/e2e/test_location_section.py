@@ -867,7 +867,11 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_location_saved(
     inp.fill(saved_text)
     inp.press("Enter")
 
-    expect(page.locator("#locationFilled")).to_be_visible()
+    # This includes the intentional 300 ms Google Places grace period plus
+    # the save request. A full E2E run can leave Chromium briefly starved
+    # after hundreds of browser tests, so use the suite's async-load budget
+    # rather than Playwright's 5 s assertion default.
+    expect(page.locator("#locationFilled")).to_be_visible(timeout=15000)
     expect(page.locator("#locationFilled .filled-place")).to_have_text(saved_text)
     expect(page.locator("#locationEmpty")).to_be_hidden()
     # renderLocationFilled scrubs the suggestion when the filled state
