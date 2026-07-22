@@ -6,90 +6,173 @@ import FeatureSection from '../components/FeatureSection.astro';
 const base = import.meta.env.BASE_URL;
 ---
 
-<Base title="Vireo — AI-Powered Wildlife Photo Organizer">
+<Base
+  title="Vireo — Open-Source Wildlife Photo Manager"
+  description="On-device wildlife detection, species classification, and subject-aware culling with standard XMP metadata, a rebuildable index, Lightroom migration, and a stable API."
+>
 
   <!-- Hero -->
   <Hero />
 
+  <!-- Filesystem-first architecture -->
+  <section class="section architecture">
+    <div class="container architecture__inner">
+      <div class="architecture__intro">
+        <p class="section-kicker">Files and metadata</p>
+        <h2 class="architecture__heading">Vireo works with the library you already have.</h2>
+        <p class="architecture__lead">
+          Photo metadata is stored in standard XMP sidecars. Vireo uses SQLite
+          to make browsing and searching fast, but the database can be rebuilt
+          at any time by scanning your photos and sidecars.
+        </p>
+      </div>
+      <div class="architecture__grid">
+        <article class="architecture__card">
+          <span class="architecture__marker" aria-hidden="true">01</span>
+          <h3>Rebuild the database</h3>
+          <p>
+            If you move to another computer or need to replace the database,
+            Vireo can recreate its index from the files and metadata on disk.
+          </p>
+        </article>
+        <article class="architecture__card">
+          <span class="architecture__marker" aria-hidden="true">02</span>
+          <h3>Use it alongside other tools</h3>
+          <p>
+            Vireo reads photos in place and writes metadata that Lightroom and
+            Darktable can read. It also connects directly to iNaturalist.
+          </p>
+        </article>
+        <article class="architecture__card">
+          <span class="architecture__marker" aria-hidden="true">03</span>
+          <h3>Inspect each step</h3>
+          <p>
+            The live log and pipeline inspector show model downloads, scans,
+            predictions, background jobs, and errors as they happen.
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
   <!-- How It Works -->
   <section class="section section--light">
     <div class="container">
-      <h2 class="hiw__heading">How It Works</h2>
+      <p class="section-kicker section-kicker--center">Workflow</p>
+      <h2 class="hiw__heading">Import, analyze, and review</h2>
       <div class="hiw__grid">
         <div class="hiw__step">
           <div class="hiw__number">1</div>
-          <h3 class="hiw__title">Import Your Photos</h3>
+          <h3 class="hiw__title">Add folders or import a card</h3>
           <p class="hiw__desc">
-            Open Import and add your photo folders in place, or copy a card
-            into your archive. You choose where every file lives.
+            Add existing photo folders without moving them, or copy a memory
+            card into the archive location you choose.
           </p>
         </div>
         <div class="hiw__step">
           <div class="hiw__number">2</div>
-          <h3 class="hiw__title">AI Classifies</h3>
+          <h3 class="hiw__title">Run the wildlife pipeline</h3>
           <p class="hiw__desc">
-            Choose what runs after import, then walk away while on-device models
-            identify species, detect duplicates, and score image quality.
+            Vireo locates animals, predicts species, finds duplicates, and
+            measures sharpness, exposure, and composition on your computer.
           </p>
         </div>
         <div class="hiw__step">
           <div class="hiw__number">3</div>
-          <h3 class="hiw__title">Review &amp; Export</h3>
+          <h3 class="hiw__title">Review and sync</h3>
           <p class="hiw__desc">
-            Browse predictions, accept or reject with a click, and export
-            your curated selections to Darktable or your editor of choice.
+            Check the predictions, mark photos to keep or reject, and sync the
+            results to XMP. The same library is also available through the API.
           </p>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- Key Benefits -->
+  <!-- Wildlife-specific intelligence -->
   <section class="section">
     <div class="container">
-      <h2 class="benefits__heading">Key Benefits</h2>
+      <p class="section-kicker section-kicker--center">Wildlife analysis</p>
+      <h2 class="benefits__heading">Detection, classification, and quality scoring</h2>
       <FeatureSection
-        title="Cull Faster Than Ever"
-        description="Quickly separate keepers from rejects. Vireo's AI scores every shot so you spend your time on the best frames, not sifting through thousands of mediocre ones."
-        image={`${base}images/vireo-cull.png`}
-        imageAlt="Screenshot of Vireo's culling interface with AI confidence scores"
+        title="Detect and classify wildlife"
+        description="MegaDetector v6 locates animals, people, and vehicles in each frame. Vireo then uses BioCLIP and iNaturalist-trained models to classify more than 10,000 species. Each prediction includes a confidence score and can be corrected during review."
+        image={`${base}images/vireo-classify.png`}
+        imageAlt="Vireo pipeline showing wildlife detections and species predictions with confidence scores"
       />
       <FeatureSection
-        title="Automatic Species Classification"
-        description="Powered by state-of-the-art vision models running entirely on your machine. Identify birds, mammals, reptiles, and more."
-        image={`${base}images/vireo-classify.png`}
-        imageAlt="Screenshot of Vireo classifying bird species with AI predictions"
+        title="Measure quality around the subject"
+        description="Vireo uses SAM2 masks and DINOv2 embeddings to measure the animal rather than treating the full frame as equally important. It groups related photos into bursts and encounters, then recommends KEEP, REVIEW, or REJECT based on subject-aware quality scores."
+        image={`${base}images/vireo-cull.png`}
+        imageAlt="Vireo culling interface comparing wildlife photos with subject-aware quality scores"
         reverse
       />
       <FeatureSection
-        title="Browse &amp; Organize Effortlessly"
-        description="Filter by species, confidence, rating, or collection. Create workspaces for different projects and keep everything organized without touching the file system."
+        title="Browse and review the results"
+        description="Filter by species, confidence, rating, keyword, folder, or location. You can inspect predictions and edit history, compare similar frames, and review photos with keyboard shortcuts. Original image files are not modified."
         image={`${base}images/vireo-browse.png`}
-        imageAlt="Screenshot of Vireo's browse view with filters and collections"
+        imageAlt="Vireo browse view with wildlife photos, filters, and review controls"
       />
     </div>
   </section>
 
-  <!-- Philosophy Teaser -->
-  <section class="section section--navy philosophy">
-    <div class="container philosophy__inner">
-      <h2 class="philosophy__heading">Your Photos, Your Machine</h2>
-      <p class="philosophy__text">
-        Vireo runs entirely on your computer. No cloud uploads, no
-        subscriptions, no telemetry. Your photos never leave your hard drive.
-      </p>
-      <a href={`${base}features/`} class="philosophy__link">
-        Learn more about our approach &rarr;
-      </a>
+  <!-- Ecosystem and automation -->
+  <section class="section section--navy ecosystem">
+    <div class="container">
+      <div class="ecosystem__intro">
+        <p class="section-kicker">Integration and automation</p>
+        <h2 class="ecosystem__heading">Use Vireo with other tools</h2>
+        <p class="ecosystem__lead">
+          Vireo can import Lightroom keywords, write portable metadata, and
+          provide library data to scripts. You can add it to a workflow without
+          replacing the rest of your photo software.
+        </p>
+      </div>
+      <div class="ecosystem__grid">
+        <article class="ecosystem__card">
+          <p class="ecosystem__label">Lightroom</p>
+          <h3>Import catalog keywords</h3>
+          <p>
+            Import keyword hierarchies from <code>.lrcat</code> catalogs. Vireo
+            also writes Lightroom-compatible XMP, so both applications can work
+            with the same photo library.
+          </p>
+        </article>
+        <article class="ecosystem__card">
+          <p class="ecosystem__label">HTTP API</p>
+          <h3>Run Vireo headlessly</h3>
+          <p>
+            Use the versioned <code>/api/v1</code> API without opening the
+            desktop interface. Scripts can search photos, inspect collections,
+            switch workspaces, and read library metadata.
+          </p>
+          <a href="https://github.com/jss367/vireo/blob/main/docs/headless-api.md" target="_blank" rel="noopener">
+            Read the API guide &rarr;
+          </a>
+        </article>
+        <article class="ecosystem__card">
+          <p class="ecosystem__label">Local processing</p>
+          <h3>Photos stay on your computer</h3>
+          <p>
+            Models run locally, with no cloud upload or telemetry. The models
+            themselves are downloaded when needed, and their progress appears
+            in the live log.
+          </p>
+        </article>
+      </div>
+      <div class="ecosystem__action">
+        <a href={`${base}features/`} class="btn btn--outline btn--large">Explore all features</a>
+      </div>
     </div>
   </section>
 
   <!-- Bottom CTA -->
   <section class="section section--dark cta">
     <div class="container cta__inner">
-      <h2 class="cta__heading">Ready to Organize Your Wildlife Photos?</h2>
+      <h2 class="cta__heading">Try Vireo with your wildlife library.</h2>
       <p class="cta__text">
-        Free, open-source, and built for photographers who care about privacy.
+        Vireo is free and open source. Your originals stay in place, and the
+        metadata remains available outside Vireo.
       </p>
       <div class="cta__actions">
         <a href={`${base}download/`} class="btn btn--primary btn--large">
@@ -110,8 +193,74 @@ const base = import.meta.env.BASE_URL;
 </Base>
 
 <style>
+  .section-kicker {
+    margin-bottom: var(--space-md);
+    color: var(--color-accent);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .section-kicker--center {
+    text-align: center;
+  }
+
+  /* ---- Filesystem-first architecture ---- */
+  .architecture__intro {
+    max-width: 820px;
+    margin-bottom: var(--space-3xl);
+  }
+
+  .architecture__heading {
+    max-width: 720px;
+    margin-bottom: var(--space-lg);
+    color: var(--color-text-on-light);
+    font-size: var(--text-4xl);
+    line-height: var(--leading-tight);
+  }
+
+  .architecture__lead {
+    color: var(--color-text-muted);
+    font-size: var(--text-xl);
+    line-height: var(--leading-normal);
+  }
+
+  .architecture__grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-xl);
+  }
+
+  .architecture__card {
+    border-top: 2px solid var(--color-accent);
+    padding: var(--space-xl) 0 0;
+  }
+
+  .architecture__marker {
+    display: block;
+    margin-bottom: var(--space-lg);
+    color: var(--color-accent);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  .architecture__card h3 {
+    margin-bottom: var(--space-sm);
+    color: var(--color-text-on-light);
+    font-size: var(--text-xl);
+  }
+
+  .architecture__card p {
+    color: var(--color-text-muted);
+  }
+
   /* ---- How It Works ---- */
   .hiw__heading {
+    max-width: 760px;
+    margin-left: auto;
+    margin-right: auto;
     text-align: center;
     font-size: var(--text-4xl);
     line-height: var(--leading-tight);
@@ -165,6 +314,9 @@ const base = import.meta.env.BASE_URL;
 
   /* ---- Key Benefits ---- */
   .benefits__heading {
+    max-width: 800px;
+    margin-left: auto;
+    margin-right: auto;
     text-align: center;
     font-size: var(--text-4xl);
     line-height: var(--leading-tight);
@@ -172,33 +324,75 @@ const base = import.meta.env.BASE_URL;
     color: var(--color-text-on-light);
   }
 
-  /* ---- Philosophy Teaser ---- */
-  .philosophy__inner {
-    text-align: center;
-    max-width: 680px;
+  /* ---- Ecosystem and automation ---- */
+  .ecosystem__intro {
+    max-width: 760px;
+    margin-bottom: var(--space-3xl);
   }
 
-  .philosophy__heading {
+  .ecosystem__heading {
     font-size: var(--text-4xl);
     line-height: var(--leading-tight);
     margin-bottom: var(--space-lg);
   }
 
-  .philosophy__text {
+  .ecosystem__lead {
     font-size: var(--text-xl);
     color: var(--color-text-muted);
     line-height: var(--leading-normal);
-    margin-bottom: var(--space-xl);
   }
 
-  .philosophy__link {
-    font-size: var(--text-lg);
+  .ecosystem__grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-xl);
+  }
+
+  .ecosystem__card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-height: 100%;
+    padding: var(--space-xl);
+    border: 1px solid var(--color-border-accent);
+    border-radius: var(--border-radius-lg);
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .ecosystem__label {
+    margin-bottom: var(--space-lg);
+    color: var(--color-accent) !important;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs) !important;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .ecosystem__card h3 {
+    margin-bottom: var(--space-sm);
+    color: var(--color-warm-white);
+    font-size: var(--text-xl);
+  }
+
+  .ecosystem__card p {
+    color: var(--color-text-muted);
+  }
+
+  .ecosystem__card code {
+    color: var(--color-warm-white);
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+
+  .ecosystem__card a {
+    margin-top: auto;
+    padding-top: var(--space-lg);
     font-weight: 600;
-    color: var(--color-accent);
   }
 
-  .philosophy__link:hover {
-    color: var(--color-accent-hover);
+  .ecosystem__action {
+    margin-top: var(--space-2xl);
   }
 
   /* ---- Bottom CTA ---- */
@@ -223,5 +417,17 @@ const base = import.meta.env.BASE_URL;
     justify-content: center;
     gap: var(--space-md);
     flex-wrap: wrap;
+  }
+
+  @media (max-width: 768px) {
+    .architecture__grid,
+    .ecosystem__grid {
+      grid-template-columns: 1fr;
+    }
+
+    .architecture__intro,
+    .ecosystem__intro {
+      margin-bottom: var(--space-2xl);
+    }
   }
 </style>
