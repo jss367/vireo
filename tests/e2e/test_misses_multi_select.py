@@ -7,6 +7,7 @@ selection. Double-click opens the shared lightbox.
 import json
 import time
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -104,6 +105,28 @@ def test_missing_folder_deep_link_fails_closed(live_server, page):
     page.goto(f"{url}/misses?folder_id=999999")
     expect(page.locator("#scopeBanner")).to_be_visible()
     expect(page.locator("#scopeBanner")).to_contain_text("999999")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+
+@pytest.mark.parametrize("scope_key", ["collection_id", "folder_id"])
+def test_malformed_legacy_scope_id_fails_closed(live_server, page, scope_key):
+    """A numeric prefix must not resolve a malformed legacy scope id."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    if scope_key == "collection_id":
+        scope_id = db.add_collection(
+            "Hawk review",
+            json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
+        )
+    else:
+        scope_id = live_server["data"]["folders"][0]
+
+    page.goto(f"{url}/misses?{scope_key}={scope_id}junk")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text(f"Invalid ?{scope_key}")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
     expect(page.locator("#missRecomputeBtn")).to_be_disabled()
 

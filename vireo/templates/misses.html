@@ -701,11 +701,29 @@ function renderMissScopeBanner() {
   b.hidden = !message;
 }
 
+function parseLegacyScopeParam(params, key) {
+  if (!params.has(key)) return { present: false, valid: true, value: null };
+  var raw = params.get(key);
+  var normalized = String(raw == null ? '' : raw).trim();
+  if (!/^[+-]?\d+$/.test(normalized)) {
+    return { present: true, valid: false, value: null, raw: raw };
+  }
+  var value = Number(normalized);
+  if (!Number.isSafeInteger(value)) {
+    return { present: true, valid: false, value: null, raw: raw };
+  }
+  return { present: true, valid: true, value: value, raw: raw };
+}
+
 async function applyLegacyMissScopes() {
   var current = new URL(window.location.href).searchParams;
-  var collectionId = parseInt(current.get('collection_id'), 10);
-  var folderId = parseInt(current.get('folder_id'), 10);
-  if (isNaN(collectionId) && isNaN(folderId)) return;
+  var collectionParam = parseLegacyScopeParam(current, 'collection_id');
+  var folderParam = parseLegacyScopeParam(current, 'folder_id');
+  if (!collectionParam.present && !folderParam.present) return;
+  var collectionId = collectionParam.present && collectionParam.valid
+    ? collectionParam.value : NaN;
+  var folderId = folderParam.present && folderParam.valid
+    ? folderParam.value : NaN;
 
   var legacyFilterKeys = [
     'rating_min', 'flag', 'color_label', 'date_from', 'date_to', 'keyword',
@@ -722,6 +740,19 @@ async function applyLegacyMissScopes() {
   var visual = keepCompiledUrlRules && VireoFilter.getVisual
     ? VireoFilter.getVisual()
     : null;
+
+  if (!collectionParam.valid) {
+    noteLegacyScopeError(
+      'Invalid ?collection_id=' + collectionParam.raw + ' deep link. ' +
+      'Showing no misses so bulk actions do not touch the wrong collection.'
+    );
+  }
+  if (!folderParam.valid) {
+    noteLegacyScopeError(
+      'Invalid ?folder_id=' + folderParam.raw + ' deep link. ' +
+      'Showing no misses so bulk actions do not touch the wrong folder.'
+    );
+  }
 
   // Track fetch failures separately from empty responses: a failed
   // /api/collections must fail closed instead of being treated as an
