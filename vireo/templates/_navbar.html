@@ -5641,10 +5641,27 @@ function _lbCaptureEyeTrackingAnchor() {
       ? { offsetX: _lbEyeTrackScreenAnchor.offsetX, offsetY: _lbEyeTrackScreenAnchor.offsetY }
       : null;
   }
-  var point = _lbPhotoEyePoint(_lightboxCurrentId);
+  var photo = _lbPhotoData(_lightboxCurrentId);
+  var eyeKnown = !!(photo && Object.prototype.hasOwnProperty.call(photo, 'eye_x'));
+  var point = _lbPhotoEyePoint(_lightboxCurrentId, photo);
+  var overlaysAvailable = _lbSourceOverlaysAvailable();
+  // If the current photo is known to be unusable for eye alignment — either
+  // its metadata has resolved without an eye, or the active source cannot
+  // align overlays (JPEG pair or geometric edit) — drop any cached anchor
+  // instead of propagating it. Otherwise, after the user pans on this
+  // paused/no-eye frame, _lbTryApplyPendingEyeTrack would apply a prior
+  // photo's anchor on the next eyed photo and jump the viewport to an
+  // unrelated eye position.
+  if ((eyeKnown && !point) || !overlaysAvailable) {
+    _lbEyeTrackScreenAnchor = null;
+    return null;
+  }
   var metrics = _lbUpdateLayoutMetrics();
   var state = _lbViewportStateFromCurrent();
-  if (!point || !metrics || !state || !_lbSourceOverlaysAvailable()) {
+  if (!point || !metrics || !state) {
+    // Truly uncertain state (destination metadata not yet cached or the layout
+    // has not been measured). Reuse the last trustworthy anchor so a later
+    // eyed frame can still align.
     return _lbEyeTrackScreenAnchor
       ? { offsetX: _lbEyeTrackScreenAnchor.offsetX, offsetY: _lbEyeTrackScreenAnchor.offsetY }
       : null;
@@ -6210,9 +6227,17 @@ function _lbApplyTrackEyeState() {
   var hasEye = !!_lbPhotoEyePoint(_lightboxCurrentId, photo);
   var available = hasEye && _lbSourceOverlaysAvailable();
   btn.setAttribute('aria-pressed', _lbTrackEyeEnabled ? 'true' : 'false');
-  btn.textContent = _lbTrackEyeEnabled
-    ? (eyeKnown && !available ? 'Eye Tracking Paused' : 'Tracking Eye')
-    : 'Track Eye';
+  if (_lbTrackEyeEnabled) {
+    if (available) {
+      btn.textContent = 'Tracking Eye';
+    } else if (eyeKnown) {
+      btn.textContent = 'Eye Tracking Paused';
+    } else {
+      btn.textContent = 'Waiting for Eye';
+    }
+  } else {
+    btn.textContent = 'Track Eye';
+  }
   if (_lbTrackEyeEnabled && !available) {
     btn.title = eyeKnown
       ? 'Eye tracking is on but unavailable for this photo'
