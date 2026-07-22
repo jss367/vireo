@@ -12,7 +12,15 @@ const { title, description, image, imageAlt, reverse = false } = Astro.props;
 
 <div class:list={['feature', { 'feature--reverse': reverse }]}>
   <div class="feature__image">
-    <img src={image} alt={imageAlt} class="screenshot" />
+    <img
+      src={image}
+      alt={imageAlt}
+      class="screenshot"
+      width="1440"
+      height="900"
+      loading="lazy"
+      decoding="async"
+    />
   </div>
   <div class="feature__text">
     <h3 class="feature__title">{title}</h3>
