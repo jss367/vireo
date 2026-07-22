@@ -132,6 +132,38 @@ def test_location_changes_are_grouped_with_plain_language_delta(
     expect(pending_detail).not_to_contain_text("effective")
 
 
+def test_location_without_gps_is_shown_as_added(live_server, page, tmp_path):
+    """A coordinate-less assignment must not look like an unchanged location."""
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+    _make_photo_folders_accessible(live_server, tmp_path, [photo_id])
+
+    reserve_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'location')",
+        ("Pu'u Wa'awa'a Forest Reserve",),
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, reserve_id)
+    db.queue_change(photo_id, "location", "effective")
+
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("openSyncPreview()")
+
+    overlay = page.locator("#syncPreviewOverlay")
+    expect(overlay.locator(".sync-review-group-title")).to_have_text(
+        "Location added to 1 photo"
+    )
+    expect(overlay.locator(".sync-review-delta")).to_contain_text(
+        "Pu'u Wa'awa'a Forest Reserve"
+    )
+    expect(overlay.locator(".sync-review-detail")).to_contain_text(
+        "is assigned in Vireo"
+    )
+    expect(overlay.locator(".sync-review-detail")).to_contain_text(
+        "has no GPS coordinates to write to XMP"
+    )
+
+
 def test_rating_preview_responds_to_selected_sidecar_creator(
     live_server, page, tmp_path,
 ):

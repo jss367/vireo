@@ -509,6 +509,35 @@ def _sync_preview_presentation(
                 ),
             }
 
+        if assigned_location:
+            if location_coordinates:
+                detail = (
+                    f"{location_name} is assigned in Vireo; writing its GPS "
+                    "to XMP is turned off"
+                )
+            else:
+                detail = (
+                    f"{location_name or 'This location'} is assigned in Vireo; "
+                    "it has no GPS coordinates to write to XMP"
+                )
+
+            if metadata.get("location_source"):
+                restored_coordinates = _sync_preview_coordinate_text(
+                    metadata.get("previous_location")
+                )
+                if restored_coordinates:
+                    detail += f"; XMP GPS returns to {restored_coordinates}"
+                else:
+                    detail += "; previously Vireo-assigned GPS is removed from XMP"
+
+            return {
+                "field": "Location",
+                "action": "added",
+                "before": before,
+                "after": location_name or "Assigned location",
+                "after_detail": detail,
+            }
+
         if metadata.get("location_source"):
             restored_coordinates = _sync_preview_coordinate_text(
                 metadata.get("previous_location")
@@ -530,15 +559,7 @@ def _sync_preview_presentation(
             "action": "unchanged",
             "before": before,
             "after": before,
-            "after_detail": (
-                f"{location_name} stays in Vireo; writing its GPS to XMP is turned off"
-                if assigned_location and location_coordinates and not write_locations
-                else (
-                    f"{location_name or 'This location keyword'} has no GPS coordinates to write"
-                    if assigned_location and not location_coordinates
-                    else "No Vireo-assigned GPS needs to be removed"
-                )
-            ),
+            "after_detail": "No Vireo-assigned GPS needs to be removed",
         }
 
     if change_type == "edit_recipe":
