@@ -5,12 +5,14 @@ const base = import.meta.env.BASE_URL;
 <section class="hero section section--dark">
   <div class="hero__inner container">
     <div class="hero__text">
+      <p class="hero__eyebrow">Works with your files and XMP metadata</p>
       <h1 class="hero__headline">
-        The AI-powered photo manager<br />for wildlife photographers.
+        A wildlife photo manager<br />for your existing library.
       </h1>
       <p class="hero__subtitle">
-        Automated species classification, AI-assisted culling, and smart
-        organization — all on-device, free and open source forever.
+        Vireo runs wildlife detection, species classification, and photo scoring
+        on your computer. It reads photos in place and saves metadata to standard
+        XMP sidecars.
       </p>
       <div class="hero__actions">
         <a href={`${base}download/`} class="btn btn--primary btn--large">
@@ -55,6 +57,16 @@ const base = import.meta.env.BASE_URL;
     margin-bottom: var(--space-lg);
   }
 
+  .hero__eyebrow {
+    margin-bottom: var(--space-md);
+    color: var(--color-accent);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
   .hero__subtitle {
     font-size: var(--text-xl);
     color: var(--color-text-muted);
@@ -94,10 +106,6 @@ const base = import.meta.env.BASE_URL;
 
     .hero__actions {
       justify-content: center;
-    }
-
-    .hero__image {
-      order: -1;
     }
 
     .hero__image img {
