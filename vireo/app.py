@@ -15155,6 +15155,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify(cfg.load())
 
+    @app.route("/api/recent-destinations", methods=["POST"])
+    def api_recent_destinations_add():
+        """Remember a destination selected in a folder picker."""
+        import config as cfg
+
+        body = request.get_json(silent=True) or {}
+        destination = body.get("path")
+        if not isinstance(destination, str) or not destination:
+            return json_error("path is required", status=400)
+        if not os.path.isabs(destination):
+            return json_error("path must be absolute", status=400)
+
+        # Use a raw read-modify-write so recording this convenience history
+        # neither pins DEFAULTS into config.json nor races settings autosaves.
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            ingest = raw.get("ingest")
+            ingest = dict(ingest) if isinstance(ingest, dict) else {}
+            existing = ingest.get("recent_destinations")
+            existing = existing if isinstance(existing, list) else []
+            recents = [
+                item for item in existing
+                if isinstance(item, str) and item and item != destination
+            ]
+            recents.insert(0, destination)
+            recents = recents[:5]
+            ingest["recent_destinations"] = recents
+            raw["ingest"] = ingest
+            cfg.save(raw)
+
+        return jsonify({"ok": True, "recent_destinations": recents})
+
     @app.route("/api/config", methods=["POST"])
     def api_config_set():
         import config as cfg

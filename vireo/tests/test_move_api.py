@@ -116,6 +116,44 @@ def test_move_page_windows_parent_preserves_drive_root(app_and_db):
     assert "parent += '\\\\'" in html
 
 
+def test_recent_destinations_add_reorders_deduplicates_and_limits(
+    app_and_db, tmp_path
+):
+    import config as cfg
+
+    app, _ = app_and_db
+    client = app.test_client()
+    destinations = [str(tmp_path / f"archive-{i}") for i in range(6)]
+
+    for destination in destinations:
+        resp = client.post("/api/recent-destinations", json={"path": destination})
+        assert resp.status_code == 200
+
+    recents = cfg.load()["ingest"]["recent_destinations"]
+    assert recents == list(reversed(destinations[1:]))
+
+    resp = client.post(
+        "/api/recent-destinations", json={"path": destinations[2]}
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["recent_destinations"] == [
+        destinations[2],
+        destinations[5],
+        destinations[4],
+        destinations[3],
+        destinations[1],
+    ]
+
+
+def test_recent_destinations_rejects_relative_path(app_and_db):
+    app, _ = app_and_db
+    resp = app.test_client().post(
+        "/api/recent-destinations", json={"path": "relative/archive"}
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "path must be absolute"
+
+
 def test_move_photos_job_starts(app_and_db, tmp_path):
     """POST /api/jobs/move-photos starts a job."""
     app, db = app_and_db

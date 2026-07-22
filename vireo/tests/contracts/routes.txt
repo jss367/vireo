@@ -338,6 +338,7 @@ POST         /api/predictions/<int:pred_id>/reviewed
 POST         /api/predictions/group/apply
 POST         /api/preview-cache/clear
 POST         /api/processes
+POST         /api/recent-destinations
 POST         /api/redo
 POST         /api/remote-targets/test
 POST         /api/report-issue
