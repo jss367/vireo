@@ -1016,6 +1016,23 @@ VireoFilter.init({
   root: document.getElementById('vireoFilterBar'),
   scopeLabel: 'Review \u00b7 Predictions',
   onChange: loadPredictions,
+  // Review keeps its collection scope outside the filter tree and passes
+  // it separately as ``collection_id`` on /api/predictions. The Misses
+  // handoff payload only serializes ``state.root``/``state.visual``, so
+  // without exposing this scope the handoff menu would offer Misses under
+  // a Review-collection view and land on workspace-wide misses matching
+  // the chip \u2014 with bulk reject/recompute enabled against photos
+  // outside the source collection (Codex review r3627997828).
+  getScope: function() {
+    if (currentCollection === 'all') {
+      return { folder_id: null, collection_id: null };
+    }
+    var collId = parseInt(currentCollection, 10);
+    return {
+      folder_id: null,
+      collection_id: isNaN(collId) ? null : collId,
+    };
+  },
 }).then(function() {
   // Restored/deep-linked filters weren't part of the first fetch above.
   if (VireoFilter.hasFilters()) loadPredictions();

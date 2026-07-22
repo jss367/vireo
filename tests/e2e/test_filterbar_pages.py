@@ -280,6 +280,78 @@ def test_handoff_hides_misses_when_source_has_folder_scope(live_server, page):
     ).count() == 1
 
 
+def test_handoff_hides_misses_when_source_has_dashboard_collection_scope(
+    live_server, page,
+):
+    """Companion to the folder-scope guard: a dashboard-composed collection
+    (?dashboard_scope=1&collection_id=...) also lives outside ``state.root``,
+    so the same handoff-payload leak would drop the collection restriction
+    on the way to Misses. Hide Misses when Browse reports that scope too
+    (CodeRabbit review r3627968187)."""
+    import json
+
+    db = live_server["db"]
+    rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    collection_id = db.add_collection("All JPGs", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse?collection_id={collection_id}&dashboard_scope=1")
+    _wait_bar(page)
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 0
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1
+
+
+def test_handoff_hides_misses_when_review_has_collection_scope(
+    live_server, page,
+):
+    """Review keeps ``currentCollection`` outside the filter tree and
+    passes it separately as ``collection_id`` to /api/predictions. Without
+    a ``getScope`` on Review's ``VireoFilter.init``, the handoff guard
+    could not see this scope and would offer Misses under a Review-
+    collection view — landing on workspace-wide misses matching the chip,
+    with bulk reject/recompute enabled against photos outside the source
+    collection (Codex review r3627997828)."""
+    import json
+
+    db = live_server["db"]
+    rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    collection_id = db.add_collection("All JPGs", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    _wait_bar(page)
+    # ``loadCollectionFilter`` populates the dropdown asynchronously —
+    # wait for the option to render before selecting it.
+    page.wait_for_selector(
+        f'#collectionFilter option[value="{collection_id}"]', timeout=8000,
+    )
+    # Select the collection via Review's dropdown so ``currentCollection``
+    # updates through the real switch path (the code under test).
+    page.select_option("#collectionFilter", str(collection_id))
+    page.wait_for_function(
+        "currentCollection === '" + str(collection_id) + "'", timeout=8000,
+    )
+    # A rule is required to reveal the handoff button.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 0
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1
+
+
 def test_handoff_shows_misses_when_source_has_no_external_scope(
     live_server, page,
 ):
