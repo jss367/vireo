@@ -326,7 +326,7 @@ function renderSyncPreview() {
     if (data.location_sync_enabled) {
       html += '<div class="sync-review-note"><strong style="color:var(--text-primary);">About location sync:</strong> Location keywords with coordinates are written to XMP as GPS metadata. Their names and hierarchy remain in Vireo.</div>';
     } else {
-      html += '<div class="sync-review-note"><strong style="color:var(--text-primary);">About location sync:</strong> Writing assigned locations to XMP is turned off in Settings. Location keywords stay in Vireo; this check only removes GPS previously written by Vireo.</div>';
+      html += '<div class="sync-review-note"><strong style="color:var(--text-primary);">About location sync:</strong> Location assignments are kept in Vireo. Writing their GPS coordinates to XMP is turned off in Settings; sync only removes GPS previously written by Vireo.</div>';
     }
   }
 

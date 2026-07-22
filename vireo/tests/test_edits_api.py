@@ -447,10 +447,10 @@ def test_sync_preview_describes_location_keyword_as_xmp_delta(
     }
 
 
-def test_sync_preview_explains_when_location_xmp_writes_are_disabled(
+def test_sync_preview_keeps_location_assignment_clear_when_xmp_writes_are_disabled(
     client_with_photo,
 ):
-    """A queued cleanup check must not imply that a location will be written."""
+    """The Vireo assignment stays primary even when XMP GPS is disabled."""
     app, db, photo_id = client_with_photo
     location_id = db.conn.execute(
         "INSERT INTO keywords "
@@ -468,12 +468,12 @@ def test_sync_preview_explains_when_location_xmp_writes_are_disabled(
     assert payload["location_sync_enabled"] is False
     change = payload["photos"][0]["changes"][0]
     assert change["presentation"] == {
-        "field": "XMP location",
-        "action": "unchanged",
+        "field": "Location",
+        "action": "added",
         "before": "No XMP sidecar",
-        "after": "No XMP sidecar",
+        "after": "Tallahassee",
         "after_detail": (
-            "Tallahassee stays in Vireo; writing its GPS to XMP is turned off"
+            "Tallahassee is assigned in Vireo; writing its GPS to XMP is turned off"
         ),
     }
 
@@ -601,6 +601,16 @@ def test_sync_preview_does_not_persist_rating_when_location_lacks_gps(
         for change in response.get_json()["photos"][0]["changes"]
     }
     assert changes["location"]["creates_xmp_sidecar"] is False
+    assert changes["location"]["presentation"] == {
+        "field": "Location",
+        "action": "added",
+        "before": "No XMP sidecar",
+        "after": "Placeholder",
+        "after_detail": (
+            "Placeholder is assigned in Vireo; it has no GPS coordinates "
+            "to write to XMP"
+        ),
+    }
     assert changes["rating"]["presentation"]["action"] == "unchanged"
 
 
