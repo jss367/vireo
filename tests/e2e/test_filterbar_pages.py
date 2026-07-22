@@ -329,9 +329,13 @@ def test_handoff_hides_misses_when_review_has_collection_scope(
     page.goto(f"{url}/review")
     _wait_bar(page)
     # ``loadCollectionFilter`` populates the dropdown asynchronously —
-    # wait for the option to render before selecting it.
+    # wait for the option to be attached before selecting it. ``<option>``
+    # elements do not have their own rendered box, so Playwright's default
+    # ``visible`` state can never succeed even though the option is ready.
     page.wait_for_selector(
-        f'#collectionFilter option[value="{collection_id}"]', timeout=8000,
+        f'#collectionFilter option[value="{collection_id}"]',
+        state="attached",
+        timeout=8000,
     )
     # Select the collection via Review's dropdown so ``currentCollection``
     # updates through the real switch path (the code under test).
