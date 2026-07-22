@@ -181,8 +181,12 @@ def test_filter_bootstrap_failure_keeps_requested_scope_closed(
         ("missing_rules", "%7B%22root%22%3A%7B%22mode%22%3A%22all%22%7D%7D"),
         # Non-JSON garbage.
         ("garbage", "not-a-json-object"),
+        # Empty ``?filters=`` — ``URLSearchParams.get`` returns ``""``,
+        # which is falsy but still carries a required handoff scope
+        # (Codex review r3627816534).
+        ("empty_string", ""),
     ],
-    ids=["truncated_json", "missing_rules", "garbage"],
+    ids=["truncated_json", "missing_rules", "garbage", "empty_string"],
 )
 def test_malformed_misses_handoff_filters_fails_closed(
     live_server, page, label, bad_payload,

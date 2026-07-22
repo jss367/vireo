@@ -1452,8 +1452,15 @@
         installEvents();
         const urlParams = new URLSearchParams(window.location.search);
         let fromUrl = false;
-        const handoffRaw = urlParams.get('filters');
-        if (handoffRaw) {
+        // Use ``has`` rather than truthiness: ``/misses?filters=`` (or
+        // ``?filters``) hands back an empty string, which is falsy but
+        // still carries the caller's intent to constrain the page. Falling
+        // through to legacy params or persisted state would silently widen
+        // the destination — on Misses, that re-exposes bulk reject and
+        // recompute to photos outside the intended handoff scope
+        // (Codex review r3627816534).
+        if (urlParams.has('filters')) {
+          const handoffRaw = urlParams.get('filters');
           let payload = null;
           try { payload = JSON.parse(handoffRaw); }
           catch (e) { payload = null; }
