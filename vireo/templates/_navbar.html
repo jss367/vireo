@@ -670,6 +670,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   cursor: default;
   text-shadow: none;
 }
+.lb-action-btn[aria-pressed="true"] {
+  color: #ffe066;
+  border-color: rgba(255, 224, 102, 0.84);
+  background: rgba(92, 76, 12, 0.82);
+}
 .lb-action-accent {
   color: #ffe066;
   border-color: rgba(255, 224, 102, 0.84);
@@ -3489,6 +3494,9 @@ async function createWorkspace() {
     <button class="lb-action-btn" id="lightboxToggleEye" onclick="event.stopPropagation(); toggleLightboxEye();" title="Toggle eye marker">
       Hide Eye
     </button>
+    <button class="lb-action-btn" id="lightboxTrackEye" aria-pressed="false" onclick="event.stopPropagation(); toggleLightboxTrackEye();" title="Keep the detected eye in the same screen position while navigating">
+      Track Eye
+    </button>
     <button class="lb-action-btn" id="lightboxToggleInfo" onclick="event.stopPropagation(); toggleLightboxInfo();" title="Toggle filename, counter, and zoom badge">
       Hide Info
     </button>
@@ -3655,6 +3663,8 @@ var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; li
 var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
+var _lbPendingEyeTrack = null; // destination alignment waiting for image metadata/layout
+var _lbEyeTrackScreenAnchor = null; // eye offset from viewport center in CSS pixels
 var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
 var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
 var _lbAdjacentPreloads = {}; // decoded immediate neighbors, keyed by photo id + source URL
@@ -5621,6 +5631,71 @@ function _lbViewportStateFromCurrent() {
   return state;
 }
 
+function _lbCaptureEyeTrackingAnchor() {
+  if (!_lbTrackEyeEnabled || (_lbZoom <= 1.001 && !_lbPending1To1)) return null;
+  // During rapid navigation the DOM can still contain the outgoing bitmap.
+  // Reuse the last trustworthy screen anchor instead of measuring that bitmap
+  // against the incoming photo id.
+  if (_lbVisualTransitionPending) {
+    return _lbEyeTrackScreenAnchor
+      ? { offsetX: _lbEyeTrackScreenAnchor.offsetX, offsetY: _lbEyeTrackScreenAnchor.offsetY }
+      : null;
+  }
+  var point = _lbPhotoEyePoint(_lightboxCurrentId);
+  var metrics = _lbUpdateLayoutMetrics();
+  var state = _lbViewportStateFromCurrent();
+  if (!point || !metrics || !state || !_lbSourceOverlaysAvailable()) {
+    return _lbEyeTrackScreenAnchor
+      ? { offsetX: _lbEyeTrackScreenAnchor.offsetX, offsetY: _lbEyeTrackScreenAnchor.offsetY }
+      : null;
+  }
+  var anchor = {
+    offsetX: (point.x - state.centerX) * metrics.w * metrics.scale,
+    offsetY: (point.y - state.centerY) * metrics.h * metrics.scale,
+  };
+  _lbEyeTrackScreenAnchor = anchor;
+  return { offsetX: anchor.offsetX, offsetY: anchor.offsetY };
+}
+
+function _lbTryApplyPendingEyeTrack(photo) {
+  var pending = _lbPendingEyeTrack;
+  if (!pending || !_lbTrackEyeEnabled) return false;
+  if (String(pending.photoId) !== String(_lightboxCurrentId)) return false;
+  photo = photo || _lbPhotoData(_lightboxCurrentId);
+  // A missing object means the detail request has not resolved yet. Keep the
+  // alignment armed so its callback can apply it after the image is laid out.
+  // Navigation lists on some pages contain only {id, filename}; those are
+  // also "unknown", not evidence that the destination lacks an eye.
+  if (!photo || !Object.prototype.hasOwnProperty.call(photo, 'eye_x')) return false;
+  var point = _lbPhotoEyePoint(_lightboxCurrentId, photo);
+  var metrics = _lbUpdateLayoutMetrics();
+  if (!point || !_lbSourceOverlaysAvailable()) {
+    _lbPendingEyeTrack = null;
+    _lbApplyTrackEyeState();
+    return false;
+  }
+  if (!metrics || _lbVisualTransitionPending) return false;
+
+  var state = _lbViewportStateFromCurrent();
+  if (!state || _lbZoom <= 1.001 || !metrics.scale) return false;
+  state.centerX = point.x - (Number(pending.offsetX) || 0) / (metrics.w * metrics.scale);
+  state.centerY = point.y - (Number(pending.offsetY) || 0) / (metrics.h * metrics.scale);
+  _lbApplyViewportState(state);
+
+  // Native 1:1 can be learned after the first layout pass. Retain the pending
+  // alignment until then so a later 1:1 snap does not move the eye.
+  if (!state.oneToOne || _lbNativeZoom) {
+    _lbPendingEyeTrack = null;
+  }
+  _lbEyeTrackScreenAnchor = {
+    offsetX: Number(pending.offsetX) || 0,
+    offsetY: Number(pending.offsetY) || 0,
+  };
+  _lbSaveViewportState(_lightboxCurrentId);
+  _lbApplyTrackEyeState();
+  return true;
+}
+
 function _lbSaveViewportState(photoId) {
   if (photoId == null) return null;
   // Mid-navigation the DOM transform still belongs to the outgoing photo but
@@ -5969,6 +6044,7 @@ function _lbPersistBool(key, value) {
 var _lbBoxesVisible = _lbStoredBool('vireo.lb.boxesVisible', false);
 var _lbMasksVisible = _lbStoredBool('vireo.lb.masksVisible', false);
 var _lbEyeVisible = _lbStoredBool('vireo.lb.eyeVisible', false);
+var _lbTrackEyeEnabled = _lbStoredBool('vireo.lb.trackEye', false);
 var _lbInfoVisible = _lbStoredBool('vireo.lb.infoVisible', true);
 var _lbChromeVisible = _lbStoredBool('vireo.lb.chromeVisible', true);
 
@@ -6090,6 +6166,63 @@ function toggleLightboxEye() {
   _lbApplyEyeVisibility();
 }
 
+function _lbPhotoData(photoId) {
+  if (photoId == null) return null;
+  var cached = _lbPhotoDataByPhoto[String(photoId)];
+  if (cached) return cached;
+  return _lightboxPhotoList.find(function(photo) {
+    return String(photo.id) === String(photoId);
+  }) || null;
+}
+
+function _lbPhotoEyePoint(photoId, photo) {
+  photo = photo || _lbPhotoData(photoId);
+  if (!photo || photo.eye_x == null || photo.eye_y == null) return null;
+  var x = Number(photo.eye_x);
+  var y = Number(photo.eye_y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return _lbTransformPointByRecipe(
+    x,
+    y,
+    _lbEditRecipeByPhoto[String(photoId)] || photo.edit_recipe
+  );
+}
+
+function _lbApplyTrackEyeState() {
+  var btn = document.getElementById('lightboxTrackEye');
+  if (!btn) return;
+  var photo = _lbPhotoData(_lightboxCurrentId);
+  var eyeKnown = !!(
+    photo && Object.prototype.hasOwnProperty.call(photo, 'eye_x')
+  );
+  var hasEye = !!_lbPhotoEyePoint(_lightboxCurrentId, photo);
+  var available = hasEye && _lbSourceOverlaysAvailable();
+  btn.setAttribute('aria-pressed', _lbTrackEyeEnabled ? 'true' : 'false');
+  btn.textContent = _lbTrackEyeEnabled
+    ? (eyeKnown && !available ? 'Eye Tracking Paused' : 'Tracking Eye')
+    : 'Track Eye';
+  if (_lbTrackEyeEnabled && !available) {
+    btn.title = eyeKnown
+      ? 'Eye tracking is on but unavailable for this photo'
+      : 'Eye tracking is on; waiting for this photo\'s eye metadata';
+  } else if (!_lbTrackEyeEnabled && !available) {
+    btn.title = 'Turn on eye tracking; it will start when a usable eye keypoint is available';
+  } else {
+    btn.title = _lbTrackEyeEnabled
+      ? 'Keep the detected eye in the same screen position while navigating'
+      : 'Track the detected eye while navigating';
+  }
+}
+
+function toggleLightboxTrackEye() {
+  _lbTrackEyeEnabled = !_lbTrackEyeEnabled;
+  _lbPersistBool('vireo.lb.trackEye', _lbTrackEyeEnabled);
+  _lbPendingEyeTrack = null;
+  _lbEyeTrackScreenAnchor = null;
+  if (_lbTrackEyeEnabled) _lbCaptureEyeTrackingAnchor();
+  _lbApplyTrackEyeState();
+}
+
 /* Species color palette for lightbox bounding boxes */
 var _lbSpeciesColors = {};
 var _lbColorPalette = [
@@ -6138,6 +6271,7 @@ function _lbRenderEyeCrosshair(photo) {
   }
   container.appendChild(marker);
   _lbApplyEyeVisibility();
+  _lbApplyTrackEyeState();
 }
 
 function _lbLoadDetections(photoId) {
@@ -6825,6 +6959,7 @@ function openLightbox(photoId, filename, photoList, options) {
   options = options || {};
   _lbCancelOriginalPreload();
   var fallbackViewportState = options.fallbackViewportState || null;
+  var eyeTrackAnchor = options.eyeTrackAnchor || null;
   _lbFlushPendingAdjustmentSave();
   if (alreadyOpen && _lightboxCurrentId != null) {
     _lbSaveViewportState(_lightboxCurrentId);
@@ -6989,6 +7124,11 @@ function openLightbox(photoId, filename, photoList, options) {
   // a stale edge anchor on the new image — consistent with the pan reset above.
   _lbPending1To1Anchor = null;
   _lbPendingViewportState = restoreViewportState;
+  _lbPendingEyeTrack = (_lbTrackEyeEnabled && eyeTrackAnchor) ? {
+    photoId: photoId,
+    offsetX: Number(eyeTrackAnchor.offsetX) || 0,
+    offsetY: Number(eyeTrackAnchor.offsetY) || 0,
+  } : null;
   _lbOriginalUnavailable = false;
   _lbFullUsesOriginal = null;
   _lbEditRecipe = null;
@@ -7092,6 +7232,7 @@ function openLightbox(photoId, filename, photoList, options) {
       if (!_lbVisualTransitionPending) {
         _lbRecomputeNativeZoom();
         if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+        _lbTryApplyPendingEyeTrack(data);
         if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
       }
       // Detection boxes, the eye marker, and the mask overlay are children of
@@ -7116,6 +7257,7 @@ function openLightbox(photoId, filename, photoList, options) {
         _lbDeferredOverlayApply = null;
         applyOverlays();
       }
+      _lbApplyTrackEyeState();
     })
     .catch(function() {
       if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
@@ -7155,6 +7297,7 @@ function openLightbox(photoId, filename, photoList, options) {
     } else if (!_lbTryApplyPendingViewportState()) {
       _lbApplyPendingOneToOneZoom();
     }
+    _lbTryApplyPendingEyeTrack();
     _lbApplyTransform();
     _lbFlushDeferredOverlayApply();
     if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
@@ -7179,6 +7322,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbSetPhotoTransitionPending(false);
       _lbRecomputeNativeZoom();
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+      _lbTryApplyPendingEyeTrack();
       _lbApplyTransform();
       _lbFlushDeferredOverlayApply();
       if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
@@ -7217,6 +7361,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbApplyInfoVisibility();
   _lbApplyChromeVisibility();
   _lbApplyEyeVisibility();
+  _lbApplyTrackEyeState();
   _lbApplyMaskToggleButton();
   _lbApplyWildlifeExcludedButton();
 
@@ -7248,10 +7393,12 @@ function lightboxNav(delta) {
     return;
   }
   var currentViewportState = _lbSaveViewportState(_lightboxCurrentId);
+  var eyeTrackAnchor = _lbCaptureEyeTrackingAnchor();
   var next = _lightboxPhotoList[newIdx];
   openLightbox(next.id, next.filename, _lightboxPhotoList, {
     fallbackViewportState: currentViewportState,
-    preserveOneToOne: _lbIsOneToOneZoom()
+    preserveOneToOne: _lbIsOneToOneZoom(),
+    eyeTrackAnchor: eyeTrackAnchor
   });
 }
 
@@ -7529,6 +7676,8 @@ function closeLightbox(e) {
   _lbSetPhotoTransitionPending(false);
   _lbDeferredOverlayApply = null;
   _lbClearPendingViewportRestore();
+  _lbPendingEyeTrack = null;
+  _lbEyeTrackScreenAnchor = null;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbCancelOriginalPreload();
@@ -7620,6 +7769,7 @@ function buildLightboxContextMenu(pid) {
   items.push(toggleItem('Detection boxes', _lbBoxesVisible, toggleLightboxBoxes));
   items.push(toggleItem('Mask overlay', _lbMasksVisible, toggleLightboxMasks));
   items.push(toggleItem('Eye marker', _lbEyeVisible, toggleLightboxEye));
+  items.push(toggleItem('Track eye', _lbTrackEyeEnabled, toggleLightboxTrackEye));
   items.push(toggleItem('Filename and counter', _lbInfoVisible, toggleLightboxInfo));
   items.push(toggleItem('Lightbox controls', _lbChromeVisible, toggleLightboxChrome));
   items.push(toggleItem('Wildlife classification', !_lbCurrentWildlifeExcluded, lightboxToggleWildlifeExcluded));
