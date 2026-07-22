@@ -209,6 +209,24 @@ body {
   font-weight: 650;
 }
 .location-review-section-title small { color: var(--text-ghost); font-size: 10px; font-weight: 400; }
+.location-review-section-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.location-review-coordinate-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 400;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.location-review-coordinate-toggle input { margin: 0; accent-color: var(--accent); }
 .location-review-candidates { display: flex; flex-direction: column; gap: 7px; }
 .location-review-candidate {
   display: grid;
@@ -251,6 +269,13 @@ body {
   text-transform: uppercase;
 }
 .location-review-candidate-meta { display: block; color: var(--text-dim); font-size: 10px; margin-top: 3px; line-height: 1.35; }
+.location-review-candidate-coordinates {
+  display: block;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 9px;
+  margin-top: 3px;
+}
 .location-review-search-row { display: flex; gap: 7px; }
 .location-review-search {
   flex: 1;
@@ -396,7 +421,13 @@ body {
         <section class="location-review-section">
           <div class="location-review-section-title">
             <span>Suggested locations</span>
-            <small id="locationReviewSuggestionStatus">Looking nearby…</small>
+            <div class="location-review-section-controls">
+              <label class="location-review-coordinate-toggle" for="locationReviewIncludeCoordinates">
+                <input id="locationReviewIncludeCoordinates" type="checkbox">
+                Include coordinates
+              </label>
+              <small id="locationReviewSuggestionStatus">Looking nearby…</small>
+            </div>
           </div>
           <div class="location-review-candidates" id="locationReviewCandidates">
             <div class="location-review-loading">Finding saved and nearby locations…</div>
@@ -446,6 +477,7 @@ body {
     assignedGroups: 0,
     skippedGroups: [],
     selectedChoice: null,
+    includeCoordinates: false,
     savedCandidates: [],
     googleCandidates: [],
     regionCandidates: [],
@@ -736,6 +768,14 @@ body {
     return parts.join(' · ');
   }
 
+  function candidateCoordinates(choice) {
+    if (!choice || choice.latitude == null || choice.longitude == null) return '';
+    var latitude = Number(choice.latitude);
+    var longitude = Number(choice.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return '';
+    return latitude.toFixed(6) + ', ' + longitude.toFixed(6);
+  }
+
   function allCandidates() {
     var seen = {};
     var values = [];
@@ -813,11 +853,13 @@ body {
       var selected = candidateKey(choice) === candidateKey(state.selectedChoice) ? ' selected' : '';
       var badge = choice.kind === 'keyword'
         ? '<span class="location-review-candidate-badge">Previously used</span>' : '';
+      var coordinates = state.includeCoordinates ? candidateCoordinates(choice) : '';
       return '<button class="location-review-candidate' + selected + '" type="button" data-candidate-index="' + index + '">' +
         '<span class="location-review-radio"></span><span>' +
         '<span class="location-review-candidate-heading">' +
         '<span class="location-review-candidate-name">' + escapeHtml(choice.name) + '</span>' + badge + '</span>' +
         '<span class="location-review-candidate-meta">' + escapeHtml(candidateMeta(choice)) + '</span>' +
+        (coordinates ? '<span class="location-review-candidate-coordinates">' + escapeHtml(coordinates) + '</span>' : '') +
         '</span></button>';
     }).join('');
     container.querySelectorAll('[data-candidate-index]').forEach(function(button) {
@@ -1196,6 +1238,10 @@ body {
 
   document.getElementById('locationReviewPrevious').addEventListener('click', function() { moveGroup(-1); });
   document.getElementById('locationReviewNext').addEventListener('click', function() { moveGroup(1); });
+  document.getElementById('locationReviewIncludeCoordinates').addEventListener('change', function(event) {
+    state.includeCoordinates = event.target.checked;
+    renderCandidates();
+  });
   document.getElementById('locationReviewSkip').addEventListener('click', function() {
     var group = currentGroup();
     if (!group) return;
