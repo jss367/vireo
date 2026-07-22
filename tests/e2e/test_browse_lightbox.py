@@ -1005,15 +1005,6 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         }"""
     )
 
-    # Queue the same delayed layout refresh that can be left behind when the
-    # bottom bar finishes laying out just before navigation starts.
-    page.evaluate(
-        """() => {
-            const wrap = document.getElementById('lightboxWrap');
-            wrap.style.height = `${wrap.clientHeight - 42}px`;
-        }"""
-    )
-
     page.keyboard.press("ArrowRight")
     page.wait_for_function("() => window._lbVisualTransitionPending === true")
     page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
@@ -1023,6 +1014,19 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     while "route" not in held_original and time.time() < deadline:
         page.wait_for_timeout(10)
     assert "route" in held_original
+
+    # Queue the delayed layout refresh only after navigation is definitely
+    # pending. Scheduling it before the key press races with slow CI control
+    # round-trips and can legitimately reflow the still-current photo before
+    # the transition begins, invalidating the baseline captured above.
+    page.evaluate(
+        """() => {
+            const wrap = document.getElementById('lightboxWrap');
+            wrap.style.height = `${wrap.clientHeight - 42}px`;
+        }"""
+    )
+    page.wait_for_timeout(150)
+    assert page.evaluate("window.__lightboxTransformCallsWhilePending") == 0
 
     # The outgoing bitmap remains visible while the incoming original is
     # loading, so its filename and position must remain visible too.
@@ -1068,11 +1072,6 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     expect(page.locator(".vireo-ctx-menu")).to_have_count(0)
     page.evaluate("window.lightboxDelete()")
     expect(page.locator("#deleteModal")).not_to_have_class("modal-overlay open")
-
-    # The queued refresh must not re-clamp or move the outgoing bitmap while
-    # the next photo is still waiting to decode.
-    page.wait_for_timeout(150)
-    assert page.evaluate("window.__lightboxTransformCallsWhilePending") == 0
 
     while_loading = page.evaluate(
         """() => {
