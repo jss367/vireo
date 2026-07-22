@@ -124,6 +124,11 @@ log = logging.getLogger(__name__)
 # and leave the process in the wrong mode mid-probe.
 _WIN_ERROR_MODE_LOCK = threading.Lock()
 
+# A Leaflet marker is substantially heavier than its JSON source row. Keep a
+# hard ceiling as a final safety net for very large libraries; the Map UI
+# clearly reports truncation and lets users narrow the shared filters.
+MAP_RENDER_PHOTO_LIMIT = 10_000
+
 
 # Stable ordering and labels for the palette + nav rendering.
 # The `id` is the nav-id used in `tabs`; `href` is the canonical
@@ -6821,6 +6826,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_photos_geo():
         db = _get_db()
         folder_id = request.args.get("folder_id", None, type=int)
+        focus_photo_id = request.args.get("photo_id", None, type=int)
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
@@ -6862,12 +6868,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_without_coordinates = db.count_photos_without_coordinates()
         total_geolocated = total_photos - total_without_coordinates
 
-        photo_dicts = [dict(p) for p in photos]
+        total_filtered = len(photos)
+        visible_photos = list(photos[:MAP_RENDER_PHOTO_LIMIT])
+        # A deep-linked photo must remain reachable even when it falls beyond
+        # the safety ceiling in the default date ordering. Replace the last
+        # visible row rather than exceeding the bound.
+        if (
+            focus_photo_id is not None
+            and visible_photos
+            and all(p["id"] != focus_photo_id for p in visible_photos)
+        ):
+            focused = next((p for p in photos if p["id"] == focus_photo_id), None)
+            if focused is not None:
+                visible_photos[-1] = focused
+
+        photo_dicts = [dict(p) for p in visible_photos]
         _attach_edit_recipes(db, photo_dicts)
 
         response = {
             "photos": photo_dicts,
-            "total_filtered": len(photos),
+            "total_filtered": total_filtered,
+            "total_rendered": len(photo_dicts),
+            "render_limit": MAP_RENDER_PHOTO_LIMIT,
+            "truncated": total_filtered > len(photo_dicts),
             "total_photos": total_photos,
             "total_geolocated": total_geolocated,
             "total_without_coordinates": total_without_coordinates,

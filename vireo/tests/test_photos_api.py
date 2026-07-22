@@ -1123,6 +1123,35 @@ def test_api_photos_geo_empty(app_and_db):
     assert data['total_filtered'] == 0
 
 
+def test_api_photos_geo_caps_payload_and_preserves_focused_photo(
+    app_and_db, monkeypatch
+):
+    """The map payload has a hard ceiling without breaking deep links."""
+    import app as app_module
+
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    for index, photo in enumerate(photos):
+        db.conn.execute(
+            "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+            (37.0 + index, -122.0 - index, photo["id"]),
+        )
+    db.conn.commit()
+    monkeypatch.setattr(app_module, "MAP_RENDER_PHOTO_LIMIT", 2)
+
+    focus_id = photos[-1]["id"]
+    response = app.test_client().get(f"/api/photos/geo?photo_id={focus_id}")
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["total_filtered"] == 3
+    assert data["total_rendered"] == 2
+    assert data["render_limit"] == 2
+    assert data["truncated"] is True
+    assert len(data["photos"]) == 2
+    assert focus_id in {photo["id"] for photo in data["photos"]}
+
+
 def test_api_photos_geo_includes_gps_stats(app_and_db):
     """GET /api/photos/geo response includes consistent global GPS stats."""
     app, db = app_and_db
