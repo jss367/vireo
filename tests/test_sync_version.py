@@ -74,3 +74,28 @@ def test_sync_version_strips_v_prefix(version_files, monkeypatch):
         (version_files / "src-tauri" / "tauri.conf.json").read_text()
     )
     assert tauri_conf["version"] == "2.0.0-beta.1"
+
+
+@pytest.mark.parametrize("version", ["", "v", "not-a-version"])
+def test_sync_version_rejects_invalid_version_without_writing(version_files, version):
+    """Invalid versions must fail before any manifest or website is changed."""
+    original_contents = {
+        path.relative_to(version_files): path.read_text()
+        for path in version_files.rglob("*")
+        if path.is_file()
+    }
+
+    script = str(REPO_ROOT / "scripts" / "sync_version.py")
+    result = subprocess.run(
+        [sys.executable, script, version, "--include-website"],
+        cwd=version_files,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "Invalid version" in result.stderr
+    assert all(
+        (version_files / path).read_text() == contents
+        for path, contents in original_contents.items()
+    )

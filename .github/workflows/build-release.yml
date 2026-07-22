@@ -785,10 +785,16 @@ jobs:
         id: version
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "ver=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+            RAW_VERSION="${GITHUB_REF#refs/tags/}"
           else
-            echo "ver=${{ github.event.inputs.tag_name }}" | sed 's/^v//' >> "$GITHUB_OUTPUT"
+            RAW_VERSION="${{ github.event.inputs.tag_name }}"
           fi
+          VERSION="${RAW_VERSION#v}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Cannot update website download links without a release version"
+            exit 1
+          fi
+          echo "ver=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Update download links for successful platforms
         run: |
