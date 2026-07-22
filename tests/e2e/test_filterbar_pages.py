@@ -223,3 +223,59 @@ def test_handoff_hides_misses_for_rejected_flag(live_server, page):
     assert page.locator(
         '.vf-handoff-menu [data-handoff-path="/map"]'
     ).count() == 1
+
+
+def test_handoff_to_misses_strips_rejected_flag(live_server, page):
+    """A cross-page handoff payload that pins Flag=Rejected must not
+    smuggle that rule into Misses: /api/misses excludes rejected rows
+    server-side, so an unsanitized payload would render an always-empty
+    grid (Codex review r3627389228). Simulates the URL a Browse handoff
+    button would produce; the guard fires no matter which source built it.
+    """
+    import json
+    from urllib.parse import quote
+
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"]
+    with db.conn:
+        db.conn.executemany(
+            "UPDATE photos SET miss_no_subject=1, miss_computed_at='2026-04-22' "
+            "WHERE id=?",
+            [(photo_id,) for photo_id in photo_ids],
+        )
+
+    payload = quote(json.dumps({
+        "root": {
+            "mode": "all",
+            "rules": [{"field": "flag", "op": "is", "value": "rejected"}],
+        },
+        "visual": None,
+    }))
+    page.goto(f"{live_server['url']}/misses?filters={payload}")
+    _wait_bar(page)
+
+    # The rejected clause was dropped, not adopted: the full Misses grid
+    # renders instead of an empty result.
+    chips = page.evaluate("document.querySelector('.vf-chips').textContent").lower()
+    assert "rejected" not in chips
+    assert _total(page) == 5
+
+
+def test_misses_legacy_flag_query_strips_rejected(live_server, page):
+    """``?flag=rejected`` on Misses would otherwise install a rule Misses
+    hides from its own controls, so it must be dropped the same way as
+    the handoff payload (Codex review r3627389228)."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"]
+    with db.conn:
+        db.conn.executemany(
+            "UPDATE photos SET miss_no_subject=1, miss_computed_at='2026-04-22' "
+            "WHERE id=?",
+            [(photo_id,) for photo_id in photo_ids],
+        )
+
+    page.goto(live_server["url"] + "/misses?flag=rejected")
+    _wait_bar(page)
+    chips = page.evaluate("document.querySelector('.vf-chips').textContent").lower()
+    assert "rejected" not in chips
+    assert _total(page) == 5

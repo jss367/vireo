@@ -132,6 +132,44 @@
     return !spec || !spec.values || spec.values.includes(value);
   }
 
+  // Strip excluded enum values out of a rule tree so a cross-page handoff
+  // (or a legacy deep link) can't smuggle in a value the current page hides
+  // from its own controls. Misses excludes ``flag=rejected`` because
+  // ``/api/misses`` filters those rows out server-side; without this a
+  // "Flag = Rejected" expression composed on Browse and handed to Misses
+  // would render an always-empty grid (Codex review r3627389228).
+  //
+  // The rewrite is minimal: values the server excludes are dropped from
+  // ``is``/``in`` clauses (leaves become no-ops rather than always-false
+  // matchers); ``is not``/``not_in`` stay untouched because the excluded
+  // value is already false by the page scope, so they are harmless. An
+  // ``in`` rule left with no values, or a group left with no rules, is
+  // pruned so we never send an empty ``in [] → false`` clause.
+  function sanitizeExcludedValues(node) {
+    if (!node) return null;
+    if (isGroup(node)) {
+      const rules = node.rules.map(sanitizeExcludedValues).filter((n) => n);
+      if (!rules.length) return null;
+      return { ...node, rules };
+    }
+    const excluded = state.excludedValues[node.field];
+    if (!excluded || !excluded.length) return node;
+    if (node.op === 'is') return excluded.includes(node.value) ? null : node;
+    if (node.op === 'in' && Array.isArray(node.value)) {
+      const values = node.value.filter((v) => !excluded.includes(v));
+      if (!values.length) return null;
+      if (values.length === node.value.length) return node;
+      return { ...node, value: values };
+    }
+    return node;
+  }
+
+  function sanitizeRoot(root) {
+    if (!root || !Array.isArray(root.rules)) return { mode: 'all', rules: [] };
+    const cleaned = sanitizeExcludedValues(root);
+    return cleaned || { mode: root.mode || 'all', rules: [] };
+  }
+
   function defaultValue(spec, op) {
     if (op === 'recent') return { n: 12, unit: 'months' };
     if (op === 'between') {
@@ -432,7 +470,10 @@
       const uiState = parseUiState(ws.ui_state);
       const saved = uiState.universal_filters && uiState.universal_filters[state.page];
       if (saved && saved.root && Array.isArray(saved.root.rules)) {
-        state.root = saved.root;
+        // Persisted state predates the current excludedValues config in
+        // some cases (e.g. a page tightens its excluded set); keep the
+        // guarantee that hidden values never reach the rule tree.
+        state.root = sanitizeRoot(saved.root);
         state.muted = Boolean(saved.muted);
         state.visual = (
           saved.visual && typeof saved.visual.prompt === 'string' && saved.visual.prompt
@@ -1398,7 +1439,10 @@
           try {
             const payload = JSON.parse(handoffRaw);
             if (payload && payload.root && Array.isArray(payload.root.rules)) {
-              state.root = payload.root;
+              // Strip page-excluded values before adopting the payload so
+              // a Browse expression like ``flag=rejected`` doesn't render
+              // an empty Misses grid when handed off.
+              state.root = sanitizeRoot(payload.root);
               // Reconstruct the visual clause from the allowed fields
               // rather than trusting the parsed URL payload — an invalid
               // ``strength`` (or an unknown extra key) would otherwise
@@ -1415,6 +1459,10 @@
           } catch (e) { /* malformed handoff param — fall through */ }
         }
         if (!fromUrl) fromUrl = applyLegacyParams(urlParams);
+        // ``applyLegacyParams`` builds rules directly from raw URL params
+        // (e.g. ``?flag=rejected`` on Misses) and would otherwise bypass
+        // the excluded-value guard.
+        if (fromUrl) state.root = sanitizeRoot(state.root);
         const finish = () => {
           state.ready = true;
           render();
