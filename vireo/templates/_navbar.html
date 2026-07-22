@@ -5829,10 +5829,16 @@ function _lbClearPendingViewportRestore() {
   // Called from user-driven viewport mutations (wheel/keyboard/click zoom,
   // drag pan) so a still-armed restore carried over by arrow navigation
   // cannot be reapplied by a later async metadata/image-load callback and
-  // stomp the user's manual zoom/pan. Programmatic restore paths
-  // (_lbTryApplyPendingViewportState) own clearing their own state and must
-  // not route through here.
+  // stomp the user's manual zoom/pan. Also drops any deferred eye-tracking
+  // alignment for the same reason: when a destination image finishes
+  // loading before /api/photos/<id> returns, _lbPendingEyeTrack stays
+  // armed until the metadata callback fires _lbTryApplyPendingEyeTrack,
+  // and a user pan/zoom in that window must not be overwritten by the
+  // previous photo's eye anchor. Programmatic restore paths
+  // (_lbTryApplyPendingViewportState, _lbTryApplyPendingEyeTrack) own
+  // clearing their own state and must not route through here.
   _lbPendingViewportState = null;
+  _lbPendingEyeTrack = null;
 }
 
 function _lbTryApplyPendingViewportState() {

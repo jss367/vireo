@@ -153,6 +153,39 @@ def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
     assert abs(after["y"] - before["y"]) < 2
 
 
+def test_user_pan_zoom_cancels_pending_eye_track(live_server, page):
+    """Manual pan/zoom before the metadata callback lands must drop the
+    armed eye alignment, otherwise _lbTryApplyPendingEyeTrack later stomps
+    the user's viewport with the previous photo's eye anchor."""
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    state = page.evaluate(
+        """() => {
+            window._lbPendingViewportState = {
+                zoom: 2, centerX: 0.5, centerY: 0.5,
+                oneToOne: false, pending1To1: false,
+            };
+            window._lbPendingEyeTrack = {
+                photoId: 'stale', offsetX: 42, offsetY: 42,
+            };
+            window._lbClearPendingViewportRestore();
+            return {
+                viewport: window._lbPendingViewportState,
+                eyeTrack: window._lbPendingEyeTrack,
+            };
+        }"""
+    )
+
+    assert state == {"viewport": None, "eyeTrack": None}
+
+
 def test_browse_lightbox_same_photo_reopen_does_not_lock_controls(live_server, page):
     """Reopening the visible photo must not wait for a same-src load event."""
     page.route(
