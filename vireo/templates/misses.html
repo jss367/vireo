@@ -1801,6 +1801,7 @@ VireoFilter.init({
   scopeLabel: missSince
     ? 'Misses \u00b7 Current pipeline run'
     : 'Misses \u00b7 Detected misses',
+  excludedValues: { flag: ['rejected'] },
   onChange: applyMissFilters,
 }).then(function() {
   return applyLegacyMissScopes();

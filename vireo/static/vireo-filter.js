@@ -52,6 +52,7 @@
     scopeLocked: true,
     fields: null,          // registry from /api/filters/fields (key -> spec)
     fieldOrder: [],
+    excludedValues: {},    // page-specific enum values hidden from filter controls
     onChange: null,
     getContextRules: null, // page-supplied rules ANDed outside the user tree
     getScope: null,        // page-supplied {folder_id, collection_id} for /api/filters/values
@@ -119,6 +120,18 @@
     return spec.ops[0];
   }
 
+  function fieldSpec(field) {
+    const spec = state.fields[field];
+    const excluded = state.excludedValues[field] || [];
+    if (!spec || !spec.values || !excluded.length) return spec;
+    return { ...spec, values: spec.values.filter((value) => !excluded.includes(value)) };
+  }
+
+  function fieldValueAvailable(field, value) {
+    const spec = fieldSpec(field);
+    return !spec || !spec.values || spec.values.includes(value);
+  }
+
   function defaultValue(spec, op) {
     if (op === 'recent') return { n: 12, unit: 'months' };
     if (op === 'between') {
@@ -155,7 +168,7 @@
   }
 
   function makeRule(field, op, value) {
-    const spec = state.fields[field];
+    const spec = fieldSpec(field);
     const resolvedOp = op || defaultOp(spec);
     return { field, op: resolvedOp, value: value == null ? defaultValue(spec, resolvedOp) : value };
   }
@@ -697,6 +710,7 @@
   }
 
   function toggleQuickEnum(field, value) {
+    if (!fieldValueAvailable(field, value)) return;
     mutate(() => {
       const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === field);
       if (idx < 0) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
@@ -720,7 +734,10 @@
       btn.classList.toggle('active', Boolean(rating && Number(rating.value) >= Number(btn.dataset.rating)));
     });
     const flags = quickEnumValues('flag');
-    $$('.vf-quick-flags button').forEach((btn) => btn.classList.toggle('active', flags.includes(btn.dataset.flag)));
+    $$('.vf-quick-flags button').forEach((btn) => {
+      btn.hidden = !fieldValueAvailable('flag', btn.dataset.flag);
+      btn.classList.toggle('active', flags.includes(btn.dataset.flag));
+    });
     const colors = quickEnumValues('color_label');
     $$('.vf-quick-colors button').forEach((btn) => btn.classList.toggle('active', colors.includes(btn.dataset.color)));
   }
@@ -786,7 +803,7 @@
         </div>
       </div>`;
     }
-    const spec = state.fields[node.field] || { label: node.field, type: 'text', ops: ['is'] };
+    const spec = fieldSpec(node.field) || { label: node.field, type: 'text', ops: ['is'] };
     const fieldOptions = state.fieldOrder.filter((key) =>
       fieldAvailable(state.fields[key]) || key === node.field).map((key) =>
       `<option value="${key}" ${key === node.field ? 'selected' : ''}>${esc(state.fields[key].label)}</option>`).join('');
@@ -931,10 +948,10 @@
         if (action === 'mode') node.mode = target.value;
         return;
       }
-      const spec = state.fields[node.field];
+      const spec = fieldSpec(node.field);
       if (action === 'field') {
         node.field = target.value;
-        const next = state.fields[node.field];
+        const next = fieldSpec(node.field);
         node.op = defaultOp(next);
         node.value = defaultValue(next, node.op);
         delete node.case;
@@ -1349,6 +1366,7 @@
       state.getContextRules = options.getContextRules || null;
       state.getScope = options.getScope || null;
       state.onCollectionSaved = options.onCollectionSaved || null;
+      state.excludedValues = options.excludedValues || {};
       rootEl = typeof options.root === 'string' ? document.querySelector(options.root) : options.root;
       if (!rootEl) return Promise.reject(new Error('VireoFilter: missing root element'));
       return loadRegistry().then(() => {

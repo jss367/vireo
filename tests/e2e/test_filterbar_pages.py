@@ -97,6 +97,21 @@ def test_misses_page_uses_filter_bar(live_server, page):
     page.wait_for_selector('.vf-handoff-menu [data-handoff-path="/browse"]')
 
 
+def test_misses_page_hides_rejected_flag_filter(live_server, page):
+    page.goto(live_server["url"] + "/misses")
+    _wait_bar(page)
+
+    page.click(".vf-filters-btn")
+    assert page.locator('.vf-quick-flags [data-flag="rejected"]').is_hidden()
+
+    page.click(".vf-add-filter")
+    page.fill(".vf-field-search", "flag")
+    page.click('[data-add-field="flag"]')
+    assert page.locator(
+        '.vf-enum-pill[data-value="rejected"]'
+    ).count() == 0
+
+
 def test_browse_picker_hides_review_only_fields(live_server, page):
     page.goto(live_server["url"] + "/browse")
     _wait_bar(page)
