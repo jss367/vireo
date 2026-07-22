@@ -522,6 +522,7 @@ var initializingMissFilters = true;
 // scoped. Fail closed instead: render an empty grid with an explanatory
 // banner and block recompute until the user edits the filter bar.
 var legacyScopeError = null;
+var legacyScopeRecoveryPending = false;
 var MISS_TUNING_CONTROL_IDS = [
   'missCfgDetectorFloor',
   'missCfgNoSubject',
@@ -641,13 +642,11 @@ function applyMissFilters() {
 function clearLegacyScopeError() {
   if (!legacyScopeError) return;
   legacyScopeError = null;
-  var b = document.getElementById('scopeBanner');
-  if (b) {
-    b.hidden = true;
-    b.textContent = '';
-  }
-  // Recompute stays disabled until loadMissConfig re-enables it via its
-  // normal control-enablement path; don't force it on here.
+  // Keep Recompute disabled until the replacement expression has loaded.
+  // Re-enabling it here would briefly let a fast click recompute the empty
+  // fail-closed snapshot (effectively the whole workspace).
+  legacyScopeRecoveryPending = true;
+  renderMissScopeBanner();
 }
 
 function normalizedRuleRoot(raw) {
@@ -673,19 +672,27 @@ function noteLegacyScopeError(message) {
     ? legacyScopeError + ' ' + message
     : message;
   if (typeof showToast === 'function') showToast(message, 'error');
+  renderMissScopeBanner();
+  var recomputeBtn = document.getElementById('missRecomputeBtn');
+  if (recomputeBtn) recomputeBtn.disabled = true;
+}
+
+function renderMissScopeBanner() {
   var b = document.getElementById('scopeBanner');
-  if (b) {
-    // Rebuild via textContent + a fresh anchor node so a collection name
-    // that contains HTML metacharacters can't inject markup into the page.
-    b.textContent = legacyScopeError + ' ';
+  if (!b) return;
+  var since = getSinceParam();
+  var message = legacyScopeError || (since
+    ? 'Showing only the current pipeline run.'
+    : '');
+  b.textContent = message ? message + ' ' : '';
+  if (message) {
+    // Build the link as a node so collection names and API errors remain text.
     var reset = document.createElement('a');
     reset.href = '/misses';
     reset.textContent = 'Show all misses';
     b.appendChild(reset);
-    b.hidden = false;
   }
-  var recomputeBtn = document.getElementById('missRecomputeBtn');
-  if (recomputeBtn) recomputeBtn.disabled = true;
+  b.hidden = !message;
 }
 
 async function applyLegacyMissScopes() {
@@ -1027,10 +1034,7 @@ function applyMissesPayload(data) {
 async function loadMisses() {
   var requestId = ++missLoadRequestId;
   var since = getSinceParam();
-  var b = document.getElementById('scopeBanner');
-  // The scope banner doubles as the deep-link error surface; only reset it
-  // to the ``since`` label when we're not currently reporting a failure.
-  if (b && !legacyScopeError) b.hidden = !since;
+  renderMissScopeBanner();
   if (legacyScopeError) {
     // Deep link couldn't be resolved: render an empty grid so bulk reject
     // and recompute have nothing to accidentally widen to. The applied
@@ -1068,6 +1072,11 @@ async function loadMisses() {
   if (requestId !== missLoadRequestId) return;
   appliedMissFilters = cloneMissFilterPayload(requestedFilters);
   applyMissesPayload(data);
+  if (legacyScopeRecoveryPending) {
+    legacyScopeRecoveryPending = false;
+    var recomputeBtn = document.getElementById('missRecomputeBtn');
+    if (recomputeBtn && missConfigLoaded) recomputeBtn.disabled = false;
+  }
 }
 
 function render() {

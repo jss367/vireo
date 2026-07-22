@@ -79,7 +79,7 @@ def test_missing_collection_deep_link_fails_closed(live_server, page):
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
 
-    page.goto(f"{url}/misses?collection_id=999999")
+    page.goto(f"{url}/misses?collection_id=999999&since=2026-01-01")
     expect(page.locator("#scopeBanner")).to_be_visible()
     expect(page.locator("#scopeBanner")).to_contain_text("999999")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
@@ -88,7 +88,10 @@ def test_missing_collection_deep_link_fails_closed(live_server, page):
     # Editing the filter bar clears the fail-closed guard and loads normally.
     page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
-    expect(page.locator("#scopeBanner")).to_be_hidden()
+    expect(page.locator("#scopeBanner")).to_contain_text(
+        "Showing only the current pipeline run"
+    )
+    expect(page.locator("#missRecomputeBtn")).to_be_enabled()
 
 
 def test_missing_folder_deep_link_fails_closed(live_server, page):
