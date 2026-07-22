@@ -8,6 +8,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from tone import (
     HIGHLIGHT_KNEE,
     apply_adjustments,
+    apply_color_grading,
+    apply_hsl_mixer,
+    apply_tone_curve,
     apply_vibrance,
     highlight_rolloff,
     linear_to_srgb,
@@ -146,6 +149,74 @@ def test_positive_vibrance_prefers_less_saturated_colors():
     low_gain = float(np.max(low_out) - np.min(low_out)) / float(np.max(low) - np.min(low))
     high_gain = float(np.max(high_out) - np.min(high_out)) / float(np.max(high) - np.min(high))
     assert low_gain > high_gain
+
+
+def test_neutral_tone_curve_is_identity():
+    rgb = np.random.default_rng(21).random((8, 8, 3), dtype=np.float32)
+    curve = {"black": 0, "shadows": 25, "midtones": 50, "highlights": 75, "white": 100}
+    assert np.allclose(apply_tone_curve(rgb, curve), rgb, atol=1e-6)
+
+
+def test_tone_curve_moves_control_points_and_interpolates():
+    rgb = np.array([[[0.0, 0.25, 0.5], [0.75, 1.0, 0.125]]], dtype=np.float32)
+    out = apply_tone_curve(rgb, {"black": 10, "shadows": 35, "midtones": 45, "white": 90})
+    assert np.allclose(out[0, 0], [0.10, 0.35, 0.45], atol=1e-6)
+    assert abs(float(out[0, 1, 1]) - 0.90) < 1e-6
+    assert 0.10 < out[0, 1, 2] < 0.35
+
+
+def test_hsl_mixer_targets_selected_color():
+    rgb = np.array([[[0.9, 0.3, 0.1], [0.1, 0.3, 0.9]]], dtype=np.float32)
+    out = apply_hsl_mixer(rgb, {"orange": {"saturation": -100}})
+    orange_chroma_before = float(np.ptp(rgb[0, 0]))
+    orange_chroma_after = float(np.ptp(out[0, 0]))
+    blue_change = float(np.max(np.abs(out[0, 1] - rgb[0, 1])))
+    assert orange_chroma_after < orange_chroma_before * 0.2
+    assert blue_change < 0.02
+
+
+def test_hsl_luminance_changes_selected_color_brightness():
+    rgb = np.array([[[0.1, 0.3, 0.9], [0.9, 0.3, 0.1]]], dtype=np.float32)
+    out = apply_hsl_mixer(rgb, {"blue": {"luminance": -50}})
+    assert float(np.mean(out[0, 0])) < float(np.mean(rgb[0, 0]))
+    assert np.allclose(out[0, 1], rgb[0, 1], atol=0.02)
+
+
+def test_hsl_mixer_does_not_treat_neutral_grey_as_red():
+    rgb = np.full((1, 1, 3), 0.45, dtype=np.float32)
+    out = apply_hsl_mixer(
+        rgb,
+        {"red": {"hue": 100, "saturation": 100, "luminance": 100}},
+    )
+    assert np.allclose(out, rgb, atol=1e-6)
+
+
+def test_color_grading_tints_tonal_ranges_differently():
+    rgb = np.array([[[0.15, 0.15, 0.15], [0.85, 0.85, 0.85]]], dtype=np.float32)
+    out = apply_color_grading(
+        rgb,
+        {
+            "shadows": {"hue": 240, "saturation": 50},
+            "highlights": {"hue": 45, "saturation": 50},
+        },
+    )
+    assert out[0, 0, 2] > out[0, 0, 0]
+    assert out[0, 1, 0] > out[0, 1, 2]
+
+
+def test_advanced_color_runs_with_local_tone_branch():
+    rgb = np.array([[[0.2, 0.3, 0.8], [0.2, 0.3, 0.8]]], dtype=np.float32)
+    weight = np.array([[1.0, 0.0]], dtype=np.float32)
+    out = apply_adjustments(
+        rgb,
+        local_weight=weight,
+        local_subject={"exposure": 0.5},
+        tone_curve={"midtones": 60},
+        hsl={"blue": {"saturation": -30}},
+        color_grading={"shadows": {"hue": 30, "saturation": 10}},
+    )
+    assert out.shape == rgb.shape
+    assert np.all(np.isfinite(out))
 
 
 # --- local (mask-weighted) tone -------------------------------------------

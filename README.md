@@ -20,6 +20,7 @@ Vireo helps wildlife photographers triage thousands of photos using machine lear
 - **Subject-aware quality scoring** — Uses SAM2 segmentation masks and DINOv2 embeddings to evaluate the actual subject, not just the frame
 - **iNaturalist integration** — Taxonomy lookup and direct observation uploads
 - **Browse, review, and cull** — Filter, search, rate, keyword, and flag photos in a responsive web UI
+- **Non-destructive photo editing** — Adjust geometry, tone, white balance, detail, five-point curves, individual color ranges, and shadow/midtone/highlight grading with reusable presets
 - **Map view** — Geographic visualization of geotagged photos
 - **Workspaces** — Isolated projects with independent predictions, collections, and settings
 - **Lightroom migration** — Import keyword hierarchies from `.lrcat` catalogs via XMP sidecars

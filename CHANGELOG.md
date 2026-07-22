@@ -5,6 +5,11 @@ All notable changes to Vireo are documented in this file.
 ## Unreleased
 
 ### Added
+- **Advanced color and tone editing.** The non-destructive photo editor now
+  includes a five-point tone curve, an eight-color hue/saturation/luminance
+  mixer, and independent shadow, midtone, and highlight color grading. These
+  adjustments work in live previews, reusable presets, copied settings, edit
+  history, and final exports.
 - **Reliable photo metadata on macOS.** macOS releases now bundle a pinned,
   checksum-verified ExifTool. Import checks metadata readiness before starting,
   offers an explicit advanced metadata-free override, and can repair photos

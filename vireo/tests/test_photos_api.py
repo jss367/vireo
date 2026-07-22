@@ -3690,6 +3690,12 @@ def test_photo_editor_page_renders(client_with_photo):
     assert "highlightClipValue" in html
     assert "Before" in html
     assert "100%" in html
+    assert "Tone Curve" in html
+    assert "Color Mixer" in html
+    assert "Color Grading" in html
+    assert "curve_midtonesRange" in html
+    assert "hslColorSelect" in html
+    assert "colorGradeZoneSelect" in html
 
 
 def test_photo_edit_history_endpoint_lists_recipe_checkpoints(client_with_photo):
@@ -9206,7 +9212,15 @@ def test_edit_presets_api_crud(app_and_db):
             "name": "Backlit",
             "recipe": {
                 "rotation": 90,
-                "adjustments": {"exposure": 1, "sharpen": 30},
+                "adjustments": {
+                    "exposure": 1,
+                    "sharpen": 30,
+                    "tone_curve": {"shadows": 32},
+                    "hsl": {"orange": {"saturation": 18}},
+                    "color_grading": {
+                        "shadows": {"hue": 220, "saturation": 12},
+                    },
+                },
             },
         },
     )
@@ -9215,7 +9229,15 @@ def test_edit_presets_api_crud(app_and_db):
     assert preset["name"] == "Backlit"
     assert preset["recipe"] == {
         "version": 1,
-        "adjustments": {"exposure": 1.0, "sharpen": 30.0},
+        "adjustments": {
+            "exposure": 1.0,
+            "sharpen": 30.0,
+            "tone_curve": {"shadows": 32.0},
+            "hsl": {"orange": {"saturation": 18.0}},
+            "color_grading": {
+                "shadows": {"hue": 220.0, "saturation": 12.0},
+            },
+        },
     }
 
     # Upsert by name keeps the id, replaces the recipe.
