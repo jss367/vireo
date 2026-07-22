@@ -273,6 +273,21 @@ def test_location_review_ranks_saved_and_google_places_by_distance(
         "Saved location"
     )
 
+    coordinate_toggle = page.get_by_label("Include coordinates")
+    expect(coordinate_toggle).not_to_be_checked()
+    expect(candidates.locator(".location-review-candidate-coordinates")).to_have_count(0)
+
+    coordinate_toggle.check()
+    expect(candidates.first.locator(".location-review-candidate-coordinates")).to_have_text(
+        "32.751000, -117.001000"
+    )
+    expect(saved_candidate.locator(".location-review-candidate-coordinates")).to_have_text(
+        "32.938000, -117.000000"
+    )
+
+    coordinate_toggle.uncheck()
+    expect(candidates.locator(".location-review-candidate-coordinates")).to_have_count(0)
+
 
 def test_location_review_suggests_campgrounds_and_can_show_all_nearby_places(
     live_server, page,
