@@ -131,6 +131,37 @@ def test_malformed_legacy_scope_id_fails_closed(live_server, page, scope_key):
     expect(page.locator("#missRecomputeBtn")).to_be_disabled()
 
 
+@pytest.mark.parametrize("scope_key", ["collection_id", "folder_id"])
+def test_filter_bootstrap_failure_keeps_legacy_scope_closed(
+    live_server, page, scope_key,
+):
+    """A filter registry failure must not bypass a legacy URL scope."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    if scope_key == "collection_id":
+        scope_id = db.add_collection(
+            "Hawk review",
+            json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
+        )
+    else:
+        scope_id = live_server["data"]["folders"][0]
+
+    page.route(
+        "**/api/filters/fields",
+        lambda route: route.fulfill(status=500, body="registry unavailable"),
+    )
+    page.goto(f"{url}/misses?{scope_key}={scope_id}")
+
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text(
+        "Could not initialize filters"
+    )
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+
 def test_unresolved_scope_freezes_preview_controls(live_server, page):
     """When a deep link fails closed, moving a threshold slider must not
     fire /api/misses/preview and repopulate the grid with photos outside
