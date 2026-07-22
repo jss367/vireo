@@ -62,6 +62,130 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(counter).to_contain_text(first_filename)
 
 
+def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
+    live_server, page, tmp_path,
+):
+    """Track Eye offsets the next frame so burst inspection stays registered."""
+    db = live_server["db"]
+    folder_path = tmp_path / "eye-track"
+    folder_path.mkdir()
+    folder_id = db.add_folder(str(folder_path), name="eye-track")
+    photo_ids = []
+    for index, eye in enumerate(((0.25, 0.40), (0.75, 0.65)), start=1):
+        filename = f"eye-{index}.png"
+        Image.new("RGB", (1200, 800), (30 * index, 80, 120)).save(
+            folder_path / filename
+        )
+        photo_id = db.add_photo(
+            folder_id=folder_id,
+            filename=filename,
+            extension=".png",
+            file_size=(folder_path / filename).stat().st_size,
+            file_mtime=(folder_path / filename).stat().st_mtime,
+            width=1200,
+            height=800,
+        )
+        db.conn.execute(
+            "UPDATE photos SET eye_x=?, eye_y=?, eye_conf=? WHERE id=?",
+            (eye[0], eye[1], 0.98, photo_id),
+        )
+        photo_ids.append(photo_id)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("localStorage.removeItem('vireo.lb.trackEye')")
+    page.evaluate(
+        """photos => openLightbox(photos[0].id, photos[0].filename, photos)""",
+        [
+            {"id": photo_ids[0], "filename": "eye-1.png"},
+            {"id": photo_ids[1], "filename": "eye-2.png"},
+        ],
+    )
+    page.wait_for_function(
+        """photoId => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbPhotoDataByPhoto[String(photoId)] &&
+                img.complete && img.naturalWidth > 0 &&
+                !window._lbVisualTransitionPending;
+        }""",
+        arg=photo_ids[0],
+    )
+    page.evaluate(
+        """() => window._lbApplyViewportState({
+            zoom: 2,
+            centerX: 0.40,
+            centerY: 0.50,
+            oneToOne: false,
+            pending1To1: false,
+        })"""
+    )
+    page.locator("#lightboxTrackEye").click()
+    expect(page.locator("#lightboxTrackEye")).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    assert page.evaluate("localStorage.getItem('vireo.lb.trackEye')") == "1"
+
+    eye_screen_js = """() => {
+        const data = window._lbPhotoDataByPhoto[String(window._lightboxCurrentId)];
+        const metrics = window._lbUpdateLayoutMetrics();
+        const state = window._lbViewportStateFromCurrent();
+        const wrap = document.getElementById('lightboxWrap').getBoundingClientRect();
+        return {
+            x: wrap.left + wrap.width / 2 +
+                (Number(data.eye_x) - state.centerX) * metrics.w * metrics.scale,
+            y: wrap.top + wrap.height / 2 +
+                (Number(data.eye_y) - state.centerY) * metrics.h * metrics.scale,
+        };
+    }"""
+    before = page.evaluate(eye_screen_js)
+
+    page.locator("#lightboxNext").click()
+    page.wait_for_function(
+        """photoId => window._lightboxCurrentId === photoId &&
+            window._lbPhotoDataByPhoto[String(photoId)] &&
+            !window._lbVisualTransitionPending &&
+            window._lbPendingEyeTrack === null""",
+        arg=photo_ids[1],
+    )
+    after = page.evaluate(eye_screen_js)
+
+    assert abs(after["x"] - before["x"]) < 2
+    assert abs(after["y"] - before["y"]) < 2
+
+
+def test_user_pan_zoom_cancels_pending_eye_track(live_server, page):
+    """Manual pan/zoom before the metadata callback lands must drop the
+    armed eye alignment, otherwise _lbTryApplyPendingEyeTrack later stomps
+    the user's viewport with the previous photo's eye anchor."""
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    state = page.evaluate(
+        """() => {
+            window._lbPendingViewportState = {
+                zoom: 2, centerX: 0.5, centerY: 0.5,
+                oneToOne: false, pending1To1: false,
+            };
+            window._lbPendingEyeTrack = {
+                photoId: 'stale', offsetX: 42, offsetY: 42,
+            };
+            window._lbClearPendingViewportRestore();
+            return {
+                viewport: window._lbPendingViewportState,
+                eyeTrack: window._lbPendingEyeTrack,
+            };
+        }"""
+    )
+
+    assert state == {"viewport": None, "eyeTrack": None}
+
+
 def test_browse_lightbox_same_photo_reopen_does_not_lock_controls(live_server, page):
     """Reopening the visible photo must not wait for a same-src load event."""
     page.route(
