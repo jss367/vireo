@@ -1,4 +1,4 @@
-/* Universal photo filter bar — shared across Browse/Map/Review/Duplicates.
+/* Universal photo filter bar — shared across Browse/Map/Review/Duplicates/Misses.
  *
  * Owns the filter expression (a smart-collection rule tree, the same JSON
  * collections store), its UI (quick search, chips, popover with quick
@@ -52,6 +52,7 @@
     scopeLocked: true,
     fields: null,          // registry from /api/filters/fields (key -> spec)
     fieldOrder: [],
+    excludedValues: {},    // page-specific enum values hidden from filter controls
     onChange: null,
     getContextRules: null, // page-supplied rules ANDed outside the user tree
     getScope: null,        // page-supplied {folder_id, collection_id} for /api/filters/values
@@ -119,15 +120,65 @@
     return spec.ops[0];
   }
 
+  function fieldSpec(field) {
+    const spec = state.fields[field];
+    const excluded = state.excludedValues[field] || [];
+    if (!spec || !spec.values || !excluded.length) return spec;
+    return { ...spec, values: spec.values.filter((value) => !excluded.includes(value)) };
+  }
+
+  function fieldValueAvailable(field, value) {
+    const spec = fieldSpec(field);
+    return !spec || !spec.values || spec.values.includes(value);
+  }
+
+  // Strip excluded enum values out of a rule tree so a cross-page handoff
+  // (or a legacy deep link) can't smuggle in a value the current page hides
+  // from its own controls. Misses excludes ``flag=rejected`` because
+  // ``/api/misses`` filters those rows out server-side; without this a
+  // "Flag = Rejected" expression composed on Browse and handed to Misses
+  // would render an always-empty grid (Codex review r3627389228).
+  //
+  // The rewrite is minimal: values the server excludes are dropped from
+  // ``is``/``in`` clauses (leaves become no-ops rather than always-false
+  // matchers); ``is not``/``not_in`` stay untouched because the excluded
+  // value is already false by the page scope, so they are harmless. An
+  // ``in`` rule left with no values, or a group left with no rules, is
+  // pruned so we never send an empty ``in [] → false`` clause.
+  function sanitizeExcludedValues(node) {
+    if (!node) return null;
+    if (isGroup(node)) {
+      const rules = node.rules.map(sanitizeExcludedValues).filter((n) => n);
+      if (!rules.length) return null;
+      return { ...node, rules };
+    }
+    const excluded = state.excludedValues[node.field];
+    if (!excluded || !excluded.length) return node;
+    if (node.op === 'is') return excluded.includes(node.value) ? null : node;
+    if (node.op === 'in' && Array.isArray(node.value)) {
+      const values = node.value.filter((v) => !excluded.includes(v));
+      if (!values.length) return null;
+      if (values.length === node.value.length) return node;
+      return { ...node, value: values };
+    }
+    return node;
+  }
+
+  function sanitizeRoot(root) {
+    if (!root || !Array.isArray(root.rules)) return { mode: 'all', rules: [] };
+    const cleaned = sanitizeExcludedValues(root);
+    return cleaned || { mode: root.mode || 'all', rules: [] };
+  }
+
   function defaultValue(spec, op) {
     if (op === 'recent') return { n: 12, unit: 'months' };
     if (op === 'between') {
       if (spec.type === 'date') return ['2025-01-01', new Date().toISOString().slice(0, 10)];
       return [0, 100];
     }
-    if (op === 'in' || op === 'not_in') return spec.values ? [spec.values[0]] : [];
+    if (op === 'in' || op === 'not_in') return spec.values && spec.values.length ? [spec.values[0]] : [];
     if (spec.type === 'boolean') return 1;
-    if (spec.type === 'enum') return (spec.values || [''])[0];
+    if (spec.type === 'enum') return spec.values && spec.values.length ? spec.values[0] : '';
     if (spec.type === 'rating') return 3;
     if (spec.type === 'number') return 0;
     if (spec.type === 'date') return new Date().toISOString().slice(0, 10);
@@ -149,13 +200,15 @@
     }
     if (Array.isArray(prev)) return prev.length ? prev[0] : defaultValue(spec, op);
     if (prev && typeof prev === 'object') return defaultValue(spec, op);
-    if (spec.type === 'enum' && spec.values && !spec.values.includes(prev)) return spec.values[0];
+    if (spec.type === 'enum' && spec.values && !spec.values.includes(prev)) {
+      return spec.values.length ? spec.values[0] : '';
+    }
     if (prev == null || prev === '') return defaultValue(spec, op);
     return prev;
   }
 
   function makeRule(field, op, value) {
-    const spec = state.fields[field];
+    const spec = fieldSpec(field);
     const resolvedOp = op || defaultOp(spec);
     return { field, op: resolvedOp, value: value == null ? defaultValue(spec, resolvedOp) : value };
   }
@@ -417,7 +470,10 @@
       const uiState = parseUiState(ws.ui_state);
       const saved = uiState.universal_filters && uiState.universal_filters[state.page];
       if (saved && saved.root && Array.isArray(saved.root.rules)) {
-        state.root = saved.root;
+        // Persisted state predates the current excludedValues config in
+        // some cases (e.g. a page tightens its excluded set); keep the
+        // guarantee that hidden values never reach the rule tree.
+        state.root = sanitizeRoot(saved.root);
         state.muted = Boolean(saved.muted);
         state.visual = (
           saved.visual && typeof saved.visual.prompt === 'string' && saved.visual.prompt
@@ -697,6 +753,7 @@
   }
 
   function toggleQuickEnum(field, value) {
+    if (!fieldValueAvailable(field, value)) return;
     mutate(() => {
       const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === field);
       if (idx < 0) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
@@ -720,7 +777,10 @@
       btn.classList.toggle('active', Boolean(rating && Number(rating.value) >= Number(btn.dataset.rating)));
     });
     const flags = quickEnumValues('flag');
-    $$('.vf-quick-flags button').forEach((btn) => btn.classList.toggle('active', flags.includes(btn.dataset.flag)));
+    $$('.vf-quick-flags button').forEach((btn) => {
+      btn.hidden = !fieldValueAvailable('flag', btn.dataset.flag);
+      btn.classList.toggle('active', flags.includes(btn.dataset.flag));
+    });
     const colors = quickEnumValues('color_label');
     $$('.vf-quick-colors button').forEach((btn) => btn.classList.toggle('active', colors.includes(btn.dataset.color)));
   }
@@ -786,9 +846,9 @@
         </div>
       </div>`;
     }
-    const spec = state.fields[node.field] || { label: node.field, type: 'text', ops: ['is'] };
+    const spec = fieldSpec(node.field) || { label: node.field, type: 'text', ops: ['is'] };
     const fieldOptions = state.fieldOrder.filter((key) =>
-      fieldAvailable(state.fields[key]) || key === node.field).map((key) =>
+      fieldAvailable(key) || key === node.field).map((key) =>
       `<option value="${key}" ${key === node.field ? 'selected' : ''}>${esc(state.fields[key].label)}</option>`).join('');
     const opOptions = spec.ops.map((op) =>
       `<option value="${esc(op)}" ${op === node.op ? 'selected' : ''}>${esc(OP_LABELS[op] || op)}</option>`).join('');
@@ -896,7 +956,10 @@
     if (shouldOpen) renderRules();
   }
 
-  function fieldAvailable(spec) {
+  function fieldAvailable(field) {
+    const spec = fieldSpec(field);
+    if (!spec) return false;
+    if (spec.type === 'enum' && Array.isArray(spec.values) && !spec.values.length) return false;
     return !spec.pages || spec.pages.includes(state.page);
   }
 
@@ -904,8 +967,8 @@
     const needle = String(query || '').trim().toLowerCase();
     const byCategory = new Map();
     state.fieldOrder.forEach((key) => {
-      const spec = state.fields[key];
-      if (!fieldAvailable(spec)) return;
+      const spec = fieldSpec(key);
+      if (!fieldAvailable(key)) return;
       if (needle && !`${spec.label} ${spec.category}`.toLowerCase().includes(needle)) return;
       if (!byCategory.has(spec.category)) byCategory.set(spec.category, []);
       byCategory.get(spec.category).push([key, spec]);
@@ -931,10 +994,10 @@
         if (action === 'mode') node.mode = target.value;
         return;
       }
-      const spec = state.fields[node.field];
+      const spec = fieldSpec(node.field);
       if (action === 'field') {
         node.field = target.value;
-        const next = state.fields[node.field];
+        const next = fieldSpec(node.field);
         node.op = defaultOp(next);
         node.value = defaultValue(next, node.op);
         delete node.case;
@@ -1314,9 +1377,42 @@
   const HANDOFF_PAGES = [
     ['browse', '/browse', 'Browse', 'Workspace · All available photos'],
     ['map', '/map', 'Map', 'Adds: plottable locations scope'],
-    ['review', '/review', 'Review', 'Adds: pending predictions scope'],
+    ['review', '/review', 'Review', 'Adds: predictions scope'],
     ['duplicates', '/duplicates', 'Duplicates', 'Adds: duplicate groups scope'],
+    ['misses', '/misses', 'Misses', 'Adds: detected misses scope'],
   ];
+  const HANDOFF_EXCLUDED_VALUES = {
+    misses: { flag: ['rejected'] },
+  };
+
+  function handoffPageAvailable(page) {
+    // Misses has bulk reject/recompute over the whole result set. The
+    // handoff payload serializes only ``state.root``/``state.visual`` —
+    // it drops any external scope the source page keeps outside the
+    // filter tree (Browse sidebar folder, dashboard collection). Hand
+    // off from ``folder A ∩ hawk`` → Misses would otherwise widen to
+    // every ``hawk`` miss in the workspace and expose them to bulk
+    // actions the user never asked for. Hide Misses whenever the source
+    // exposes an external scope; the user can navigate manually if they
+    // really want the workspace-wide view.
+    if (page === 'misses' && state.getScope) {
+      const scope = state.getScope();
+      if (scope && (scope.folder_id != null || scope.collection_id != null)) {
+        return false;
+      }
+    }
+    const exclusions = HANDOFF_EXCLUDED_VALUES[page];
+    if (!exclusions) return true;
+    return !allLeaves(state.root).some((rule) => {
+      const excluded = exclusions[rule.field];
+      if (!excluded) return false;
+      if (rule.op === 'is') return excluded.includes(rule.value);
+      if (rule.op === 'in' && Array.isArray(rule.value)) {
+        return rule.value.every((value) => excluded.includes(value));
+      }
+      return false;
+    });
+  }
 
   function renderHandoff() {
     const btn = $('.vf-handoff');
@@ -1327,7 +1423,8 @@
   function openHandoffMenu() {
     const menu = $('.vf-handoff-menu');
     if (!menu.hidden) { menu.hidden = true; return; }
-    menu.innerHTML = HANDOFF_PAGES.filter(([key]) => key !== state.page).map(([key, path, label, detail]) =>
+    menu.innerHTML = HANDOFF_PAGES.filter(([key]) =>
+      key !== state.page && handoffPageAvailable(key)).map(([key, path, label, detail]) =>
       `<button type="button" data-handoff-path="${path}"><span>${label}</span><small>${esc(detail)}</small></button>`).join('');
     menu.hidden = false;
   }
@@ -1348,34 +1445,58 @@
       state.getContextRules = options.getContextRules || null;
       state.getScope = options.getScope || null;
       state.onCollectionSaved = options.onCollectionSaved || null;
+      state.excludedValues = options.excludedValues || {};
       rootEl = typeof options.root === 'string' ? document.querySelector(options.root) : options.root;
       if (!rootEl) return Promise.reject(new Error('VireoFilter: missing root element'));
       return loadRegistry().then(() => {
         installEvents();
         const urlParams = new URLSearchParams(window.location.search);
         let fromUrl = false;
-        const handoffRaw = urlParams.get('filters');
-        if (handoffRaw) {
-          try {
-            const payload = JSON.parse(handoffRaw);
-            if (payload && payload.root && Array.isArray(payload.root.rules)) {
-              state.root = payload.root;
-              // Reconstruct the visual clause from the allowed fields
-              // rather than trusting the parsed URL payload — an invalid
-              // ``strength`` (or an unknown extra key) would otherwise
-              // ride through to ``/api/photos/query`` and 500 the request.
-              // Mirrors ``restorePersisted()``.
-              state.visual = (
-                payload.visual && typeof payload.visual.prompt === 'string' && payload.visual.prompt
-              ) ? { prompt: payload.visual.prompt,
-                    strength: ['broad', 'balanced', 'strict'].includes(payload.visual.strength)
-                      ? payload.visual.strength : 'balanced' }
-                : null;
-              fromUrl = true;
-            }
-          } catch (e) { /* malformed handoff param — fall through */ }
+        // Use ``has`` rather than truthiness: ``/misses?filters=`` (or
+        // ``?filters``) hands back an empty string, which is falsy but
+        // still carries the caller's intent to constrain the page. Falling
+        // through to legacy params or persisted state would silently widen
+        // the destination — on Misses, that re-exposes bulk reject and
+        // recompute to photos outside the intended handoff scope
+        // (Codex review r3627816534).
+        if (urlParams.has('filters')) {
+          const handoffRaw = urlParams.get('filters');
+          let payload = null;
+          try { payload = JSON.parse(handoffRaw); }
+          catch (e) { payload = null; }
+          if (payload && payload.root && Array.isArray(payload.root.rules)) {
+            // Strip page-excluded values before adopting the payload so
+            // a Browse expression like ``flag=rejected`` doesn't render
+            // an empty Misses grid when handed off.
+            state.root = sanitizeRoot(payload.root);
+            // Reconstruct the visual clause from the allowed fields
+            // rather than trusting the parsed URL payload — an invalid
+            // ``strength`` (or an unknown extra key) would otherwise
+            // ride through to ``/api/photos/query`` and 500 the request.
+            // Mirrors ``restorePersisted()``.
+            state.visual = (
+              payload.visual && typeof payload.visual.prompt === 'string' && payload.visual.prompt
+            ) ? { prompt: payload.visual.prompt,
+                  strength: ['broad', 'balanced', 'strict'].includes(payload.visual.strength)
+                    ? payload.visual.strength : 'balanced' }
+              : null;
+            fromUrl = true;
+          } else {
+            // A present-but-invalid handoff payload (truncated URL, bad
+            // JSON, missing ``root.rules``) must not fall through to
+            // legacy params or persisted state — that would silently
+            // widen the page beyond the intended handoff scope and, on
+            // Misses, expose bulk reject/recompute to unrelated photos.
+            // Reject init so the destination page can install its
+            // fail-closed banner (see misses.html bootstrap catch).
+            throw new Error('VireoFilter: invalid filters handoff payload');
+          }
         }
         if (!fromUrl) fromUrl = applyLegacyParams(urlParams);
+        // ``applyLegacyParams`` builds rules directly from raw URL params
+        // (e.g. ``?flag=rejected`` on Misses) and would otherwise bypass
+        // the excluded-value guard.
+        if (fromUrl) state.root = sanitizeRoot(state.root);
         const finish = () => {
           state.ready = true;
           render();

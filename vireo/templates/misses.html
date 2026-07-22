@@ -300,33 +300,19 @@
     border: 1px solid var(--border-primary);
     border-radius: 6px;
   }
-  .misses-filters {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+  .misses-filterbar {
     margin: 0 0 12px;
     padding: 10px 12px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-primary);
     border-radius: 6px;
   }
-  .misses-filters input,
-  .misses-filters select,
-  .misses-filters button {
-    min-height: 30px;
-    border: 1px solid var(--border-secondary);
-    border-radius: 4px;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    padding: 5px 8px;
+  .misses-scope-reset {
+    margin: -4px 0 12px;
     font-size: 12px;
+    color: var(--text-secondary);
   }
-  .misses-filters input[type="search"] { flex: 1 1 220px; min-width: 160px; }
-  .misses-filters input[type="date"] { width: 130px; }
-  .misses-filters button { cursor: pointer; color: var(--text-secondary); }
-  .misses-filters button:hover { border-color: var(--accent); color: var(--text-primary); }
-  .misses-filter-label { font-size: 11px; color: var(--text-secondary); }
+  .misses-scope-reset a { color: var(--accent); }
   .misses-tuning-head {
     display: flex;
     align-items: center;
@@ -432,45 +418,11 @@
     </button>
   </div>
 
-  <div id="scopeBanner" style="display:none;padding:8px 12px;margin-bottom:12px;
-       background:var(--bg-tertiary);border:1px solid var(--border-primary);
-       border-radius:4px;font-size:12px;color:var(--text-secondary);">
-    Showing misses from the current pipeline run.
-    <a href="/misses" style="color:var(--accent);margin-left:8px;">Show all</a>
+  <div class="misses-filterbar">
+    {% include '_filterbar.html' %}
   </div>
-
-  <div class="misses-filters" aria-label="Miss filters">
-    <select id="missCollectionFilter" onchange="applyMissFilters()" title="Filter by collection">
-      <option value="">All collections</option>
-    </select>
-    <select id="missFolderFilter" onchange="applyMissFilters()" title="Filter by folder and its subfolders">
-      <option value="">All folders</option>
-    </select>
-    <input id="missSearchFilter" type="search" placeholder="Search keywords or filenames..."
-           autocomplete="off" oninput="scheduleMissFilter()"
-           onkeydown="if(event.key==='Enter'){event.preventDefault();applyMissFilters();}">
-    <select id="missRatingFilter" onchange="applyMissFilters()" title="Minimum star rating">
-      <option value="">Any rating</option>
-      <option value="1">1+ stars</option><option value="2">2+ stars</option>
-      <option value="3">3+ stars</option><option value="4">4+ stars</option>
-      <option value="5">5 stars</option>
-    </select>
-    <select id="missFlagFilter" onchange="applyMissFilters()" title="Filter by pick status">
-      <option value="">Any pick status</option>
-      <option value="none">Unflagged</option>
-      <option value="flagged">Picks</option>
-    </select>
-    <select id="missColorFilter" onchange="applyMissFilters()" title="Filter by color label">
-      <option value="">Any color</option>
-      <option value="red">Red</option><option value="yellow">Yellow</option>
-      <option value="green">Green</option><option value="blue">Blue</option>
-      <option value="purple">Purple</option>
-    </select>
-    <span class="misses-filter-label">Captured</span>
-    <input id="missDateFrom" type="date" onchange="applyMissFilters()" title="Captured from">
-    <span class="misses-filter-label">to</span>
-    <input id="missDateTo" type="date" onchange="applyMissFilters()" title="Captured through">
-    <button type="button" onclick="clearMissFilters()">Clear filters</button>
+  <div class="misses-scope-reset" id="scopeBanner" hidden>
+    Showing only the current pipeline run. <a href="/misses">Show all misses</a>
   </div>
 
   <div class="misses-tuning" id="missesTuning">
@@ -559,19 +511,18 @@ var missLightboxCurrent = null;
 // sections accumulates them all. The focused card doubles as the anchor for
 // shift-click range selection (range stays within the clicked category).
 var selection = new Set();
-var missFilterTimer = null;
 var missLoadRequestId = 0;
-var appliedMissFilters = new URLSearchParams();
-var MISS_FILTER_FIELDS = {
-  collection_id: 'missCollectionFilter',
-  folder_id: 'missFolderFilter',
-  keyword: 'missSearchFilter',
-  rating_min: 'missRatingFilter',
-  flag: 'missFlagFilter',
-  color_label: 'missColorFilter',
-  date_from: 'missDateFrom',
-  date_to: 'missDateTo',
-};
+var appliedMissFilters = { rules: [], visual: null };
+var initializingMissFilters = true;
+// Set when a ?collection_id=/?folder_id= deep link points at a scope we can't
+// resolve at boot (deleted collection/folder, degraded collection, or a
+// /api/collections|/api/folders fetch failure). Skipping the missing rule
+// silently would widen the initial /api/misses POST to the entire workspace,
+// and bulk reject/recompute would then operate on photos the user never
+// scoped. Fail closed instead: render an empty grid with an explanatory
+// banner and block recompute until the user edits the filter bar.
+var legacyScopeError = null;
+var legacyScopeRecoveryPending = false;
 var MISS_TUNING_CONTROL_IDS = [
   'missCfgDetectorFloor',
   'missCfgNoSubject',
@@ -637,104 +588,246 @@ function getSinceParam() {
   } catch (e) { return null; }
 }
 
-function missFilterParams() {
-  var params = new URLSearchParams();
-  Object.keys(MISS_FILTER_FIELDS).forEach(function(key) {
-    var el = document.getElementById(MISS_FILTER_FIELDS[key]);
-    var value = el ? String(el.value || '').trim() : '';
-    if (value) params.set(key, value);
-  });
-  return params;
+function cloneMissFilterPayload(payload) {
+  return JSON.parse(JSON.stringify(payload || { rules: [], visual: null }));
 }
 
-function addFilterParamsToBody(body, params) {
-  params.forEach(function(value, key) { body[key] = value; });
+function missFilterPayload() {
+  var rules = [];
+  var visual = null;
+  if (window.VireoFilter && VireoFilter.getRules) {
+    rules = VireoFilter.getRules();
+    visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+  }
+  return { rules: rules || [], visual: visual || null };
+}
+
+function addFilterPayloadToBody(body, payload) {
+  body.rules = payload.rules || [];
+  if (payload.visual) body.visual = payload.visual;
   return body;
 }
 
-function addMissFiltersToBody(body) {
-  return addFilterParamsToBody(body, missFilterParams());
-}
-
 function addAppliedMissFiltersToBody(body) {
-  return addFilterParamsToBody(body, appliedMissFilters);
+  return addFilterPayloadToBody(body, appliedMissFilters);
 }
 
-function syncMissFilterUrl() {
-  var url = new URL(window.location.href);
-  Object.keys(MISS_FILTER_FIELDS).forEach(function(key) { url.searchParams.delete(key); });
-  missFilterParams().forEach(function(value, key) { url.searchParams.set(key, value); });
-  window.history.replaceState({}, '', url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : ''));
+function sameMissFilterPayload(a, b) {
+  return JSON.stringify(a || {}) === JSON.stringify(b || {});
+}
+
+function missRulesContainField(node, field) {
+  if (Array.isArray(node)) {
+    return node.some(function(child) { return missRulesContainField(child, field); });
+  }
+  if (!node || typeof node !== 'object') return false;
+  if (node.field === field) return true;
+  return Array.isArray(node.rules) && node.rules.some(function(child) {
+    return missRulesContainField(child, field);
+  });
 }
 
 function applyMissFilters() {
-  if (missFilterTimer) clearTimeout(missFilterTimer);
-  missFilterTimer = null;
+  if (initializingMissFilters) return;
+  // A user-driven filter change replaces the unresolved deep-link scope with
+  // whatever they typed, so the fail-closed guard no longer applies.
+  clearLegacyScopeError();
   invalidateMissPreview();
-  syncMissFilterUrl();
   selection.clear();
   focusedCategory = null;
   focusedIndex = -1;
   loadMisses();
 }
 
-function scheduleMissFilter() {
-  if (missFilterTimer) clearTimeout(missFilterTimer);
-  missFilterTimer = setTimeout(applyMissFilters, 250);
+function clearLegacyScopeError() {
+  if (!legacyScopeError) return;
+  legacyScopeError = null;
+  // Keep the tuning controls (sliders, save-defaults, reset, Recompute)
+  // disabled until the replacement expression has loaded. Re-enabling them
+  // here would briefly let a slider nudge preview — or a fast Recompute
+  // click — operate on the empty fail-closed snapshot, which the preview
+  // endpoint would widen back to the whole workspace.
+  legacyScopeRecoveryPending = true;
+  renderMissScopeBanner();
 }
 
-function clearMissFilters() {
-  Object.keys(MISS_FILTER_FIELDS).forEach(function(key) {
-    var el = document.getElementById(MISS_FILTER_FIELDS[key]);
-    if (el) el.value = '';
-  });
-  applyMissFilters();
+function normalizedRuleRoot(raw) {
+  if (Array.isArray(raw)) return { mode: 'all', rules: raw };
+  if (raw && Array.isArray(raw.rules)) return raw;
+  return { mode: 'all', rules: [] };
 }
 
-async function initMissFilters() {
+function appendRuleRoot(target, source) {
+  var root = normalizedRuleRoot(source);
+  if (!root.rules.length) return;
+  if ((root.mode || 'all') === 'all') {
+    root.rules.forEach(function(rule) { target.rules.push(rule); });
+  } else {
+    target.rules.push(root);
+  }
+}
+
+function noteLegacyScopeError(message) {
+  // Append when multiple deep-link params fail (e.g. a link with both a
+  // missing collection and a missing folder) so the banner surfaces both.
+  legacyScopeError = legacyScopeError
+    ? legacyScopeError + ' ' + message
+    : message;
+  if (typeof showToast === 'function') showToast(message, 'error');
+  renderMissScopeBanner();
+  // Freeze the whole tuning group — not just Recompute. Preview and reset
+  // still call /api/misses/preview with the current (empty) rules, which
+  // widens results to every miss outside the unresolved scope; card and
+  // selection handlers on that grid could then mutate photos the user
+  // never scoped. Sliders re-enable once a replacement scope loads.
+  setMissTuningDisabled(true);
+}
+
+function renderMissScopeBanner() {
+  var b = document.getElementById('scopeBanner');
+  if (!b) return;
+  var since = getSinceParam();
+  var message = legacyScopeError || (since
+    ? 'Showing only the current pipeline run.'
+    : '');
+  b.textContent = message ? message + ' ' : '';
+  if (message) {
+    // Build the link as a node so collection names and API errors remain text.
+    var reset = document.createElement('a');
+    reset.href = '/misses';
+    reset.textContent = 'Show all misses';
+    b.appendChild(reset);
+  }
+  b.hidden = !message;
+}
+
+function parseLegacyScopeParam(params, key) {
+  if (!params.has(key)) return { present: false, valid: true, value: null };
+  var raw = params.get(key);
+  var normalized = String(raw == null ? '' : raw).trim();
+  if (!/^[+-]?\d+$/.test(normalized)) {
+    return { present: true, valid: false, value: null, raw: raw };
+  }
+  var value = Number(normalized);
+  if (!Number.isSafeInteger(value)) {
+    return { present: true, valid: false, value: null, raw: raw };
+  }
+  return { present: true, valid: true, value: value, raw: raw };
+}
+
+async function applyLegacyMissScopes() {
   var current = new URL(window.location.href).searchParams;
-  var results = await Promise.all([
-    fetch('/api/collections').then(function(r) { return r.ok ? r.json() : []; }).catch(function() { return []; }),
-    fetch('/api/folders').then(function(r) { return r.ok ? r.json() : []; }).catch(function() { return []; }),
-  ]);
-  var collectionSelect = document.getElementById('missCollectionFilter');
-  (results[0] || []).forEach(function(c) {
-    var option = document.createElement('option');
-    option.value = c.id;
-    if (c.has_visual) {
-      // Misses filter consumes the collection via
-      // collection_photo_ids, which is rules-only — a visual
-      // collection would silently expand the filter to every
-      // metadata match. Server 400s the request too.
-      option.disabled = true;
-      option.textContent = c.name + ' (visual — open in Browse)';
-      option.title = 'Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause.';
+  var collectionParam = parseLegacyScopeParam(current, 'collection_id');
+  var folderParam = parseLegacyScopeParam(current, 'folder_id');
+  if (!collectionParam.present && !folderParam.present) return;
+  var collectionId = collectionParam.present && collectionParam.valid
+    ? collectionParam.value : NaN;
+  var folderId = folderParam.present && folderParam.valid
+    ? folderParam.value : NaN;
+
+  var legacyFilterKeys = [
+    'rating_min', 'flag', 'color_label', 'date_from', 'date_to', 'keyword',
+    'filters',
+  ];
+  var keepCompiledUrlRules = legacyFilterKeys.some(function(key) {
+    return current.has(key);
+  });
+  var combined = { mode: 'all', rules: [] };
+  if (keepCompiledUrlRules) appendRuleRoot(combined, VireoFilter.getUserRules());
+  // A plain folder/collection deep link overrides restored page state. Keep a
+  // visual clause only when it came from this URL's handoff payload; a visual
+  // collection below supplies its own clause explicitly.
+  var visual = keepCompiledUrlRules && VireoFilter.getVisual
+    ? VireoFilter.getVisual()
+    : null;
+
+  if (!collectionParam.valid) {
+    noteLegacyScopeError(
+      'Invalid ?collection_id=' + collectionParam.raw + ' deep link. ' +
+      'Showing no misses so bulk actions do not touch the wrong collection.'
+    );
+  }
+  if (!folderParam.valid) {
+    noteLegacyScopeError(
+      'Invalid ?folder_id=' + folderParam.raw + ' deep link. ' +
+      'Showing no misses so bulk actions do not touch the wrong folder.'
+    );
+  }
+
+  // Track fetch failures separately from empty responses: a failed
+  // /api/collections must fail closed instead of being treated as an
+  // empty list (which would silently drop the collection rule and load
+  // every miss in the workspace).
+  var collectionsFetchFailed = false;
+  var foldersFetchFailed = false;
+  var requests = [];
+  requests.push(
+    isNaN(collectionId)
+      ? Promise.resolve([])
+      : fetch('/api/collections').then(function(r) {
+          if (!r.ok) { collectionsFetchFailed = true; return []; }
+          return r.json();
+        }).catch(function() { collectionsFetchFailed = true; return []; })
+  );
+  requests.push(
+    isNaN(folderId)
+      ? Promise.resolve([])
+      : fetch('/api/folders').then(function(r) {
+          if (!r.ok) { foldersFetchFailed = true; return []; }
+          return r.json();
+        }).catch(function() { foldersFetchFailed = true; return []; })
+  );
+  var results = await Promise.all(requests);
+
+  if (!isNaN(collectionId)) {
+    if (collectionsFetchFailed) {
+      noteLegacyScopeError(
+        'Could not load collections to resolve the ?collection_id=' +
+        collectionId + ' deep link. Showing no misses to avoid ' +
+        'bulk-rejecting the whole workspace.'
+      );
     } else {
-      option.textContent = c.name + (c.photo_count == null ? '' : ' (' + c.photo_count + ')');
-      option.disabled = !!c.count_error;
+      var collection = (results[0] || []).find(function(c) { return c.id === collectionId; });
+      if (!collection) {
+        noteLegacyScopeError(
+          'Collection #' + collectionId + ' is missing or was deleted. ' +
+          'Showing no misses so bulk actions do not touch the whole workspace.'
+        );
+      } else if (collection.count_error) {
+        noteLegacyScopeError(
+          'Collection "' + (collection.name || ('#' + collectionId)) +
+          '" is degraded (' + collection.count_error + '). ' +
+          'Showing no misses so bulk actions do not touch the whole workspace.'
+        );
+      } else {
+        try { appendRuleRoot(combined, JSON.parse(collection.rules || '[]')); } catch (e) {}
+        try {
+          if (collection.visual_json) visual = JSON.parse(collection.visual_json);
+        } catch (e) {}
+      }
     }
-    collectionSelect.appendChild(option);
-  });
-  var folderSelect = document.getElementById('missFolderFilter');
-  (results[1] || []).slice().sort(function(a, b) {
-    return String(a.path || a.name || '').localeCompare(String(b.path || b.name || ''));
-  }).forEach(function(f) {
-    var option = document.createElement('option');
-    option.value = f.id;
-    option.textContent = f.path || f.name || ('Folder ' + f.id);
-    folderSelect.appendChild(option);
-  });
-  Object.keys(MISS_FILTER_FIELDS).forEach(function(key) {
-    var el = document.getElementById(MISS_FILTER_FIELDS[key]);
-    if (el && current.has(key)) el.value = current.get(key);
-  });
-  // Seed the applied-filters snapshot from the URL so recompute/bulk reject
-  // scope to the URL-requested review set if the user clicks before the first
-  // /api/misses response applies (e.g. /misses?rating_min=4). Without this,
-  // loadMissConfig() enables the Recompute button while appliedMissFilters is
-  // still empty, and an early click POSTs an unfiltered recompute that flags
-  // photos outside the URL scope.
-  appliedMissFilters = missFilterParams();
+  }
+  if (!isNaN(folderId)) {
+    if (foldersFetchFailed) {
+      noteLegacyScopeError(
+        'Could not load folders to resolve the ?folder_id=' + folderId +
+        ' deep link. Showing no misses to avoid bulk-rejecting the whole workspace.'
+      );
+    } else {
+      var folder = (results[1] || []).find(function(f) { return f.id === folderId; });
+      if (folder) {
+        combined.rules.push({
+          field: 'folder', op: 'under', value: folder.path || folder.name || '',
+        });
+      } else {
+        noteLegacyScopeError(
+          'Folder #' + folderId + ' is missing or was removed. ' +
+          'Showing no misses so bulk actions do not touch the whole workspace.'
+        );
+      }
+    }
+  }
+  VireoFilter.loadExpression(combined, visual, { reason: 'legacyScopeLoaded' });
 }
 
 function setMissTuningStatus(text) {
@@ -834,7 +927,12 @@ async function loadMissConfig() {
     originalMissConfig = Object.assign({}, missConfig);
     setMissSliders(missConfig);
     missConfigLoaded = true;
-    setMissTuningDisabled(false);
+    // Keep the tuning group frozen when a fail-closed scope is in effect;
+    // loadMisses() will re-enable it once a user-supplied replacement
+    // filter loads successfully.
+    if (!legacyScopeError && !legacyScopeRecoveryPending) {
+      setMissTuningDisabled(false);
+    }
     setMissTuningStatus('Preview uses current sliders');
   } catch (e) {
     setMissTuningStatus('Thresholds unavailable');
@@ -843,21 +941,27 @@ async function loadMissConfig() {
 
 function scheduleMissPreview() {
   if (!missConfigLoaded) return;
+  if (legacyScopeError || legacyScopeRecoveryPending) return;
   if (previewTimer) clearTimeout(previewTimer);
   previewTimer = setTimeout(previewMisses, 250);
 }
 
 async function previewMisses() {
   if (!missConfigLoaded) return;
+  // Defense in depth: sliders are disabled while a deep-link scope is
+  // unresolved, but any caller that reaches here anyway must not POST the
+  // empty rule payload to /api/misses/preview and repopulate the grid with
+  // photos outside the user's scope.
+  if (legacyScopeError || legacyScopeRecoveryPending) return;
   if (previewTimer) {
     clearTimeout(previewTimer);
     previewTimer = null;
   }
   var requestId = ++previewRequestId;
   missLoadRequestId++;
-  var requestedFilters = missFilterParams();
+  var requestedFilters = missFilterPayload();
   var body = collectMissThresholds();
-  addFilterParamsToBody(body, requestedFilters);
+  addFilterPayloadToBody(body, requestedFilters);
   var since = getSinceParam();
   if (since) body.since = since;
   setMissTuningStatus('Previewing...');
@@ -870,7 +974,7 @@ async function previewMisses() {
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
     if (requestId !== previewRequestId) return;
-    appliedMissFilters = new URLSearchParams(requestedFilters.toString());
+    appliedMissFilters = cloneMissFilterPayload(requestedFilters);
     previewActive = true;
     previewPayload = data;
     applyMissesPayload(data);
@@ -883,14 +987,15 @@ async function previewMisses() {
 
 async function recomputeMisses() {
   if (!missConfigLoaded) return;
+  if (legacyScopeError || legacyScopeRecoveryPending) return;
   invalidateMissPreview();
   var requestId = ++missLoadRequestId;
   var btn = document.getElementById('missRecomputeBtn');
   // Recompute the photos that produced the cards the user is looking at.
   // Live controls may already represent a newer filter whose load is pending.
-  var requestedFilters = new URLSearchParams(appliedMissFilters.toString());
+  var requestedFilters = cloneMissFilterPayload(appliedMissFilters);
   var body = collectMissThresholds();
-  addFilterParamsToBody(body, requestedFilters);
+  addFilterPayloadToBody(body, requestedFilters);
   var since = getSinceParam();
   if (since) body.since = since;
   body.save_defaults = !!document.getElementById('missSaveDefaults').checked;
@@ -915,7 +1020,7 @@ async function recomputeMisses() {
       loadMisses();
       return;
     }
-    if (missFilterParams().toString() !== requestedFilters.toString()) {
+    if (!sameMissFilterPayload(missFilterPayload(), requestedFilters)) {
       if (data.config && data.saved_defaults) {
         missConfig = data.config;
         originalMissConfig = Object.assign({}, data.config);
@@ -924,7 +1029,7 @@ async function recomputeMisses() {
       loadMisses();
       return;
     }
-    appliedMissFilters = new URLSearchParams(requestedFilters.toString());
+    appliedMissFilters = cloneMissFilterPayload(requestedFilters);
     previewActive = false;
     previewPayload = null;
     applyMissesPayload(data);
@@ -938,12 +1043,15 @@ async function recomputeMisses() {
     setMissTuningStatus('Recompute failed');
     if (typeof showToast === 'function') showToast('Recompute failed', 'error');
   } finally {
-    if (btn && missConfigLoaded) btn.disabled = false;
+    if (btn && missConfigLoaded && !legacyScopeError && !legacyScopeRecoveryPending) {
+      btn.disabled = false;
+    }
   }
 }
 
 function resetMissThresholds() {
   if (!missConfigLoaded || !originalMissConfig) return;
+  if (legacyScopeError || legacyScopeRecoveryPending) return;
   invalidateMissPreview();
   setMissSliders(originalMissConfig);
   previewActive = false;
@@ -965,6 +1073,12 @@ function applyMissesPayload(data) {
   selection.forEach(function(id) {
     if (!present.has(id)) selection.delete(id);
   });
+  if (window.VireoFilter && VireoFilter.setResultTotal) {
+    VireoFilter.setResultTotal(present.size);
+  }
+  if (window.VireoFilter && VireoFilter.setVisualInfo) {
+    VireoFilter.setVisualInfo(data.visual || null);
+  }
   render();
 }
 
@@ -972,9 +1086,18 @@ function applyMissesPayload(data) {
 async function loadMisses() {
   var requestId = ++missLoadRequestId;
   var since = getSinceParam();
-  if (since) {
-    var b = document.getElementById('scopeBanner');
-    if (b) b.style.display = '';
+  renderMissScopeBanner();
+  if (legacyScopeError) {
+    // Deep link couldn't be resolved: render an empty grid so bulk reject
+    // and recompute have nothing to accidentally widen to. The applied
+    // filter snapshot stays empty; a subsequent user filter edit calls
+    // clearLegacyScopeError() and loadMisses() again with the new scope.
+    missesData = { no_subject: [], clipped: [], oof: [] };
+    appliedMissFilters = cloneMissFilterPayload(missFilterPayload());
+    render();
+    var recomputeBtn = document.getElementById('missRecomputeBtn');
+    if (recomputeBtn) recomputeBtn.disabled = true;
+    return;
   }
   if (previewActive) {
     // Re-derive from the preview endpoint with the live slider values
@@ -983,11 +1106,14 @@ async function loadMisses() {
     await previewMisses();
     return;
   }
-  var requestedFilters = missFilterParams();
-  var params = new URLSearchParams(requestedFilters.toString());
-  if (since) params.set('since', since);
-  var url = '/api/misses' + (params.toString() ? '?' + params.toString() : '');
-  var r = await fetch(url);
+  var requestedFilters = missFilterPayload();
+  var body = addFilterPayloadToBody({}, requestedFilters);
+  if (since) body.since = since;
+  var r = await fetch('/api/misses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   if (requestId !== missLoadRequestId) return;
   if (!r.ok) {
     document.getElementById('missesRoot').innerHTML =
@@ -996,8 +1122,12 @@ async function loadMisses() {
   }
   var data = await r.json();
   if (requestId !== missLoadRequestId) return;
-  appliedMissFilters = new URLSearchParams(requestedFilters.toString());
+  appliedMissFilters = cloneMissFilterPayload(requestedFilters);
   applyMissesPayload(data);
+  if (legacyScopeRecoveryPending) {
+    legacyScopeRecoveryPending = false;
+    if (missConfigLoaded) setMissTuningDisabled(false);
+  }
 }
 
 function render() {
@@ -1297,7 +1427,7 @@ function _clearMissRepresentativeStateIfIneligible(photoIds, flag) {
  * disappear on the next loadMisses() (list_misses excludes flag='rejected').
  */
 function refreshAppliedFlagFilter() {
-  if (appliedMissFilters.has('flag')) loadMisses();
+  if (missRulesContainField(appliedMissFilters.rules, 'flag')) loadMisses();
 }
 
 async function flagFocusedMiss(photoId, flag) {
@@ -1824,9 +1954,40 @@ document.addEventListener('lightbox:flagchanged', function(e) {
 
 /* ---------- Boot ---------- */
 installMissSliderHandlers();
-initMissFilters().then(function() {
+var missSince = getSinceParam();
+VireoFilter.init({
+  page: 'misses',
+  root: document.getElementById('vireoFilterBar'),
+  scopeLabel: missSince
+    ? 'Misses \u00b7 Current pipeline run'
+    : 'Misses \u00b7 Detected misses',
+  excludedValues: { flag: ['rejected'] },
+  onChange: applyMissFilters,
+}).then(function() {
+  return applyLegacyMissScopes();
+}).then(function() {
+  // Seed the applied-expression snapshot before threshold controls become
+  // enabled. An immediate Recompute therefore scopes to the expression that
+  // produced the initial grid, including legacy deep links and handoffs.
+  appliedMissFilters = cloneMissFilterPayload(missFilterPayload());
+  initializingMissFilters = false;
   return loadMissConfig();
-}).then(loadMisses);
+}).then(loadMisses).catch(function() {
+  initializingMissFilters = false;
+  var current = new URL(window.location.href).searchParams;
+  if (current.has('collection_id') || current.has('folder_id') ||
+      current.has('filters')) {
+    // If the shared registry/bootstrap fails, applyLegacyMissScopes() never
+    // gets a chance to translate the legacy URL into universal rules. Keep
+    // the page closed instead of loading the default empty expression, which
+    // would expose every miss to bulk actions outside the requested scope.
+    noteLegacyScopeError(
+      'Could not initialize the requested filters. Showing no misses so ' +
+      'bulk actions stay within the requested scope.'
+    );
+  }
+  loadMissConfig().then(loadMisses);
+});
 </script>
 
 </body>

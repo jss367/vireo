@@ -99,6 +99,24 @@ def test_api_misses_filter_by_category(client, db_with_misses):
     assert len(data["photos"]) == 1
 
 
+def test_api_misses_category_preserves_visual_info(
+    client, db_with_misses, monkeypatch,
+):
+    import models
+
+    monkeypatch.setattr(models, "get_active_model", lambda: None)
+    r = client.post("/api/misses", json={
+        "category": "clipped",
+        "rules": [],
+        "visual": {"prompt": "bird", "strength": "balanced"},
+    })
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["category"] == "clipped"
+    assert data["visual"]["status"] == "no_model"
+
+
 def test_api_misses_filters_by_collection_and_browse_attributes(
     client, db_with_misses,
 ):
@@ -125,6 +143,112 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
     assert data["no_subject"] == []
     assert [p["id"] for p in data["clipped"]] == [ids["clipped"]]
     assert data["oof"] == []
+
+
+def test_api_misses_accepts_universal_filter_rules(client, db_with_misses):
+    _, db, ids = db_with_misses
+    db.update_photo_rating(ids["no_subject"], 2)
+    db.update_photo_rating(ids["clipped"], 5)
+    rules = {
+        "mode": "all",
+        "rules": [
+            {"field": "rating", "op": ">=", "value": 4},
+            {"field": "filename", "op": "contains", "value": "clip"},
+        ],
+    }
+
+    r = client.post("/api/misses", json={"rules": rules})
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["no_subject"] == []
+    assert [p["id"] for p in data["clipped"]] == [ids["clipped"]]
+    assert data["oof"] == []
+
+
+def test_api_misses_forwards_collection_to_rule_and_visual_queries(
+    client, db_with_misses, monkeypatch,
+):
+    import models
+
+    _, db, ids = db_with_misses
+    collection_id = db.add_collection(
+        "One miss",
+        json.dumps([{
+            "field": "photo_ids",
+            "value": [ids["clipped"]],
+        }]),
+    )
+    original = type(db).query_photo_ids
+    seen_collection_ids = []
+
+    def tracked_query_photo_ids(self, rules, *args, **kwargs):
+        seen_collection_ids.append(kwargs.get("collection_id"))
+        return original(self, rules, *args, **kwargs)
+
+    monkeypatch.setattr(type(db), "query_photo_ids", tracked_query_photo_ids)
+    r = client.post("/api/misses", json={
+        "collection_id": collection_id,
+        "rules": [{"field": "rating", "op": ">=", "value": 0}],
+    })
+
+    assert r.status_code == 200
+    assert collection_id in seen_collection_ids
+    assert [p["id"] for p in r.get_json()["clipped"]] == [ids["clipped"]]
+
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "name": "test-model",
+        "model_type": "bioclip",
+        "model_str": "test-model",
+    })
+    visual = client.post("/api/misses", json={
+        "collection_id": collection_id,
+        "rules": [],
+        "visual": {"prompt": "bird", "strength": "balanced"},
+    })
+
+    assert visual.status_code == 200
+    visual_info = visual.get_json()["visual"]
+    assert visual_info["status"] == "no_embeddings"
+    assert visual_info["candidates"] == 1
+    assert seen_collection_ids.count(collection_id) >= 2
+
+
+def test_api_misses_actions_accept_universal_filter_rules(
+    client, db_with_misses,
+):
+    _, db, ids = db_with_misses
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id=?", (ids["no_subject"],)
+    )
+    db.conn.commit()
+    rules = {
+        "mode": "all",
+        "rules": [{"field": "photo_ids", "op": "in", "value": [ids["clipped"]]}],
+    }
+
+    reject = client.post(
+        "/api/misses/reject",
+        data=json.dumps({"category": "clipped", "rules": rules}),
+        content_type="application/json",
+    )
+
+    assert reject.status_code == 200
+    assert reject.get_json()["rejected"] == 1
+    assert db.get_photo(ids["clipped"])["flag"] == "rejected"
+    assert db.get_photo(ids["no_subject"])["flag"] != "rejected"
+
+
+def test_api_misses_rejects_malformed_universal_rules(client):
+    r = client.get("/api/misses", query_string={"rules": "not-json"})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "rules and visual must be valid JSON"
+
+
+def test_api_misses_post_requires_object_body(client):
+    r = client.post("/api/misses", json=[])
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "request body must be a JSON object"
 
 
 def test_api_misses_reject_and_recompute_honor_collection_filter(
@@ -505,14 +629,11 @@ def test_api_misses_since_restricts_to_recent_run(client, db_with_misses):
 
 
 def test_api_misses_rejects_visual_collection(client, db_with_misses):
-    """The Misses page filter funnels ``collection_id`` through
-    ``collection_photo_ids``, which evaluates ``rules`` only. A visual
-    collection would silently widen the miss scope to every metadata
-    match instead of the visually-matched subset — Codex review
-    r3620423210 on PR #1343 flagged the equivalent risk for
-    ``/api/collections/<id>/photos``; the misses filter has the same
-    boundary. Reject with 400 so the front-end picker (which disables
-    the same options) has a defense-in-depth backstop.
+    """The legacy Misses ``collection_id`` shim evaluates ``rules`` only.
+
+    A visual collection would silently widen the miss scope to every metadata
+    match instead of the visually matched subset. The shared-bar page sends
+    rules + visual directly, but old API callers still need this boundary.
     """
     _, db, _ = db_with_misses
     visual_cid = db.add_collection(

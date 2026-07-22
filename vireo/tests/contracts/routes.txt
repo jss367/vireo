@@ -79,7 +79,6 @@ GET          /api/location-review/saved-suggestions
 GET          /api/logs/recent
 GET          /api/logs/stream
 GET          /api/masks/<int:pid>/<variant>.png
-GET          /api/misses
 GET          /api/misses/config
 GET          /api/models
 GET          /api/models/pipeline
@@ -194,6 +193,7 @@ GET          /variants
 GET          /welcome
 GET          /workspace
 GET,POST     /api/edit-presets
+GET,POST     /api/misses
 GET,POST     /api/pipeline/config
 PATCH        /api/settings/global
 PATCH        /api/settings/workspace

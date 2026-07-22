@@ -10703,8 +10703,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     d["can_add_photos"] = False
             # ``has_visual`` lets clients that funnel a collection through
             # the legacy rules-only path (``/api/collections/<id>/photos``,
-            # ``/photo-ids``, pipeline/misses ``collection_id``) hide or
-            # disable visual collections in their pickers. Those paths
+            # ``/photo-ids``, pipeline/Misses ``collection_id`` callers) hide,
+            # disable, or reject visual collections. Those paths
             # evaluate ``rules`` only — a visual-only collection would
             # otherwise silently widen the scope to every metadata match.
             # Browse opens the same collection into the filter bar, where
@@ -10952,7 +10952,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         The consumers that call ``db.get_collection_photos`` /
         ``collection_photo_ids`` (pipeline stages, sharpness/cull/classify/
-        regroup/masks jobs, predictions-compare, misses filter, import
+        regroup/masks jobs, predictions-compare, the Misses legacy API, import
         preview) evaluate ``rules`` only. A visual-only collection would
         otherwise silently scope those runs to every metadata-matching
         photo instead of the visually-matched subset — the fix Codex
@@ -14567,7 +14567,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return grouped
 
     def _miss_filter_photo_ids(db, values):
-        """Resolve Misses-page filters to an intersected workspace photo set."""
+        """Resolve Misses-page filters to an intersected workspace photo set.
+
+        The Misses UI sends the shared filter bar's ``rules``/``visual``
+        expression.  The legacy scalar parameters remain accepted for old
+        bookmarks and API callers, but are no longer emitted by the page.
+
+        Returns ``(photo_ids, visual_info)``.  ``photo_ids=None`` means the
+        full active-workspace scope; ``visual_info`` mirrors
+        ``/api/photos/query`` so the shared bar can surface visual-search
+        fallback states instead of silently widening the result set.
+        """
         def value(name):
             raw = values.get(name)
             return None if raw in (None, "") else raw
@@ -14587,6 +14597,65 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return parsed
 
         collection_id = integer("collection_id", minimum=1)
+
+        rules_raw = value("rules")
+        visual_raw = value("visual")
+        if rules_raw is not None or visual_raw is not None:
+            collection_ids = None
+            if collection_id is not None:
+                # Validate before rules/visual resolution so both paths can
+                # safely use the collection as their candidate scope while
+                # preserving the friendlier legacy error messages.
+                valid = {c["id"]: c for c in db.get_collections()}
+                if collection_id not in valid:
+                    raise ValueError("collection not found")
+                if valid[collection_id]["visual_json"] is not None:
+                    raise ValueError(
+                        "visual collections have no rules-only expansion; "
+                        "open the collection from Browse instead"
+                    )
+                collection_ids = db.collection_photo_ids(collection_id)
+            try:
+                rules = (
+                    json.loads(rules_raw)
+                    if isinstance(rules_raw, str)
+                    else rules_raw
+                )
+                visual_value = (
+                    json.loads(visual_raw)
+                    if isinstance(visual_raw, str)
+                    else visual_raw
+                )
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("rules and visual must be valid JSON") from exc
+
+            if rules is None:
+                rules = []
+            rules = _inject_active_visual_model(rules)
+            visual = _validate_visual_arg(visual_value)
+            visual_info = None
+            photo_ids = None
+            if visual is not None:
+                visual_info, ordered_ids, _ = _resolve_visual(
+                    db, rules, visual, collection_id=collection_id,
+                )
+                if ordered_ids is not None:
+                    photo_ids = set(ordered_ids)
+            if photo_ids is None and rules:
+                photo_ids = set(db.query_photo_ids(
+                    rules, collection_id=collection_id,
+                ))
+
+            # ``collection_id`` can still accompany the universal expression
+            # for compatibility with an old composed Misses deep link.
+            if collection_id is not None:
+                photo_ids = (
+                    collection_ids
+                    if photo_ids is None
+                    else photo_ids & collection_ids
+                )
+            return photo_ids, visual_info
+
         folder_id = integer("folder_id", minimum=1)
         rating_min = integer("rating_min", minimum=1, maximum=5)
         keyword = value("keyword")
@@ -14626,9 +14695,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if collection_id is not None:
             # ``collection_photo_ids`` (like ``get_collection_photos``)
             # evaluates ``rules`` only. Refuse a visual-only collection
-            # here so the Misses page does not silently widen its scope
-            # to every metadata match — the picker filter is the primary
-            # gate; this is defense-in-depth for API callers.
+            # here so a legacy Misses API caller does not silently widen its
+            # scope to every metadata match. The shared-bar page sends the
+            # collection's rules + visual clause instead of collection_id.
             valid = {c["id"]: c for c in db.get_collections()}
             if collection_id not in valid:
                 raise ValueError("collection not found")
@@ -14643,22 +14712,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if photo_ids is None
                 else photo_ids & collection_ids
             )
-        return photo_ids
+        return photo_ids, None
 
-    @app.route("/api/misses")
+    @app.route("/api/misses", methods=["GET", "POST"])
     def api_misses():
         """Return photos flagged as misses.
 
-        With no query string, returns a dict with all three categories.
-        With ``?category=X``, returns {"photos": [...], "category": X}.
-        ``?since=<iso-ts>`` restricts results to photos whose
-        miss_computed_at >= since (used by the pipeline-review step).
+        GET retains the legacy scalar query parameters for bookmarks and API
+        callers. POST accepts the shared filter bar's rule/visual payload,
+        avoiding URL-size limits for large saved collections. With a category,
+        returns {"photos": [...], "category": X}; otherwise returns all three
+        category lists. ``since`` restricts results to photos whose
+        miss_computed_at >= the supplied timestamp.
         """
         db = _get_db()
-        category = request.args.get("category")
-        since = request.args.get("since") or None
+        if request.method == "POST":
+            values = request.get_json(silent=True)
+            if not isinstance(values, dict):
+                return json_error("request body must be a JSON object", 400)
+        else:
+            values = request.args
+        category = values.get("category")
+        since = values.get("since") or None
         try:
-            photo_ids = _miss_filter_photo_ids(db, request.args)
+            photo_ids, visual_info = _miss_filter_photo_ids(db, values)
         except ValueError as e:
             return json_error(str(e), 400)
         if category is not None:
@@ -14669,13 +14746,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )]
             _attach_species_representatives(db, photos)
             _attach_edit_recipes(db, photos)
-            return jsonify({"photos": photos, "category": category})
+            response = {"photos": photos, "category": category}
+            if visual_info is not None:
+                response["visual"] = visual_info
+            return jsonify(response)
         grouped = {
             "no_subject": db.list_misses(category="no_subject", since=since, photo_ids=photo_ids),
             "clipped":    db.list_misses(category="clipped", since=since, photo_ids=photo_ids),
             "oof":        db.list_misses(category="oof", since=since, photo_ids=photo_ids),
         }
-        return jsonify(_attach_miss_edit_recipes(db, grouped))
+        grouped = _attach_miss_edit_recipes(db, grouped)
+        if visual_info is not None:
+            grouped["visual"] = visual_info
+        return jsonify(grouped)
 
     @app.route("/api/misses/preview", methods=["POST"])
     def api_misses_preview():
@@ -14691,7 +14774,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e))
         try:
-            photo_ids = _miss_filter_photo_ids(db, body)
+            photo_ids, visual_info = _miss_filter_photo_ids(db, body)
         except ValueError as e:
             return json_error(str(e), 400)
         grouped = preview_misses_for_workspace(
@@ -14701,6 +14784,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
         grouped["preview"] = True
+        if visual_info is not None:
+            grouped["visual"] = visual_info
         return jsonify(grouped)
 
     @app.route("/api/misses/recompute", methods=["POST"])
@@ -14717,7 +14802,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e))
         try:
-            photo_ids = _miss_filter_photo_ids(db, body)
+            photo_ids, visual_info = _miss_filter_photo_ids(db, body)
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -14737,6 +14822,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         grouped["config"] = values
         grouped["updated"] = updated
         grouped["saved_defaults"] = body.get("save_defaults") is True
+        if visual_info is not None:
+            grouped["visual"] = visual_info
         return jsonify(grouped)
 
     @app.route("/api/misses/reject", methods=["POST"])
@@ -14761,7 +14848,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if category not in ("no_subject", "clipped", "oof"):
             return jsonify({"error": "invalid category"}), 400
         try:
-            photo_ids = _miss_filter_photo_ids(db, body)
+            photo_ids, _ = _miss_filter_photo_ids(db, body)
         except ValueError as e:
             return json_error(str(e), 400)
         affected = db.bulk_reject_miss_category(

@@ -6,7 +6,9 @@ selection. Double-click opens the shared lightbox.
 """
 import json
 import time
+from urllib.parse import quote
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -54,21 +56,302 @@ def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
         json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
     )
 
-    page.goto(f"{url}/misses")
+    page.goto(f"{url}/misses?collection_id={collection_id}")
     page.locator("[data-testid^='miss-card-no_subject-']").first.wait_for(
         state="visible", timeout=3000,
     )
-    page.locator("#missCollectionFilter").select_option(str(collection_id))
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(3)
     assert f"collection_id={collection_id}" in page.url
 
     # The shared E2E fixture gives the first hawk four stars; the other two
     # have no rating, so composing filters should leave exactly that miss.
-    page.locator("#missRatingFilter").select_option("4")
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
     expect(
         page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']")
     ).to_be_visible()
+
+
+def test_missing_collection_deep_link_fails_closed(live_server, page):
+    """A ?collection_id=<gone> deep link must not silently widen to every
+    miss in the workspace — bulk reject/recompute would otherwise operate
+    on photos the user never scoped."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?collection_id=999999&since=2026-01-01")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text("999999")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+    # Editing the filter bar clears the fail-closed guard and loads normally.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    expect(page.locator("#scopeBanner")).to_contain_text(
+        "Showing only the current pipeline run"
+    )
+    expect(page.locator("#missRecomputeBtn")).to_be_enabled()
+
+
+def test_missing_folder_deep_link_fails_closed(live_server, page):
+    """A ?folder_id=<gone> deep link must not silently widen to every miss."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?folder_id=999999")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text("999999")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+
+@pytest.mark.parametrize("scope_key", ["collection_id", "folder_id"])
+def test_malformed_legacy_scope_id_fails_closed(live_server, page, scope_key):
+    """A numeric prefix must not resolve a malformed legacy scope id."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    if scope_key == "collection_id":
+        scope_id = db.add_collection(
+            "Hawk review",
+            json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
+        )
+    else:
+        scope_id = live_server["data"]["folders"][0]
+
+    page.goto(f"{url}/misses?{scope_key}={scope_id}junk")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text(f"Invalid ?{scope_key}")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+
+@pytest.mark.parametrize("scope_key", ["collection_id", "folder_id", "filters"])
+def test_filter_bootstrap_failure_keeps_requested_scope_closed(
+    live_server, page, scope_key,
+):
+    """A filter registry failure must not bypass a scoped URL."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    if scope_key == "collection_id":
+        scope_id = db.add_collection(
+            "Hawk review",
+            json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
+        )
+    elif scope_key == "folder_id":
+        scope_id = live_server["data"]["folders"][0]
+    else:
+        scope_id = quote(json.dumps({
+            "root": {
+                "mode": "all",
+                "rules": [{"field": "rating", "op": ">=", "value": 4}],
+            },
+            "visual": None,
+        }))
+
+    page.route(
+        "**/api/filters/fields",
+        lambda route: route.fulfill(status=500, body="registry unavailable"),
+    )
+    page.goto(f"{url}/misses?{scope_key}={scope_id}")
+
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text(
+        "Could not initialize the requested filters"
+    )
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+
+@pytest.mark.parametrize(
+    ("label", "bad_payload"),
+    [
+        # Truncated JSON (URL cut off mid-array).
+        ("truncated_json",
+         "%7B%22root%22%3A%7B%22mode%22%3A%22all%22%2C%22rules%22%3A%5B"),
+        # Well-formed JSON with the wrong shape (missing ``root.rules``).
+        ("missing_rules", "%7B%22root%22%3A%7B%22mode%22%3A%22all%22%7D%7D"),
+        # Non-JSON garbage.
+        ("garbage", "not-a-json-object"),
+        # Empty ``?filters=`` — ``URLSearchParams.get`` returns ``""``,
+        # which is falsy but still carries a required handoff scope
+        # (Codex review r3627816534).
+        ("empty_string", ""),
+    ],
+    ids=["truncated_json", "missing_rules", "garbage", "empty_string"],
+)
+def test_malformed_misses_handoff_filters_fails_closed(
+    live_server, page, label, bad_payload,
+):
+    """A present-but-invalid ``filters=...`` handoff payload on /misses
+    must not silently fall through to legacy params or persisted filters.
+    ``VireoFilter.init`` rejects on any malformed payload and the page
+    installs the fail-closed banner so bulk reject/recompute cannot
+    escape the intended handoff scope (Codex review r3627693292)."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?filters={bad_payload}")
+
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text(
+        "Could not initialize the requested filters"
+    )
+    expect(
+        page.locator("[data-testid^='miss-card-no_subject-']")
+    ).to_have_count(0)
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+
+
+def test_unresolved_scope_freezes_preview_controls(live_server, page):
+    """When a deep link fails closed, moving a threshold slider must not
+    fire /api/misses/preview and repopulate the grid with photos outside
+    the unresolved scope. The whole tuning group (sliders, save-defaults,
+    reset, Recompute) stays disabled until the user edits the filter bar
+    and the replacement scope loads."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?collection_id=999999")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+    for control_id in (
+        "missCfgDetectorFloor",
+        "missCfgNoSubject",
+        "missCfgClassifierRescue",
+        "missCfgBboxMin",
+        "missCfgOofRatio",
+        "missSaveDefaults",
+        "missRecomputeBtn",
+        "missResetPreviewBtn",
+    ):
+        expect(page.locator(f"#{control_id}")).to_be_disabled()
+
+    # Any /api/misses/preview call while the scope is unresolved would widen
+    # results to every miss outside the failed scope; track and assert none
+    # fire even if a slider input is dispatched programmatically.
+    page.evaluate("""() => {
+      window.previewCalls = 0;
+      const realFetch = window.fetch.bind(window);
+      window.fetch = (url, options) => {
+        if (String(url).includes('/api/misses/preview')) window.previewCalls++;
+        return realFetch(url, options);
+      };
+    }""")
+    page.locator("#missCfgNoSubject").evaluate("""el => {
+      el.value = String(Number(el.value) + 1);
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+    }""")
+    page.wait_for_timeout(400)
+    assert page.evaluate("window.previewCalls") == 0
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
+
+    # Editing the filter bar replaces the failed scope; once the follow-up
+    # load succeeds, the tuning controls become interactive again.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    for control_id in (
+        "missCfgDetectorFloor",
+        "missSaveDefaults",
+        "missRecomputeBtn",
+        "missResetPreviewBtn",
+    ):
+        expect(page.locator(f"#{control_id}")).to_be_enabled()
+
+
+def test_scope_recovery_stays_frozen_until_replacement_load(live_server, page):
+    """A late config response must not re-enable tuning while the request
+    that replaces an unresolved deep-link scope is still in flight."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.add_init_script("""(() => {
+      const realFetch = window.fetch.bind(window);
+      window.previewCalls = 0;
+      window.recomputeCalls = 0;
+      window.fetch = (url, options) => {
+        const value = String(url);
+        if (value === '/api/misses/config') {
+          return realFetch(url, options).then(response => new Promise(resolve => {
+            window.releaseHeldConfig = () => resolve(response);
+          }));
+        }
+        if (value === '/api/misses') {
+          return realFetch(url, options).then(response => new Promise(resolve => {
+            window.releaseHeldMisses = () => resolve(response);
+          }));
+        }
+        if (value.includes('/api/misses/preview')) window.previewCalls++;
+        if (value.includes('/api/misses/recompute')) window.recomputeCalls++;
+        return realFetch(url, options);
+      };
+    })()""")
+
+    page.goto(f"{url}/misses?collection_id=999999")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    page.wait_for_function("window.releaseHeldConfig != null")
+
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+    page.wait_for_function("window.releaseHeldMisses != null")
+    page.evaluate("window.releaseHeldConfig()")
+    page.wait_for_function("window.missConfigLoaded === true")
+
+    # Config is ready, but the replacement filters are not yet applied.
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+    expect(page.locator("#missCfgNoSubject")).to_be_disabled()
+    page.evaluate("previewMisses(); recomputeMisses()")
+    page.wait_for_timeout(100)
+    assert page.evaluate("window.previewCalls") == 0
+    assert page.evaluate("window.recomputeCalls") == 0
+
+    page.evaluate("window.releaseHeldMisses()")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    expect(page.locator("#missRecomputeBtn")).to_be_enabled()
+    expect(page.locator("#missCfgNoSubject")).to_be_enabled()
+
+
+def test_collections_fetch_failure_fails_closed(live_server, page):
+    """If /api/collections itself errors, the deep-link resolver must fail
+    closed rather than treating the empty list as "no collection matches"
+    and dropping the scope."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    collection_id = db.add_collection(
+        "Hawk review",
+        json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
+    )
+
+    page.add_init_script("""(() => {
+      const realFetch = window.fetch.bind(window);
+      window.fetch = (url, options) => {
+        if (String(url).includes('/api/collections')
+            && !String(url).includes('/api/collections/')) {
+          return Promise.resolve(new Response('boom', {status: 500}));
+        }
+        return realFetch(url, options);
+      };
+    })()""")
+
+    page.goto(f"{url}/misses?collection_id={collection_id}")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    expect(page.locator("#scopeBanner")).to_contain_text("Could not load collections")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
 
 
 def test_filter_change_ignores_older_threshold_preview(live_server, page):
@@ -98,7 +381,7 @@ def test_filter_change_ignores_older_threshold_preview(live_server, page):
     }""")
     page.wait_for_function("window.releaseHeldPreview != null")
 
-    page.locator("#missRatingFilter").select_option("4")
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
     page.evaluate("window.releaseHeldPreview()")
     page.wait_for_timeout(400)
@@ -140,7 +423,7 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
     page.locator("#missRecomputeBtn").click()
     page.wait_for_function("window.releaseHeldRecompute != null")
 
-    page.locator("#missRatingFilter").select_option("4")
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
     calls_before_release = page.evaluate(
         "window.missesFetchCalls.filter(u => u.startsWith('/api/misses') && !u.includes('/recompute') && !u.includes('/preview')).length"
@@ -180,7 +463,7 @@ def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page)
         return realFetch(url, options);
       };
     }""")
-    page.locator("#missRatingFilter").select_option("")
+    page.evaluate("VireoFilter.removeField('rating')")
     page.wait_for_function("window.releaseHeldFilterLoad != null")
 
     page.once("dialog", lambda dialog: dialog.accept())
@@ -211,7 +494,7 @@ def test_recompute_uses_filters_that_rendered_visible_cards(live_server, page):
         return realFetch(url, options);
       };
     }""")
-    page.locator("#missRatingFilter").select_option("")
+    page.evaluate("VireoFilter.removeField('rating')")
     page.wait_for_function("window.releaseHeldFilterLoad != null")
 
     page.locator("#missRecomputeBtn").click()
@@ -238,7 +521,9 @@ def test_initial_recompute_uses_url_filters_before_grid_loads(live_server, page)
       const realFetch = window.fetch.bind(window);
       let held = false;
       window.fetch = (url, options) => {
-        if (!held && String(url).includes('/api/misses?rating_min=4')) {
+        const parsed = new URL(String(url), window.location.origin);
+        const body = options && options.body ? JSON.parse(options.body) : {};
+        if (!held && parsed.pathname === '/api/misses' && body.rules) {
           held = true;
           return new Promise(resolve => {
             window.releaseInitialMissesLoad = () => realFetch(url, options).then(resolve);
@@ -256,7 +541,12 @@ def test_initial_recompute_uses_url_filters_before_grid_loads(live_server, page)
     expect(page.locator("#missRecomputeBtn")).to_be_enabled()
     page.locator("#missRecomputeBtn").click()
     page.wait_for_function("window.initialRecomputeBody != null")
-    assert page.evaluate("window.initialRecomputeBody.rating_min") == "4"
+    assert page.evaluate("""() => {
+      const rules = window.initialRecomputeBody.rules;
+      const leaves = Array.isArray(rules) ? rules : (rules.rules || []);
+      const rating = leaves.find(rule => rule.field === 'rating');
+      return rating && rating.op === '>=' && rating.value === 4;
+    }""")
     page.evaluate("window.releaseInitialMissesLoad()")
 
 

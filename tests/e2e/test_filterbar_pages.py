@@ -1,10 +1,12 @@
-"""E2E: universal filter bar on Map, Review, and Duplicates (Phase 4),
+"""E2E: universal filter bar on Map, Review, Duplicates, and Misses,
 plus the cross-page "Open results in…" handoff.
 
 Seed data (conftest): 3 hawk photos in /photos/park, 2 robins in
 /photos/yard; hawk1 rated 4; species keywords on hawk1/robin1; every
 photo has a pending prediction.
 """
+
+import pytest
 
 
 def _wait_bar(page):
@@ -50,7 +52,7 @@ def test_map_page_uses_filter_bar(live_server, page):
 def test_review_page_uses_filter_bar(live_server, page):
     page.goto(live_server["url"] + "/review")
     _wait_bar(page)
-    assert "Pending predictions" in page.inner_text(".vf-scope-chip")
+    assert "Review · Predictions" in page.inner_text(".vf-scope-chip")
     page.wait_for_selector(".pred-card, .grid .card, #grid > *", timeout=15000)
     before = page.evaluate("predictions.length")
     assert before == 5
@@ -67,6 +69,72 @@ def test_review_page_uses_filter_bar(live_server, page):
     page.click(".vf-add-filter")
     page.fill(".vf-field-search", "prediction status")
     page.wait_for_selector('[data-add-field="prediction_status"]', timeout=8000)
+
+
+def test_misses_page_uses_filter_bar(live_server, page):
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"]
+    with db.conn:
+        db.conn.executemany(
+            "UPDATE photos SET miss_no_subject=1, miss_computed_at='2026-04-22' "
+            "WHERE id=?",
+            [(photo_id,) for photo_id in photo_ids],
+        )
+
+    page.goto(live_server["url"] + "/misses")
+    _wait_bar(page)
+    assert "Misses · Detected misses" in page.inner_text(".vf-scope-chip")
+    assert _total(page) == 5
+
+    search = page.locator(".vf-search input")
+    search.fill("robin")
+    search.press("Enter")
+    page.wait_for_function(
+        "document.querySelector('.vf-total strong').textContent === '2'",
+        timeout=8000,
+    )
+    assert page.locator("[data-testid^='miss-card-no_subject-']").count() == 2
+
+    page.click(".vf-handoff")
+    page.wait_for_selector('.vf-handoff-menu [data-handoff-path="/browse"]')
+
+
+def test_misses_page_hides_rejected_flag_filter(live_server, page):
+    page.goto(live_server["url"] + "/misses")
+    _wait_bar(page)
+
+    page.click(".vf-filters-btn")
+    assert page.locator('.vf-quick-flags [data-flag="rejected"]').is_hidden()
+
+    page.click(".vf-add-filter")
+    page.fill(".vf-field-search", "flag")
+    page.click('[data-add-field="flag"]')
+    assert page.locator(
+        '.vf-enum-pill[data-value="rejected"]'
+    ).count() == 0
+
+
+def test_enum_field_is_unavailable_when_page_excludes_every_value(
+    live_server, page,
+):
+    def leave_only_rejected_flag(route):
+        response = route.fetch()
+        body = response.json()
+        flag = next(field for field in body["fields"] if field["key"] == "flag")
+        flag["values"] = ["rejected"]
+        route.fulfill(response=response, json=body)
+
+    page.route("**/api/filters/fields", leave_only_rejected_flag)
+    page.goto(live_server["url"] + "/misses")
+    _wait_bar(page)
+
+    page.click(".vf-filters-btn")
+    expect_flag_buttons = page.locator(".vf-quick-flags button")
+    for index in range(expect_flag_buttons.count()):
+        assert expect_flag_buttons.nth(index).is_hidden()
+    page.click(".vf-add-filter")
+    page.fill(".vf-field-search", "flag")
+    assert page.locator('[data-add-field="flag"]').count() == 0
 
 
 def test_browse_picker_hides_review_only_fields(live_server, page):
@@ -142,3 +210,216 @@ def test_handoff_carries_expression_to_map(live_server, page):
     assert "hawk" in chips
     assert "Plottable locations" in page.inner_text(".vf-scope-chip")
     assert _total(page) == 1
+
+
+@pytest.mark.parametrize(
+    ("op", "value"),
+    [("is", "rejected"), ("in", ["rejected"])],
+)
+def test_handoff_hides_misses_for_rejected_flag(live_server, page, op, value):
+    page.goto(live_server["url"] + "/browse")
+    _wait_bar(page)
+    page.evaluate(
+        "([op, value]) => VireoFilter.addRule('flag', op, value)",
+        [op, value],
+    )
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 0
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1
+
+
+@pytest.mark.parametrize(
+    ("op", "value"),
+    [("is not", "rejected"), ("in", ["rejected", "flagged"])],
+)
+def test_handoff_keeps_misses_for_compatible_rejected_rules(
+    live_server, page, op, value,
+):
+    page.goto(live_server["url"] + "/browse")
+    _wait_bar(page)
+    page.evaluate(
+        "([op, value]) => VireoFilter.addRule('flag', op, value)",
+        [op, value],
+    )
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 1
+
+
+def test_handoff_hides_misses_when_source_has_folder_scope(live_server, page):
+    """A source page with an external scope (Browse sidebar folder,
+    dashboard collection) that lives outside ``state.root`` would lose
+    that scope when the handoff payload — ``{root, visual}`` only — lands
+    on Misses; bulk reject/recompute would then act workspace-wide on
+    photos beyond the source scope. Hide Misses when the source reports
+    such a scope (Codex review r3627693288)."""
+    url = live_server["url"]
+    folder_id = live_server["data"]["folders"][0]
+    page.goto(f"{url}/browse?folder_id={folder_id}")
+    _wait_bar(page)
+    # A rule is required to reveal the handoff button.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 0
+    # Non-destructive targets remain — this is a Misses-specific guard.
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1
+
+
+def test_handoff_hides_misses_when_source_has_dashboard_collection_scope(
+    live_server, page,
+):
+    """Companion to the folder-scope guard: a dashboard-composed collection
+    (?dashboard_scope=1&collection_id=...) also lives outside ``state.root``,
+    so the same handoff-payload leak would drop the collection restriction
+    on the way to Misses. Hide Misses when Browse reports that scope too
+    (CodeRabbit review r3627968187)."""
+    import json
+
+    db = live_server["db"]
+    rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    collection_id = db.add_collection("All JPGs", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse?collection_id={collection_id}&dashboard_scope=1")
+    _wait_bar(page)
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 0
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1
+
+
+def test_handoff_hides_misses_when_review_has_collection_scope(
+    live_server, page,
+):
+    """Review keeps ``currentCollection`` outside the filter tree and
+    passes it separately as ``collection_id`` to /api/predictions. Without
+    a ``getScope`` on Review's ``VireoFilter.init``, the handoff guard
+    could not see this scope and would offer Misses under a Review-
+    collection view — landing on workspace-wide misses matching the chip,
+    with bulk reject/recompute enabled against photos outside the source
+    collection (Codex review r3627997828)."""
+    import json
+
+    db = live_server["db"]
+    rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    collection_id = db.add_collection("All JPGs", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    _wait_bar(page)
+    # ``loadCollectionFilter`` populates the dropdown asynchronously —
+    # wait for the option to render before selecting it.
+    page.wait_for_selector(
+        f'#collectionFilter option[value="{collection_id}"]', timeout=8000,
+    )
+    # Select the collection via Review's dropdown so ``currentCollection``
+    # updates through the real switch path (the code under test).
+    page.select_option("#collectionFilter", str(collection_id))
+    page.wait_for_function(
+        "currentCollection === '" + str(collection_id) + "'", timeout=8000,
+    )
+    # A rule is required to reveal the handoff button.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 0
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1
+
+
+def test_handoff_shows_misses_when_source_has_no_external_scope(
+    live_server, page,
+):
+    """Sanity check the guard doesn't hide Misses when there is no
+    external folder/collection scope to lose on handoff."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    _wait_bar(page)
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
+    ).count() == 1
+
+
+def test_handoff_to_misses_strips_rejected_flag(live_server, page):
+    """A cross-page handoff payload that pins Flag=Rejected must not
+    smuggle that rule into Misses: /api/misses excludes rejected rows
+    server-side, so an unsanitized payload would render an always-empty
+    grid (Codex review r3627389228). Simulates the URL a Browse handoff
+    button would produce; the guard fires no matter which source built it.
+    """
+    import json
+    from urllib.parse import quote
+
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"]
+    with db.conn:
+        db.conn.executemany(
+            "UPDATE photos SET miss_no_subject=1, miss_computed_at='2026-04-22' "
+            "WHERE id=?",
+            [(photo_id,) for photo_id in photo_ids],
+        )
+
+    payload = quote(json.dumps({
+        "root": {
+            "mode": "all",
+            "rules": [{"field": "flag", "op": "is", "value": "rejected"}],
+        },
+        "visual": None,
+    }))
+    page.goto(f"{live_server['url']}/misses?filters={payload}")
+    _wait_bar(page)
+
+    # The rejected clause was dropped, not adopted: the full Misses grid
+    # renders instead of an empty result.
+    chips = page.evaluate("document.querySelector('.vf-chips').textContent").lower()
+    assert "rejected" not in chips
+    assert _total(page) == 5
+
+
+def test_misses_legacy_flag_query_strips_rejected(live_server, page):
+    """``?flag=rejected`` on Misses would otherwise install a rule Misses
+    hides from its own controls, so it must be dropped the same way as
+    the handoff payload (Codex review r3627389228)."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"]
+    with db.conn:
+        db.conn.executemany(
+            "UPDATE photos SET miss_no_subject=1, miss_computed_at='2026-04-22' "
+            "WHERE id=?",
+            [(photo_id,) for photo_id in photo_ids],
+        )
+
+    page.goto(live_server["url"] + "/misses?flag=rejected")
+    _wait_bar(page)
+    chips = page.evaluate("document.querySelector('.vf-chips').textContent").lower()
+    assert "rejected" not in chips
+    assert _total(page) == 5
