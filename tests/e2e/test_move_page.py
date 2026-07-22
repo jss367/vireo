@@ -167,6 +167,40 @@ def test_move_folder_shows_source_while_choosing_destination(live_server, page):
     expect(page.locator("#moveBrowserSourceCount")).to_have_text("(3 photos)")
 
 
+def test_move_folder_browser_navigates_to_recent_destinations(
+    live_server, page, tmp_path
+):
+    import config as cfg
+
+    first = tmp_path / "primary" / "Archive"
+    second = tmp_path / "secondary" / "Archive"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    config = cfg.load()
+    config["ingest"]["recent_destinations"] = [str(first), str(second)]
+    cfg.save(config)
+
+    page.goto(f"{live_server['url']}/move")
+    page.get_by_role("button", name="Browse", exact=True).first.click()
+
+    recents = page.locator("[data-testid='move-browser-recents']")
+    expect(recents).to_be_visible()
+    expect(recents).to_contain_text("primary / Archive")
+    expect(recents).to_contain_text("secondary / Archive")
+
+    page.get_by_role("button", name=f"Go to {second}").click()
+    expect(page.locator("#moveBrowserBreadcrumb")).to_have_text(str(second))
+    expect(page.locator("#moveBrowserModal")).to_have_class(re.compile(r"\bopen\b"))
+
+    page.get_by_role("button", name="Select This Folder").click()
+    expect(page.locator("#quickDestInput")).to_have_value(str(second))
+
+    page.get_by_role("button", name="Browse", exact=True).first.click()
+    expect(
+        page.locator("#moveBrowserRecentList button").first
+    ).to_have_attribute("aria-label", f"Go to {second}")
+
+
 def test_move_folder_prints_full_move_before_submission(live_server, page):
     live_server["db"].update_folder_counts()
     url = live_server["url"]
