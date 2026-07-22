@@ -181,6 +181,163 @@ def apply_vibrance(rgb, vibrance=0.0):
     return np.clip(luma + (rgb - luma) * factor, 0.0, 1.0)
 
 
+_TONE_CURVE_POINTS = ("black", "shadows", "midtones", "highlights", "white")
+_TONE_CURVE_DEFAULTS = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
+_HSL_CENTERS = {
+    "red": 0.0,
+    "orange": 30.0,
+    "yellow": 60.0,
+    "green": 120.0,
+    "aqua": 180.0,
+    "blue": 240.0,
+    "purple": 275.0,
+    "magenta": 315.0,
+}
+
+
+def apply_tone_curve(rgb, curve):
+    """Apply a five-point composite RGB curve in display space.
+
+    The recipe stores output levels at fixed 0/25/50/75/100-percent input
+    points. Interpolation is piecewise linear, matching the predictable point
+    curve photographers expect while remaining cheap enough for tiled renders.
+    """
+    if not curve:
+        return rgb
+    outputs = _TONE_CURVE_DEFAULTS.copy()
+    for i, name in enumerate(_TONE_CURVE_POINTS):
+        if name in curve:
+            outputs[i] = np.float32(float(curve[name]) / 100.0)
+    src = np.clip(np.asarray(rgb, dtype=np.float32), 0.0, 1.0)
+    position = src * np.float32(4.0)
+    lower = np.minimum(position.astype(np.int32), 3)
+    fraction = position - lower
+    return np.clip(
+        outputs[lower] * (1.0 - fraction) + outputs[lower + 1] * fraction,
+        0.0, 1.0,
+    )
+
+
+def _rgb_to_hsl(rgb):
+    src = np.clip(np.asarray(rgb, dtype=np.float32), 0.0, 1.0)
+    maxc = np.max(src, axis=-1)
+    minc = np.min(src, axis=-1)
+    delta = maxc - minc
+    light = (maxc + minc) * np.float32(0.5)
+    denom = np.maximum(1.0 - np.abs(2.0 * light - 1.0), 1e-7)
+    saturation = np.where(delta > 1e-7, delta / denom, 0.0)
+    safe_delta = np.where(delta > 1e-7, delta, 1.0)
+    red, green, blue = src[..., 0], src[..., 1], src[..., 2]
+    hue = np.zeros_like(light)
+    red_max = (maxc == red) & (delta > 1e-7)
+    green_max = (maxc == green) & (delta > 1e-7) & ~red_max
+    blue_max = (delta > 1e-7) & ~red_max & ~green_max
+    hue = np.where(red_max, np.mod((green - blue) / safe_delta, 6.0), hue)
+    hue = np.where(green_max, (blue - red) / safe_delta + 2.0, hue)
+    hue = np.where(blue_max, (red - green) / safe_delta + 4.0, hue)
+    return np.mod(hue / 6.0, 1.0), saturation, light
+
+
+def _hsl_to_rgb(hue, saturation, light):
+    h = np.mod(np.asarray(hue, dtype=np.float32), 1.0)
+    s = np.clip(np.asarray(saturation, dtype=np.float32), 0.0, 1.0)
+    l = np.clip(np.asarray(light, dtype=np.float32), 0.0, 1.0)
+    chroma = (1.0 - np.abs(2.0 * l - 1.0)) * s
+    hp = h * 6.0
+    x = chroma * (1.0 - np.abs(np.mod(hp, 2.0) - 1.0))
+    zero = np.zeros_like(chroma)
+    sector = np.floor(hp).astype(np.int32) % 6
+    r1 = np.select(
+        [sector == 0, sector == 1, sector == 2, sector == 3, sector == 4],
+        [chroma, x, zero, zero, x], default=chroma,
+    )
+    g1 = np.select(
+        [sector == 0, sector == 1, sector == 2, sector == 3, sector == 4],
+        [x, chroma, chroma, x, zero], default=zero,
+    )
+    b1 = np.select(
+        [sector == 0, sector == 1, sector == 2, sector == 3, sector == 4],
+        [zero, zero, x, chroma, chroma], default=x,
+    )
+    m = l - chroma * np.float32(0.5)
+    return np.stack((r1 + m, g1 + m, b1 + m), axis=-1).astype(np.float32)
+
+
+def apply_hsl_mixer(rgb, mixer):
+    """Apply smooth, overlapping per-colour HSL adjustments."""
+    if not mixer:
+        return rgb
+    hue, saturation, light = _rgb_to_hsl(rgb)
+    hue_delta = np.zeros_like(hue)
+    sat_delta = np.zeros_like(hue)
+    lum_delta = np.zeros_like(hue)
+    weight_sum = np.zeros_like(hue)
+    # A 75-degree triangular support avoids seams between the deliberately
+    # non-uniform named colour centers (notably yellow -> green).
+    support = np.float32(75.0 / 360.0)
+    for color, center_deg in _HSL_CENTERS.items():
+        settings = mixer.get(color) or {}
+        if not settings:
+            continue
+        center = np.float32(center_deg / 360.0)
+        distance = np.abs(np.mod(hue - center + 0.5, 1.0) - 0.5)
+        weight = np.clip(1.0 - distance / support, 0.0, 1.0)
+        # Achromatic pixels have no meaningful hue. Fade the band selection to
+        # zero near grey so changing (say) Red luminance cannot unexpectedly
+        # brighten a neutral wall whose mathematical fallback hue is zero.
+        weight *= smoothstep(0.01, 0.08, saturation)
+        weight_sum += weight
+        hue_delta += weight * np.float32(float(settings.get("hue", 0.0)))
+        sat_delta += weight * np.float32(float(settings.get("saturation", 0.0)))
+        lum_delta += weight * np.float32(float(settings.get("luminance", 0.0)))
+    divisor = np.maximum(weight_sum, 1.0)
+    # ±100 Hue corresponds to a ±30-degree shift, enough to cross adjacent
+    # colour bands without turning the mixer into a full hue rotation.
+    hue = np.mod(hue + (hue_delta / divisor) * np.float32(30.0 / 36000.0), 1.0)
+    sat_amount = np.clip(sat_delta / divisor / 100.0, -1.0, 1.0)
+    saturation = np.where(
+        sat_amount >= 0,
+        saturation + (1.0 - saturation) * sat_amount,
+        saturation * (1.0 + sat_amount),
+    )
+    lum_amount = np.clip(lum_delta / divisor / 100.0, -1.0, 1.0)
+    light = np.where(
+        lum_amount >= 0,
+        light + (1.0 - light) * lum_amount,
+        light * (1.0 + lum_amount),
+    )
+    return np.clip(_hsl_to_rgb(hue, saturation, light), 0.0, 1.0)
+
+
+def apply_color_grading(rgb, grading):
+    """Tint shadows, midtones, and highlights while preserving luminance."""
+    if not grading:
+        return rgb
+    out = np.asarray(rgb, dtype=np.float32)
+    balance = float(grading.get("balance", 0.0)) / 100.0
+    lum = np.clip(_luma(out) + np.float32(balance * 0.25), 0.0, 1.0)
+    weights = {
+        "shadows": 1.0 - smoothstep(0.12, 0.58, lum),
+        "highlights": smoothstep(0.42, 0.88, lum),
+    }
+    weights["midtones"] = np.clip(
+        1.0 - weights["shadows"] - weights["highlights"], 0.0, 1.0
+    )
+    for zone in ("shadows", "midtones", "highlights"):
+        settings = grading.get(zone) or {}
+        strength = float(settings.get("saturation", 0.0)) / 100.0
+        if strength <= 0.0:
+            continue
+        hue = np.float32(float(settings.get("hue", 0.0)) / 360.0)
+        tint = _hsl_to_rgb(hue, np.float32(1.0), np.float32(0.5))
+        tint_luma = (
+            LUMA_R * tint[..., 0] + LUMA_G * tint[..., 1] + LUMA_B * tint[..., 2]
+        )
+        chroma = tint - tint_luma[..., None]
+        out = out + chroma * weights[zone] * np.float32(strength * 0.35)
+    return np.clip(out, 0.0, 1.0)
+
+
 def apply_adjustments(
     rgb,
     *,
@@ -193,6 +350,9 @@ def apply_adjustments(
     contrast=0.0,
     vibrance=0.0,
     saturation=0.0,
+    tone_curve=None,
+    hsl=None,
+    color_grading=None,
     local_weight=None,
     local_subject=None,
     local_background=None,
@@ -210,6 +370,9 @@ def apply_adjustments(
         contrast: [-100, 100]; a linear contrast around mid-grey (0.5).
         vibrance: [-100, 100]; luma-preserving selective saturation.
         saturation: [-100, 100]; luma-preserving saturation in display space.
+        tone_curve: five composite RGB output points at fixed input levels.
+        hsl: per-colour hue, saturation, and luminance adjustments.
+        color_grading: shadow/midtone/highlight hue and saturation tints.
 
     Returns:
         float32 array, same shape, sRGB-encoded and clipped to [0,1].
@@ -244,6 +407,9 @@ def apply_adjustments(
             contrast=contrast,
             vibrance=vibrance,
             saturation=saturation,
+            tone_curve=tone_curve,
+            hsl=hsl,
+            color_grading=color_grading,
         )
 
     # --- scene-referred ops, in linear light ---
@@ -287,6 +453,12 @@ def apply_adjustments(
     if contrast:
         c = np.float32(1.0 + float(contrast) / 100.0)
         disp = (disp - 0.5) * c + 0.5
+    if tone_curve:
+        disp = apply_tone_curve(disp, tone_curve)
+    if hsl:
+        disp = apply_hsl_mixer(disp, hsl)
+    if color_grading:
+        disp = apply_color_grading(disp, color_grading)
     if vibrance:
         disp = apply_vibrance(disp, vibrance)
     if saturation:
@@ -311,6 +483,7 @@ _LOCAL_CLAMPS = {
 def _apply_adjustments_weighted(
     rgb, *, weight, subject, background, exposure, white_balance,
     highlights, shadows, whites, blacks, contrast, vibrance, saturation,
+    tone_curve, hsl, color_grading,
 ):
     """Local (mask-weighted) variant of :func:`apply_adjustments`.
 
@@ -377,6 +550,12 @@ def _apply_adjustments_weighted(
     elif contrast:
         c = np.float32(1.0 + float(contrast) / 100.0)
         disp = (disp - 0.5) * c + 0.5
+    if tone_curve:
+        disp = apply_tone_curve(disp, tone_curve)
+    if hsl:
+        disp = apply_hsl_mixer(disp, hsl)
+    if color_grading:
+        disp = apply_color_grading(disp, color_grading)
     if vibrance:
         disp = apply_vibrance(disp, vibrance)
     s_amt = amount_map("saturation", saturation)

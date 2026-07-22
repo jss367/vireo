@@ -291,7 +291,8 @@ body {
   font-size: 12px;
 }
 .preset-row select,
-.preset-row input[type="text"] {
+.preset-row input[type="text"],
+.advanced-select {
   width: 100%;
   padding: 6px 8px;
   background: var(--bg-secondary);
@@ -624,6 +625,95 @@ body {
     </div>
 
     <div class="panel-band">
+      <div class="panel-title">Tone Curve</div>
+      <div class="control-row">
+        <label for="curve_blackRange">Black</label>
+        <input id="curve_blackRange" type="range" min="0" max="100" step="1" value="0" oninput="setToneCurvePoint('black', this.value)">
+        <span class="control-value" id="curve_blackValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="curve_shadowsRange">Shadows</label>
+        <input id="curve_shadowsRange" type="range" min="0" max="100" step="1" value="25" oninput="setToneCurvePoint('shadows', this.value)">
+        <span class="control-value" id="curve_shadowsValue">25</span>
+      </div>
+      <div class="control-row">
+        <label for="curve_midtonesRange">Midtones</label>
+        <input id="curve_midtonesRange" type="range" min="0" max="100" step="1" value="50" oninput="setToneCurvePoint('midtones', this.value)">
+        <span class="control-value" id="curve_midtonesValue">50</span>
+      </div>
+      <div class="control-row">
+        <label for="curve_highlightsRange">Highlights</label>
+        <input id="curve_highlightsRange" type="range" min="0" max="100" step="1" value="75" oninput="setToneCurvePoint('highlights', this.value)">
+        <span class="control-value" id="curve_highlightsValue">75</span>
+      </div>
+      <div class="control-row">
+        <label for="curve_whiteRange">White</label>
+        <input id="curve_whiteRange" type="range" min="0" max="100" step="1" value="100" oninput="setToneCurvePoint('white', this.value)">
+        <span class="control-value" id="curve_whiteValue">100</span>
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="resetToneCurve()">Reset Curve</button>
+      </div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Color Mixer</div>
+      <select id="hslColorSelect" class="advanced-select" aria-label="Color mixer color" onchange="syncAdvancedColorControls()">
+        <option value="red">Red</option><option value="orange">Orange</option>
+        <option value="yellow">Yellow</option><option value="green">Green</option>
+        <option value="aqua">Aqua</option><option value="blue">Blue</option>
+        <option value="purple">Purple</option><option value="magenta">Magenta</option>
+      </select>
+      <div class="control-row">
+        <label for="hslHueRange">Hue</label>
+        <input id="hslHueRange" type="range" min="-100" max="100" step="1" value="0" oninput="setHslControl('hue', this.value)">
+        <span class="control-value" id="hslHueValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="hslSaturationRange">Saturation</label>
+        <input id="hslSaturationRange" type="range" min="-100" max="100" step="1" value="0" oninput="setHslControl('saturation', this.value)">
+        <span class="control-value" id="hslSaturationValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="hslLuminanceRange">Luminance</label>
+        <input id="hslLuminanceRange" type="range" min="-100" max="100" step="1" value="0" oninput="setHslControl('luminance', this.value)">
+        <span class="control-value" id="hslLuminanceValue">0</span>
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="resetHslColor()">Reset Selected</button>
+        <button class="editor-btn" type="button" onclick="resetHslMixer()">Reset Mixer</button>
+      </div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Color Grading</div>
+      <select id="colorGradeZoneSelect" class="advanced-select" aria-label="Color grading tonal range" onchange="syncAdvancedColorControls()">
+        <option value="shadows">Shadows</option>
+        <option value="midtones">Midtones</option>
+        <option value="highlights">Highlights</option>
+      </select>
+      <div class="control-row">
+        <label for="colorGradeHueRange">Hue</label>
+        <input id="colorGradeHueRange" type="range" min="0" max="360" step="1" value="0" oninput="setColorGradeControl('hue', this.value)">
+        <span class="control-value" id="colorGradeHueValue">0°</span>
+      </div>
+      <div class="control-row">
+        <label for="colorGradeSaturationRange">Saturation</label>
+        <input id="colorGradeSaturationRange" type="range" min="0" max="100" step="1" value="0" oninput="setColorGradeControl('saturation', this.value)">
+        <span class="control-value" id="colorGradeSaturationValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="colorGradeBalanceRange">Balance</label>
+        <input id="colorGradeBalanceRange" type="range" min="-100" max="100" step="1" value="0" oninput="setColorGradeBalance(this.value)">
+        <span class="control-value" id="colorGradeBalanceValue">0</span>
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="resetColorGradeZone()">Reset Selected</button>
+        <button class="editor-btn" type="button" onclick="resetColorGrading()">Reset Grading</button>
+      </div>
+    </div>
+
+    <div class="panel-band">
       <div class="panel-title">Detail</div>
       <div class="control-row">
         <label for="sharpenRange">Sharpen</label>
@@ -913,6 +1003,10 @@ function transformCropForFlip(crop, axis) {
   }, editorState.recipe.straighten, aspects);
 }
 
+var TONE_CURVE_DEFAULTS = {black: 0, shadows: 25, midtones: 50, highlights: 75, white: 100};
+var HSL_COLORS = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'];
+var COLOR_GRADE_ZONES = ['shadows', 'midtones', 'highlights'];
+
 function adjustmentValues(recipe) {
   var adj = recipe && recipe.adjustments || {};
   var wb = adj.white_balance || {};
@@ -930,6 +1024,21 @@ function adjustmentValues(recipe) {
     sharpen: Number(adj.sharpen || 0),
     sharpen_radius: Number(adj.sharpen_radius || 1),
     noise_reduction: Number(adj.noise_reduction || 0),
+  };
+}
+
+function advancedColorValues(recipe) {
+  var adj = recipe && recipe.adjustments || {};
+  var curveIn = adj.tone_curve || {};
+  var curve = {};
+  Object.keys(TONE_CURVE_DEFAULTS).forEach(function(key) {
+    curve[key] = Object.prototype.hasOwnProperty.call(curveIn, key)
+      ? Number(curveIn[key]) : TONE_CURVE_DEFAULTS[key];
+  });
+  return {
+    tone_curve: curve,
+    hsl: cloneRecipe(adj.hsl || {}),
+    color_grading: cloneRecipe(adj.color_grading || {}),
   };
 }
 
@@ -978,6 +1087,41 @@ function recipeForSave(recipe) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) wb[key] = Number(vals[key]);
   });
   if (Object.keys(wb).length) adj.white_balance = wb;
+
+  var advanced = advancedColorValues(out);
+  var curve = {};
+  Object.keys(TONE_CURVE_DEFAULTS).forEach(function(key) {
+    var value = Number(advanced.tone_curve[key]);
+    if (Math.abs(value - TONE_CURVE_DEFAULTS[key]) > 0.000001) curve[key] = value;
+  });
+  if (Object.keys(curve).length) adj.tone_curve = curve;
+
+  var hsl = {};
+  HSL_COLORS.forEach(function(color) {
+    var source = advanced.hsl[color] || {};
+    var section = {};
+    ['hue', 'saturation', 'luminance'].forEach(function(key) {
+      var value = Number(source[key] || 0);
+      if (Math.abs(value) > 0.000001) section[key] = value;
+    });
+    if (Object.keys(section).length) hsl[color] = section;
+  });
+  if (Object.keys(hsl).length) adj.hsl = hsl;
+
+  var grading = {};
+  COLOR_GRADE_ZONES.forEach(function(zone) {
+    var source = advanced.color_grading[zone] || {};
+    var saturation = Number(source.saturation || 0);
+    if (saturation > 0.000001) {
+      var hue = ((Number(source.hue || 0) % 360) + 360) % 360;
+      grading[zone] = {hue: hue, saturation: saturation};
+    }
+  });
+  if (Object.keys(grading).length) {
+    var balance = Number(advanced.color_grading.balance || 0);
+    if (Math.abs(balance) > 0.000001) grading.balance = balance;
+    adj.color_grading = grading;
+  }
   if (Object.keys(adj).length) out.adjustments = adj;
   else delete out.adjustments;
   return out;
@@ -1008,6 +1152,9 @@ function updateRecipeSummary() {
       if (key === 'white_balance') parts.push('white balance');
       else if (key === 'sharpen_radius') return; // folded into "sharpen"
       else if (key === 'noise_reduction') parts.push('noise reduction');
+      else if (key === 'tone_curve') parts.push('tone curve');
+      else if (key === 'hsl') parts.push('color mixer');
+      else if (key === 'color_grading') parts.push('color grading');
       else parts.push(key);
     });
   }
@@ -1041,6 +1188,7 @@ function syncControls() {
   set('sharpen', vals.sharpen, false);
   set('sharpen_radius', vals.sharpen_radius, true);
   set('noise_reduction', vals.noise_reduction, false);
+  syncAdvancedColorControls();
   var straight = Number(r.straighten || 0);
   var straightInput = document.getElementById('straightenRange');
   // The recipe schema allows ±45° (pasted/API recipes), wider than the ±10°
@@ -1456,15 +1604,161 @@ function setAdjustment(key, value) {
 }
 
 function resetAdjustments() {
-  // Detail lives in its own panel band; only clear the tone/color keys.
+  // Detail, tone curve, color mixer, and color grading each live in their
+  // own panel band with a dedicated reset button; only clear the basic
+  // tone/white-balance keys owned by this panel.
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   var kept = {};
-  ['sharpen', 'sharpen_radius', 'noise_reduction'].forEach(function(key) {
+  [
+    'sharpen', 'sharpen_radius', 'noise_reduction',
+    'tone_curve', 'hsl', 'color_grading',
+  ].forEach(function(key) {
     if (adj[key]) kept[key] = adj[key];
   });
   if (Object.keys(kept).length) editorState.recipe.adjustments = kept;
   else delete editorState.recipe.adjustments;
   syncControls();
+  markChanged(true);
+}
+
+// --- Advanced colour and tone ---------------------------------------------
+
+function _setAdjustmentSection(name, value) {
+  var adj = cloneRecipe(editorState.recipe.adjustments || {});
+  if (value && Object.keys(value).length) adj[name] = value;
+  else delete adj[name];
+  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
+  else delete editorState.recipe.adjustments;
+}
+
+function syncAdvancedColorControls() {
+  var values = advancedColorValues(editorState.recipe);
+  Object.keys(TONE_CURVE_DEFAULTS).forEach(function(key) {
+    var input = document.getElementById('curve_' + key + 'Range');
+    var label = document.getElementById('curve_' + key + 'Value');
+    if (input) input.value = String(values.tone_curve[key]);
+    if (label) label.textContent = String(Math.round(values.tone_curve[key]));
+  });
+
+  var hslSelect = document.getElementById('hslColorSelect');
+  var color = hslSelect ? hslSelect.value : 'red';
+  var hsl = values.hsl[color] || {};
+  [['Hue', 'hue'], ['Saturation', 'saturation'], ['Luminance', 'luminance']].forEach(function(pair) {
+    var value = Number(hsl[pair[1]] || 0);
+    var input = document.getElementById('hsl' + pair[0] + 'Range');
+    var label = document.getElementById('hsl' + pair[0] + 'Value');
+    if (input) input.value = String(value);
+    if (label) label.textContent = String(Math.round(value));
+  });
+
+  var zoneSelect = document.getElementById('colorGradeZoneSelect');
+  var zone = zoneSelect ? zoneSelect.value : 'shadows';
+  var grade = values.color_grading[zone] || {};
+  var hue = Number(grade.hue || 0);
+  var saturation = Number(grade.saturation || 0);
+  var balance = Number(values.color_grading.balance || 0);
+  var hueInput = document.getElementById('colorGradeHueRange');
+  var satInput = document.getElementById('colorGradeSaturationRange');
+  var balanceInput = document.getElementById('colorGradeBalanceRange');
+  if (hueInput) hueInput.value = String(hue);
+  if (satInput) satInput.value = String(saturation);
+  if (balanceInput) balanceInput.value = String(balance);
+  var hueLabel = document.getElementById('colorGradeHueValue');
+  var satLabel = document.getElementById('colorGradeSaturationValue');
+  var balanceLabel = document.getElementById('colorGradeBalanceValue');
+  if (hueLabel) hueLabel.textContent = Math.round(hue) + '°';
+  if (satLabel) satLabel.textContent = String(Math.round(saturation));
+  if (balanceLabel) balanceLabel.textContent = String(Math.round(balance));
+}
+
+function setToneCurvePoint(key, raw) {
+  var values = advancedColorValues(editorState.recipe).tone_curve;
+  values[key] = Number(raw);
+  document.getElementById('curve_' + key + 'Value').textContent = String(Math.round(values[key]));
+  var section = {};
+  Object.keys(TONE_CURVE_DEFAULTS).forEach(function(name) {
+    if (Math.abs(values[name] - TONE_CURVE_DEFAULTS[name]) > 0.000001) section[name] = values[name];
+  });
+  _setAdjustmentSection('tone_curve', section);
+  markChanged(true);
+}
+
+function resetToneCurve() {
+  _setAdjustmentSection('tone_curve', null);
+  syncAdvancedColorControls();
+  markChanged(true);
+}
+
+function setHslControl(key, raw) {
+  var select = document.getElementById('hslColorSelect');
+  var color = select ? select.value : 'red';
+  var values = advancedColorValues(editorState.recipe).hsl;
+  var section = cloneRecipe(values[color] || {});
+  var value = Number(raw) || 0;
+  if (Math.abs(value) > 0.000001) section[key] = value;
+  else delete section[key];
+  if (Object.keys(section).length) values[color] = section;
+  else delete values[color];
+  var labelName = key.charAt(0).toUpperCase() + key.slice(1);
+  document.getElementById('hsl' + labelName + 'Value').textContent = String(Math.round(value));
+  _setAdjustmentSection('hsl', values);
+  markChanged(true);
+}
+
+function resetHslColor() {
+  var select = document.getElementById('hslColorSelect');
+  var color = select ? select.value : 'red';
+  var values = advancedColorValues(editorState.recipe).hsl;
+  delete values[color];
+  _setAdjustmentSection('hsl', values);
+  syncAdvancedColorControls();
+  markChanged(true);
+}
+
+function resetHslMixer() {
+  _setAdjustmentSection('hsl', null);
+  syncAdvancedColorControls();
+  markChanged(true);
+}
+
+function setColorGradeControl(key, raw) {
+  var select = document.getElementById('colorGradeZoneSelect');
+  var zone = select ? select.value : 'shadows';
+  var values = advancedColorValues(editorState.recipe).color_grading;
+  var section = cloneRecipe(values[zone] || {});
+  section[key] = Number(raw) || 0;
+  values[zone] = section;
+  var label = document.getElementById(
+    key === 'hue' ? 'colorGradeHueValue' : 'colorGradeSaturationValue'
+  );
+  if (label) label.textContent = String(Math.round(section[key])) + (key === 'hue' ? '°' : '');
+  _setAdjustmentSection('color_grading', values);
+  markChanged(true);
+}
+
+function setColorGradeBalance(raw) {
+  var values = advancedColorValues(editorState.recipe).color_grading;
+  var value = Number(raw) || 0;
+  if (Math.abs(value) > 0.000001) values.balance = value;
+  else delete values.balance;
+  document.getElementById('colorGradeBalanceValue').textContent = String(Math.round(value));
+  _setAdjustmentSection('color_grading', values);
+  markChanged(true);
+}
+
+function resetColorGradeZone() {
+  var select = document.getElementById('colorGradeZoneSelect');
+  var zone = select ? select.value : 'shadows';
+  var values = advancedColorValues(editorState.recipe).color_grading;
+  delete values[zone];
+  _setAdjustmentSection('color_grading', values);
+  syncAdvancedColorControls();
+  markChanged(true);
+}
+
+function resetColorGrading() {
+  _setAdjustmentSection('color_grading', null);
+  syncAdvancedColorControls();
   markChanged(true);
 }
 
@@ -2072,8 +2366,11 @@ async function autoTone() {
     if (!stats) throw new Error('no canvas context');
     var auto = computeAutoTone(stats);
 
-    // Replace the tonal values; preserve any colour choices already made.
+    // Replace the basic tonal values; preserve advanced colour/curve choices
+    // already made. The curve remains a deliberate post-Auto-Tone creative
+    // adjustment rather than being silently discarded.
     var vals = adjustmentValues(editorState.recipe);
+    var existingAdj = cloneRecipe(editorState.recipe.adjustments || {});
     var adj = {};
     ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast'].forEach(function(k) {
       if (Math.abs(auto[k]) > 0.000001) adj[k] = auto[k];
@@ -2088,6 +2385,9 @@ async function autoTone() {
     if (Math.abs(vals.temperature) > 0.000001) wb.temperature = vals.temperature;
     if (Math.abs(vals.tint) > 0.000001) wb.tint = vals.tint;
     if (Object.keys(wb).length) adj.white_balance = wb;
+    ['tone_curve', 'hsl', 'color_grading'].forEach(function(key) {
+      if (existingAdj[key]) adj[key] = cloneRecipe(existingAdj[key]);
+    });
     if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
     else delete editorState.recipe.adjustments;
 

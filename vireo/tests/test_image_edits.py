@@ -114,6 +114,75 @@ def test_normalize_recipe_accepts_expanded_adjustments():
     }
 
 
+def test_normalize_recipe_accepts_advanced_color_adjustments():
+    assert normalize_recipe(
+        {
+            "adjustments": {
+                "tone_curve": {"black": 4, "shadows": 25, "white": 96},
+                "hsl": {
+                    "orange": {"hue": -12, "saturation": 18, "luminance": 0},
+                    "blue": {"luminance": -25},
+                },
+                "color_grading": {
+                    "shadows": {"hue": 220, "saturation": 14},
+                    "midtones": {"hue": 40, "saturation": 0},
+                    "highlights": {"hue": 48, "saturation": 9},
+                    "balance": 12,
+                },
+            }
+        }
+    ) == {
+        "version": 1,
+        "adjustments": {
+            "tone_curve": {"black": 4.0, "white": 96.0},
+            "hsl": {
+                "orange": {"hue": -12.0, "saturation": 18.0},
+                "blue": {"luminance": -25.0},
+            },
+            "color_grading": {
+                "shadows": {"hue": 220.0, "saturation": 14.0},
+                "highlights": {"hue": 48.0, "saturation": 9.0},
+                "balance": 12.0,
+            },
+        },
+    }
+
+
+def test_normalize_recipe_drops_neutral_advanced_color_adjustments():
+    assert normalize_recipe(
+        {
+            "adjustments": {
+                "tone_curve": {
+                    "black": 0, "shadows": 25, "midtones": 50,
+                    "highlights": 75, "white": 100,
+                },
+                "hsl": {"red": {"hue": 0, "saturation": 0, "luminance": 0}},
+                "color_grading": {
+                    "shadows": {"hue": 240, "saturation": 0},
+                    "balance": 30,
+                },
+            }
+        }
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("adjustments", "message"),
+    [
+        ({"tone_curve": {"black": -1}}, "tone_curve.black"),
+        ({"tone_curve": {"toe": 10}}, "unsupported tone_curve"),
+        ({"hsl": {"orange": {"saturation": 101}}}, "hsl.orange.saturation"),
+        ({"hsl": {"infrared": {"hue": 1}}}, "unsupported hsl color"),
+        ({"color_grading": {"shadows": {"hue": 361, "saturation": 10}}},
+         "color_grading.shadows.hue"),
+        ({"color_grading": {"balance": "warm"}}, "color_grading.balance"),
+    ],
+)
+def test_normalize_recipe_rejects_invalid_advanced_color(adjustments, message):
+    with pytest.raises(RecipeError, match=message):
+        normalize_recipe({"adjustments": adjustments})
+
+
 def test_normalize_recipe_accepts_detail_adjustments():
     assert normalize_recipe(
         {
@@ -244,6 +313,28 @@ def test_apply_recipe_adjusts_expanded_tone_controls():
     assert sum(dark) > 35 * 3
     assert sum(bright) < 230 * 3
     assert max(mid) - min(mid) > 128 - 96
+
+
+def test_apply_recipe_adjusts_advanced_color_controls():
+    img = Image.fromarray(
+        np.array([[[40, 40, 40], [190, 105, 45], [45, 90, 190], [225, 225, 225]]], dtype=np.uint8),
+        "RGB",
+    )
+    edited = apply_recipe(
+        img,
+        {
+            "adjustments": {
+                "tone_curve": {"shadows": 35, "highlights": 68},
+                "hsl": {"orange": {"saturation": 45}, "blue": {"luminance": -30}},
+                "color_grading": {
+                    "shadows": {"hue": 220, "saturation": 25},
+                    "highlights": {"hue": 45, "saturation": 20},
+                },
+            }
+        },
+    )
+    assert edited.tobytes() != img.tobytes()
+    assert sum(edited.getpixel((2, 0))) < sum(img.getpixel((2, 0)))
 
 
 @pytest.mark.parametrize("mode", ["RGB", "RGBA"])

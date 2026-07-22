@@ -76,9 +76,134 @@ _WHITE_BALANCE_RANGES = {
     "tint": (-100.0, 100.0),
 }
 
+# Advanced global colour controls. Tone-curve values are output levels at
+# fixed input positions (0, 25, 50, 75, 100 percent), which makes the neutral
+# curve explicit and lets the renderer use a deterministic five-point curve.
+TONE_CURVE_DEFAULTS = {
+    "black": 0.0,
+    "shadows": 25.0,
+    "midtones": 50.0,
+    "highlights": 75.0,
+    "white": 100.0,
+}
+HSL_COLOR_NAMES = (
+    "red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta",
+)
+_HSL_KEYS = ("hue", "saturation", "luminance")
+COLOR_GRADING_ZONES = ("shadows", "midtones", "highlights")
+
 
 class RecipeError(ValueError):
     """Raised when an edit recipe is malformed or unsupported."""
+
+
+def _number(value, path, lo, hi):
+    """Validate a finite numeric recipe leaf and return a rounded float."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise RecipeError(f"{path} must be numeric")
+    value = float(value)
+    if not math.isfinite(value) or value < lo or value > hi:
+        raise RecipeError(f"{path} must be between {lo:g} and {hi:g}")
+    return round(value, 6)
+
+
+def _normalize_tone_curve(value):
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict):
+        raise RecipeError("tone_curve adjustment must be an object")
+    unknown = set(value) - set(TONE_CURVE_DEFAULTS)
+    if unknown:
+        raise RecipeError(f"unsupported tone_curve point '{sorted(unknown)[0]}'")
+    out = {}
+    for name, default in TONE_CURVE_DEFAULTS.items():
+        if name not in value or value[name] in (None, ""):
+            continue
+        point = _number(value[name], f"tone_curve.{name}", 0.0, 100.0)
+        if abs(point - default) > 1e-9:
+            out[name] = point
+    return out or None
+
+
+def _normalize_hsl(value):
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict):
+        raise RecipeError("hsl adjustment must be an object")
+    unknown = set(value) - set(HSL_COLOR_NAMES)
+    if unknown:
+        raise RecipeError(f"unsupported hsl color '{sorted(unknown)[0]}'")
+    out = {}
+    for color in HSL_COLOR_NAMES:
+        section = value.get(color)
+        if section in (None, "", {}):
+            continue
+        if not isinstance(section, dict):
+            raise RecipeError(f"hsl.{color} must be an object")
+        unknown_keys = set(section) - set(_HSL_KEYS)
+        if unknown_keys:
+            raise RecipeError(
+                f"unsupported hsl.{color} control '{sorted(unknown_keys)[0]}'"
+            )
+        normalized = {}
+        for name in _HSL_KEYS:
+            if name not in section or section[name] in (None, ""):
+                continue
+            amount = _number(section[name], f"hsl.{color}.{name}", -100.0, 100.0)
+            if abs(amount) > 1e-9:
+                normalized[name] = amount
+        if normalized:
+            out[color] = normalized
+    return out or None
+
+
+def _normalize_color_grading(value):
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict):
+        raise RecipeError("color_grading adjustment must be an object")
+    supported = set(COLOR_GRADING_ZONES) | {"balance"}
+    unknown = set(value) - supported
+    if unknown:
+        raise RecipeError(f"unsupported color_grading control '{sorted(unknown)[0]}'")
+    raw_balance = value.get("balance", 0.0)
+    balance = _number(
+        0.0 if raw_balance in (None, "") else raw_balance,
+        "color_grading.balance", -100.0, 100.0,
+    )
+    out = {}
+    for zone in COLOR_GRADING_ZONES:
+        section = value.get(zone)
+        if section in (None, "", {}):
+            continue
+        if not isinstance(section, dict):
+            raise RecipeError(f"color_grading.{zone} must be an object")
+        unknown_keys = set(section) - {"hue", "saturation"}
+        if unknown_keys:
+            raise RecipeError(
+                f"unsupported color_grading.{zone} control "
+                f"'{sorted(unknown_keys)[0]}'"
+            )
+        raw_hue = section.get("hue", 0.0)
+        raw_saturation = section.get("saturation", 0.0)
+        hue = _number(
+            0.0 if raw_hue in (None, "") else raw_hue,
+            f"color_grading.{zone}.hue", 0.0, 360.0,
+        )
+        saturation = _number(
+            0.0 if raw_saturation in (None, "") else raw_saturation,
+            f"color_grading.{zone}.saturation", 0.0, 100.0,
+        )
+        # Hue has no visible meaning without saturation. Dropping the whole
+        # zone keeps neutral recipes canonical and prevents needless renders.
+        if saturation > 1e-9:
+            out[zone] = {
+                "hue": 0.0 if abs(hue - 360.0) < 1e-9 else hue,
+                "saturation": saturation,
+            }
+    if out and abs(balance) > 1e-9:
+        out["balance"] = balance
+    return out or None
 
 
 def normalize_recipe(recipe):
@@ -243,6 +368,16 @@ def normalize_recipe(recipe):
     if normalized_wb:
         normalized_adjustments["white_balance"] = normalized_wb
 
+    tone_curve = _normalize_tone_curve(adjustments.get("tone_curve"))
+    if tone_curve:
+        normalized_adjustments["tone_curve"] = tone_curve
+    hsl = _normalize_hsl(adjustments.get("hsl"))
+    if hsl:
+        normalized_adjustments["hsl"] = hsl
+    color_grading = _normalize_color_grading(adjustments.get("color_grading"))
+    if color_grading:
+        normalized_adjustments["color_grading"] = color_grading
+
     if normalized_adjustments:
         out["adjustments"] = normalized_adjustments
 
@@ -373,6 +508,7 @@ def recipe_to_json(recipe):
 # Row-tile budget for the tone pass, in pixels. Bounds peak memory on
 # full-resolution originals/exports; overridable in tests to force many tiles.
 _ADJUST_TILE_PIXELS = 4_000_000
+_ADVANCED_COLOR_TILE_PIXELS = 1_000_000
 
 
 def _apply_adjustments(
@@ -412,6 +548,9 @@ def _apply_adjustments(
     contrast = adjustments.get("contrast", 0.0)
     vibrance = adjustments.get("vibrance", 0.0)
     saturation = adjustments.get("saturation", 0.0)
+    tone_curve = adjustments.get("tone_curve")
+    hsl = adjustments.get("hsl")
+    color_grading = adjustments.get("color_grading")
 
     src = np.asarray(img)  # uint8, view onto the PIL buffer (no copy)
     height, width = src.shape[:2]
@@ -422,7 +561,13 @@ def _apply_adjustments(
     # originals/exports (45MP+). The tone pass is strictly per-pixel, so tiling
     # is numerically identical to a single whole-frame pass. ~4M pixels per tile
     # keeps the transient float arrays to a few hundred MB.
-    rows_per_tile = max(1, _ADJUST_TILE_PIXELS // max(1, width))
+    tile_budget = _ADJUST_TILE_PIXELS
+    if tone_curve or hsl or color_grading:
+        # HSL conversion and curve indexing keep several additional float
+        # planes alive. Smaller tiles bound peak memory on 45MP+ exports while
+        # preserving byte-identical output because every operation is per-pixel.
+        tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
+    rows_per_tile = max(1, tile_budget // max(1, width))
     for top in range(0, height, rows_per_tile):
         bottom = min(top + rows_per_tile, height)
         tile = src[top:bottom].astype(np.float32) / 255.0
@@ -437,6 +582,9 @@ def _apply_adjustments(
             contrast=contrast,
             vibrance=vibrance,
             saturation=saturation,
+            tone_curve=tone_curve,
+            hsl=hsl,
+            color_grading=color_grading,
             local_weight=(
                 local_weight[top:bottom] if local_weight is not None else None
             ),
