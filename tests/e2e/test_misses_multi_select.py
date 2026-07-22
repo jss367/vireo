@@ -166,6 +166,59 @@ def test_unresolved_scope_freezes_preview_controls(live_server, page):
         expect(page.locator(f"#{control_id}")).to_be_enabled()
 
 
+def test_scope_recovery_stays_frozen_until_replacement_load(live_server, page):
+    """A late config response must not re-enable tuning while the request
+    that replaces an unresolved deep-link scope is still in flight."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.add_init_script("""(() => {
+      const realFetch = window.fetch.bind(window);
+      window.previewCalls = 0;
+      window.recomputeCalls = 0;
+      window.fetch = (url, options) => {
+        const value = String(url);
+        if (value === '/api/misses/config') {
+          return realFetch(url, options).then(response => new Promise(resolve => {
+            window.releaseHeldConfig = () => resolve(response);
+          }));
+        }
+        if (value === '/api/misses') {
+          return realFetch(url, options).then(response => new Promise(resolve => {
+            window.releaseHeldMisses = () => resolve(response);
+          }));
+        }
+        if (value.includes('/api/misses/preview')) window.previewCalls++;
+        if (value.includes('/api/misses/recompute')) window.recomputeCalls++;
+        return realFetch(url, options);
+      };
+    })()""")
+
+    page.goto(f"{url}/misses?collection_id=999999")
+    expect(page.locator("#scopeBanner")).to_be_visible()
+    page.wait_for_function("window.releaseHeldConfig != null")
+
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+    page.wait_for_function("window.releaseHeldMisses != null")
+    page.evaluate("window.releaseHeldConfig()")
+    page.wait_for_function("window.missConfigLoaded === true")
+
+    # Config is ready, but the replacement filters are not yet applied.
+    expect(page.locator("#missRecomputeBtn")).to_be_disabled()
+    expect(page.locator("#missCfgNoSubject")).to_be_disabled()
+    page.evaluate("previewMisses(); recomputeMisses()")
+    page.wait_for_timeout(100)
+    assert page.evaluate("window.previewCalls") == 0
+    assert page.evaluate("window.recomputeCalls") == 0
+
+    page.evaluate("window.releaseHeldMisses()")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    expect(page.locator("#missRecomputeBtn")).to_be_enabled()
+    expect(page.locator("#missCfgNoSubject")).to_be_enabled()
+
+
 def test_collections_fetch_failure_fails_closed(live_server, page):
     """If /api/collections itself errors, the deep-link resolver must fail
     closed rather than treating the empty list as "no collection matches"

@@ -899,7 +899,9 @@ async function loadMissConfig() {
     // Keep the tuning group frozen when a fail-closed scope is in effect;
     // loadMisses() will re-enable it once a user-supplied replacement
     // filter loads successfully.
-    if (!legacyScopeError) setMissTuningDisabled(false);
+    if (!legacyScopeError && !legacyScopeRecoveryPending) {
+      setMissTuningDisabled(false);
+    }
     setMissTuningStatus('Preview uses current sliders');
   } catch (e) {
     setMissTuningStatus('Thresholds unavailable');
@@ -908,7 +910,7 @@ async function loadMissConfig() {
 
 function scheduleMissPreview() {
   if (!missConfigLoaded) return;
-  if (legacyScopeError) return;
+  if (legacyScopeError || legacyScopeRecoveryPending) return;
   if (previewTimer) clearTimeout(previewTimer);
   previewTimer = setTimeout(previewMisses, 250);
 }
@@ -919,7 +921,7 @@ async function previewMisses() {
   // unresolved, but any caller that reaches here anyway must not POST the
   // empty rule payload to /api/misses/preview and repopulate the grid with
   // photos outside the user's scope.
-  if (legacyScopeError) return;
+  if (legacyScopeError || legacyScopeRecoveryPending) return;
   if (previewTimer) {
     clearTimeout(previewTimer);
     previewTimer = null;
@@ -954,7 +956,7 @@ async function previewMisses() {
 
 async function recomputeMisses() {
   if (!missConfigLoaded) return;
-  if (legacyScopeError) return;
+  if (legacyScopeError || legacyScopeRecoveryPending) return;
   invalidateMissPreview();
   var requestId = ++missLoadRequestId;
   var btn = document.getElementById('missRecomputeBtn');
@@ -1010,13 +1012,15 @@ async function recomputeMisses() {
     setMissTuningStatus('Recompute failed');
     if (typeof showToast === 'function') showToast('Recompute failed', 'error');
   } finally {
-    if (btn && missConfigLoaded) btn.disabled = false;
+    if (btn && missConfigLoaded && !legacyScopeError && !legacyScopeRecoveryPending) {
+      btn.disabled = false;
+    }
   }
 }
 
 function resetMissThresholds() {
   if (!missConfigLoaded || !originalMissConfig) return;
-  if (legacyScopeError) return;
+  if (legacyScopeError || legacyScopeRecoveryPending) return;
   invalidateMissPreview();
   setMissSliders(originalMissConfig);
   previewActive = false;
