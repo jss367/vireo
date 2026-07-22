@@ -83,10 +83,23 @@ body { padding-bottom: 36px; }
 .sidebar-card {
   display: flex;
   gap: 8px;
+  box-sizing: border-box;
+  height: 69px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border, #1a4a5a);
   cursor: pointer;
   transition: background 0.15s;
+}
+
+.sidebar-virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.sidebar-virtual-spacer .sidebar-card {
+  position: absolute;
+  left: 0;
+  right: 0;
 }
 
 .sidebar-card:hover {
@@ -419,6 +432,17 @@ function formatDate(ts) {
 /* ── State for bi-directional sync ── */
 var photoMarkers = {};  /* photo id -> marker */
 var activePhotoId = null;
+/* Keep both kinds of map work bounded. Leaflet clustering is efficient once
+ * markers exist, but creating thousands of markers in one JavaScript turn
+ * still blocks navigation and animation. Likewise, a sidebar DOM node (and
+ * thumbnail) for every result can exhaust the webview on large libraries. */
+var MAP_RENDER_BATCH_SIZE = 100;
+var SIDEBAR_CARD_HEIGHT = 69;
+var SIDEBAR_OVERSCAN = 8;
+var sidebarPhotos = [];
+var sidebarPhotoIndexes = {};
+var sidebarSpacer = null;
+var sidebarRenderFrame = null;
 var requestedPhotoId = (function() {
   var raw = new URLSearchParams(window.location.search).get('photo_id');
   if (!raw) return null;
@@ -434,9 +458,17 @@ function setActiveCard(photoId) {
   activePhotoId = photoId;
   if (photoId !== null) {
     var card = document.querySelector('.sidebar-card[data-id="' + photoId + '"]');
+    if (!card && Object.prototype.hasOwnProperty.call(sidebarPhotoIndexes, photoId)) {
+      var list = document.getElementById('sidebarList');
+      list.scrollTop = Math.max(0,
+        sidebarPhotoIndexes[photoId] * SIDEBAR_CARD_HEIGHT
+          - Math.floor(list.clientHeight / 2));
+      renderSidebarWindow();
+      card = document.querySelector('.sidebar-card[data-id="' + photoId + '"]');
+    }
     if (card) {
       card.classList.add('active');
-      card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      card.scrollIntoView({ block: 'nearest' });
     }
   }
 }
@@ -459,16 +491,13 @@ function photoThumbnailUrl(p) {
     : '/thumbnails/' + p.id + '.jpg';
 }
 
-/* ── Sidebar rendering ── */
-function renderSidebar(photos) {
-  var list = document.getElementById('sidebarList');
-  list.innerHTML = '';
-  document.getElementById('sidebarHeader').textContent = photos.length + ' photo' + (photos.length !== 1 ? 's' : '');
-
-  photos.forEach(function(p) {
+/* ── Virtualized sidebar rendering ── */
+function makeSidebarCard(p, index) {
     var card = document.createElement('div');
     card.className = 'sidebar-card';
+    if (p.id === activePhotoId) card.classList.add('active');
     card.setAttribute('data-id', p.id);
+    card.style.top = (index * SIDEBAR_CARD_HEIGHT) + 'px';
 
     var thumbSrc = photoThumbnailUrl(p);
     var color = getSpeciesColor(p.species);
@@ -478,7 +507,7 @@ function renderSidebar(photos) {
       : '';
 
     card.innerHTML =
-      (thumbSrc ? '<img src="' + escapeAttr(thumbSrc) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<div style="width:56px;height:56px;background:var(--bg-tertiary,#14374E);border-radius:4px;flex-shrink:0"></div>')
+      (thumbSrc ? '<img src="' + escapeAttr(thumbSrc) + '" alt="" loading="lazy" decoding="async" onerror="this.style.visibility=\'hidden\'">' : '<div style="width:56px;height:56px;background:var(--bg-tertiary,#14374E);border-radius:4px;flex-shrink:0"></div>')
       + '<div class="card-info">'
       + '<div class="card-filename">' + escapeHtml(p.filename) + '</div>'
       + speciesHtml
@@ -489,9 +518,53 @@ function renderSidebar(photos) {
       openPhotoMarker(p.id);
     });
 
-    list.appendChild(card);
-  });
+    return card;
 }
+
+function renderSidebarWindow() {
+  if (!sidebarSpacer) return;
+  var list = document.getElementById('sidebarList');
+  var visibleCount = Math.max(1, Math.ceil(list.clientHeight / SIDEBAR_CARD_HEIGHT));
+  var start = Math.max(0,
+    Math.floor(list.scrollTop / SIDEBAR_CARD_HEIGHT) - SIDEBAR_OVERSCAN);
+  var end = Math.min(sidebarPhotos.length,
+    start + visibleCount + SIDEBAR_OVERSCAN * 2);
+  var fragment = document.createDocumentFragment();
+
+  for (var i = start; i < end; i++) {
+    fragment.appendChild(makeSidebarCard(sidebarPhotos[i], i));
+  }
+  sidebarSpacer.replaceChildren(fragment);
+}
+
+function renderSidebar(photos) {
+  var list = document.getElementById('sidebarList');
+  list.innerHTML = '';
+  list.scrollTop = 0;
+  sidebarPhotos = photos;
+  sidebarPhotoIndexes = {};
+  photos.forEach(function(p, index) { sidebarPhotoIndexes[p.id] = index; });
+  document.getElementById('sidebarHeader').textContent = photos.length + ' photo' + (photos.length !== 1 ? 's' : '');
+
+  if (photos.length === 0) {
+    sidebarSpacer = null;
+    return;
+  }
+
+  sidebarSpacer = document.createElement('div');
+  sidebarSpacer.className = 'sidebar-virtual-spacer';
+  sidebarSpacer.style.height = (photos.length * SIDEBAR_CARD_HEIGHT) + 'px';
+  list.appendChild(sidebarSpacer);
+  renderSidebarWindow();
+}
+
+document.getElementById('sidebarList').addEventListener('scroll', function() {
+  if (sidebarRenderFrame !== null) return;
+  sidebarRenderFrame = requestAnimationFrame(function() {
+    sidebarRenderFrame = null;
+    renderSidebarWindow();
+  });
+});
 
 /* ── Cluster preview ── */
 var clusterPreviewEl = document.getElementById('clusterPreview');
@@ -541,6 +614,74 @@ markers.on('clusterclick', hideClusterPreview);
  * current rules. */
 var _loadPhotosEpoch = 0;
 
+function nextMapRenderFrame() {
+  return new Promise(function(resolve) { requestAnimationFrame(resolve); });
+}
+
+function makePhotoMarker(p) {
+  var thumbSrc = photoThumbnailUrl(p);
+  var imgTag = thumbSrc
+    ? '<img src="' + escapeAttr(thumbSrc) + '" alt="" loading="lazy" decoding="async" onerror="this.style.display=\'none\'">'
+    : '';
+  var speciesLine = p.species
+    ? '<div class="popup-species">' + escapeHtml(p.species) + '</div>'
+    : '';
+
+  var provenanceLine = '';
+  if (p.coord_source === 'keyword' && p.keyword_location_name) {
+    provenanceLine = '<div class="popup-provenance">\u{1F4CD} from assigned location: '
+      + escapeHtml(p.keyword_location_name) + '</div>';
+  } else if (p.coord_source === 'exif') {
+    provenanceLine = '<div class="popup-provenance">\u{1F4CD} from EXIF GPS</div>';
+  }
+
+  var popup = '<div class="photo-popup">'
+    + imgTag
+    + '<div class="popup-title">' + escapeHtml(p.filename) + '</div>'
+    + '<div class="popup-meta">' + escapeHtml(formatDate(p.timestamp)) + ' ' + buildStars(p.rating) + '</div>'
+    + speciesLine
+    + '<a class="popup-link" href="/browse?photo_id=' + p.id + '">View in Browse &rarr;</a>'
+    + provenanceLine
+    + '</div>';
+
+  var marker = L.marker([p.latitude, p.longitude], {
+    icon: makeCircleIcon(getSpeciesColor(p.species)),
+  });
+  marker.bindPopup(popup);
+  marker._photoData = p;
+  marker.on('click', function() { setActiveCard(p.id); });
+  return marker;
+}
+
+async function renderPhotoMarkers(photos, epoch) {
+  for (var offset = 0; offset < photos.length; offset += MAP_RENDER_BATCH_SIZE) {
+    if (epoch !== _loadPhotosEpoch) return false;
+    var end = Math.min(offset + MAP_RENDER_BATCH_SIZE, photos.length);
+    var markerBatch = [];
+
+    for (var i = offset; i < end; i++) {
+      var p = photos[i];
+      var marker = makePhotoMarker(p);
+      photoMarkers[p.id] = marker;
+      markerBatch.push(marker);
+    }
+
+    /* addLayers() lets MarkerCluster process a bounded batch together. The
+     * old one-at-a-time addLayer() loop caused its clustering/layout work to
+     * monopolize the UI thread for large libraries. */
+    if (markers.addLayers) {
+      markers.addLayers(markerBatch);
+    } else {
+      markerBatch.forEach(function(marker) { markers.addLayer(marker); });
+    }
+
+    document.getElementById('mapStatus').textContent =
+      'Plotting ' + end + ' of ' + photos.length + ' photos\u2026';
+    if (end < photos.length) await nextMapRenderFrame();
+  }
+  return epoch === _loadPhotosEpoch;
+}
+
 /* ── Load photos ── */
 async function loadPhotos() {
   var myEpoch = ++_loadPhotosEpoch;
@@ -560,6 +701,7 @@ async function loadPhotos() {
     var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
     if (visual) params.set('visual', JSON.stringify(visual));
   }
+  if (focusPhotoId !== null) params.set('photo_id', focusPhotoId);
 
   var qs = params.toString();
   var url = '/api/photos/geo' + (qs ? '?' + qs : '');
@@ -600,48 +742,9 @@ async function loadPhotos() {
 
     assignSpeciesColors(data.photos);
     legendControl.update(speciesColorMap);
-
-    data.photos.forEach(function(p) {
-      var thumbSrc = photoThumbnailUrl(p);
-      var imgTag = thumbSrc
-        ? '<img src="' + escapeAttr(thumbSrc) + '" alt="" onerror="this.style.display=\'none\'">'
-        : '';
-      var speciesLine = p.species
-        ? '<div class="popup-species">' + escapeHtml(p.species) + '</div>'
-        : '';
-
-      var provenanceLine = '';
-      if (p.coord_source === 'keyword' && p.keyword_location_name) {
-        provenanceLine = '<div class="popup-provenance">\u{1F4CD} from assigned location: '
-          + escapeHtml(p.keyword_location_name) + '</div>';
-      } else if (p.coord_source === 'exif') {
-        provenanceLine = '<div class="popup-provenance">\u{1F4CD} from EXIF GPS</div>';
-      }
-
-      var popup = '<div class="photo-popup">'
-        + imgTag
-        + '<div class="popup-title">' + escapeHtml(p.filename) + '</div>'
-        + '<div class="popup-meta">' + escapeHtml(formatDate(p.timestamp)) + ' ' + buildStars(p.rating) + '</div>'
-        + speciesLine
-        + '<a class="popup-link" href="/browse?photo_id=' + p.id + '">View in Browse &rarr;</a>'
-        + provenanceLine
-        + '</div>';
-
-      var color = getSpeciesColor(p.species);
-      var marker = L.marker([p.latitude, p.longitude], { icon: makeCircleIcon(color) });
-      marker.bindPopup(popup);
-      marker._photoData = p;
-
-      marker.on('click', function() {
-        setActiveCard(p.id);
-      });
-
-      photoMarkers[p.id] = marker;
-      markers.addLayer(marker);
-    });
-
-    map.fitBounds(markers.getBounds(), { padding: [30, 30] });
     renderSidebar(data.photos);
+    if (!await renderPhotoMarkers(data.photos, myEpoch)) return;
+    map.fitBounds(markers.getBounds(), { padding: [30, 30] });
     if (focusPhotoId !== null) {
       if (!openPhotoMarker(focusPhotoId)) {
         document.getElementById('mapStatus').textContent =
@@ -657,7 +760,15 @@ async function loadPhotos() {
     var pct = totalPhotos > 0 ? Math.round((totalGeolocated / totalPhotos) * 100) : 0;
 
     var statusEl = document.getElementById('mapStatus');
-    var parts = ['Showing ' + totalFiltered + ' of ' + totalGeolocated + ' geolocated photos'];
+    var parts;
+    if (data.truncated) {
+      parts = [
+        'Showing ' + data.photos.length + ' of ' + totalFiltered + ' matching photos',
+        'Map display is limited to ' + data.render_limit + ' photos; refine the filters to see omitted results',
+      ];
+    } else {
+      parts = ['Showing ' + totalFiltered + ' of ' + totalGeolocated + ' geolocated photos'];
+    }
     parts.push(pct + '% map coverage');
     if (missingCoordinates > 0) {
       parts.push('<a href="/browse?location_status=none">' + missingCoordinates + ' without coordinates</a>');

@@ -26,9 +26,24 @@ window.L = {
   },
   markerClusterGroup: function() {
     var layers = [];
+    window.__mapMarkerBatchSizes = [];
     return {
-      addLayer: function(marker) { layers.push(marker); return this; },
-      clearLayers: function() { layers = []; return this; },
+      addLayer: function(marker) {
+        layers.push(marker);
+        window.__mapMarkerCount = layers.length;
+        return this;
+      },
+      addLayers: function(markers) {
+        window.__mapMarkerBatchSizes.push(markers.length);
+        layers = layers.concat(markers);
+        window.__mapMarkerCount = layers.length;
+        return this;
+      },
+      clearLayers: function() {
+        layers = [];
+        window.__mapMarkerCount = 0;
+        return this;
+      },
       getBounds: function() { return [[0, 0], [1, 1]]; },
       zoomToShowLayer: function(marker, cb) {
         window.__zoomedToMarker = marker.getLatLng();
@@ -168,3 +183,64 @@ def test_map_photo_id_deep_link_is_one_shot_for_later_filters(live_server, page)
 
     expect(page.locator("#mapStatus")).to_contain_text("Showing 1 of 2 geolocated photos")
     expect(page.locator("#mapStatus")).not_to_contain_text("No map location found")
+
+
+def test_large_map_renders_in_bounded_batches_and_virtualizes_sidebar(
+    live_server, page
+):
+    """Large libraries must not monopolize or exhaust the browser main thread."""
+    photo_count = 2500
+    matching_count = 5000
+    photos = [
+        {
+            "id": index + 1,
+            "filename": f"photo-{index + 1}.jpg",
+            "latitude": 37.0 + (index % 100) / 1000,
+            "longitude": -122.0 - (index % 100) / 1000,
+            "timestamp": "2026-01-01T12:00:00",
+            "rating": 0,
+            "species": None,
+            "coord_source": "exif",
+            "keyword_location_name": None,
+            "folder_id": 1,
+            "edit_recipe": None,
+        }
+        for index in range(photo_count)
+    ]
+    payload = {
+        "photos": photos,
+        "total_filtered": matching_count,
+        "total_rendered": photo_count,
+        "render_limit": photo_count,
+        "truncated": True,
+        "total_photos": matching_count,
+        "total_geolocated": matching_count,
+        "total_without_coordinates": 0,
+    }
+
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.route("**/api/photos/geo**", lambda route: route.fulfill(json=payload))
+    page.goto(f"{live_server['url']}/map")
+
+    page.wait_for_function(
+        "count => window.__mapMarkerCount === count",
+        arg=photo_count,
+        timeout=15_000,
+    )
+    expect(page.locator("#mapStatus")).to_contain_text(
+        f"Showing {photo_count} of {matching_count} matching photos"
+    )
+    expect(page.locator("#mapStatus")).to_contain_text("refine the filters")
+
+    batch_sizes = page.evaluate("window.__mapMarkerBatchSizes")
+    assert len(batch_sizes) > 1
+    assert max(batch_sizes) <= 100
+
+    # The scroll area represents all results, but only the visible window and
+    # a small overscan are materialized (and allowed to request thumbnails).
+    rendered_cards = page.locator(".sidebar-card").count()
+    assert rendered_cards < 50
+    assert rendered_cards < photo_count
+
+    page.locator("#sidebarList").evaluate("el => { el.scrollTop = el.scrollHeight; }")
+    expect(page.locator(f".sidebar-card[data-id='{photo_count}']")).to_be_visible()
