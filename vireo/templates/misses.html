@@ -1975,14 +1975,15 @@ VireoFilter.init({
 }).then(loadMisses).catch(function() {
   initializingMissFilters = false;
   var current = new URL(window.location.href).searchParams;
-  if (current.has('collection_id') || current.has('folder_id')) {
+  if (current.has('collection_id') || current.has('folder_id') ||
+      current.has('filters')) {
     // If the shared registry/bootstrap fails, applyLegacyMissScopes() never
     // gets a chance to translate the legacy URL into universal rules. Keep
     // the page closed instead of loading the default empty expression, which
     // would expose every miss to bulk actions outside the requested scope.
     noteLegacyScopeError(
-      'Could not initialize filters to resolve this collection or folder ' +
-      'deep link. Showing no misses so bulk actions stay within the requested scope.'
+      'Could not initialize the requested filters. Showing no misses so ' +
+      'bulk actions stay within the requested scope.'
     );
   }
   loadMissConfig().then(loadMisses);

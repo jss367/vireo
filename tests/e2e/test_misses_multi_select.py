@@ -6,6 +6,7 @@ selection. Double-click opens the shared lightbox.
 """
 import json
 import time
+from urllib.parse import quote
 
 import pytest
 from playwright.sync_api import expect
@@ -131,11 +132,11 @@ def test_malformed_legacy_scope_id_fails_closed(live_server, page, scope_key):
     expect(page.locator("#missRecomputeBtn")).to_be_disabled()
 
 
-@pytest.mark.parametrize("scope_key", ["collection_id", "folder_id"])
-def test_filter_bootstrap_failure_keeps_legacy_scope_closed(
+@pytest.mark.parametrize("scope_key", ["collection_id", "folder_id", "filters"])
+def test_filter_bootstrap_failure_keeps_requested_scope_closed(
     live_server, page, scope_key,
 ):
-    """A filter registry failure must not bypass a legacy URL scope."""
+    """A filter registry failure must not bypass a scoped URL."""
     url = live_server["url"]
     db = live_server["db"]
     pids = live_server["data"]["photos"]
@@ -145,8 +146,16 @@ def test_filter_bootstrap_failure_keeps_legacy_scope_closed(
             "Hawk review",
             json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
         )
-    else:
+    elif scope_key == "folder_id":
         scope_id = live_server["data"]["folders"][0]
+    else:
+        scope_id = quote(json.dumps({
+            "root": {
+                "mode": "all",
+                "rules": [{"field": "rating", "op": ">=", "value": 4}],
+            },
+            "visual": None,
+        }))
 
     page.route(
         "**/api/filters/fields",
@@ -156,7 +165,7 @@ def test_filter_bootstrap_failure_keeps_legacy_scope_closed(
 
     expect(page.locator("#scopeBanner")).to_be_visible()
     expect(page.locator("#scopeBanner")).to_contain_text(
-        "Could not initialize filters"
+        "Could not initialize the requested filters"
     )
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(0)
     expect(page.locator("#missRecomputeBtn")).to_be_disabled()

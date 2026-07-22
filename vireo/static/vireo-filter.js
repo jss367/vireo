@@ -1391,8 +1391,11 @@
     return !allLeaves(state.root).some((rule) => {
       const excluded = exclusions[rule.field];
       if (!excluded) return false;
-      const values = Array.isArray(rule.value) ? rule.value : [rule.value];
-      return values.some((value) => excluded.includes(value));
+      if (rule.op === 'is') return excluded.includes(rule.value);
+      if (rule.op === 'in' && Array.isArray(rule.value)) {
+        return rule.value.every((value) => excluded.includes(value));
+      }
+      return false;
     });
   }
 

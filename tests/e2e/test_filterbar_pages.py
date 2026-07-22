@@ -6,6 +6,8 @@ Seed data (conftest): 3 hawk photos in /photos/park, 2 robins in
 photo has a pending prediction.
 """
 
+import pytest
+
 
 def _wait_bar(page):
     page.wait_for_selector("#vireoFilterBar", timeout=15000)
@@ -210,10 +212,17 @@ def test_handoff_carries_expression_to_map(live_server, page):
     assert _total(page) == 1
 
 
-def test_handoff_hides_misses_for_rejected_flag(live_server, page):
+@pytest.mark.parametrize(
+    ("op", "value"),
+    [("is", "rejected"), ("in", ["rejected"])],
+)
+def test_handoff_hides_misses_for_rejected_flag(live_server, page, op, value):
     page.goto(live_server["url"] + "/browse")
     _wait_bar(page)
-    page.evaluate("VireoFilter.addRule('flag', 'is', 'rejected')")
+    page.evaluate(
+        "([op, value]) => VireoFilter.addRule('flag', op, value)",
+        [op, value],
+    )
 
     page.click(".vf-handoff")
     page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
@@ -222,6 +231,27 @@ def test_handoff_hides_misses_for_rejected_flag(live_server, page):
     ).count() == 0
     assert page.locator(
         '.vf-handoff-menu [data-handoff-path="/map"]'
+    ).count() == 1
+
+
+@pytest.mark.parametrize(
+    ("op", "value"),
+    [("is not", "rejected"), ("in", ["rejected", "flagged"])],
+)
+def test_handoff_keeps_misses_for_compatible_rejected_rules(
+    live_server, page, op, value,
+):
+    page.goto(live_server["url"] + "/browse")
+    _wait_bar(page)
+    page.evaluate(
+        "([op, value]) => VireoFilter.addRule('flag', op, value)",
+        [op, value],
+    )
+
+    page.click(".vf-handoff")
+    page.wait_for_selector(".vf-handoff-menu button", timeout=8000)
+    assert page.locator(
+        '.vf-handoff-menu [data-handoff-path="/misses"]'
     ).count() == 1
 
 
