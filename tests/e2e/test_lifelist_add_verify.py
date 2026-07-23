@@ -180,12 +180,12 @@ def test_lightbox_panel_hides_after_current_photo_rejected(live_server, page):
     expect(panel).to_be_hidden()
 
 
-def test_sort_and_numbering_preferences_persist(live_server, page):
+def test_default_sort_and_numbering_preferences_persist(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/life-list")
     page.locator(".species-card").first.wait_for(state="visible")
 
-    page.locator("#sortSelect").select_option("alpha")
+    expect(page.locator("#sortSelect")).to_have_value("alpha")
     expect(page.locator(".species-name").first).to_have_text("American Robin")
 
     # Fixed numbering preserves the chronological lifer number even though
@@ -193,12 +193,14 @@ def test_sort_and_numbering_preferences_persist(live_server, page):
     expect(page.locator(".lifer-number").first).to_have_text("#2")
     page.locator("#renumberView").check()
     expect(page.locator(".lifer-number").first).to_have_text("#1")
+    page.locator("#sortSelect").select_option("life-order")
+    expect(page.locator(".species-name").first).to_have_text("Red-tailed Hawk")
 
     page.reload()
     page.locator(".species-card").first.wait_for(state="visible")
-    expect(page.locator("#sortSelect")).to_have_value("alpha")
+    expect(page.locator("#sortSelect")).to_have_value("life-order")
     expect(page.locator("#renumberView")).to_be_checked()
-    expect(page.locator(".species-name").first).to_have_text("American Robin")
+    expect(page.locator(".species-name").first).to_have_text("Red-tailed Hawk")
     expect(page.locator(".lifer-number").first).to_have_text("#1")
 
 

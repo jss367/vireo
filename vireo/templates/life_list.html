@@ -160,9 +160,9 @@
   <div class="control-group">
     <label for="sortSelect">Sort</label>
     <select id="sortSelect">
+      <option value="alpha">A&ndash;Z</option>
       <option value="newest">Newest lifer first</option>
       <option value="life-order">Life order (oldest first)</option>
-      <option value="alpha">A&ndash;Z</option>
       <option value="most-photos">Most photos</option>
     </select>
   </div>
@@ -315,7 +315,7 @@ var LIFE_LIST_EXPORT_COLUMNS = {
   ],
 };
 var lifeListExportColumnSelections = {species: null, photos: null};
-var LIFE_LIST_SORTS = ['newest', 'life-order', 'alpha', 'most-photos'];
+var LIFE_LIST_SORTS = ['alpha', 'newest', 'life-order', 'most-photos'];
 var LIFE_LIST_PAGE_SIZE = 100;
 var lifeListLightboxSpecies = null;
 var lifeListLoadPromises = {};
@@ -429,7 +429,7 @@ function sortedSpecies() {
     if (sort === 'alpha') return a.species.localeCompare(b.species);
     if (sort === 'most-photos') return b.photo_count - a.photo_count;
     if (sort === 'life-order') return a.number - b.number;
-    // 'newest' default — by first_seen desc, undated species last so they
+    // 'newest' — by first_seen desc, undated species last so they
     // don't masquerade as the newest lifers (server gives them the highest
     // life-list numbers for stable numbering, so reversing number is wrong).
     var af = a.first_seen, bf = b.first_seen;
