@@ -191,15 +191,16 @@ def test_default_sort_and_numbering_preferences_persist(live_server, page):
     # Fixed numbering preserves the chronological lifer number even though
     # alphabetical order puts the newer robin first.
     expect(page.locator(".lifer-number").first).to_have_text("#2")
-    page.locator("#sortSelect").select_option("newest")
     page.locator("#renumberView").check()
     expect(page.locator(".lifer-number").first).to_have_text("#1")
+    page.locator("#sortSelect").select_option("life-order")
+    expect(page.locator(".species-name").first).to_have_text("Red-tailed Hawk")
 
     page.reload()
     page.locator(".species-card").first.wait_for(state="visible")
-    expect(page.locator("#sortSelect")).to_have_value("newest")
+    expect(page.locator("#sortSelect")).to_have_value("life-order")
     expect(page.locator("#renumberView")).to_be_checked()
-    expect(page.locator(".species-name").first).to_have_text("American Robin")
+    expect(page.locator(".species-name").first).to_have_text("Red-tailed Hawk")
     expect(page.locator(".lifer-number").first).to_have_text("#1")
 
 
