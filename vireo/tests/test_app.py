@@ -13413,6 +13413,19 @@ def test_browse_filter_by_collection_guards_degraded_rows():
     )
 
 
+def test_browse_undo_confirmation_uses_success_toast():
+    """Successful edits must not inherit showToast's red error default."""
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "browse.html"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("async function showUndoToast")
+    assert fn_start != -1, "showUndoToast function not found"
+    fn_end = text.find("\n}", fn_start)
+    assert fn_end != -1
+    body = text[fn_start:fn_end]
+    assert "showToast(data.description + ' — Ctrl+Z to undo', 'success')" in body
+
+
 def test_review_switch_collection_does_not_silently_widen_scope():
     """When /api/collections/<id>/photos fails, the review page must not fall
     back to `allPredictions.slice()` — that silently widened the scope back

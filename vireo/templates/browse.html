@@ -6297,7 +6297,7 @@ async function redoLast() {
 async function showUndoToast() {
   try {
     var data = await safeFetch('/api/undo/status', {}, { toast: false });
-    if (data.available) showToast(data.description + ' — Ctrl+Z to undo');
+    if (data.available) showToast(data.description + ' — Ctrl+Z to undo', 'success');
   } catch(e) {}
 }
 
