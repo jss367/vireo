@@ -31,6 +31,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+import card_cleanup
+import path_guard
 import places
 from db import (
     _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE,
@@ -3065,6 +3067,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = (
         os.environ.get("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "1") != "0"
     )
+    app.config["CARD_CLEANUP_DIR"] = os.path.join(
+        os.path.dirname(os.path.abspath(db_path)), "card_cleanup"
+    )
 
     # Schema creation and migrations are startup work, never request work.
     # `:memory:` is the development exception because each SQLite connection
@@ -3181,6 +3186,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     body = {}
                 else:
                     body = request.get_json(silent=True) or {}
+                    if not isinstance(body, dict):
+                        # Valid non-object JSON (5, "x", [..]) — the
+                        # .get() calls below would 500 the response of
+                        # any endpoint after it already ran.
+                        body = {}
                 if "/rating" in path:
                     detail = f" rating={body.get('rating')}"
                 elif "/flag" in path:
@@ -19035,6 +19045,221 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job_id = runner.start("verify-hashes", work, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/card-cleanup/scan", methods=["POST"])
+    def api_card_cleanup_scan():
+        """Scan a removable-media source and write a manifest of files
+        that are safely deletable (verified elsewhere in the archive).
+
+        Background job: the manifest is written to disk by
+        card_cleanup.scan_card and read back by the manifest/delete
+        endpoints below, keyed by this job's id.
+        """
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            # get_json happily returns 5 or "x" for valid non-object
+            # JSON; body.get would then 500.
+            return json_error("request body must be a JSON object")
+        source = body.get("source")
+        recursive = body.get("recursive", True)
+        if not isinstance(recursive, bool):
+            # bool("false") is True — a stringly-typed client would get
+            # the opposite of what it asked for. JSON booleans only.
+            return json_error("recursive must be a boolean")
+        if not source or not isinstance(source, str):
+            return json_error("source required")
+        if not os.path.isabs(source):
+            return json_error("source must be an absolute path")
+        if not os.path.isdir(source):
+            return json_error("source is not an accessible directory")
+        db = _get_db()
+        # Overlap fail-fast, across all workspaces (folders is global):
+        # this tool is for removable media, not the archive. The per-file
+        # guard in card_cleanup.qualify_rows is the real invariant; this
+        # is the clear early error.
+        #
+        # Cost: O(folders) realpath calls at request time, plus (on Linux,
+        # where contains_resolved probes case sensitivity) a listdir of
+        # each root. Acceptable at the thousands-of-rows scale of a local
+        # folders table with local paths. Revisit — cache the resolved
+        # roots, or narrow the candidate set by prefix first — if folder
+        # counts grow much larger or roots live on network mounts where
+        # each realpath/listdir is a round trip.
+        source_real = os.path.realpath(source)
+        for row in db.conn.execute("SELECT path FROM folders").fetchall():
+            froot = row["path"]
+            if not froot:
+                continue
+            froot_real = os.path.realpath(froot)
+            if (path_guard.contains_resolved(source_real, froot_real)
+                    or path_guard.contains_resolved(froot_real, source_real)):
+                return json_error(
+                    "the selected source overlaps the cataloged archive "
+                    f"folder {froot!r}; this tool is for removable media "
+                    "like memory cards, not archive folders")
+        card_cleanup_dir = app.config["CARD_CLEANUP_DIR"]
+        card_cleanup.prune_manifests(card_cleanup_dir)
+
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+
+        def work(job):
+            thread_db = Database(db_path)
+            try:
+                if active_ws is not None:
+                    thread_db.set_active_workspace(active_ws)
+
+                def progress_cb(current, total, filename):
+                    # Throttle SSE events; hashing is per-file fast on
+                    # small files and the stream doesn't need every one.
+                    if current % 10 != 0 and current not in (1, total):
+                        return
+                    runner.push_event(job["id"], "progress", {
+                        "current": current, "total": total,
+                        "current_file": filename,
+                        "phase": "Verifying card files against the archive",
+                    })
+
+                manifest = card_cleanup.scan_card(
+                    thread_db, source, recursive, card_cleanup_dir,
+                    job["id"],
+                    progress_cb=progress_cb,
+                    should_cancel=lambda: runner.is_cancelled(job["id"]),
+                )
+                if manifest.get("cancelled"):
+                    return {"cancelled": True}
+                # Trimmed on purpose: entries can be a multi-MB blob (one
+                # per card file) and nothing consumes the job result for
+                # them — the UI fetches the manifest endpoint instead.
+                # json-dumping the full manifest into job_history.result,
+                # the SSE complete event, and every /api/jobs/<id> poll
+                # would ship that blob for no reader.
+                return {
+                    "cancelled": False,
+                    "totals": manifest["totals"],
+                    "source_root": manifest["source_root"],
+                    "manifest_path": card_cleanup.manifest_path(
+                        card_cleanup_dir, job["id"]),
+                    "walk_errors": len(manifest["walk_errors"]),
+                }
+            finally:
+                thread_db.close()
+
+        job_id = runner.start(
+            "card-cleanup-scan", work,
+            config={"source": source, "recursive": recursive},
+            workspace_id=active_ws)
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/card-cleanup/<scan_job_id>/manifest")
+    def api_card_cleanup_manifest(scan_job_id):
+        """Read back the manifest a completed scan job wrote, so the UI
+        can preview what a delete would remove."""
+        card_cleanup_dir = app.config["CARD_CLEANUP_DIR"]
+        try:
+            manifest = card_cleanup.load_manifest(
+                card_cleanup_dir, scan_job_id)
+        except card_cleanup.ManifestError as e:
+            return json_error(str(e), status=e.http_status)
+        return jsonify(manifest)
+
+    @app.route("/api/card-cleanup/delete", methods=["POST"])
+    def api_card_cleanup_delete():
+        """Delete the deletable bucket of a scan's manifest.
+
+        Background job: re-verifies every file against the card and the
+        archive immediately before each unlink (see card_cleanup.delete_
+        verified). Validates the referencing scan job via the live runner
+        first, falling back to job_history so a delete can still be
+        requested for a scan whose job fell out of the runner's in-memory
+        table (e.g. after a process restart) as long as its manifest is
+        still on disk.
+        """
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        scan_job_id = body.get("scan_job_id")
+        if not scan_job_id or not isinstance(scan_job_id, str):
+            return json_error("scan_job_id required")
+        db = _get_db()
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+
+        scan_job = runner.get(scan_job_id)
+        if scan_job is None:
+            row = db.conn.execute(
+                "SELECT type, status FROM job_history WHERE id = ?",
+                (scan_job_id,)).fetchone()
+            scan_job = dict(row) if row is not None else None
+        if scan_job is None or scan_job.get("type") != "card-cleanup-scan":
+            return json_error("unknown scan job", status=404)
+        if scan_job.get("status") in ("queued", "running"):
+            # Mid-flight, not a dead end: telling the user to re-scan here
+            # would throw away a scan that is about to succeed.
+            return json_error("scan still running — wait for it to finish")
+        if scan_job.get("status") != "completed":
+            return json_error("scan did not complete — re-scan the card")
+        # One delete AT A TIME per manifest — this guards concurrency,
+        # not repetition: after a delete finishes, the manifest still
+        # loads and a second delete may start (its per-file gates skip
+        # everything already gone). (A TOCTOU race between two
+        # simultaneous POSTs is likewise acceptable: the gates make a
+        # double-delete skip, not double-fire.)
+        for j in runner.list_jobs():
+            if (j.get("type") == "card-cleanup-delete"
+                    and j.get("status") in ("queued", "running")
+                    and (j.get("config") or {}).get("scan_job_id")
+                    == scan_job_id):
+                return json_error(
+                    "a delete for this scan is already running", status=409)
+        card_cleanup_dir = app.config["CARD_CLEANUP_DIR"]
+        try:
+            manifest = card_cleanup.load_manifest(
+                card_cleanup_dir, scan_job_id)
+        except card_cleanup.ManifestError as e:
+            return json_error(str(e), status=e.http_status)
+        if not any(e.get("bucket") == "deletable"
+                   for e in manifest["entries"]):
+            return json_error("nothing to delete — no verified files")
+
+        def work(job):
+            thread_db = Database(db_path)
+            try:
+                if active_ws is not None:
+                    thread_db.set_active_workspace(active_ws)
+
+                def progress_cb(current, total, filename):
+                    # Not throttled — deletions are the events the user
+                    # watches, unlike the scan's per-file hashing.
+                    runner.push_event(job["id"], "progress", {
+                        "current": current, "total": total,
+                        "current_file": filename,
+                        "phase": "Deleting verified files from the card",
+                    })
+
+                summary = card_cleanup.delete_verified(
+                    thread_db, manifest,
+                    progress_cb=progress_cb,
+                    should_cancel=lambda: runner.is_cancelled(job["id"]),
+                )
+                # Bound the persisted result: skipped/failed can run to
+                # thousands of per-file entries on a wholesale-drifted
+                # card, and this dict lands in job_history.result and
+                # every /api/jobs/<id> poll. Totals stay exact; the
+                # lists carry a generous sample and the UI says when it
+                # is showing a sample.
+                for key in ("skipped", "failed"):
+                    summary[f"{key}_total"] = len(summary[key])
+                    summary[key] = summary[key][:500]
+                return summary
+            finally:
+                thread_db.close()
+
+        job_id = runner.start(
+            "card-cleanup-delete", work,
+            config={"scan_job_id": scan_job_id},
+            workspace_id=active_ws)
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/audit/resolve", methods=["POST"])
     def api_audit_resolve():
         db = _get_db()
@@ -25644,78 +25869,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # format once ``copied + skipped_duplicate == discovered``; if the
         # destination lives inside the card, formatting the card also erases
         # the supposed archive copy, so allowing this is a data-loss trap.
-        #
-        # macOS's default APFS/HFS+ volumes and Windows NTFS are
-        # case-INSENSITIVE, so ``/Volumes/Card`` and ``/volumes/card`` are
-        # the same directory but ``realpath`` doesn't case-normalize on
-        # POSIX (macOS reports as POSIX). On Linux, a platform-wide
-        # case-sensitivity assumption misses FAT/exFAT/NTFS-mounted
-        # removable media (typical SD-card setup) that sit under a
-        # case-sensitive ext4 parent — the user's real card mount point
-        # can be case-insensitive even when the root filesystem isn't.
-        # Compare case-folded on darwin/win32 unconditionally, and on
-        # Linux probe each source's actual filesystem: if the resolved
-        # path with an alpha character case-swapped still stat's to the
-        # same inode, the mount is case-insensitive and both sides of
-        # the containment comparison need case-folding for that source.
-        _case_insensitive_platform = sys.platform in ("darwin", "win32")
-
-        def _casenorm(p):
-            return p.casefold() if _case_insensitive_platform else p
-
-        def _fs_is_case_insensitive(path):
-            """Probe whether the filesystem at ``path`` treats case as insensitive.
-
-            List an entry inside ``path`` and check whether accessing it
-            under a case-swapped name resolves to the same inode. Probing
-            *inside* the directory (rather than swapping characters in
-            ``path`` itself) is essential when a case-insensitive mount
-            sits under a case-sensitive parent — a FAT/exFAT SD card
-            mounted at ``/mnt/Card`` on Linux under an ext4 root: the
-            ext4 ``/mnt`` cannot resolve ``/Mnt`` or a differently-cased
-            ``Card`` entry (mount-point dentries are stored in the
-            parent FS), so swapping characters in the ``path`` string
-            always reports case-sensitive regardless of the card's own
-            semantics.
-
-            Any inconclusive result (unlistable, empty, no
-            alpha-containing entry, or a stat error while comparing)
-            returns True so the containment check falls back to
-            case-fold — the stricter direction of this safety guard.
-            A false positive on a case-sensitive filesystem can only
-            reject a legitimate destination (recoverable UX error the
-            user immediately sees and fixes by picking a different
-            path), whereas a false negative on a case-insensitive
-            filesystem accepts a case-collision destination inside the
-            card and lets ``safe_to_format`` later green-light
-            formatting while the archive lives on it. The reviewer's
-            example: an SD card whose root contains only numeric
-            top-level directories (Nikon-style ``100``/``101``/``102``)
-            has no alpha-containing entry to probe with. See PR #1107
-            review.
-            """
-            try:
-                entries = os.listdir(path)
-            except OSError:
-                return True
-            for name in entries:
-                for i, c in enumerate(name):
-                    if c.isalpha():
-                        swapped = name[:i] + c.swapcase() + name[i + 1:]
-                        if swapped == name:
-                            continue
-                        original_full = os.path.join(path, name)
-                        probe_full = os.path.join(path, swapped)
-                        if not os.path.exists(probe_full):
-                            # Definitive: case-swap resolves to nothing,
-                            # so the filesystem distinguishes case.
-                            return False
-                        try:
-                            return os.path.samefile(original_full, probe_full)
-                        except OSError:
-                            return True
-            return True
-
+        # Case-fold handling (darwin/win32 unconditional, Linux per-mount
+        # probe) lives in path_guard — see its module docstring and the
+        # fs_is_case_insensitive() docstring for the full rationale
+        # (PR #1107 review).
         try:
             dest_real = os.path.realpath(destination)
         except OSError as e:
@@ -25727,21 +25884,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Source unresolvable — the os.path.isdir check above
                 # already handled non-existent sources; nothing more to say.
                 continue
-            # Per-source case-fold decision: platform is enough on
-            # darwin/win32; on Linux, probe the actual source mount.
-            per_source_ci = _case_insensitive_platform or (
-                not _case_insensitive_platform
-                and _fs_is_case_insensitive(source_real)
-            )
-            if per_source_ci:
-                source_cmp = source_real.casefold().rstrip(os.sep)
-                dest_cmp = dest_real.casefold()
-            else:
-                source_cmp = source_real.rstrip(os.sep)
-                dest_cmp = dest_real
-            if dest_cmp == source_cmp or dest_cmp.startswith(
-                source_cmp + os.sep
-            ):
+            if path_guard.contains_resolved(source_real, dest_real):
                 return json_error(
                     f"destination cannot be inside a source directory "
                     f"(destination={destination!r}, source={s!r}); "

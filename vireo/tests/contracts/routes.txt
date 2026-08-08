@@ -27,6 +27,7 @@ GET          /api/audit/untracked
 GET          /api/browse
 GET          /api/browse/init
 GET          /api/browse/summary
+GET          /api/card-cleanup/<scan_job_id>/manifest
 GET          /api/classify/config
 GET          /api/classify/readiness
 GET          /api/collections
@@ -221,6 +222,8 @@ POST         /api/batch/rating
 POST         /api/browse/mkdir
 POST         /api/browse/photo-counts
 POST         /api/capture-time/preview
+POST         /api/card-cleanup/delete
+POST         /api/card-cleanup/scan
 POST         /api/collections
 POST         /api/collections/<int:collection_id>/add-photos
 POST         /api/collections/<int:collection_id>/duplicate
