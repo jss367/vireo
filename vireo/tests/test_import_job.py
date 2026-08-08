@@ -9561,8 +9561,14 @@ _BEHAVIOR_PARITY_SCENARIOS = [
     ("collision_different_bytes", [_TWIN],
      _seed_prior_import([("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0),
                           "blue")]), {}),
-    # adoption_uncataloged_dest_twin DIVERGES (adopted row hash_status:
-    # local 'ok', remote NULL) — characterized per-path below, not deleted.
+    # Crash-recovery adoption: identical bytes already AT the template
+    # path but NOT cataloged (plain file drop, no prior import). Diverged
+    # on the adopted row's hash_status until PR 5a folded remote
+    # adoptions into ``landed`` (spec divergence 10); the positive
+    # control lives in
+    # test_local_adoption_uncataloged_dest_twin_current_behavior.
+    ("adoption_uncataloged_dest_twin", [_TWIN], _seed_file_drop([_TWIN]),
+     {}),
     # Mixed batch: one fresh copy + one duplicate of a cataloged twin.
     ("mixed_fresh_and_duplicate",
      [_TWIN, ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green")],
@@ -9577,16 +9583,8 @@ _BEHAVIOR_PARITY_SCENARIOS = [
     ("renamed_twin_skip", _RT_CARD, _seed_prior_import([_RT_TWIN]), {}),
 ]
 
-# Crash-recovery adoption: identical bytes already AT the template path but
-# NOT cataloged (plain file drop, no prior import). Kept out of the parity
-# list because the paths genuinely diverge on the adopted row's
-# ``hash_status``; see the per-path characterization pair below.
-_ADOPTION_SCENARIO = (
-    "adoption_uncataloged_dest_twin", [_TWIN], _seed_file_drop([_TWIN]), {})
-
-
 def test_behavior_parity_scenarios_are_distinct():
-    scenarios = _BEHAVIOR_PARITY_SCENARIOS + [_ADOPTION_SCENARIO]
+    scenarios = _BEHAVIOR_PARITY_SCENARIOS
     names = [n for n, _s, _seed, _p in scenarios]
     assert len(names) == len(set(names))
     # seed_specs joins the key because two scenarios legitimately share
@@ -9650,20 +9648,20 @@ def test_behavior_parity_scenarios_exercise_their_branches(
 
 def test_local_adoption_uncataloged_dest_twin_current_behavior(
         tmp_path, monkeypatch):
-    """CHARACTERIZATION: local crash-recovery adoption folds the adopted
-    file into ``landed`` with its verified hash, so the verify_by_hash
-    catalog stamp marks the adopted row ``hash_status='ok'``.
+    """Positive control for the adoption parity scenario: local
+    crash-recovery adoption folds the adopted file into ``landed`` with
+    its verified hash, so the verify_by_hash catalog stamp marks the
+    adopted row ``hash_status='ok'``.
 
-    DIVERGES from the remote path, which keeps adoptions in the separate
-    ``adopted_paths`` dict whose validation cross-checks bytes but never
-    stamps ``hash_status`` (row stays NULL). Re-unified on the local model
-    by the spec's transport-seam decisions — "Adoptions fold into
-    ``landed`` with ``origin='skipped_duplicate'``" and catalog stamping
-    on ``_LandedFile.verified_hash`` (PR 5):
-    docs/superpowers/specs/2026-08-06-import-path-unification-design.md.
-    """
+    Since PR 5a folded remote adoptions into ``landed`` too (spec
+    divergence 10), both paths share this shape; cross-path equality is
+    the parity suite's job, and this test pins the absolute values the
+    parity comparison alone could not (two identically-wrong paths
+    still agree)."""
     from import_dedup import compute_file_hash
-    _name, specs, seed, pkw = _ADOPTION_SCENARIO
+    _name, specs, seed, pkw = next(
+        s for s in _BEHAVIOR_PARITY_SCENARIOS
+        if s[0] == "adoption_uncataloged_dest_twin")
     lroot = tmp_path / "l"
     lroot.mkdir()
     rroot = tmp_path / "r"
@@ -9672,15 +9670,9 @@ def test_local_adoption_uncataloged_dest_twin_current_behavior(
         lroot, monkeypatch, specs, seed=seed, params_kwargs=pkw)
     remote = _run_remote_behavior_case(
         rroot, monkeypatch, specs, seed=seed, params_kwargs=pkw)
-    # Everything BUT db_photos stays in the parity net: summary, unsafe
-    # ordering, verified, copy_totals etc. must still agree, while the
-    # db_photos divergence is pinned per path (here and in the remote twin
-    # test) until PR 5 re-unifies it.
-    local_rest = dict(obs)
-    local_rest.pop("db_photos")
-    remote_rest = dict(remote)
-    remote_rest.pop("db_photos")
-    assert local_rest == remote_rest
+    # Full-dict equality (db_photos included, since PR 5a's fold) — a
+    # belt over the parity suite's own comparison of this scenario.
+    assert obs == remote
     assert obs["skipped_duplicate"] == 1
     assert obs["copied"] == 0
     assert obs["safe_to_format"] is True
@@ -9694,31 +9686,81 @@ def test_local_adoption_uncataloged_dest_twin_current_behavior(
     assert obs["db_linked_folders"] == {"2026/2026-07-03"}
 
 
-def test_remote_adoption_uncataloged_dest_twin_current_behavior(
+def test_remote_adoption_gets_card_side_wc_override(tmp_path, monkeypatch):
+    """Flip 2 of the PR 5a fold: adopted mount files now carry a
+    card-side working-copy source override, exactly like local
+    adoptions always did (they live in ``landed``, whose entries feed
+    ``wc_source_paths``). Pre-fold, remote adoptions lived outside
+    ``landed`` and WC extraction read the mount copy instead."""
+    import scanner as _scanner
+
+    captured = {}
+
+    def spy_extract(*args, **kwargs):
+        captured["source_paths"] = dict(kwargs.get("source_paths") or {})
+        return None
+
+    monkeypatch.setattr(_scanner, "_extract_working_copies", spy_extract)
+
+    _name, specs, seed, pkw = next(
+        s for s in _BEHAVIOR_PARITY_SCENARIOS
+        if s[0] == "adoption_uncataloged_dest_twin")
+    obs = _run_remote_behavior_case(
+        tmp_path, monkeypatch, specs, seed=seed,
+        params_kwargs={**pkw, "vireo_dir": str(tmp_path / "vdir")})
+
+    assert obs["skipped_duplicate"] == 1, obs
+    assert captured, "working-copy extraction never ran"
+    adopted_dest = str(
+        tmp_path / "mount" / "2026" / "2026-07-03" / "DSC_0001.jpg")
+    card_src = str(tmp_path / "card" / "DSC_0001.jpg")
+    assert adopted_dest in captured["source_paths"], captured["source_paths"]
+    src_path, src_size, src_mtime_ns = captured["source_paths"][adopted_dest]
+    assert src_path == card_src
+    st = os.stat(card_src)
+    assert (src_size, src_mtime_ns) == (st.st_size, st.st_mtime_ns)
+
+
+def test_remote_adopted_file_scan_mismatch_fails_with_mount_subject(
         tmp_path, monkeypatch):
-    """CHARACTERIZATION: remote adoption agrees with local on every
-    observable EXCEPT the adopted row's ``hash_status``, which stays NULL
-    — the ``'ok'`` stamp only runs for freshly-transferred ``landed``
-    entries, and remote adoptions live in ``adopted_paths`` instead.
-    The agreement half is ASSERTED in the local twin test above (both
-    paths run there, compared minus db_photos); it also cites the spec
-    decision that re-unifies the two (adoptions fold into ``landed``,
-    PR 5)."""
-    from import_dedup import compute_file_hash
-    _name, specs, seed, pkw = _ADOPTION_SCENARIO
+    """Flip 3 of the PR 5a fold: an adopted file whose mount bytes no
+    longer match at catalog-scan time is failed with the MOUNT dest
+    path as the ``unsafe_files`` subject and the landed stamping loop's
+    wording — pre-fold, the separate ``adopted_paths`` validation pass
+    reported the CARD source path with adoption-specific wording."""
+    import scanner as _scanner
+
+    real_scan = _scanner.scan
+    mutated = {}
+
+    def mutating_scan(*args, **kwargs):
+        # The mount file is swapped between adoption's hash check and
+        # the catalog scan (stale/misbehaving share).
+        adopted = (tmp_path / "mount" / "2026" / "2026-07-03"
+                   / "DSC_0001.jpg")
+        if not mutated and adopted.exists():
+            Image.new("RGB", (16, 16), "blue").save(str(adopted))
+            mutated["done"] = True
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(_scanner, "scan", mutating_scan)
+
+    _name, specs, seed, pkw = next(
+        s for s in _BEHAVIOR_PARITY_SCENARIOS
+        if s[0] == "adoption_uncataloged_dest_twin")
     obs = _run_remote_behavior_case(
         tmp_path, monkeypatch, specs, seed=seed, params_kwargs=pkw)
-    assert obs["skipped_duplicate"] == 1
-    assert obs["copied"] == 0
-    assert obs["safe_to_format"] is True
-    # Photo row exists (adoption cataloged it) — scan() populates
-    # file_hash — but carries no integrity verdict (hash_status stays
-    # NULL), unlike the local path's 'ok'.
-    adopted = tmp_path / "mount" / "2026" / "2026-07-03" / "DSC_0001.jpg"
-    expected_hash = compute_file_hash(str(adopted))
-    assert obs["db_photos"] == {
-        ("2026/2026-07-03", "DSC_0001.jpg", expected_hash, None)}
-    assert obs["db_linked_folders"] == {"2026/2026-07-03"}
+
+    assert mutated, "the scan wrapper never saw the adopted file"
+    # Rolled back exactly once (0, never -1) and reported as failed.
+    assert obs["skipped_duplicate"] == 0, obs
+    assert obs["failed"] == 1, obs
+    assert obs["safe_to_format"] is False, obs
+    adopted_dest = str(
+        tmp_path / "mount" / "2026" / "2026-07-03" / "DSC_0001.jpg")
+    reasons = {p: r for p, r in obs["unsafe"]}
+    assert adopted_dest in reasons, obs["unsafe"]
+    assert "scanned mount row hash does not match" in reasons[adopted_dest]
 
 
 def test_local_renamed_twin_of_accepted_duplicate_current_behavior(
@@ -10907,7 +10949,7 @@ def test_remote_import_invalidates_duplicate_skips_when_mount_detaches(
     """The remote path needs the local path's duplicate-skip rollback.
 
     A twin-verified skip increments ``skipped_duplicate``, never enters
-    ``landed`` or ``adopted_paths``, and can be satisfied by a shadow file
+    ``landed``, and can be satisfied by a shadow file
     left on the persistent mount stub by an earlier failed import — so
     rsync is skipped entirely and ``copied + skipped_duplicate ==
     discovered`` holds against bytes that are not on the NAS. With
@@ -11003,7 +11045,7 @@ def test_remote_import_mount_loss_is_sticky_across_batches(
     """Mount loss must be sticky for the rest of the run.
 
     A batch's mount-detach rollback undoes ``dup_skips`` / ``to_transfer``
-    / ``adopted_paths`` but not the identities the same batch already
+    / the ``landed`` ledger (fresh and adopted entries) but not the identities the same batch already
     installed in the job-wide checker (and in ``run_dest_folders`` /
     ``run_verified_hashes``) via ``_record_checker`` — and
     ``DuplicateChecker`` exposes no removal API, so those entries cannot
@@ -11112,6 +11154,171 @@ def test_remote_import_mount_loss_is_sticky_across_batches(
     # No rsync happened either — both batches short-circuited before the
     # transfer step.
     assert calls["rsync"] == [], calls["rsync"]
+
+
+def test_remote_import_mount_detach_after_adoption_rolls_back_once(
+        tmp_path, monkeypatch):
+    """An adoption's mount-detach rollback must decrement exactly once.
+
+    Pre-fold, a remote adoption was booked in ``dup_skips`` (plus the
+    since-deleted ``adopted_paths`` dict); the PR 5a fold moved it into
+    ``landed`` with origin ``"skipped_duplicate"`` and added a
+    mount-lost ``landed`` rollback. Had the fold kept the adoption
+    branch's ``dup_skips.append``, the same file would be rolled back
+    by BOTH blocks and ``skipped_duplicate`` would read -1 on a detach
+    after an adoption. This test pinned the single decrement across
+    that refactor: exactly 0, never negative.
+
+    Geometry: one 2-file batch (same capture date). File A has a
+    byte-identical, uncataloged twin pre-seeded at its mount destination
+    (crash-recovery shape -> the collision walk adopts it); file B is
+    fresh and gets queued for rsync. The probe spy stays healthy through
+    the batch-boundary probe and both per-file probes, then reports a
+    detach from the POST-LOOP probe onward — after both files were
+    decided, before transfer/catalog.
+    """
+    import shutil
+
+    import pipeline_job as _pj
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+    mount_base = ra["mount_base"]
+
+    card = _make_card(tmp_path, [
+        ("DSC_0100.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0101.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+
+    # Byte-identical twin already at file A's mount destination,
+    # uncataloged (no DB rows) — the duplicate gate finds nothing, the
+    # collision walk hashes the on-disk twin and adopts it.
+    day_dir = os.path.join(mount_base, "2026", "2026-07-03")
+    os.makedirs(day_dir)
+    shutil.copy2(str(card / "DSC_0100.jpg"),
+                 os.path.join(day_dir, "DSC_0100.jpg"))
+
+    probe_calls = {"count": 0}
+
+    def spy_unmounted(baseline):
+        probe_calls["count"] += 1
+        # Healthy for batch-boundary (1) and the per-file probes for A
+        # (2) and B (3); detached from the post-loop probe (4) onward.
+        if probe_calls["count"] >= 4:
+            return "/Volumes/NAS"
+        return None
+
+    monkeypatch.setattr(_pj, "_unmounted_since_baseline", spy_unmounted)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id, ImportParams(
+            sources=[str(card)], destination=mount_base,
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # The per-file loop completed (both files decided) and the detach
+    # was first seen at the post-loop probe — not earlier, not at a
+    # next-batch boundary (there is no next batch).
+    assert probe_calls["count"] == 4, (
+        f"expected 4 mount probes (batch-boundary + 2x per-file + "
+        f"post-loop) but got {probe_calls['count']}"
+    )
+    # THE pin: adopted file A's skipped_duplicate is rolled back exactly
+    # once. A double rollback (dup_skips AND landed, post-fold) yields -1.
+    assert result["skipped_duplicate"] == 0, result
+    assert result["copied"] == 0, result
+    assert result["failed"] == 2, result
+    assert result["safe_to_format"] is False, result
+    # Detach was observed before the transfer step ever ran.
+    assert calls["rsync"] == [], calls["rsync"]
+    # Reason wording proves WHICH block failed each file: the post-loop
+    # rollback blocks, not the per-file probe (whose wording is
+    # "detached while this batch was being prepared").
+    # Flip 3 (PR 5a fold): adopted A now rolls back via the mount-lost
+    # ``landed`` block — MOUNT dest path subject + the local path's
+    # "local shadow" wording (pre-fold it went through ``dup_skips``
+    # with the card path and "cannot be confirmed"). Fresh B still rolls
+    # back via ``to_transfer`` with the card path, unchanged.
+    reason_a = _unsafe_reason(
+        result, os.path.join(day_dir, "DSC_0100.jpg"))
+    assert "local shadow" in reason_a, reason_a
+    reason_b = _unsafe_reason(result, str(card / "DSC_0101.jpg"))
+    assert "detached before this file was transferred" in reason_b, reason_b
+
+
+def test_local_import_mount_detach_after_adoption_rolls_back_once(
+        tmp_path, monkeypatch):
+    """Local mirror of the remote adoption single-rollback pin.
+
+    Local adoptions are booked straight into ``landed`` with origin
+    ``"skipped_duplicate"`` (never ``dup_skips``) and rolled back on
+    mount detach via ``_reclassify_landed_failed`` — the exact shape the
+    PR 5a fold gives the remote path. Pinning the local counter at
+    exactly 0 keeps the two paths' single-decrement behavior verifiably
+    identical while the remote bookkeeping moves.
+
+    Geometry mirrors the remote test: one 2-file batch, file A's
+    byte-identical uncataloged twin pre-seeded at the archive
+    destination (adopted), file B fresh (copied), detach first visible
+    at the post-loop probe.
+    """
+    import shutil
+
+    import pipeline_job as _pj
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0100.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0101.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+    archive = tmp_path / "archive"
+    day_dir = archive / "2026" / "2026-07-03"
+    day_dir.mkdir(parents=True)
+    shutil.copy2(str(card / "DSC_0100.jpg"), str(day_dir / "DSC_0100.jpg"))
+
+    probe_calls = {"count": 0}
+
+    def spy_unmounted(baseline):
+        probe_calls["count"] += 1
+        # Healthy for batch-boundary (1) and the per-file probes for A
+        # (2) and B (3); detached from the post-loop probe (4) onward.
+        if probe_calls["count"] >= 4:
+            return "/Volumes/NAS"
+        return None
+
+    monkeypatch.setattr(_pj, "_unmounted_since_baseline", spy_unmounted)
+
+    db, ws_id, result = _run_import(
+        tmp_path,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+
+    # Loop completed; detach first seen at the post-loop probe (single
+    # batch — a next-batch boundary probe does not exist here).
+    assert probe_calls["count"] == 4, (
+        f"expected 4 mount probes (batch-boundary + 2x per-file + "
+        f"post-loop) but got {probe_calls['count']}"
+    )
+    # THE pin: adoption rolled back exactly once (0, never -1).
+    assert result["skipped_duplicate"] == 0, result
+    assert result["copied"] == 0, result
+    assert result["failed"] == 2, result
+    assert result["safe_to_format"] is False, result
+    # Both files were rolled back by the ``landed`` block (dest-side
+    # paths + "local shadow" wording), proving the detach was handled at
+    # the post-loop probe, not by the per-file probe (card-side paths,
+    # "detached while this batch was copying" wording).
+    assert _unsafe_paths(result) == {
+        str(day_dir / "DSC_0100.jpg"), str(day_dir / "DSC_0101.jpg"),
+    }, result["unsafe_files"]
+    for u in result["unsafe_files"]:
+        assert "local shadow" in u["reason"], u
 
 
 # --------------------------------------------------------------------------
@@ -11961,7 +12168,7 @@ def test_remote_import_hash_watchdog_does_not_block_on_pause(
 class CancelOnFileImportingRunner(FakeRunner):
     """Flips to cancelled the moment the "importing" progress emit lands
     for a specific card filename — so an earlier file in the same batch can
-    complete normally (populating ``landed``/``adopted_paths``) before Stop
+    complete normally (populating ``landed``) before Stop
     trips on the target file's destination-side hash."""
 
     def __init__(self, filename):
@@ -12085,11 +12292,12 @@ def test_local_import_dest_read_cancel_skips_catalog_scan(
 def test_remote_import_dest_read_cancel_skips_catalog_scan(
         tmp_path, monkeypatch):
     """Remote path mirror. An earlier file in the batch is adopted from
-    an already-on-disk (crash-recovery) mount copy, populating
-    ``adopted_paths``. The next file's cataloged twin is a FIFO — twin-
-    hash blocks, cancel fires, ``DestReadCancelled`` trips
-    ``dest_read_cancelled``. The post-loop
-    ``if landed or adopted_paths:`` catalog block MUST be skipped."""
+    an already-on-disk (crash-recovery) mount copy, entering ``landed``
+    with origin ``skipped_duplicate`` (since the PR 5a fold). The next
+    file's cataloged twin is a FIFO — twin-hash blocks, cancel fires,
+    ``DestReadCancelled`` trips ``dest_read_cancelled``. The post-loop
+    ``if landed and not dest_read_cancelled:`` catalog block MUST be
+    skipped."""
     import threading
     from datetime import datetime
 
@@ -12121,7 +12329,8 @@ def test_remote_import_dest_read_cancel_skips_catalog_scan(
     dest_dir.mkdir(parents=True)
     # A is already on the mount as byte-identical (crash-recovery shape):
     # the collision loop hashes it, matches, and adopts it into
-    # ``adopted_paths`` without going through rsync.
+    # ``landed`` (origin ``skipped_duplicate``) without going through
+    # rsync.
     (dest_dir / "A.jpg").write_bytes(a_file.read_bytes())
 
     # B has a cataloged twin (different folder from ``dest_dir``) whose
@@ -12180,8 +12389,8 @@ def test_remote_import_dest_read_cancel_skips_catalog_scan(
     result = result_box["result"]
     assert result["cancelled"] is True
     assert result["failed"] == 0, result
-    # A was adopted from the mount before B's cancel, so
-    # ``adopted_paths`` is non-empty. The unfixed code would call
+    # A was adopted from the mount before B's cancel, so ``landed``
+    # holds its adoption entry. The unfixed code would call
     # ``scan()`` here — hitting the wedged mount and hanging. The gate on
     # ``dest_read_cancelled`` must suppress every catalog-block scan.
     assert scan_calls == [], (
@@ -12200,15 +12409,14 @@ def test_remote_import_dest_read_cancel_skips_catalog_scan(
 def test_local_import_dest_read_cancel_skips_catalog_scan_adoption_path(
         tmp_path, monkeypatch):
     """Local path, ADOPTION geometry — mirror of
-    ``test_remote_import_dest_read_cancel_skips_catalog_scan`` (which
-    gates the remote guard's ``adopted_paths`` term). An earlier file in
-    the batch (A) finds a byte-identical, uncataloged copy already at
-    its template destination path and is ADOPTED via the collision loop.
-    On the local path adoption appends straight into ``landed`` (with
-    outcome ``"skipped_duplicate"``) — there is no separate
-    ``adopted_paths`` term in the local guard ``if landed and not
-    dest_read_cancelled:`` — so this geometry gates the ``landed`` term
-    through its adoption feeder. The next file's (B) cataloged twin is a
+    ``test_remote_import_dest_read_cancel_skips_catalog_scan``. An
+    earlier file in the batch (A) finds a byte-identical, uncataloged
+    copy already at its template destination path and is ADOPTED via
+    the collision loop. Adoption appends straight into ``landed`` (with
+    origin ``"skipped_duplicate"``) — since the PR 5a fold this shape
+    is identical on both paths, and both guards read ``if landed and
+    not dest_read_cancelled:`` — so this geometry gates the ``landed``
+    term through its adoption feeder. The next file's (B) cataloged twin is a
     FIFO: twin-hash blocks, cancel fires, ``DestReadCancelled`` trips
     ``dest_read_cancelled``, and the catalog block MUST be skipped.
 
@@ -12347,13 +12555,13 @@ def test_remote_import_dest_read_cancel_skips_catalog_scan_fresh_transfer(
     flushed after the per-file loop, behind ``if to_transfer and not
     cancelled:``, and every ``dest_read_cancelled = True`` site also
     sets ``cancelled = True`` and breaks. So here A is queued but never
-    rsync'd (it stays on the card for the next run), and BOTH ``landed``
-    and ``adopted_paths`` stay empty.
+    rsync'd (it stays on the card for the next run), and ``landed``
+    stays empty.
 
     IMPORTANT: this test does NOT independently exercise the
-    ``not dest_read_cancelled`` term of the guard ``if (landed or
-    adopted_paths) and not dest_read_cancelled:``. Because the guard's
-    subject ``(landed or adopted_paths)`` is structurally empty in this
+    ``not dest_read_cancelled`` term of the guard ``if landed and not
+    dest_read_cancelled:``. Because the guard's
+    subject ``landed`` is structurally empty in this
     geometry, ``scan()`` is doubly protected — removing the
     ``dest_read_cancelled`` gate would still leave the empty subject
     suppressing ``scan()``. The three sibling tests in the matrix
@@ -12440,10 +12648,10 @@ def test_remote_import_dest_read_cancel_skips_catalog_scan_fresh_transfer(
     assert result["failed"] == 0, result
     # Pin the doubled-protection observables FIRST — this is what makes
     # this matrix corner asymmetric: on remote+fresh geometry the cancel
-    # reaches the transfer gate before flush, so both ``landed`` and
-    # ``adopted_paths`` are structurally empty at the catalog block.
-    # Nothing rsync'd (proxy for ``landed == []``); nothing adopted
-    # (no pre-written mount copy → ``adopted_paths == []``).
+    # reaches the transfer gate before flush, so ``landed`` is
+    # structurally empty at the catalog block. Nothing rsync'd (proxy
+    # for no fresh entries); nothing adopted (no pre-written mount
+    # copy).
     assert calls["rsync"] == [], calls["rsync"]
     assert result["copied"] == 0, result
     # ``scan_calls == []`` here is doubly protected — by the empty guard
@@ -12451,7 +12659,7 @@ def test_remote_import_dest_read_cancel_skips_catalog_scan_fresh_transfer(
     # discriminate the ``not dest_read_cancelled`` term on its own; that
     # term is exercised by the three sibling tests in the 2x2 matrix
     # (local fresh, local adoption, remote adoption), each of which has
-    # a nonempty ``landed``/``adopted_paths`` at the cancel point. The
+    # a nonempty ``landed`` at the cancel point. The
     # role of this test in the matrix is to pin the fourth (asymmetric)
     # corner: scan is skipped on remote+fresh cancellation because
     # nothing ever reached the guard's subject to begin with.

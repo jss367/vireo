@@ -288,6 +288,16 @@ and goes through the normal PR-agent review cycle.
    dest_twin_current_behavior` pair must flip in this PR; a "no change"
    verdict there is a regression that silently omitted the fix. All other
    parity scenarios and result-dict fields stay byte-identical.
+   *Split 2026-08-08: 5a = `_LandedFile` + fold remote adoptions into
+   `landed` + origin-switching rollback (ships three behavior flips
+   aligning remote to local — divergence 10's hash_status stamp,
+   card-side WC overrides for remote adoptions, local failure
+   wording/subjects for adopted-file validation failures); 5b =
+   `_record_checker` hoist + `_ImportRunState` (mechanical rename diff,
+   kept separate so the flips stay reviewable). Rationale: the fold trio
+   is semantically inseparable — the fold requires the `origin` field
+   and origin-switching rollback or counters go negative on
+   adopted-entry failures.*
 6. **PR 6 — extract shared phases (no behavior change).** The
    identical/cosmetic phases (setup, normalization, mount baseline, guards,
    discovery, selection, preflight, batching, batch guards, twin linking, WC
