@@ -76,6 +76,13 @@ body { display: flex; flex-direction: column; height: 100vh; }
 }
 .preview-selection-row input { accent-color: var(--accent); }
 .preview-filter { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
+.import-day-summary { margin-top: 12px; overflow-x: auto; }
+.import-day-summary input { accent-color: var(--accent); }
+.import-day-toggle { border: 0; background: none; color: var(--text-primary); font: inherit; cursor: pointer; padding: 4px 0; white-space: nowrap; }
+.import-day-toggle:hover { text-decoration: underline; }
+.import-preview-day { display: flex; flex-direction: column; gap: 10px; }
+.import-preview-day[hidden] { display: none; }
+.import-preview-day-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .import-preview-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; max-height: 520px; overflow-y: auto; }
 .import-preview-collapsed {
   padding: 9px 11px; border-radius: 6px; color: var(--text-secondary);
@@ -427,6 +434,13 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <input type="checkbox" id="chkHideDuplicates" onchange="onHideDuplicatesToggle()">
         <span id="hideDuplicatesLabel">Hide duplicates</span>
       </label>
+      <div id="importDaySummary" class="import-day-summary" style="display:none;">
+        <div class="hint">Uncheck a capture date to skip its photos for this import. Click a date to show or hide its photos.</div>
+        <table class="structure-table">
+          <thead><tr><th scope="col">Import</th><th scope="col">Capture date</th><th scope="col" class="num">Files</th><th scope="col" class="num">Duplicates</th><th scope="col" class="num">Selected to import</th></tr></thead>
+          <tbody id="importDayRows"></tbody>
+        </table>
+      </div>
       <div id="importPreviewGrid" class="import-preview-grid" style="display:none;"></div>
     </div>
 
@@ -510,6 +524,8 @@ let importTags = [];
 let importDeselected = new Set();
 let importPreviewedPaths = [];
 let importSelectionAnchor = null;
+let importDayGroups = new Map();
+let importCollapsedDays = new Set();
 let newImagesSnapshotId = null;
 // Preview lifecycle, read only by updateStartGate(). The four states below
 // must stay distinguishable — collapsing "no preview run" with "in flight"
@@ -876,41 +892,7 @@ function wireImportSelectAll() {
   const master = document.getElementById('chkSelectAllImport');
   if (!master) return;
   master.addEventListener('change', () => {
-    // Every rendered card, hidden or not — this is "select all", not
-    // "select visible". Eligibility still comes off the cards, so a stale
-    // duplicate verdict can't silently exclude files from a bulk action.
-    //
-    // SCOPE NOTE: this walks importGridCards() while importFolderPaths()
-    // walks importVisibleCards(). Still equivalent — but NOT for the
-    // reason this note used to give, so read the whole thing before
-    // relying on it.
-    //
-    // It used to argue that the only cards anything hides are skipped
-    // duplicates, which both scopes exclude. #1382's hide-duplicates
-    // filter has since landed and that premise is false: it can hide a
-    // duplicate card while chkSkipDuplicates is OFF, i.e. a card that IS
-    // eligible. The predicted symptom was that such a card would count
-    // toward this master's denominator while belonging to no folder
-    // header, leaving the master dashed after every header was ticked.
-    //
-    // Measured against exactly that state (six files, two flagged, Skip
-    // duplicates OFF and Hide duplicates ON, then every folder header
-    // ticked): master.checked true, master.indeterminate false. It does
-    // not reproduce — because #1382 does not hide those cards, it OMITS
-    // them from the render. Both scopes read the DOM, so a card that was
-    // never drawn is missing from both, and they stayed equal at 4 and 4.
-    // The conclusion survives; the argument for it did not.
-    //
-    // (That state is also unreachable from the UI: unchecking Skip
-    // duplicates retires the opt-in and re-previews with no duplicate
-    // flags, so the row hides and all six cards come back — measured too.
-    // It took a forced render to put the scopes under the load this note
-    // is about.)
-    //
-    // The condition to re-check is therefore unchanged in shape but not
-    // in wording: does anything draw a card that this master counts and
-    // no folder header owns? Omitting cards is safe. Hiding them in
-    // place would not be.
+    // Include collapsed days. Only shift-click ranges are scoped to visible cards.
     importSelectableCardPaths(importGridCards())
       .forEach(p => {
         if (master.checked) importDeselected.delete(p);
@@ -1313,8 +1295,9 @@ function sourceCountRowText(state) {
   if (state.status === 'loading') {
     const elapsed = Math.max(0, Math.floor((Date.now() - state.startedAt) / 1000));
     let text = 'Scanning…' + (elapsed ? ' ' + elapsed + 's' : '');
-    if (state.stage === 'metadata' && state.found) {
-      text = 'Reading file info…' + (elapsed ? ' ' + elapsed + 's' : '') +
+    if (['metadata', 'capture_dates'].includes(state.stage) && state.found) {
+      text = (state.stage === 'capture_dates' ? 'Reading capture dates…' : 'Reading file info…') +
+        (elapsed ? ' ' + elapsed + 's' : '') +
         ' · ' + Number(state.checked).toLocaleString() + ' of ' +
         Number(state.found).toLocaleString();
     } else if (Number.isFinite(state.checked) && state.checked > 0) {
@@ -2587,6 +2570,9 @@ function clearImportPreviewGrid() {
     importThumbSchedulerCancel = null;
   }
   lastImportPreviewRender = null;
+  importDayGroups = new Map();
+  document.getElementById('importDaySummary').style.display = 'none';
+  document.getElementById('importDayRows').replaceChildren();
   updateHideDuplicatesControl(0);
   const grid = document.getElementById('importPreviewGrid');
   if (!grid) return;
@@ -2668,6 +2654,101 @@ function computeDuplicateFlags(files, duplicatePaths) {
   return flags;
 }
 
+function importCaptureDay(file) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(file.capture_date || '')
+    ? file.capture_date : 'Unknown date';
+}
+
+function importDaySelectablePaths(entries) {
+  const skip = document.getElementById('chkSkipDuplicates').checked;
+  return entries.filter(entry => !(entry.isDuplicate && skip))
+    .map(entry => entry.file.path).filter(Boolean);
+}
+
+function renderImportDaySummary(files, duplicateFlags) {
+  const container = document.getElementById('importDaySummary');
+  const rows = document.getElementById('importDayRows');
+  rows.replaceChildren();
+  importDayGroups = new Map();
+  container.style.display = importSelectionEnabled() && files.length ? '' : 'none';
+  if (!importSelectionEnabled()) return;
+  // A source path can occur twice with overlapping source folders. Count
+  // it once, retaining eligibility when either occurrence will be copied.
+  const unique = new Map();
+  files.forEach((file, i) => {
+    const existing = unique.get(file.path);
+    if (!existing || !duplicateFlags[i]) {
+      unique.set(file.path, { file, isDuplicate: duplicateFlags[i] });
+    }
+  });
+  unique.forEach(entry => {
+    const day = importCaptureDay(entry.file);
+    if (!importDayGroups.has(day)) importDayGroups.set(day, []);
+    importDayGroups.get(day).push(entry);
+  });
+  Array.from(importDayGroups.keys()).sort().forEach((day, index) => {
+    const row = document.createElement('tr');
+    row.dataset.day = day;
+    const selectCell = row.insertCell();
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.className = 'day-check';
+    check.setAttribute('aria-label', 'Import photos from ' + day);
+    check.addEventListener('change', () => {
+      importDaySelectablePaths(importDayGroups.get(day)).forEach(path => {
+        if (check.checked) importDeselected.delete(path);
+        else importDeselected.add(path);
+      });
+      updateImportSelectionUI();
+      rerenderImportPreviewGridSafe();
+    });
+    selectCell.appendChild(check);
+    const dateCell = row.insertCell();
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'import-day-toggle';
+    toggle.setAttribute('aria-controls', 'import-day-' + index);
+    toggle.addEventListener('click', () => {
+      if (importCollapsedDays.has(day)) importCollapsedDays.delete(day);
+      else importCollapsedDays.add(day);
+      refreshImportDaySummary();
+    });
+    dateCell.appendChild(toggle);
+    ['files', 'duplicates', 'selected'].forEach(name => {
+      const cell = row.insertCell();
+      cell.className = 'num day-' + name;
+    });
+    rows.appendChild(row);
+  });
+  refreshImportDaySummary();
+}
+
+function refreshImportDaySummary() {
+  document.querySelectorAll('#importDayRows tr').forEach(row => {
+    const day = row.dataset.day;
+    const entries = importDayGroups.get(day) || [];
+    const paths = importDaySelectablePaths(entries);
+    const selected = paths.filter(path => !importDeselected.has(path)).length;
+    const check = row.querySelector('.day-check');
+    check.checked = paths.length > 0 && selected === paths.length;
+    check.indeterminate = selected > 0 && selected < paths.length;
+    check.disabled = paths.length === 0;
+    check.title = paths.length ? 'Select or deselect photos from ' + day
+      : 'All photos from ' + day + ' will be skipped as duplicates';
+    row.querySelector('.day-files').textContent = entries.length.toLocaleString();
+    row.querySelector('.day-duplicates').textContent = importDupStreamPending ? 'Checking…'
+      : !document.getElementById('chkSkipDuplicates').checked ? 'Not checked'
+      : entries.filter(entry => entry.isDuplicate).length.toLocaleString();
+    row.querySelector('.day-selected').textContent = selected.toLocaleString();
+    const expanded = !importCollapsedDays.has(day);
+    const toggle = row.querySelector('.import-day-toggle');
+    toggle.textContent = (expanded ? '▾ ' : '▸ ') + day;
+    toggle.setAttribute('aria-expanded', String(expanded));
+    const group = document.getElementById(toggle.getAttribute('aria-controls'));
+    if (group) group.hidden = !expanded;
+  });
+}
+
 function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
   const grid = document.getElementById('importPreviewGrid');
   if (!grid) return;
@@ -2678,6 +2759,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
   grid.innerHTML = '';
   const destMap = importDestinationMap(destinationFiles);
   if (!files || !files.length) {
+    renderImportDaySummary([], []);
     lastImportPreviewRender = null;
     updateHideDuplicatesControl(0);
     grid.style.display = 'none';
@@ -2700,6 +2782,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
   // of what will be imported either way. Only the controls that would claim
   // the user can change that list are withheld.
   const selectionEnabled = importSelectionEnabled();
+  renderImportDaySummary(files, duplicateFlags);
 
   // Duplicate-heavy retries should foreground the work Vireo will actually
   // perform. Rendering hundreds of skipped cards obscures the one failed
@@ -2711,7 +2794,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
   const duplicateCount = files.length - pendingFiles.length;
   const groups = {};
   files.forEach((f, i) => {
-    const key = f.subfolder || 'Source';
+    const key = JSON.stringify([selectionEnabled ? importCaptureDay(f) : '', f.subfolder || 'Source']);
     if (!groups[key]) groups[key] = [];
     groups[key].push({ file: f, isDuplicate: duplicateFlags[i] });
   });
@@ -2726,9 +2809,8 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
       ' be skipped. ' + (
         pendingFiles.length
           ? pendingFiles.length.toLocaleString() +
-            ' file' + (pendingFiles.length === 1 ? '' : 's') +
-            ' to import ' + (pendingFiles.length === 1 ? 'is' : 'are') +
-            ' shown below.'
+            ' other file' + (pendingFiles.length === 1 ? '' : 's') +
+            ' in this preview.'
           : 'Nothing else will be imported from this selection.'
       );
     grid.appendChild(collapsed);
@@ -2736,8 +2818,26 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
 
   let anyTilesRendered = false;
 
-  Object.keys(groups).sort().forEach((subfolder) => {
-    const all = groups[subfolder];
+  const dayContainers = new Map();
+  Object.keys(groups).sort().forEach((key) => {
+    const [day, subfolder] = JSON.parse(key);
+    const all = groups[key];
+    let parent = grid;
+    if (day) {
+      if (!dayContainers.has(day)) {
+        const section = document.createElement('section');
+        section.className = 'import-preview-day';
+        section.id = 'import-day-' + dayContainers.size;
+        section.hidden = importCollapsedDays.has(day);
+        const title = document.createElement('div');
+        title.className = 'import-preview-day-title';
+        title.textContent = day;
+        section.appendChild(title);
+        grid.appendChild(section);
+        dayContainers.set(day, section);
+      }
+      parent = dayContainers.get(day);
+    }
     const shown = hidingDuplicates ? all.filter((e) => !e.isDuplicate) : all;
     const hiddenHere = all.length - shown.length;
     // Nothing to show and nothing hidden — no reason to render a header.
@@ -2786,7 +2886,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
     // silent drop would leave the user with no evidence the folder or its
     // hidden count existed while other headers own their hidden files.
     if (!shown.length) {
-      grid.appendChild(groupEl);
+      parent.appendChild(groupEl);
       return;
     }
 
@@ -2857,7 +2957,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
       thumbsEl.appendChild(card);
     });
     groupEl.appendChild(thumbsEl);
-    grid.appendChild(groupEl);
+    parent.appendChild(groupEl);
   });
   // Every folder ended up fully filtered, so replace the wall of
   // "(0) · N hidden" headers with a single clearer message that also
@@ -2866,6 +2966,13 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
   // outcome, so keep it and skip the fallback message.
   if (!anyTilesRendered) {
     const collapsedBanner = grid.querySelector('.import-preview-collapsed');
+    // Day summaries and their sections remain available even when every
+    // thumbnail is filtered out.
+    if (selectionEnabled) {
+      grid.style.display = '';
+      refreshImportFolderHeaders();
+      return;
+    }
     grid.innerHTML = '';
     if (collapsedBanner) {
       grid.appendChild(collapsedBanner);
@@ -2879,9 +2986,6 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
     }
   }
   grid.style.display = '';
-  // After the grid is shown, not before: importVisibleCards() reads
-  // offsetParent, which is null for every card while the grid is still
-  // display:none — the state it inherits from the template on first render.
   refreshImportFolderHeaders();
   setupImportThumbnailScheduler();
 }
@@ -2892,17 +2996,7 @@ function importGridCards() {
   return grid ? Array.from(grid.querySelectorAll('.import-preview-thumb')) : [];
 }
 
-// Only the cards the user can actually see: a shift-range must not reach
-// through a card that isn't on screen and toggle it.
-//
-// This was written expecting the hide-duplicates filter (#1382) to hide
-// cards in place with CSS. It doesn't — it OMITS them from the render, so
-// with the filter on there is no card in the DOM to skip and this
-// offsetParent test currently excludes nothing (measured: with two of six
-// files filtered, every card the grid holds has a non-null offsetParent).
-// Kept as the defensive scope it is: it costs one layout read, and the day
-// something does hide a card in place, a range that swept through it would
-// toggle files the user could not see.
+// Shift-click ranges exclude collapsed days; duplicate filtering omits cards entirely.
 function importVisibleCards(root) {
   const scope = root || document.getElementById('importPreviewGrid');
   if (!scope) return [];
@@ -2932,7 +3026,7 @@ function importSelectableCardPaths(cards) {
 // eligibility verdict into user intent, and it would outlive the verdict).
 function importFolderPaths(groupEl) {
   if (!groupEl) return [];
-  return importSelectableCardPaths(importVisibleCards(groupEl));
+  return importSelectableCardPaths(Array.from(groupEl.querySelectorAll('.import-preview-thumb')));
 }
 
 // Folder headers are a tally of the cards under them, so they have to be
@@ -3036,6 +3130,7 @@ function rerenderImportPreviewGridSafe() {
   // A header left claiming "all selected" after a per-file click is exactly
   // the stale readout this function exists to stop.
   refreshImportFolderHeaders();
+  refreshImportDaySummary();
 }
 
 // #chkHideDuplicates changes which cards EXIST, not just which boxes are
@@ -3073,6 +3168,7 @@ function importCheckedCount() {
 }
 
 function updateImportSelectionUI() {
+  refreshImportDaySummary();
   const el = document.getElementById('previewSelectedCount');
   if (el) {
     // The CHECKED count — what will actually be copied. Never the
@@ -3542,6 +3638,7 @@ async function previewImport(opts) {
           folders: sources,
           file_types: fileTypes,
           recursive: document.getElementById('chkRecursive').checked,
+          include_capture_dates: copyMode,
         }),
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
@@ -3569,6 +3666,7 @@ async function previewImport(opts) {
     // 5,000-file hazard described there.
     importPreviewCapturedSignature = requestSignature;
     importDeselected = new Set();
+    importCollapsedDays = new Set();
     importPreviewedPaths = files.map(f => f.path);
     // The walk is over — the duplicate stream, if any, is gated separately
     // so the label can say "Checking duplicates…" rather than "Previewing…".

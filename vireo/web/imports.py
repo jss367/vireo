@@ -506,6 +506,7 @@ def create_imports_blueprint(
                 folders,
                 file_types=file_types if file_types else "both",
                 recursive=bool(body.get("recursive", True)),
+                include_capture_dates=bool(body.get("include_capture_dates", False)),
             ),
             mimetype="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

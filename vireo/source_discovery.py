@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 import source_scan_policy
 from image_loader import ScanCancelled
+from import_dedup import source_capture_timestamps
 from ingest import discover_source_files
 
 GLOBAL_SCAN_LIMIT = 4
@@ -100,7 +101,7 @@ def _empty_result(folder, error=False):
 
 
 def _walk_folder(folder, root_name, multi_source, file_types, recursive,
-                 cancel, emit):
+                 cancel, emit, include_capture_dates=False):
     """Walk one folder; returns a per-folder result or None when cancelled."""
     errors = []
     last_emit = [0.0]
@@ -176,6 +177,22 @@ def _walk_folder(folder, root_name, multi_source, file_types, recursive,
                 "checked": index,
                 "found": len(discovered),
             })
+    if include_capture_dates:
+        # Bound metadata reads so a disconnected preview stops between
+        # batches. Capture dates deliberately never fall back to file mtime.
+        for start in range(0, len(files), 128):
+            if cancel.is_set():
+                return None
+            batch = files[start:start + 128]
+            timestamps = source_capture_timestamps([Path(f["path"]) for f in batch])
+            for f in batch:
+                timestamp = timestamps.get(Path(f["path"]))
+                f["capture_date"] = timestamp.date().isoformat() if timestamp else None
+            emit({
+                "type": "folder_progress", "path": folder,
+                "stage": "capture_dates", "checked": start + len(batch),
+                "found": len(files),
+            })
     return {
         "path": folder,
         "files": files,
@@ -190,7 +207,7 @@ def _walk_folder(folder, root_name, multi_source, file_types, recursive,
 
 
 def stream_folder_preview(folders, file_types="both", recursive=True,
-                          classify=None):
+                          classify=None, include_capture_dates=False):
     """Yield SSE frames for a storage-aware multi-folder discovery walk.
 
     Frame sequence: one ``policy`` frame, then interleaved
@@ -235,6 +252,7 @@ def stream_folder_preview(folders, file_types="both", recursive=True,
                     recursive,
                     cancel,
                     events.put,
+                    include_capture_dates=include_capture_dates,
                 )
             except Exception:
                 # A walker must never die silently: the scheduler would wait
