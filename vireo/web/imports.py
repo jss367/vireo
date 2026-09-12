@@ -292,6 +292,7 @@ def create_imports_blueprint(
             job_id, _, _ = runner.start_singleton(
                 "send-to-nas", work, singleton_key=archive_id,
                 workspace_id=workspace_id,
+                exclusive_workspace=True,
                 config={"pending_archive_id": archive_id, "destination": archive["destination"]},
             )
         return jsonify({"job_id": job_id})

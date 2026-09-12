@@ -30,3 +30,24 @@ def test_staging_freezes_mounted_destination_symlink(tmp_path):
     assert target["mount_path"] == str(original)
     with pytest.raises(ValueError, match="destination has changed"):
         plan_staged_import(str(tmp_path / ".vireo"), str(alias / "trip"), parent=plan)
+
+
+def test_staging_persists_mount_identity_and_retries_keep_original(tmp_path, monkeypatch):
+    import json
+
+    import pipeline_job
+    from import_staging import check_staged_mount
+
+    monkeypatch.setattr(pipeline_job, "_archive_mount_baseline", lambda *a: {"/mnt/photos": True})
+    monkeypatch.setattr(pipeline_job, "_mount_identity", lambda *a: ("stat", 1, 2))
+    monkeypatch.setattr(pipeline_job, "_unmounted_since_baseline", lambda *a: None)
+    destination = str(tmp_path / "NAS" / "trip")
+    plan, target = plan_staged_import(str(tmp_path / ".vireo"), destination)
+    plan = json.loads(json.dumps(plan))
+    target = json.loads(json.dumps(target))
+    check_staged_mount(destination, target["mount_baseline"], target["mount_identities"])
+    monkeypatch.setattr(pipeline_job, "_mount_identity", lambda *a: ("stat", 3, 4))
+    retry, target = plan_staged_import(str(tmp_path / ".vireo"), destination, parent=plan)
+    assert retry == plan
+    with pytest.raises(ValueError, match="NAS volume changed"):
+        check_staged_mount(destination, target["mount_baseline"], target["mount_identities"])

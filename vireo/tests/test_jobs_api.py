@@ -4617,6 +4617,59 @@ def test_managed_import_preserves_originals_on_transfer_failure(app_and_db, tmp_
     assert len(list((tmp_path / "staging").rglob("*.jpg"))) == 1
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("when", ["before", "during"])
+def test_managed_import_preserves_originals_when_mount_replaced(app_and_db, tmp_path, monkeypatch, deferred, when):
+    import shutil
+
+    import move
+    import pipeline_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    mount = str(tmp_path / "NAS")
+    identity = {"value": ("stat", 1, 2)}
+    original_baseline = pipeline_job._archive_mount_baseline
+    monkeypatch.setattr(pipeline_job, "_archive_mount_baseline",
+                        lambda path, *a: {mount: True} if path.startswith(mount) else original_baseline(path, *a))
+    monkeypatch.setattr(pipeline_job, "_mount_identity", lambda *a: identity["value"])
+    monkeypatch.setattr(pipeline_job, "_unmounted_since_baseline", lambda *a: None)
+
+    def process(*args, **kwargs):
+        if when == "before":
+            identity["value"] = ("stat", 3, 4)
+        return {"ok": True}
+
+    def copy(source, destination, *args, **kwargs):
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+        identity["value"] = ("stat", 3, 4)
+        return 0, "", False
+
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", process)
+    monkeypatch.setattr(move, "_run_rsync_streamed", copy)
+    response = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS" / "trip"),
+        "folder_template": "", "local_processing": True, "defer_nas_transfer": deferred,
+        "after_import": _process_id(db, "Cull-ready"),
+    })
+    assert response.status_code == 200, response.get_json()
+    imported = wait_for_job_via_client(client, response.get_json()["job_id"])
+    processed = wait_for_job_via_client(client, imported["result"]["process_job_id"])
+    if deferred:
+        sent = client.post(f"/api/import/pending-archives/{imported['config']['pending_archive_id']}/send")
+        jobs = [sent.get_json()["job_id"]]
+    else:
+        jobs = processed["result"]["move_job_ids"]
+    assert jobs
+    for job_id in jobs:
+        moved = wait_for_job_via_client(client, job_id)
+        assert moved["status"] == "failed", moved
+        assert "NAS volume changed" in str(moved["errors"])
+    assert len(list((tmp_path / "staging").rglob("*.jpg"))) == 1
+    assert db.conn.execute("SELECT path FROM folders WHERE path = ?",
+                           (imported["config"]["managed_staging"]["destination"],)).fetchone()
+
+
 def test_managed_import_requires_processing(app_and_db, tmp_path):
     app, _ = app_and_db
     response = app.test_client().post("/api/jobs/import-photos", json={
@@ -4873,6 +4926,10 @@ def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and
         assert entered.wait(10)
         second = client.post(f"/api/import/pending-archives/{archive_id}/send")
         assert second.get_json()["job_id"] == first.get_json()["job_id"]
+        staging = imported["config"]["managed_staging"]["destination"]
+        scan = client.post("/api/jobs/scan", json={"root": staging})
+        assert scan.status_code == 409, scan.get_json()
+        assert "NAS transfer" in scan.get_json()["error"]
     finally:
         release.set()
     failed = wait_for_job_via_client(client, first.get_json()["job_id"])

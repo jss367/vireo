@@ -2432,7 +2432,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 merge=False, remote=None, reject_tracked_ancestor=False,
-                allow_tracked_merge=False, destination_name="", verify_contents=False):
+                allow_tracked_merge=False, destination_name="", verify_contents=False,
+                pre_commit_check=None):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name unless
@@ -2448,6 +2449,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             Must be one path component. Empty preserves the source name.
         verify_contents: compare every local destination file byte-for-byte
             before updating the catalog and deleting the source originals.
+        pre_commit_check: optional callback that raises if the destination
+            is no longer safe, after verification and before catalog changes.
         progress_cb: optional callback(current, total, filename)
         merge: when False (default), refuse to write into a destination
             that already exists — the safe all-or-nothing behavior. When
@@ -2975,6 +2978,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # keeps resolving to the photos whenever the NAS is mounted.
     if progress_cb:
         progress_cb(total_files, total_files, "", "Updating catalog")
+    if pre_commit_check:
+        pre_commit_check()
     merge_counts = None
     if merge_into_tracked is not None:
         # Destination is a tracked archive and the caller opted into merging:

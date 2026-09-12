@@ -42,10 +42,34 @@ def plan_staged_import(vireo_dir, destination, remote_archive=None, parent=None,
     target["managed_staging_root"] = root
     plan = {"destination": local_destination, "identity": identity}
     if not remote_archive:
-        from pipeline_job import _archive_mount_baseline
+        from pipeline_job import _archive_mount_baseline, _mount_identity_baseline
         baseline = _archive_mount_baseline(destination, known_mounted_roots)
         for mount, was_mounted in (parent or {}).get("mount_baseline", {}).items():
             baseline[mount] = baseline.get(mount, False) or was_mounted
         target["mount_baseline"] = baseline
         plan["mount_baseline"] = baseline
+        identities = _mount_identity_baseline(baseline)
+        identities.update((parent or {}).get("mount_identities", {}))
+        target["mount_identities"] = identities
+        plan["mount_identities"] = identities
     return plan, target
+
+
+def check_staged_mount(destination, baseline, identities):
+    """Refuse an unavailable or replaced destination before deleting originals."""
+    from pipeline_job import (
+        _changed_mount_since_baseline,
+        _missing_archive_mount_root,
+        _unmounted_since_baseline,
+    )
+
+    # JSON persistence turns the helper's tuple identities into lists.
+    identities = {root: tuple(value) if isinstance(value, list) else value
+                  for root, value in (identities or {}).items()}
+    changed = _changed_mount_since_baseline(identities)
+    if changed:
+        raise ValueError(f"NAS volume changed: {changed}. Local originals are preserved; restore the original volume before retrying.")
+    offline = (_unmounted_since_baseline(baseline or {})
+               or _missing_archive_mount_root(destination))
+    if offline:
+        raise ValueError(f"NAS volume unavailable: {offline}. Local originals are preserved; reconnect it and retry.")

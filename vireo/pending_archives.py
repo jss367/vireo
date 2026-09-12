@@ -48,7 +48,7 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
     """
     import config
     import move
-    from pipeline_job import _missing_archive_mount_root, _unmounted_since_baseline
+    from import_staging import check_staged_mount
 
     source = archive["staging_destination"]
     target = json.loads(archive["target_json"])
@@ -66,11 +66,11 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
         raise ValueError(error)
     destination = target["mount_path"]
     remote = None
+    check_mount = None
     if target.get("transport") == "mounted":
-        offline = (_unmounted_since_baseline(target.get("mount_baseline", {}))
-                   or _missing_archive_mount_root(archive["destination"]))
-        if offline:
-            raise ValueError(f"NAS volume unavailable: {offline}. Reconnect it and try again; local originals are preserved.")
+        def check_mount():
+            check_staged_mount(archive["destination"], target.get("mount_baseline"), target.get("mount_identities"))
+        check_mount()
     else:
         effective = db.get_effective_config(config.load())
         rsync = move.resolve_rsync_bin(effective.get("rsync_bin", "") or "")
@@ -83,6 +83,7 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
         developed_dir=db.get_effective_config(config.load()).get("darktable_output_dir", "") or "",
         merge=True, remote=remote, allow_tracked_merge=True,
         verify_contents=remote is None,
+        **({"pre_commit_check": check_mount} if check_mount else {}),
     )
     if result.get("errors") or result.get("needs_merge") or result.get("cleanup_error"):
         raise ValueError("; ".join(result.get("errors") or [result.get("cleanup_error") or "The NAS transfer needs attention."]))

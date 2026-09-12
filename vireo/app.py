@@ -4022,7 +4022,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # Catch uncaught exceptions so they don't disappear silently
     @app.errorhandler(Exception)
     def _handle_error(e):
+        from jobs import WorkspaceBusyError
         from werkzeug.exceptions import HTTPException
+        if isinstance(e, WorkspaceBusyError):
+            return json_error(str(e), 409)
         if isinstance(e, HTTPException):
             return e
         log.exception("Unhandled error: %s %s", request.method, request.path)
@@ -24177,7 +24180,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                merge, remote, developed_dir, folder_template="",
                                chained_from=None, serialize_lock=None,
                                allow_tracked_merge=False,
-                               managed_staging_root=None, mount_baseline=None):
+                               managed_staging_root=None, mount_baseline=None,
+                               mount_identities=None):
         """Enqueue a move-folder job and return its job id.
 
         Shared by the move-folder endpoint and the chained
@@ -24284,12 +24288,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     ),
                 }
             try:
+                check_mount = None
                 if mount_baseline is not None:
-                    from pipeline_job import _missing_archive_mount_root, _unmounted_since_baseline
-                    offline = (_unmounted_since_baseline(mount_baseline)
-                               or _missing_archive_mount_root(resolved_destination))
-                    if offline:
-                        raise RuntimeError(f"NAS volume unavailable: {offline}. Local originals are preserved; reconnect it and retry the move.")
+                    from import_staging import check_staged_mount
+
+                    def check_mount():
+                        check_staged_mount(resolved_destination, mount_baseline, mount_identities)
+                    check_mount()
                 if folder_template:
                     result = move_folder_by_date(
                         db=thread_db,
@@ -24311,6 +24316,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         destination_name=destination_name,
                         allow_tracked_merge=allow_tracked_merge,
                         **({"verify_contents": True} if managed_staging_root and not remote else {}),
+                        **({"pre_commit_check": check_mount} if check_mount else {}),
                     )
             finally:
                 if serialize_lock is not None:
@@ -26603,6 +26609,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 allow_tracked_merge=True,
                 managed_staging_root=target.get("managed_staging_root"),
                 mount_baseline=target.get("mount_baseline"),
+                mount_identities=target.get("mount_identities"),
             )
         rsync_bin = move_mod.resolve_rsync_bin(
             effective_cfg.get("rsync_bin", "") or "")

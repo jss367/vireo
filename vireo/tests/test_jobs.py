@@ -35,6 +35,78 @@ def test_job_runner_starts_and_completes(tmp_path):
     assert job['progress']['current'] == 3
 
 
+@pytest.mark.parametrize("admission", ["start", "singleton", "pipeline"])
+def test_workspace_transfer_reservation_blocks_job_admission(admission):
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release = threading.Event()
+    called = threading.Event()
+    transfer, _, _ = runner.start_singleton(
+        "send-to-nas", lambda job: release.wait(10), singleton_key="archive",
+        workspace_id=1, exclusive_workspace=True,
+    )
+
+    def admit(workspace_id):
+        if admission == "start":
+            return runner.start("export", lambda job: called.set(), workspace_id=workspace_id)
+        if admission == "singleton":
+            return runner.start_singleton("export", lambda job: called.set(), workspace_id=workspace_id,
+                                          singleton_key="export")[0]
+        return runner.enqueue_pipeline(lambda job: called.set(), workspace_id=workspace_id)
+
+    try:
+        with pytest.raises(WorkspaceBusyError, match="NAS transfer"):
+            admit(1)
+        assert not called.is_set()
+        other = admit(2)
+        assert wait_for_job_via_runner(runner, other)["status"] == "completed"
+        assert called.is_set()
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+    assert wait_for_job_via_runner(runner, admit(1))["status"] == "completed"
+    runner.shutdown()
+
+
+def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch):
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    entered, release = threading.Event(), threading.Event()
+    errors = []
+
+    def persist(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(runner, "_enqueue_pipeline_admitted", persist)
+
+    def enqueue():
+        try:
+            runner.enqueue_pipeline(lambda job: None, workspace_id=1)
+        except OSError as e:
+            errors.append(str(e))
+
+    thread = threading.Thread(target=enqueue)
+    thread.start()
+    try:
+        assert entered.wait(10)
+        with pytest.raises(WorkspaceBusyError, match="running jobs"):
+            runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
+                                   workspace_id=1, exclusive_workspace=True)
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    assert errors == ["database unavailable"]
+    assert not runner._pipeline_admissions
+    transfer, _, _ = runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
+                                            workspace_id=1, exclusive_workspace=True)
+    assert wait_for_job_via_runner(runner, transfer)["status"] == "completed"
+    runner.shutdown()
+
+
 def test_job_runner_shutdown_cancels_and_joins_workers():
     """Teardown owns worker lifetime and refuses work after it begins."""
     from jobs import JobRunner

@@ -82,6 +82,10 @@ class _TrackedJobThread(threading.Thread):
 SLOT_CAP = 2
 
 
+class WorkspaceBusyError(RuntimeError):
+    """A transfer and another job cannot share the workspace's originals."""
+
+
 class JobRunner:
     """Runs long operations in background threads with progress tracking.
 
@@ -125,6 +129,7 @@ class JobRunner:
         # job_history without a matching entry here; the startup sweep
         # promotes such rows to 'failed'.
         self._queued_pipelines = {}  # job_id -> dict(work_fn, config, ...)
+        self._pipeline_admissions = {}  # workspace -> enqueues persisting outside the lock
         # Monotonic suffix so two enqueues landing in the same
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
@@ -570,6 +575,22 @@ class JobRunner:
 
     def enqueue_pipeline(self, work_fn, config=None, workspace_id=None,
                          runtime_warning=None):
+        """Admit and persist a pipeline, then attempt promotion into a free slot."""
+        # Cover the persistence window before the queued context is published.
+        # A transfer must not slip between checking admission and publishing it.
+        with self._lock:
+            self._check_workspace_admission_locked(workspace_id)
+            self._pipeline_admissions[workspace_id] = self._pipeline_admissions.get(workspace_id, 0) + 1
+        try:
+            return self._enqueue_pipeline_admitted(work_fn, config, workspace_id, runtime_warning)
+        finally:
+            with self._lock:
+                self._pipeline_admissions[workspace_id] -= 1
+                if not self._pipeline_admissions[workspace_id]:
+                    del self._pipeline_admissions[workspace_id]
+
+    def _enqueue_pipeline_admitted(self, work_fn, config=None, workspace_id=None,
+                                   runtime_warning=None):
         """Enqueue a pipeline job and attempt promotion before returning.
 
         Unlike ``start`` (which spawns a worker thread synchronously),
@@ -939,6 +960,7 @@ class JobRunner:
         with self._lock:
             if self._shutting_down:
                 raise RuntimeError("JobRunner is shut down")
+            self._check_workspace_admission_locked(workspace_id, blocks_local_transitions)
             self._enqueue_counter += 1
             seq = self._enqueue_counter
             job_id = f"{job_type}-{int(time.time() * 1000)}-{seq}"
@@ -956,6 +978,20 @@ class JobRunner:
             self._events[job_id] = deque(maxlen=1000)
             self._subscribers[job_id] = []
         return job, work_fn
+
+    def _check_workspace_admission_locked(self, workspace_id, blocking=True, exclusive=False):
+        """Check both sides of a transfer reservation under the registration lock."""
+        if not blocking:
+            return
+        active = [j for j in self._jobs.values()
+                  if j.get("workspace_id") == workspace_id
+                  and j.get("status") in ("running", "queued", "pausing", "paused")
+                  and j.get("blocks_local_transitions", True)]
+        if any(j.get("exclusive_workspace") for j in active):
+            raise WorkspaceBusyError("Wait for the NAS transfer to finish before starting another job in this workspace")
+        if exclusive and (active or self._pipeline_admissions.get(workspace_id)
+                          or any(c.get("workspace_id") == workspace_id for c in self._queued_pipelines.values())):
+            raise WorkspaceBusyError("Wait for running jobs to finish before sending these photos to NAS")
 
     def _find_singleton_locked(self, job_type, singleton_key):
         """Find an active singleton job by (job_type, singleton_key).
@@ -983,7 +1019,8 @@ class JobRunner:
     def start_singleton(self, job_type, work_fn, *, singleton_key,
                         config=None, workspace_id=None, ephemeral=False,
                         runtime_warning=None, counts_for_badge=True,
-                        pausable=False, blocks_local_transitions=True):
+                        pausable=False, blocks_local_transitions=True,
+                        exclusive_workspace=False):
         """Start a job unless one with the same (type, singleton_key) is active.
 
         The existence check AND the new-job registration happen under a
@@ -1010,6 +1047,7 @@ class JobRunner:
             )
             if existing_id is not None:
                 return existing_id, True, self._snapshot_job(existing)
+            self._check_workspace_admission_locked(workspace_id, blocks_local_transitions, exclusive_workspace)
             # No active singleton — register inline while still holding the
             # lock so a second caller arriving between our check and our
             # registration cannot slip in and register its own.
@@ -1025,6 +1063,7 @@ class JobRunner:
                 runtime_warning=runtime_warning,
                 singleton_key=singleton_key,
             )
+            job["exclusive_workspace"] = bool(exclusive_workspace)
             self._prune_finished_jobs()
             self._jobs[job_id] = job
             self._events[job_id] = deque(maxlen=1000)
