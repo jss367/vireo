@@ -24173,7 +24173,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                source_path, resolved_destination,
                                merge, remote, developed_dir, folder_template="",
                                chained_from=None, serialize_lock=None,
-                               allow_tracked_merge=False):
+                               allow_tracked_merge=False,
+                               managed_staging_root=None, mount_baseline=None):
         """Enqueue a move-folder job and return its job id.
 
         Shared by the move-folder endpoint and the chained
@@ -24280,6 +24281,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     ),
                 }
             try:
+                if mount_baseline is not None:
+                    from pipeline_job import _missing_archive_mount_root, _unmounted_since_baseline
+                    offline = (_unmounted_since_baseline(mount_baseline)
+                               or _missing_archive_mount_root(resolved_destination))
+                    if offline:
+                        raise RuntimeError(f"NAS volume unavailable: {offline}. Local originals are preserved; reconnect it and retry the move.")
                 if folder_template:
                     result = move_folder_by_date(
                         db=thread_db,
@@ -24300,6 +24307,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         remote=remote,
                         destination_name=destination_name,
                         allow_tracked_merge=allow_tracked_merge,
+                        **({"verify_contents": True} if managed_staging_root and not remote else {}),
                     )
             finally:
                 if serialize_lock is not None:
@@ -24330,6 +24338,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         )
                     )
             if result.get("ok"):
+                if managed_staging_root:
+                    from path_guard import contains_resolved
+                    # Remove only empty staging ancestors. Failed transfers and
+                    # concurrent sibling moves keep their originals intact.
+                    parent = os.path.dirname(source_path)
+                    root = os.path.realpath(managed_staging_root)
+                    while contains_resolved(root, parent):
+                        try:
+                            os.rmdir(parent)
+                        except OSError:
+                            break
+                        if os.path.realpath(parent) == root:
+                            break
+                        parent = os.path.dirname(parent)
                 try:
                     _invalidate_missing_originals_cache()
                 except Exception:
@@ -26560,6 +26582,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if guard:
             raise RuntimeError(guard)
         effective_cfg = thread_db.get_effective_config(cfg.load())
+        if target.get("transport") == "mounted":
+            folder = thread_db.conn.execute(
+                "SELECT path FROM folders WHERE id = ?", (folder_id,),
+            ).fetchone()
+            if not folder:
+                raise RuntimeError("folder no longer exists")
+            destination = os.path.join(mount_path, *posixpath.dirname(subpath).split("/"))
+            return _start_move_folder_job(
+                runner, workspace_id, folder_id=folder_id,
+                destination=destination, display_dest=destination,
+                destination_name="", source_path=folder["path"],
+                resolved_destination=os.path.join(destination, os.path.basename(folder["path"])),
+                merge=True, remote=None,
+                developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
+                chained_from=chained_from, serialize_lock=serialize_lock,
+                allow_tracked_merge=True,
+                managed_staging_root=target.get("managed_staging_root"),
+                mount_baseline=target.get("mount_baseline"),
+            )
         rsync_bin = move_mod.resolve_rsync_bin(
             effective_cfg.get("rsync_bin", "") or "")
         if not rsync_bin:
@@ -26612,6 +26653,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # file whose bytes differ, and manual moves keep the default
             # refusal.
             allow_tracked_merge=True,
+            managed_staging_root=target.get("managed_staging_root"),
         )
 
     @app.route("/api/encounters/species", methods=["POST"])
@@ -30265,6 +30307,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             enqueue_process_job=pipeline_chain.enqueue_process_job,
             chain_after_move=pipeline_chain.chain_after_move,
             bulk_gps_location_payload=_bulk_gps_location_payload,
+            guard_move_folder=_move_folder_guard_error,
         )
     )
 

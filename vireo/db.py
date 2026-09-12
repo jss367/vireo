@@ -940,6 +940,18 @@ class Database:
                 visual_json  TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS pending_archives (
+                id TEXT PRIMARY KEY,
+                workspace_id INTEGER NOT NULL,
+                collection_id INTEGER,
+                destination TEXT NOT NULL,
+                staging_destination TEXT NOT NULL,
+                target_json TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS pending_changes (
                 id          INTEGER PRIMARY KEY,
                 photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,

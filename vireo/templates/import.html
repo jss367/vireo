@@ -192,6 +192,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 {% include '_navbar.html' %}
 <div class="content">
   <div class="import-wrap">
+    {% include '_pending_archives.html' %}
 
     <div class="card" id="orphanedStagingCard" style="display:none;">
       <h3>Recover old staging folders</h3>
@@ -399,6 +400,14 @@ body { display: flex; flex-direction: column; height: 100vh; }
         </select>
       </div>
       <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
+      <div id="localProcessingRow" style="display:none; margin-top:10px;">
+        <label><input type="checkbox" id="chkLocalProcessing" checked onchange="updateAfterMoveUI()"> Process locally before sending to NAS</label>
+        <div class="hint">Vireo manages temporary storage on this computer and removes the local originals after the NAS transfer is verified. If the transfer fails, the local copies stay available for recovery.</div>
+        <div id="deferNasTransferRow" style="margin-top:10px;">
+          <label><input type="checkbox" id="chkDeferNasTransfer" checked onchange="updateDestinationModeHint()"> Keep photos local until I choose “Send to NAS”</label>
+          <div class="hint">Review, delete unwanted photos, and publish while originals stay on this computer. Send the remaining files to the saved NAS destination from Browse, Import, or Jobs when you are ready. They are retained until you send or delete them.</div>
+        </div>
+      </div>
       <div class="row" id="afterMoveRow" style="display:none; margin-top:10px;">
         <label><input type="checkbox" id="chkAfterMove" onchange="updateAfterMoveUI()"> Then move to NAS</label>
         <select id="afterMoveTarget" style="max-width:220px;" onchange="updateAfterMoveUI()"></select>
@@ -1050,6 +1059,12 @@ function remoteArchiveSelectionReady() {
 function updateDestinationModeHint() {
   const hint = document.getElementById('destModeHint');
   if (!hint) return;
+  if (localProcessingRequest()) {
+    hint.textContent = deferNasTransferRequest()
+      ? 'This is the final NAS destination. Photos stay on this computer for processing and review until you choose Send to NAS.'
+      : 'This is the final NAS destination. Photos are imported and processed in temporary storage on this computer, then transferred here.';
+    return;
+  }
   const target = importRemoteTarget();
   if (target) {
     hint.textContent = 'Direct SSH transfer to ' + target.remote_path +
@@ -1925,7 +1940,27 @@ function refreshAfterMoveTargets() {
 }
 
 let _afterMoveNotice = '';
+function localProcessingAvailable() {
+  if (selectedImportMode() !== 'copy' || !afterImportChainsProcess()) return false;
+  if (importRemoteTargetId()) return true;
+  const destination = (document.getElementById('destInput')?.value || '').trim();
+  return importRemoteTargets.some((t) => t.mount_path
+    && afterMovePathInsideRoot(destination, t.mount_path));
+}
+
+function localProcessingRequest() {
+  return localProcessingAvailable() && !!document.getElementById('chkLocalProcessing')?.checked;
+}
+
+function deferNasTransferRequest() {
+  return localProcessingRequest() && !!document.getElementById('chkDeferNasTransfer')?.checked;
+}
+
 function updateAfterMoveUI() {
+  const localAvailable = localProcessingAvailable();
+  document.getElementById('localProcessingRow').style.display = localAvailable ? '' : 'none';
+  document.getElementById('deferNasTransferRow').style.display = localProcessingRequest() ? '' : 'none';
+  updateDestinationModeHint();
   const row = document.getElementById('afterMoveRow');
   const unavailable = document.getElementById('afterMoveUnavailable');
   const preview = document.getElementById('afterMovePreview');
@@ -1941,7 +1976,7 @@ function updateAfterMoveUI() {
   // a processing run — everything else hides the row entirely, and a
   // hidden row means startImport() sends after_process_move: null no
   // matter what the (stale) checkbox says.
-  if (selectedImportMode() !== 'copy' || importRemoteTargetId()
+  if (localAvailable || selectedImportMode() !== 'copy' || importRemoteTargetId()
       || !afterImportChainsProcess()) {
     hideAll();
     return;
@@ -3986,6 +4021,8 @@ async function startImport() {
   // archive copy + chained process + eligible target) — a hidden row means
   // a stale checkbox must not send anything.
   body.after_process_move = afterMoveRequest();
+  body.local_processing = localProcessingRequest();
+  body.defer_nas_transfer = deferNasTransferRequest();
   importStartPending = true;
   updateStartGate();
   try {
@@ -4179,6 +4216,8 @@ function retryBodyFromFinishedJob(job) {
       remote_target_id: cfg.after_process_move.remote_target_id,
     };
   }
+  body.local_processing = !!cfg.local_processing;
+  body.defer_nas_transfer = !!cfg.defer_nas_transfer;
   return body;
 }
 
@@ -4308,7 +4347,11 @@ function renderResult(res, status) {
   }
   if (res.safe_to_format) {
     pill.className = 'pill pill-ok';
-    pill.textContent = 'Safe to format the card — every file is verified in the archive';
+    pill.textContent = res.nas_transfer_deferred
+      ? 'Photos kept locally for review — choose Send to NAS when you are ready'
+      : res.local_processing
+      ? 'Card files verified in local temporary storage — see the processing and NAS transfer jobs for archive completion'
+      : 'Safe to format the card — every file is verified in the archive';
     unsafe.style.display = 'none';
   } else if (
     res.unverified_duplicates_only

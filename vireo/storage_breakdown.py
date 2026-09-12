@@ -17,7 +17,7 @@ def describe_auxiliary_storage(path, db_path):
         return "Database support files", "Live database transaction and coordination files. Keep these with the catalog."
     descriptions = {
         "originals": ("Full-resolution renders", "Generated full-resolution images, including display and paired-photo renders."),
-        "staging": ("Import recovery files", "Staged photos from imports; these may be the only remaining copies."),
+        "staging": ("Local import originals", "Photos kept locally for review or import recovery; these may be the only remaining copies."),
         "taxonomy": ("Species reference data", "Species names and classification reference data."),
         "taxonomy.json": ("Species reference data", "Species names and classification reference data."),
         "external-edits": ("External editor files", "Images prepared for or returned from an external editor."),

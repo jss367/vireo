@@ -168,6 +168,7 @@ def create_imports_blueprint(
     enqueue_process_job,
     chain_after_move,
     bulk_gps_location_payload,
+    guard_move_folder,
 ):
     """Build the imports blueprint.
 
@@ -179,6 +180,96 @@ def create_imports_blueprint(
     """
     blueprint = Blueprint("imports", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
+    archive_dispatch_lock = threading.Lock()
+
+    @blueprint.get("/api/import/pending-archives")
+    def api_pending_archives():
+        from pending_archives import active_archive_jobs
+        db = get_db()
+        jobs = active_archive_jobs(get_runner(), db._ws_id())
+        rows = db.conn.execute(
+            "SELECT a.*, c.name AS collection_name FROM pending_archives a "
+            "LEFT JOIN collections c ON c.id = a.collection_id "
+            "WHERE a.workspace_id = ? AND a.state != 'complete' ORDER BY a.created_at",
+            (db._ws_id(),),
+        ).fetchall()
+        items = []
+        for row in rows:
+            sending = any(j.get("type") == "send-to-nas"
+                          and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
+            items.append({
+                "id": row["id"], "destination": row["destination"],
+                "collection_id": row["collection_id"], "name": row["collection_name"] or "Imported photos",
+                "state": "sending" if sending else "waiting" if jobs else "ready",
+                "error": row["error"] or (
+                    "The previous transfer was interrupted. Local originals are retained; try sending again."
+                    if row["state"] == "sending" and not sending else ""),
+            })
+        return jsonify({"items": items})
+
+    @blueprint.post("/api/import/pending-archives/<archive_id>/send")
+    def api_send_pending_archive(archive_id):
+        from pending_archives import active_archive_jobs, get_pending_archive, send_pending_archive
+        db = get_db()
+        runner = get_runner()
+        workspace_id = db._ws_id()
+        with archive_dispatch_lock:
+            archive = get_pending_archive(db, archive_id)
+            if archive is None:
+                return json_error("Pending NAS transfer not found in this workspace", 404)
+            if archive["state"] == "complete":
+                return jsonify({"already_sent": True})
+            active = active_archive_jobs(runner, workspace_id)
+            existing = next((j for j in active if j.get("type") == "send-to-nas"
+                             and (j.get("config") or {}).get("pending_archive_id") == archive_id), None)
+            if existing:
+                return jsonify({"job_id": existing["id"]})
+            if active:
+                return json_error("Wait for running jobs to finish before sending these photos to NAS", 409)
+
+            def work(job):
+                with Database(db_path) as thread_db:
+                    thread_db.set_active_workspace(workspace_id)
+                    thread_db.conn.execute(
+                        "UPDATE pending_archives SET state = 'sending', error = '' WHERE id = ?",
+                        (archive_id,),
+                    )
+                    thread_db.conn.commit()
+                    try:
+                        if not runner.begin_uncancellable(job["id"]):
+                            raise ValueError("Transfer cancelled before it started. Local originals are retained.")
+
+                        def progress(current, total, filename, phase="Sending to NAS"):
+                            job["progress"].update(current=current, total=total, current_file=filename)
+                            runner.push_event(job["id"], "progress", {
+                                "current": current, "total": total, "current_file": filename, "phase": phase,
+                            })
+
+                        result = send_pending_archive(
+                            thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                            guard_folder=guard_move_folder, progress_cb=progress,
+                        )
+                        thread_db.conn.execute(
+                            "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
+                        )
+                        thread_db.conn.commit()
+                        with contextlib.suppress(Exception):
+                            invalidate_missing_originals()
+                        return result
+                    except Exception as e:
+                        thread_db.conn.execute(
+                            "UPDATE pending_archives SET state = 'pending', error = ? WHERE id = ?",
+                            (str(e), archive_id),
+                        )
+                        thread_db.conn.commit()
+                        raise
+
+            job_id, _, _ = runner.start_singleton(
+                "send-to-nas", work, singleton_key=archive_id,
+                workspace_id=workspace_id,
+                config={"pending_archive_id": archive_id, "destination": archive["destination"]},
+            )
+        return jsonify({"job_id": job_id})
     # Import workers run on separate threads. Serialize execution of the same
     # frozen snapshot so the second worker observes the first worker's catalog
     # admissions and reports an idempotent replay instead of claiming them too.
@@ -2374,6 +2465,10 @@ def create_imports_blueprint(
 
         body = request.get_json(silent=True) or {}
         source_snapshot_id = body.get("source_snapshot_id")
+        if body.get("local_processing"):
+            return json_error("Local processing with temporary storage requires Copy to archive")
+        if body.get("defer_nas_transfer"):
+            return json_error("Keeping photos local before NAS transfer requires Copy to archive")
         if body.get("after_process_move") is not None:
             return json_error(
                 "after_process_move is not supported for import-in-place — "
@@ -3582,6 +3677,16 @@ def create_imports_blueprint(
         if remote_subpath and not remote_target_id:
             return json_error("remote_subpath requires remote_target_id")
         after_process_move = body.get("after_process_move")
+        local_processing = body.get("local_processing", False)
+        if not isinstance(local_processing, bool):
+            return json_error("local_processing must be a boolean")
+        defer_nas_transfer = body.get("defer_nas_transfer", False)
+        if not isinstance(defer_nas_transfer, bool):
+            return json_error("defer_nas_transfer must be a boolean")
+        if defer_nas_transfer and not local_processing:
+            return json_error("Keeping photos local until review requires local processing")
+        if local_processing and after_process_move is not None:
+            return json_error("Choose automatic local processing or a local archive move, not both")
         if after_process_move is not None and remote_target_id:
             return json_error(
                 "after_process_move requires a local archive destination — "
@@ -4002,11 +4107,32 @@ def create_imports_blueprint(
         # local archive root; snapshotted now so a mid-chain Settings edit
         # can't redirect the move. Runs before workspace creation so a bad
         # target/root/destination doesn't leave an orphan workspace behind.
-        move_target_snapshot, move_err = _validate_after_process_move(
-            after_process_move, after_import, destination, folder_template,
-        )
-        if move_err is not None:
-            return move_err
+        managed_staging = None
+        parent_staging = (parent_config or {}).get("managed_staging")
+        if parent_config is not None and bool(parent_config.get("defer_nas_transfer")) != defer_nas_transfer:
+            return json_error("A recovery retry must preserve the original NAS transfer timing")
+        if bool(parent_staging) != local_processing and parent_config is not None:
+            return json_error("A recovery retry must preserve the original local processing choice")
+        if local_processing:
+            if after_import is None:
+                return json_error("Local processing requires an after-import process")
+            from import_staging import plan_staged_import
+            from pipeline_job import _load_known_mount_roots
+            try:
+                managed_staging, move_target_snapshot = plan_staged_import(
+                    os.path.dirname(config["THUMB_CACHE_DIR"]), destination,
+                    remote_archive_config, parent_staging, _load_known_mount_roots(db),
+                )
+                if any(path_guard.contains_resolved(s, managed_staging["destination"]) for s in sources):
+                    return json_error("Temporary processing storage cannot be inside a source directory")
+            except (ValueError, OSError, RuntimeError) as e:
+                return json_error(str(e))
+        else:
+            move_target_snapshot, move_err = _validate_after_process_move(
+                after_process_move, after_import, destination, folder_template,
+            )
+            if move_err is not None:
+                return move_err
 
         # A retry with a chained NAS move must land on the same
         # host/root/mount as the parent. When the parent recorded a
@@ -4042,6 +4168,16 @@ def create_imports_blueprint(
                     "a new import instead of retrying."
                 )
 
+        pending_archive_id = (
+            os.path.basename(move_target_snapshot["managed_staging_root"]) if defer_nas_transfer else None
+        )
+        if pending_archive_id:
+            completed = db.conn.execute(
+                "SELECT 1 FROM pending_archives WHERE id = ? AND state = 'complete'", (pending_archive_id,),
+            ).fetchone()
+            if completed:
+                return json_error("These photos have already been sent to NAS. Start a new import instead of retrying.")
+
         active_ws, created_workspace, workspace_err = (
             _prepare_import_workspace(db, body)
         )
@@ -4057,7 +4193,7 @@ def create_imports_blueprint(
         # archive to a different host/mount than the panel is showing
         # (mirrors the pipeline route's remote_target_snapshot).
         remote_target = None
-        if remote_archive_config is not None:
+        if remote_archive_config is not None and not local_processing:
             import move as move_mod
 
             spec = move_mod.build_remote_move_spec(
@@ -4075,6 +4211,10 @@ def create_imports_blueprint(
         job_config = {
             "sources": sources,
             "destination": destination,
+            "local_processing": local_processing,
+            "managed_staging": managed_staging,
+            "defer_nas_transfer": defer_nas_transfer,
+            "pending_archive_id": pending_archive_id,
             "folder_template": folder_template,
             "file_types": file_types,
             "skip_duplicates": skip_duplicates,
@@ -4165,7 +4305,7 @@ def create_imports_blueprint(
             # accepted deliberately as the price of a retry that stays
             # true to the parent's scope.
             job_config["include_paths"] = sorted(include_paths)
-        if move_target_snapshot is not None:
+        if move_target_snapshot is not None and not local_processing:
             job_config["after_process_move"] = {
                 "remote_target_id": move_target_snapshot["id"],
                 "target_name": move_target_snapshot["name"],
@@ -4195,6 +4335,14 @@ def create_imports_blueprint(
             thread_db, col_id = _record_import_collection(
                 result, active_ws, chain_photo_ids=carry_photo_ids,
             )
+            if pending_archive_id:
+                thread_db.conn.execute(
+                    "UPDATE pending_archives SET collection_id = COALESCE(?, collection_id) WHERE id = ?",
+                    (col_id, pending_archive_id),
+                )
+                thread_db.conn.commit()
+                result["nas_transfer_deferred"] = True
+                result["pending_archive_id"] = pending_archive_id
             # Recovery-retry imports may carry forward files earlier
             # attempts landed. The original failed run skipped its
             # after-import chain because ``ok`` was False, so those files
@@ -4235,7 +4383,7 @@ def create_imports_blueprint(
                 # move. Uses ``chain_scope`` so a recovery retry moves the
                 # folders holding the original run's successful files too.
                 after_move = None
-                if move_target_snapshot is not None:
+                if move_target_snapshot is not None and not defer_nas_transfer:
                     from import_chain import minimal_move_set
                     folder_rows = []
                     for i in range(0, len(chain_scope), 500):
@@ -4334,9 +4482,28 @@ def create_imports_blueprint(
         def work(job):
             from import_job import ImportParams, run_import_job
 
+            import_destination = destination
+            if managed_staging:
+                from local_processing import selected_source_files, storage_plan, total_file_bytes
+                import_destination = managed_staging["destination"]
+                files = selected_source_files(sources, file_types, recursive)
+                if include_paths is not None:
+                    files = [p for p in files if str(p) in include_paths]
+                space = storage_plan(vireo_dir, total_file_bytes(files))
+                if not space["enough"]:
+                    raise ValueError("Not enough free space on this computer for temporary processing. Free up space or import fewer photos.")
+                os.makedirs(import_destination, exist_ok=True)
+                if pending_archive_id:
+                    from pending_archives import register_pending_archive
+                    with Database(db_path) as pending_db:
+                        pending_db.set_active_workspace(active_ws)
+                        register_pending_archive(
+                            pending_db, pending_archive_id, destination, import_destination, move_target_snapshot,
+                        )
+
             params = ImportParams(
                 sources=sources,
-                destination=destination,
+                destination=import_destination,
                 folder_template=folder_template,
                 file_types=file_types,
                 skip_duplicates=skip_duplicates,
@@ -4355,6 +4522,10 @@ def create_imports_blueprint(
                 result = run_import_job(
                     job, runner, db_path, active_ws, params,
                 )
+                if managed_staging:
+                    result["local_processing"] = True
+                    result["final_destination"] = destination
+                    result["staging_destination"] = import_destination
                 _apply_import_tags(
                     active_ws, result.get("photo_ids") or [], import_tags,
                     location_from_gps, result, job=job, runner=runner,

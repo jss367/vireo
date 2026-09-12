@@ -1004,11 +1004,14 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
     return None
 
 
-def _first_missing_source_file(src_path, dest_path):
+def _first_missing_source_file(src_path, dest_path, *, verify_contents=False):
     """Return the relative path of the first source file absent (or
     size-mismatched, or a symlink) at dest_path, or None if every source
     file is present and matches. Used to verify a merge before deleting
     originals.
+
+    With ``verify_contents``, compare fresh bytes as well before allowing
+    managed temporary originals to be removed.
 
     A symlinked destination entry is treated as missing: `os.path.isfile` /
     `os.path.getsize` follow the link, so a symlink pointing back into the
@@ -1036,6 +1039,15 @@ def _first_missing_source_file(src_path, dest_path):
             if not os.path.isfile(dst_file) or \
                     os.path.getsize(src_file) != os.path.getsize(dst_file):
                 return rel_name
+            if verify_contents:
+                # Read fresh bytes: filecmp caches by stat signatures and a
+                # pre-copy conflict check may already have populated it.
+                with open(src_file, "rb") as source, open(dst_file, "rb") as dest:
+                    while chunk := source.read(1024 * 1024):
+                        if chunk != dest.read(len(chunk)):
+                            return rel_name
+                    if dest.read(1):
+                        return rel_name
     return None
 
 
@@ -2420,7 +2432,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 merge=False, remote=None, reject_tracked_ancestor=False,
-                allow_tracked_merge=False, destination_name=""):
+                allow_tracked_merge=False, destination_name="", verify_contents=False):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name unless
@@ -2434,6 +2446,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             for a remote move (the destination comes from ``remote``).
         destination_name: optional new name for the folder at the destination.
             Must be one path component. Empty preserves the source name.
+        verify_contents: compare every local destination file byte-for-byte
+            before updating the catalog and deleting the source originals.
         progress_cb: optional callback(current, total, filename)
         merge: when False (default), refuse to write into a destination
             that already exists — the safe all-or-nothing behavior. When
@@ -2913,12 +2927,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 f"Verification failed: '{name}' is missing or differs at the "
                 f"destination. Originals preserved."
             ]}
-    elif dest_exists:
+    elif dest_exists or verify_contents:
         # Merge: the destination may legitimately hold extra unrelated
         # files (and leftover temp files from an interrupted run), so a
         # count comparison is meaningless. Instead require that every
         # source file is present at the destination with a matching size.
-        missing = _first_missing_source_file(src_path, transfer_dest)
+        missing = _first_missing_source_file(src_path, transfer_dest, verify_contents=verify_contents)
         if missing is not None:
             return {"moved": 0, "errors": [
                 f"Verification failed: '{missing}' missing, size mismatch, "
