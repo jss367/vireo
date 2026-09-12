@@ -8261,6 +8261,15 @@ function openLightbox(photoId, filename, photoList, options) {
       img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
       return;
     }
+    if (['1920', '2560', '3840'].indexOf(_lbCurrentSrcKey) !== -1) {
+      // Sized tiers can now be the initial source. A failed render must not
+      // leave navigation on a broken image: try the original, whose existing
+      // error path falls back to /full if the original is unavailable too.
+      _lbCurrentSrcKey = 'original';
+      _lbDesiredSrcKey = null;
+      img.src = _lbSrcUrl(photoId, 'original');
+      return;
+    }
     if (_lbCurrentSrcKey !== 'original') {
       img.onload = null;
       img.onerror = null;

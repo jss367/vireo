@@ -268,3 +268,60 @@ def test_busy_generation_retries_fill_window_without_parallel_producers(live_ser
     assert len(set(generated)) == 12
     assert len(declined) == 11  # Retries run alone and no longer collide.
     assert page.evaluate("_lbPreloadBytes()") <= 128 * 1024 * 1024
+
+
+@pytest.mark.parametrize("needed,tier", [(2300, "2560"), (3200, "3840")])
+@pytest.mark.parametrize("original_fails", [False, True])
+@pytest.mark.parametrize("mode", ["fit", "restored"])
+def test_failed_initial_sized_preview_falls_back_to_usable_image(live_server, page, needed, tier, original_fails, mode):
+    active = False
+    failed_requests = []
+
+    def serve(route):
+        url = route.request.url
+        if active and "/116/" in url and f"size={tier}" in url:
+            failed_requests.append(url)
+            route.fulfill(status=503, body="Preview render failed")
+        elif active and "/116/original" in url and original_fails:
+            route.fulfill(status=404, body="Original unavailable")
+        else:
+            width, height = (6000, 4000) if "/original" in url else (1920, 1280)
+            route.fulfill(body=_jpeg(width, height), content_type="image/jpeg")
+
+    page.route("**/photos/*/full*", serve)
+    page.route("**/photos/*/original*", serve)
+    page.route("**/photos/*/preview?*", serve)
+    if mode == "fit":
+        page.set_viewport_size({"width": needed + 160, "height": round(needed * 2 / 3) + 200})
+    _open_window(page, live_server)
+    active = True
+    page.evaluate(
+        """({needed, mode}) => {
+          _lbClearAdjacentPreloads();
+          _lbScheduleAdjacentPhoto = function() {};
+          const wrap = document.getElementById('lightboxWrap');
+          const fit = Math.min(1, wrap.clientWidth / 6000, wrap.clientHeight / 4000);
+          const options = mode === 'restored' ? {
+            fallbackViewportState: {zoom: needed / (6000 * fit * devicePixelRatio), centerX: 0.4, centerY: 0.6}
+          } : {};
+          openLightbox(116, 'photo-16.jpg', _lightboxPhotoList, options);
+        }""", {"needed": needed, "mode": mode},
+    )
+    page.wait_for_function(
+        """() => {
+          const image = document.getElementById('lightboxImg');
+          return _lightboxCommittedId === 116 && !_lbVisualTransitionPending &&
+            image.complete && image.naturalWidth > 0;
+        }""",
+        timeout=5000,
+    )
+    assert failed_requests
+    expect(page.locator("#lightboxFilename")).to_have_text("photo-16.jpg")
+    expect(page.locator("#lightboxActions")).not_to_have_attribute("inert", "")
+    source = "/full" if original_fails else "/original"
+    assert source in page.locator("#lightboxImg").get_attribute("src")
+    page.wait_for_timeout(400)
+    # Restoring the viewport may attempt the requested tier once more, but
+    # its failure must keep the usable fallback and cannot cause a retry loop.
+    assert len(failed_requests) <= 2
+    assert page.evaluate("document.getElementById('lightboxImg').naturalWidth") > 0
