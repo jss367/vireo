@@ -975,6 +975,12 @@ class Database:
                 DELETE FROM pending_archives WHERE workspace_id = OLD.id;
             END;
 
+            CREATE TRIGGER IF NOT EXISTS pending_archives_clear_collection
+            AFTER DELETE ON collections
+            BEGIN
+                UPDATE pending_archives SET collection_id = NULL WHERE collection_id = OLD.id;
+            END;
+
             CREATE TABLE IF NOT EXISTS pending_changes (
                 id          INTEGER PRIMARY KEY,
                 photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,

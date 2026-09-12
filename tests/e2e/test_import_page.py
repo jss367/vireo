@@ -2443,6 +2443,45 @@ def test_pending_archive_panel_sends_remembered_destination(live_server, page, p
     assert state["sent"]
 
 
+def test_pending_archive_missing_transfer_requires_confirmation(live_server, page):
+    state = {"discarded": False}
+
+    def pending(route):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "items": [] if state["discarded"] else [{
+                "id": "missing", "name": "Missing photos", "collection_id": None,
+                "destination": "/Volumes/Photography/Coast", "state": "ready", "error": "",
+                "source_available": False,
+            }],
+        }))
+
+    def discard(route):
+        assert route.request.method == "POST"
+        assert route.request.post_data_json == {"confirmed": True}
+        state["discarded"] = True
+        route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
+
+    page.route("**/api/import/pending-archives", pending)
+    page.route("**/api/import/pending-archives/missing/discard", discard)
+    page.goto(live_server["url"] + "/import")
+    panel = page.locator("#pendingArchives")
+    expect(panel.get_by_role("link", name="Review photos")).to_have_count(0)
+    button = panel.get_by_role("button", name="Remove missing transfer")
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    button.click()
+    assert not state["discarded"]
+    expect(panel).to_be_visible()
+
+    def confirm(dialog):
+        assert "No files or catalog entries will be deleted" in dialog.message
+        dialog.accept()
+
+    page.once("dialog", confirm)
+    button.click()
+    expect(panel).to_be_hidden()
+    assert state["discarded"]
+
+
 def test_import_after_move_hint_blames_the_right_field(live_server, page):
     """Issue #1377: with a typo'd archive root (Vireo_Archive vs the real
     "Vireo Archive"), the old hint said the *destination* was outside every

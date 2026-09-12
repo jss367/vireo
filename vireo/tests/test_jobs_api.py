@@ -4795,6 +4795,63 @@ def test_pending_archive_persists_without_job_history_and_scopes_workspace(app_a
         assert get_pending_archive(reopened, archive_id) is None
 
 
+def test_pending_archive_deleted_collection_does_not_relink(app_and_db, tmp_path, monkeypatch):
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    collection_id = imported["result"]["collection_id"]
+    db.delete_collection(collection_id)
+    # Force ID reuse, as SQLite may do for the newest deleted collection.
+    db.conn.execute(
+        "INSERT INTO collections (id, name, workspace_id) VALUES (?, ?, ?)",
+        (collection_id, "Unrelated photos", db._ws_id()),
+    )
+    db.conn.commit()
+    item = app.test_client().get("/api/import/pending-archives").get_json()["items"][0]
+    assert item["collection_id"] is None
+    assert item["name"] == "Imported photos"
+
+
+@pytest.mark.parametrize("state", ["pending", "sending"])
+def test_pending_archive_missing_transfer_can_be_forgotten(app_and_db, tmp_path, monkeypatch, state):
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    workspace_id = db._ws_id()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    url = f"/api/import/pending-archives/{archive_id}/discard"
+    photo_ids = [r[0] for r in db.conn.execute("SELECT id FROM photos ORDER BY id")]
+    assert client.post(url, json={"confirmed": True}).status_code == 409
+    # Simulate externally moved originals; forgetting must preserve those files.
+    relocated = tmp_path / "relocated-originals"
+    os.rename(staging, relocated)
+    db.conn.execute("UPDATE pending_archives SET state = ? WHERE id = ?", (state, archive_id))
+    db.conn.commit()
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["source_available"] is False
+    assert client.post(url).status_code == 400
+    assert client.post(url, json={"confirmed": "true"}).status_code == 400
+
+    release = threading.Event()
+    job_id = app._job_runner.start("export", lambda job: release.wait(10), workspace_id=workspace_id)
+    try:
+        assert client.post(url, json={"confirmed": True}).status_code == 409
+    finally:
+        release.set()
+        wait_for_job_via_client(client, job_id)
+
+    other = db.create_workspace("Another workspace")
+    assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
+    assert client.post(url, json={"confirmed": True}).status_code == 404
+    assert client.post(f"/api/workspaces/{workspace_id}/activate").status_code == 200
+    assert client.post(url, json={"confirmed": True}).status_code == 200
+    assert client.get("/api/import/pending-archives").get_json()["items"] == []
+    assert len(list(relocated.glob("*.jpg"))) == 2
+    assert [r[0] for r in db.conn.execute("SELECT id FROM photos ORDER BY id")] == photo_ids
+    assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
+    assert client.delete(f"/api/workspaces/{workspace_id}").status_code == 200
+    assert len(list(relocated.glob("*.jpg"))) == 2
+
+
 def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and_db, tmp_path, monkeypatch):
     import move
 

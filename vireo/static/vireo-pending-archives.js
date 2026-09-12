@@ -63,6 +63,38 @@
           }
         });
         row.appendChild(button);
+        if (item.source_available === false) {
+          const missing = document.createElement('div');
+          missing.textContent = 'Local originals are unavailable. Reconnect their storage, or remove this transfer record if they are permanently gone.';
+          row.appendChild(missing);
+          const discard = document.createElement('button');
+          discard.type = 'button';
+          discard.className = 'btn';
+          discard.textContent = 'Remove missing transfer';
+          discard.disabled = item.state !== 'ready';
+          discard.addEventListener('click', async () => {
+            if (sending || !window.confirm('Remove this missing transfer record? Vireo will stop tracking its NAS transfer. No files or catalog entries will be deleted. If the storage is only disconnected, cancel and reconnect it instead.')) return;
+            sending = true;
+            discard.disabled = true;
+            actionError = '';
+            error.textContent = '';
+            try {
+              const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(item.id) + '/discard', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirmed: true}),
+              });
+              const result = await response.json();
+              if (!response.ok) throw new Error(result.error || 'Could not remove the transfer record.');
+            } catch (e) {
+              actionError = e.message;
+              error.textContent = actionError;
+            } finally {
+              sending = false;
+              signature = '';
+              refresh();
+            }
+          });
+          row.appendChild(discard);
+        }
         if (item.error || item.state === 'waiting') {
           const note = document.createElement('div');
           note.textContent = item.error || 'Waiting for running jobs to finish.';

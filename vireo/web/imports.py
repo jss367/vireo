@@ -188,8 +188,8 @@ def create_imports_blueprint(
         db = get_db()
         jobs = active_archive_jobs(get_runner(), db._ws_id())
         rows = db.conn.execute(
-            "SELECT a.*, c.name AS collection_name FROM pending_archives a "
-            "LEFT JOIN collections c ON c.id = a.collection_id "
+            "SELECT a.*, c.id AS review_collection_id, c.name AS collection_name FROM pending_archives a "
+            "LEFT JOIN collections c ON c.id = a.collection_id AND c.workspace_id = a.workspace_id "
             "WHERE a.workspace_id = ? AND a.state != 'complete' ORDER BY a.created_at",
             (db._ws_id(),),
         ).fetchall()
@@ -199,13 +199,38 @@ def create_imports_blueprint(
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
             items.append({
                 "id": row["id"], "destination": row["destination"],
-                "collection_id": row["collection_id"], "name": row["collection_name"] or "Imported photos",
+                "source_available": os.path.isdir(row["staging_destination"]),
+                "collection_id": row["review_collection_id"], "name": row["collection_name"] or "Imported photos",
                 "state": "sending" if sending else "waiting" if jobs else "ready",
                 "error": row["error"] or (
                     "The previous transfer was interrupted. Local originals are retained; try sending again."
                     if row["state"] == "sending" and not sending else ""),
             })
         return jsonify({"items": items})
+
+    @blueprint.post("/api/import/pending-archives/<archive_id>/discard")
+    def api_discard_pending_archive(archive_id):
+        from pending_archives import active_archive_jobs, get_pending_archive
+        db = get_db()
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict) or body.get("confirmed") is not True:
+            return json_error("Confirm removal of this missing NAS transfer record", 400)
+        with archive_dispatch_lock:
+            archive = get_pending_archive(db, archive_id)
+            if archive is None:
+                return json_error("Pending NAS transfer not found in this workspace", 404)
+            if active_archive_jobs(get_runner(), db._ws_id()):
+                return json_error("Wait for running jobs to finish before removing this transfer record", 409)
+            if os.path.isdir(archive["staging_destination"]):
+                return json_error("Local originals are available. Send them to NAS before removing this transfer", 409)
+            # Forget only the transfer, never files or catalog entries. This is
+            # explicit recovery for lost storage, including interrupted sends.
+            db.conn.execute(
+                "DELETE FROM pending_archives WHERE id = ? AND workspace_id = ?",
+                (archive_id, db._ws_id()),
+            )
+            db.conn.commit()
+        return jsonify({"ok": True})
 
     @blueprint.post("/api/import/pending-archives/<archive_id>/send")
     def api_send_pending_archive(archive_id):
