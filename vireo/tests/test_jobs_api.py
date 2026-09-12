@@ -4983,6 +4983,12 @@ def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and
         scan = client.post("/api/jobs/scan", json={"root": staging})
         assert scan.status_code == 409, scan.get_json()
         assert "NAS transfer" in scan.get_json()["error"]
+        photo_id = imported["result"]["photo_ids"][0]
+        deleted = client.post("/api/batch/delete", json={"photo_ids": [photo_id], "mode": "disk_permanent"})
+        assert deleted.status_code == 409, deleted.get_json()
+        assert "NAS transfer" in deleted.get_json()["error"]
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (photo_id,)).fetchone()
+        assert len(list((tmp_path / "staging").rglob("*.jpg"))) == 2
     finally:
         release.set()
     failed = wait_for_job_via_client(client, first.get_json()["job_id"])
@@ -4999,6 +5005,41 @@ def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and
     retried = client.post(f"/api/import/pending-archives/{archive_id}/send")
     sent = wait_for_job_via_client(client, retried.get_json()["job_id"])
     assert sent["status"] == "completed", sent
+
+
+def test_pending_archive_waits_for_synchronous_delete(app_and_db, tmp_path, monkeypatch):
+    from db import Database
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+    responses = []
+    delete = Database.delete_photos
+
+    def blocking_delete(self, *args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return delete(self, *args, **kwargs)
+
+    monkeypatch.setattr(Database, "delete_photos", blocking_delete)
+
+    def request_delete():
+        with app.test_client() as client:
+            responses.append(client.post("/api/batch/delete", json={
+                "photo_ids": imported["result"]["photo_ids"], "mode": "vireo",
+            }))
+
+    thread = threading.Thread(target=request_delete)
+    thread.start()
+    try:
+        assert entered.wait(10)
+        sent = app.test_client().post(f"/api/import/pending-archives/{imported['config']['pending_archive_id']}/send")
+        assert sent.status_code == 409, sent.get_json()
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    assert responses[0].status_code == 200, responses[0].get_json()
+    assert not app._job_runner._workspace_mutations
 
 
 def test_pending_archive_waits_for_running_work(app_and_db, tmp_path, monkeypatch):

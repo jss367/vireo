@@ -4947,6 +4947,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         threading.Thread(target=_folder_health_loop, daemon=True).start()
 
     app._job_runner = JobRunner(db=init_db)
+
+    @app.before_request
+    def _reserve_workspace_mutation():
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.path.startswith("/api/"):
+            return None
+        # Sending establishes its own exclusive reservation. Control requests
+        # must remain available while a transfer holds the workspace.
+        if request.endpoint in {
+            "imports.api_send_pending_archive", "api_activate_workspace",
+            "api_shutdown", "api_v1_shutdown",
+            "jobs.api_job_cancel", "jobs.api_job_pause", "jobs.api_job_resume",
+            "jobs.api_jobs_cancel_queued",
+        }:
+            return None
+        reservation = app._job_runner.workspace_mutation(_get_db()._ws_id())
+        reservation.__enter__()
+        g.nas_workspace_mutation = reservation
+        return None
+
+    @app.teardown_request
+    def _release_workspace_mutation(exc):
+        reservation = g.pop("nas_workspace_mutation", None)
+        if reservation is not None:
+            reservation.__exit__(None, None, None)
     # XMP sidecars are read-modify-written files; serialize sync jobs so
     # repeated clicks cannot race while touching the same sidecar.
     app._sync_job_lock = threading.Lock()

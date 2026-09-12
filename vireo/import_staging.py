@@ -44,23 +44,41 @@ def plan_staged_import(vireo_dir, destination, remote_archive=None, parent=None,
     target["managed_staging_root"] = root
     plan = {"destination": local_destination, "identity": identity}
     if not remote_archive:
-        from pipeline_job import _archive_mount_baseline, _mount_identity_baseline
+        from pipeline_job import _archive_mount_baseline
         baseline = _archive_mount_baseline(destination, known_mounted_roots)
         for mount, was_mounted in (parent or {}).get("mount_baseline", {}).items():
             baseline[mount] = baseline.get(mount, False) or was_mounted
         target["mount_baseline"] = baseline
         plan["mount_baseline"] = baseline
-        identities = _mount_identity_baseline(baseline)
+        identities = _archive_mount_identities(baseline)
         identities.update((parent or {}).get("mount_identities", {}))
         target["mount_identities"] = identities
         plan["mount_identities"] = identities
     return plan, target
 
 
+def _archive_mount_identities(baseline):
+    """Identify network shares across reconnects, retaining strict disk checks."""
+    from pipeline_job import _mount_identity_baseline
+    from source_scan_policy import classify_sources
+
+    identities = _mount_identity_baseline(baseline)
+    for policy in classify_sources(list(identities)):
+        key = policy["volume_key"]
+        if policy["storage"] != "network" or key == "unknown-volume" or key.startswith("windows:drive:"):
+            continue
+        root = policy["path"]
+        instance = identities[root]
+        # Linux bind mounts can expose different subdirectories of one share.
+        # Keep that root, but discard the transient mount ID and device number.
+        subtree = instance[3] if instance and instance[0] == "mountinfo" else "/"
+        identities[root] = ("network-share", key, subtree)
+    return identities
+
+
 def check_staged_mount(destination, baseline, identities):
     """Refuse an unavailable or replaced destination before deleting originals."""
     from pipeline_job import (
-        _changed_mount_since_baseline,
         _missing_archive_mount_root,
         _unmounted_since_baseline,
     )
@@ -68,7 +86,9 @@ def check_staged_mount(destination, baseline, identities):
     # JSON persistence turns the helper's tuple identities into lists.
     identities = {root: tuple(value) if isinstance(value, list) else value
                   for root, value in (identities or {}).items()}
-    changed = _changed_mount_since_baseline(identities)
+    current = _archive_mount_identities({root: True for root in identities})
+    changed = next((root for root, prior in identities.items()
+                    if prior is None or current.get(root) != prior), None)
     if changed:
         raise ValueError(f"NAS volume changed: {changed}. Local originals are preserved; restore the original volume before retrying.")
     offline = (_unmounted_since_baseline(baseline or {})

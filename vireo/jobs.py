@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime
 
 import power
@@ -130,6 +131,7 @@ class JobRunner:
         # promotes such rows to 'failed'.
         self._queued_pipelines = {}  # job_id -> dict(work_fn, config, ...)
         self._pipeline_admissions = {}  # workspace -> enqueues persisting outside the lock
+        self._workspace_mutations = {}  # workspace -> synchronous API requests
         # Monotonic suffix so two enqueues landing in the same
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
@@ -979,6 +981,20 @@ class JobRunner:
             self._subscribers[job_id] = []
         return job, work_fn
 
+    @contextmanager
+    def workspace_mutation(self, workspace_id):
+        """Reserve synchronous mutations against transfers for their full duration."""
+        with self._lock:
+            self._check_workspace_admission_locked(workspace_id)
+            self._workspace_mutations[workspace_id] = self._workspace_mutations.get(workspace_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._workspace_mutations[workspace_id] -= 1
+                if not self._workspace_mutations[workspace_id]:
+                    del self._workspace_mutations[workspace_id]
+
     def _check_workspace_admission_locked(self, workspace_id, blocking=True, exclusive=False):
         """Check both sides of a transfer reservation under the registration lock."""
         if not blocking:
@@ -990,6 +1006,7 @@ class JobRunner:
         if any(j.get("exclusive_workspace") for j in active):
             raise WorkspaceBusyError("Wait for the NAS transfer to finish before starting another job in this workspace")
         if exclusive and (active or self._pipeline_admissions.get(workspace_id)
+                          or self._workspace_mutations.get(workspace_id)
                           or any(c.get("workspace_id") == workspace_id for c in self._queued_pipelines.values())):
             raise WorkspaceBusyError("Wait for running jobs to finish before sending these photos to NAS")
 
