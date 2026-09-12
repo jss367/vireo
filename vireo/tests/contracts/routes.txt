@@ -63,6 +63,7 @@ GET          /api/highlights
 GET          /api/highlights/bucket
 GET          /api/import/folder-preview/thumbnail
 GET          /api/import/orphaned-staging
+GET          /api/import/pending-archives
 GET          /api/import/readiness
 GET          /api/inat/prepare/<int:photo_id>
 GET          /api/inat/submissions
@@ -259,6 +260,8 @@ POST         /api/import/destination-preview
 POST         /api/import/folder-preview-stream
 POST         /api/import/new-images-preview
 POST         /api/import/orphaned-staging/verify
+POST         /api/import/pending-archives/<archive_id>/discard
+POST         /api/import/pending-archives/<archive_id>/send
 POST         /api/import/preview
 POST         /api/inat/export
 POST         /api/inat/submit
