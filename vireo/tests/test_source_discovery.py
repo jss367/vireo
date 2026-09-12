@@ -7,6 +7,7 @@ from pathlib import Path
 
 import source_discovery
 from image_loader import ScanCancelled
+from PIL import Image
 
 
 def _parse(frames):
@@ -38,6 +39,45 @@ def _serial_network_policy(paths):
         }
         for path in paths
     ]
+
+
+def test_preview_capture_dates_use_photo_metadata_not_file_mtime(tmp_path):
+    dated = tmp_path / "dated.jpg"
+    unknown = tmp_path / "unknown.jpg"
+    exif = Image.Exif()
+    exif[36867] = "2026:08:09 23:59:00"
+    Image.new("RGB", (8, 8)).save(dated, exif=exif)
+    Image.new("RGB", (8, 8)).save(unknown)
+
+    frames = _parse(source_discovery.stream_folder_preview(
+        [str(tmp_path)], include_capture_dates=True,
+        classify=_serial_network_policy))
+    files = {f["filename"]: f for f in frames[-1]["files"]}
+    assert files["dated.jpg"]["capture_date"] == "2026-08-09"
+    assert files["unknown.jpg"]["capture_date"] is None
+    assert files["unknown.jpg"]["mtime"] > 0
+    assert any(f.get("stage") == "capture_dates" for f in frames)
+
+
+def test_capture_date_reads_stop_between_batches(tmp_path, monkeypatch):
+    files = [tmp_path / f"photo-{i}.jpg" for i in range(130)]
+    for path in files:
+        path.touch()
+    cancel = threading.Event()
+    batches = []
+
+    def timestamps(batch):
+        batches.append(batch)
+        cancel.set()
+        return {}
+
+    monkeypatch.setattr(source_discovery, "source_capture_timestamps", timestamps)
+    result = source_discovery._walk_folder(
+        str(tmp_path), "card", False, "both", True, cancel, lambda _event: None,
+        include_capture_dates=True)
+    assert result is None
+    assert len(batches) == 1
+    assert len(batches[0]) == 128
 
 
 def test_closing_the_stream_cancels_running_walkers(monkeypatch):

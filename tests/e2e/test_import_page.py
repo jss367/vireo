@@ -3670,15 +3670,23 @@ def _stub_preview(page, files, duplicates=None):
           window.fetch = (input, init) => {
             const t = typeof input === 'string' ? input : input.url;
             if (t && t.indexOf('/api/import/folder-preview') === 0) {
+              window.__dayDiscoveryRequest = JSON.parse(init.body);
               return Promise.resolve(window.__previewDoneResponse({
                 total_count: files.length, total_size: 0,
                 type_breakdown: {'.jpg': files.length},
-                duplicate_count: 0, files: files,
+                duplicate_count: 0, files: files.map(file => {
+                  const copy = {...file};
+                  if (!window.__dayDiscoveryRequest.include_capture_dates) delete copy.capture_date;
+                  return copy;
+                }),
               }));
             }
             if (t && t.indexOf('/api/import/check-duplicates') === 0) {
+              window.__dayCheckRequest = JSON.parse(init.body);
               const frame = 'data: ' + JSON.stringify({
                 duplicates: dupes, checked: files.length, total: files.length,
+                capture_dates: window.__dayCheckRequest.include_capture_dates
+                  ? Object.fromEntries(files.map(file => [file.path, file.capture_date || null])) : {},
               }) + '\\n\\n' + 'data: ' + JSON.stringify({
                 done: true, duplicate_count: dupes.length,
                 checked: files.length, total: files.length,
@@ -3721,6 +3729,137 @@ def _files(n, prefix='/tmp/card/DSC_'):
     return [{"path": f"{prefix}{i:04d}.jpg", "filename": f"DSC_{i:04d}.jpg",
              "subfolder": "card", "size": 100, "extension": ".jpg",
              "mtime": 0, "thumb_url": ""} for i in range(n)]
+
+
+def _day_row(page, day):
+    return page.locator(f"#importDayRows tr[data-day='{day}']")
+
+
+@pytest.mark.parametrize("skip_duplicates,with_destination,verify_by_hash", [
+    (True, True, False), (True, False, True),
+    (False, True, False), (False, True, True), (False, False, False),
+])
+def test_capture_day_metadata_is_read_by_only_one_preview_phase(
+        live_server, page, skip_duplicates, with_destination, verify_by_hash):
+    page.goto(f"{live_server['url']}/import")
+    files = _files(1)
+    files[0]['capture_date'] = '2026-08-09'
+    _stub_preview(page, files)
+    page.locator('#chkSkipDuplicates').set_checked(skip_duplicates)
+    if verify_by_hash:
+        page.locator('#chkVerifyByHash').check()
+    if with_destination:
+        _set_destination(page)
+    _preview(page)
+    expect(_day_row(page, '2026-08-09')).to_be_visible()
+    discovery = page.evaluate('window.__dayDiscoveryRequest')
+    checks_metadata = skip_duplicates or with_destination
+    assert discovery['include_capture_dates'] is not checks_metadata
+    if checks_metadata:
+        assert page.evaluate('window.__dayCheckRequest.include_capture_dates') is True
+
+
+def test_capture_day_skip_with_hidden_duplicates_reaches_import(live_server, page):
+    page.goto(f"{live_server['url']}/import")
+    files = _files(4)
+    for index, file in enumerate(files):
+        file["capture_date"] = "2026-08-09" if index < 3 else "2026-08-10"
+    # The day spans source folders, independently of destination layout.
+    files[2]["subfolder"] = "another-card"
+    _stub_preview(page, files, duplicates=[files[0]["path"]])
+    _set_destination(page)
+    _capture_start(page)
+    _preview(page)
+    _await_duplicate_verdicts(page, 1)
+    day = _day_row(page, "2026-08-09")
+    expect(day.locator('.day-files')).to_have_text('3')
+    expect(day.locator('.day-duplicates')).to_have_text('1')
+    expect(day.locator('.day-selected')).to_have_text('2')
+    page.locator('#chkHideDuplicates').check()
+    expect(day).to_be_visible()
+    day.locator('.import-day-toggle').click()
+    expect(day.locator('.import-day-toggle')).to_have_attribute('aria-expanded', 'false')
+    expect(page.locator('#previewSelectedCount')).to_have_text('3 of 4 selected')
+    day.locator('.day-check').uncheck()
+    expect(day.locator('.day-selected')).to_have_text('0')
+    expect(page.locator('#btnStart')).to_have_text('Start import (1 file)')
+    page.locator('#btnStart').click()
+    body = page.evaluate("() => window.__body")
+    assert body['include_paths'] == [files[0]['path'], files[3]['path']]
+    assert body['checked_count'] == 1
+
+
+def test_capture_day_counts_follow_individual_and_master_selection(live_server, page):
+    page.goto(f"{live_server['url']}/import")
+    files = _files(3)
+    files[0]['capture_date'] = files[1]['capture_date'] = '2026-08-09'
+    # mtime is deliberately usable, but must never become a capture date.
+    files[2]['mtime'] = 1786320000
+    _stub_preview(page, files)
+    _preview(page)
+    day = _day_row(page, '2026-08-09')
+    expect(_day_row(page, 'Unknown date')).to_be_visible()
+    _box(page, files[0]['path']).uncheck()
+    expect(day.locator('.day-check')).to_have_js_property('indeterminate', True)
+    expect(day.locator('.day-selected')).to_have_text('1')
+    day.locator('.import-day-toggle').click()
+    page.locator('#chkSelectAllImport').check()
+    expect(day.locator('.day-check')).to_be_checked()
+    expect(day.locator('.day-selected')).to_have_text('2')
+    page.locator('#chkSelectAllImport').uncheck()
+    day.locator('.day-check').check()
+    expect(page.locator('#previewSelectedCount')).to_have_text('2 of 3 selected')
+    day.locator('.import-day-toggle').click()
+    expect(_box(page, files[0]['path'])).to_be_checked()
+
+
+def test_capture_day_all_duplicates_stays_visible_and_cannot_be_selected(live_server, page):
+    page.goto(f"{live_server['url']}/import")
+    files = _files(2)
+    for file in files:
+        file['capture_date'] = '2026-08-09'
+    _stub_preview(page, files, duplicates=[file['path'] for file in files])
+    _preview(page)
+    _await_duplicate_verdicts(page, 2)
+    page.locator('#chkHideDuplicates').check()
+    day = _day_row(page, '2026-08-09')
+    expect(day).to_be_visible()
+    expect(day.locator('.day-duplicates')).to_have_text('2')
+    expect(day.locator('.day-selected')).to_have_text('0')
+    expect(day.locator('.day-check')).to_be_disabled()
+
+
+def test_capture_day_overlapping_sources_count_each_path_once(live_server, page):
+    page.goto(f"{live_server['url']}/import")
+    files = _files(2)
+    for file in files:
+        file['capture_date'] = '2026-08-09'
+    _stub_preview(page, files + [dict(files[0])], duplicates=[files[0]['path']])
+    _preview(page)
+    _await_duplicate_verdicts(page, 1)
+    day = _day_row(page, '2026-08-09')
+    expect(day.locator('.day-files')).to_have_text('2')
+    expect(day.locator('.day-duplicates')).to_have_text('0')
+    expect(day.locator('.day-selected')).to_have_text('2')
+    day.locator('.day-check').uncheck()
+    expect(page.locator('#previewSelectedCount')).to_have_text('0 of 2 selected')
+
+
+def test_capture_day_collapsed_photos_are_excluded_from_shift_selection(live_server, page):
+    page.goto(f"{live_server['url']}/import")
+    files = _files(3)
+    for index, file in enumerate(files):
+        file['capture_date'] = f'2026-08-{index + 9:02d}'
+    _stub_preview(page, files)
+    _preview(page)
+    middle = _day_row(page, '2026-08-10')
+    middle.locator('.import-day-toggle').click()
+    _box(page, files[0]['path']).click()
+    _box(page, files[2]['path']).click(modifiers=['Shift'])
+    expect(middle.locator('.day-selected')).to_have_text('1')
+    expect(page.locator('#previewSelectedCount')).to_have_text('1 of 3 selected')
+    middle.locator('.import-day-toggle').click()
+    expect(_box(page, files[1]['path'])).to_be_checked()
 
 
 def test_import_preview_files_are_checked_by_default(live_server, page):

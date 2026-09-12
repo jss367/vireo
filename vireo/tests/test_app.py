@@ -15524,6 +15524,21 @@ def test_api_import_folder_preview_stream(app_and_db, tmp_path):
     assert final["source_counts"] == {str(source): 3}
 
 
+def test_api_import_folder_preview_stream_includes_capture_dates(app_and_db, tmp_path):
+    from PIL import Image
+
+    exif = Image.Exif()
+    exif[36867] = "2026:08:09 23:59:00"
+    Image.new("RGB", (8, 8)).save(tmp_path / "dated.jpg", exif=exif)
+    app, _ = app_and_db
+    response = app.test_client().post("/api/import/folder-preview-stream", json={
+        "folders": [str(tmp_path)], "file_types": [".jpg"],
+        "include_capture_dates": True,
+    })
+    assert response.status_code == 200
+    assert _sse_frames(response)[-1]["files"][0]["capture_date"] == "2026-08-09"
+
+
 def test_api_import_folder_preview_stream_validates_folders(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
