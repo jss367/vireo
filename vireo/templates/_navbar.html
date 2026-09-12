@@ -4218,7 +4218,8 @@ var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata 
 var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
 var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
-var _lbPreviewMaxSize = null; // workspace-effective /full cap from photo metadata; 0 means original
+// Bootstrap before opening any photo; metadata refreshes the workspace cap later.
+var _lbPreviewMaxSize = window.VIREO_FULL_PREVIEW_MAX_SIZE ?? null; // 0 means original
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
 var _lbPending1To1Anchor = null; // optional client-space anchor for a deferred 1:1 snap
 var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions

@@ -5094,9 +5094,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         first in ``_navbar.html``, before any inline page script runs.
         """
         labels = _file_manager_labels()
+        preview_max_size = _get_db().get_effective_config(cfg.load()).get("preview_max_size")
         return Response(
             "window.VIREO_CONFIG_DEFAULTS = "
             + json.dumps(cfg.DEFAULTS, separators=(",", ":"))
+            + ";\nwindow.VIREO_FULL_PREVIEW_MAX_SIZE = "
+            + json.dumps(1920 if preview_max_size is None else preview_max_size)
             + ";\nwindow.VIREO_PLATFORM = "
             + json.dumps(sys.platform)
             + ";\nwindow.VIREO_REVEAL_LABEL = "
@@ -5107,6 +5110,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + json.dumps(labels["editor_placeholder"])
             + ";\n",
             mimetype="application/javascript",
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.route("/")

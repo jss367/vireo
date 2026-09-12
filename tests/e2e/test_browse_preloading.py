@@ -370,3 +370,46 @@ def test_small_photo_does_not_lower_workspace_preview_limit(live_server, page, p
     page.wait_for_function("id => _lightboxCommittedId === id && !_lbVisualTransitionPending", arg=ids[1])
     incoming = [url for url in requested if f"/photos/{ids[1]}/" in url]
     assert incoming and "/full" in incoming[0]
+
+
+@pytest.mark.parametrize("preview_size,needed", [(3000, 2800), (5000, 4500), (0, 5000)])
+def test_navigation_uses_workspace_limit_before_metadata(live_server, page, preview_size, needed):
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+    db.update_workspace(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
+    requested = []
+    held_metadata = []
+    page.route(re.compile(r"/api/photos/\d+$"), lambda route: held_metadata.append(route))
+
+    def serve(route):
+        requested.append(route.request.url)
+        route.fulfill(body=_jpeg(), content_type="image/jpeg")
+
+    page.route("**/photos/*/full*", serve)
+    page.route("**/photos/*/original*", serve)
+    page.route("**/photos/*/preview?*", serve)
+    page.set_viewport_size({"width": needed, "height": needed})
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate(
+        """id => {
+          _lbScheduleAdjacentPhoto = function() {};
+          _lbScheduleOriginalPreload = function() {};
+          openLightbox(id, 'first.jpg', [{id, filename: 'first.jpg', width: 6000, height: 4000}]);
+        }""", photo_id,
+    )
+    page.wait_for_function("document.getElementById('lightboxImg').naturalWidth > 0")
+    assert held_metadata
+    assert requested and "/full" in requested[0]
+    page.evaluate(
+        """id => openLightbox(id, 'next.jpg', [{id, filename: 'next.jpg', width: 6000, height: 4000}])""",
+        photo_id + 1,
+    )
+    page.wait_for_function("id => _lightboxCommittedId === id", arg=photo_id + 1)
+    incoming = [url for url in requested if f"/photos/{photo_id + 1}/" in url]
+    assert incoming and "/full" in incoming[0]
+    for route in held_metadata:
+        route.fulfill(json={
+            "id": int(route.request.url.rsplit("/", 1)[1]), "width": 6000, "height": 4000,
+            "full_preview_max_size": preview_size, "full_uses_original": preview_size == 0,
+        })
