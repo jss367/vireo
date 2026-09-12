@@ -24,6 +24,7 @@ def _open_window(page, live_server, count=30):
         lambda route: route.fulfill(json={
             "id": int(route.request.url.rsplit("/", 1)[1]),
             "width": 6000, "height": 4000, "full_uses_original": False,
+            "full_preview_max_size": 1920,
             "edit_recipe": None, "flag": "none",
         }),
     )
@@ -325,3 +326,47 @@ def test_failed_initial_sized_preview_falls_back_to_usable_image(live_server, pa
     # its failure must keep the usable fallback and cannot cause a retry loop.
     assert len(failed_requests) <= 2
     assert page.evaluate("document.getElementById('lightboxImg').naturalWidth") > 0
+
+
+@pytest.mark.parametrize("preview_size,needed", [(1920, 1200), (960, 900), (3840, 3200), (0, 5000)])
+def test_small_photo_does_not_lower_workspace_preview_limit(live_server, page, preview_size, needed):
+    db = live_server["db"]
+    ids = live_server["data"]["photos"]
+    db.conn.execute("UPDATE photos SET width=6000, height=4000")
+    db.conn.execute("UPDATE photos SET width=800, height=533 WHERE id=?", (ids[0],))
+    db.conn.commit()
+    db.update_workspace(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
+    requested = []
+
+    def serve(route):
+        url = route.request.url
+        if "prefetch=1" not in url:
+            requested.append(url)
+        if f"/photos/{ids[0]}/" in url:
+            width, height = 800, 533
+        else:
+            width = preview_size or 6000
+            height = round(width * 2 / 3)
+        route.fulfill(body=_jpeg(width, height), content_type="image/jpeg")
+
+    page.route("**/photos/*/full*", serve)
+    page.route("**/photos/*/original*", serve)
+    page.route("**/photos/*/preview?*", serve)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("_lbFullLongEdge === 800 && _lbPhotoW === 800")
+    page.evaluate(
+        """needed => {
+          _lbClearAdjacentPreloads();
+          _lbScheduleAdjacentPhoto = function() {};
+          const wrap = document.getElementById('lightboxWrap');
+          const fit = Math.min(1, wrap.clientWidth / 6000, wrap.clientHeight / 4000);
+          const next = _lightboxPhotoList[1];
+          openLightbox(next.id, next.filename, _lightboxPhotoList, {
+            fallbackViewportState: {zoom: needed / (6000 * fit * devicePixelRatio), centerX: 0.5, centerY: 0.5}
+          });
+        }""", needed,
+    )
+    page.wait_for_function("id => _lightboxCommittedId === id && !_lbVisualTransitionPending", arg=ids[1])
+    incoming = [url for url in requested if f"/photos/{ids[1]}/" in url]
+    assert incoming and "/full" in incoming[0]

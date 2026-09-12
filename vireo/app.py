@@ -7402,9 +7402,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # In full-resolution preview mode /full already redirects to /original,
         # so tell the client not to repeat that potentially expensive RAW work.
         import config as cfg
-        result["full_uses_original"] = (
-            db.get_effective_config(cfg.load()).get("preview_max_size") == 0
-        )
+        preview_max_size = db.get_effective_config(cfg.load()).get("preview_max_size")
+        result["full_uses_original"] = preview_max_size == 0
+        # A small photo's natural dimensions cannot reveal the configured cap.
+        result["full_preview_max_size"] = 1920 if preview_max_size is None else preview_max_size
 
         # Read XMP sidecar keywords
         folder = db.conn.execute(

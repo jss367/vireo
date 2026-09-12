@@ -961,6 +961,7 @@ def test_api_photo_detail(app_and_db):
     assert data['filename'] == 'bird1.jpg'
     assert 'keywords' in data
     assert data['full_uses_original'] is False
+    assert data['full_preview_max_size'] == 1920
 
 
 def test_api_photo_detail_reports_full_resolution_preview_mode(app_and_db):
@@ -976,6 +977,20 @@ def test_api_photo_detail_reports_full_resolution_preview_mode(app_and_db):
 
     assert resp.status_code == 200
     assert resp.get_json()['full_uses_original'] is True
+    assert resp.get_json()['full_preview_max_size'] == 0
+
+
+@pytest.mark.parametrize("preview_size", [960, 3840])
+def test_api_photo_detail_reports_workspace_preview_size(app_and_db, preview_size):
+    """The lightbox receives the workspace override rather than the global cap."""
+    app, db = app_and_db
+    db.update_workspace(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
+    pid = db.get_photos()[0]['id']
+
+    data = app.test_client().get(f'/api/photos/{pid}').get_json()
+
+    assert data['full_preview_max_size'] == preview_size
+    assert data['full_uses_original'] is False
 
 
 def test_api_photo_detail_includes_on_disk_path(app_and_db):

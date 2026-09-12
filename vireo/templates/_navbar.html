@@ -4218,7 +4218,7 @@ var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata 
 var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
 var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
-var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
+var _lbPreviewMaxSize = null; // workspace-effective /full cap from photo metadata; 0 means original
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
 var _lbPending1To1Anchor = null; // optional client-space anchor for a deferred 1:1 snap
 var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions
@@ -5373,7 +5373,6 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     if (_lightboxCurrentId !== photoId) return;
     if (img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
-      _lbSessionFullLongEdge = _lbFullLongEdge;
     }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
@@ -8139,6 +8138,10 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoH = data.height || null;
       _lbFullUsesOriginal = !!data.full_uses_original;
       _lbSessionFullUsesOriginal = _lbFullUsesOriginal;
+      if (data.full_preview_max_size != null &&
+          Number.isFinite(Number(data.full_preview_max_size)) && Number(data.full_preview_max_size) >= 0) {
+        _lbPreviewMaxSize = Number(data.full_preview_max_size);
+      }
       _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
       var currentLayoutRecipe = _lbEditRecipeByPhoto[String(photoId)];
       _lbCurrentEditRecipe = _lbRecipeHasEdits(currentLayoutRecipe)
@@ -8212,7 +8215,6 @@ function openLightbox(photoId, filename, photoList, options) {
     // dimensions as the /full threshold.
     if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'full' && img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
-      _lbSessionFullLongEdge = _lbFullLongEdge;
     }
     if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'original' && !_lbPhotoW && img.naturalWidth) {
       _lbPhotoW = img.naturalWidth;
@@ -10503,6 +10505,11 @@ function _lbSetPreviewLoading(loading) {
   if (status) status.style.display = loading ? '' : 'none';
 }
 
+function _lbFullPreviewLimit() {
+  if (_lbPreviewMaxSize === 0 || _lbFullUsesOriginal === true || _lbSessionFullUsesOriginal === true) return Infinity;
+  return _lbPreviewMaxSize || 1920;
+}
+
 function _lbInitialSourceKey(photo, zoom, oneToOne) {
   var w = Number(photo.width), h = Number(photo.height);
   if (!w || !h) return oneToOne || zoom > 1.001 ? 'original' : 'full';
@@ -10519,7 +10526,7 @@ function _lbInitialSourceKey(photo, zoom, oneToOne) {
   var fit = Math.min(1, wrap.clientWidth / dims.w, wrap.clientHeight / dims.h);
   var needed = oneToOne ? Math.max(dims.w, dims.h)
     : Math.max(dims.w, dims.h) * fit * zoom * (window.devicePixelRatio || 1);
-  var fullEdge = _lbSessionFullLongEdge || 1920;
+  var fullEdge = _lbFullPreviewLimit();
   if (needed <= fullEdge) return 'full';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
@@ -10559,9 +10566,9 @@ function _lbPickSourceKey(targetZoom) {
   var dpr = window.devicePixelRatio || 1;
   var needed = displayedLong * dpr;
   // /full's actual long edge depends on the server's preview_max_size config (default 1920).
-  // Prefer the per-photo measurement; if not yet recorded (user zoomed before /full
-  // loaded), fall back to the last photo's measurement in this session, then 1920.
-  var fullLongEdge = _lbFullLongEdge || _lbSessionFullLongEdge || 1920;
+  // Prefer this photo's decoded size. Before it loads, use the configured cap;
+  // a previous small photo may never have reached that cap.
+  var fullLongEdge = _lbFullLongEdge || _lbFullPreviewLimit();
   if (needed <= fullLongEdge) return 'full';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
@@ -10653,8 +10660,7 @@ function _lbReleasePreloadImage(entry) {
 function _lbSmallPreviewKey() {
   // /full is configurable, including an original-resolution mode. Never use
   // that mode (or a large custom preview) for the wide navigation window.
-  return (_lbFullUsesOriginal === true || _lbSessionFullUsesOriginal === true ||
-    (_lbFullLongEdge || _lbSessionFullLongEdge || 1920) > 1920) ? '1920' : 'full';
+  return _lbFullPreviewLimit() > 1920 ? '1920' : 'full';
 }
 
 function _lbEstimatePreloadBytes(photo, key) {
@@ -10662,8 +10668,7 @@ function _lbEstimatePreloadBytes(photo, key) {
   var w = Number(cached.width || photo.width) || _lbPhotoW || 6000;
   var h = Number(cached.height || photo.height) || _lbPhotoH || 4000;
   var size = key === 'original' ? Math.max(w, h)
-    : key === 'full' ? (_lbSessionFullLongEdge || 1920) : Number(key);
-  if (key === 'full' && (_lbFullUsesOriginal || _lbSessionFullUsesOriginal)) size = Math.max(w, h);
+    : key === 'full' ? _lbFullPreviewLimit() : Number(key);
   var scale = Math.min(1, size / Math.max(w, h));
   return Math.ceil(w * scale) * Math.ceil(h * scale) * 4;
 }
