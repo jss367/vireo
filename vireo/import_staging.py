@@ -34,9 +34,11 @@ def plan_staged_import(vireo_dir, destination, remote_archive=None, parent=None,
     root = os.path.dirname(local_destination)
     from path_guard import contains_resolved
 
-    if (contains_resolved(destination, root)
-            or contains_resolved(root, destination)
-            or not contains_resolved(os.path.join(vireo_dir, "staging"), root)):
+    root_real = os.path.realpath(root)
+    destination_real = os.path.realpath(destination)
+    if (contains_resolved(destination_real, root_real)
+            or contains_resolved(root_real, destination_real)
+            or not contains_resolved(os.path.realpath(os.path.join(vireo_dir, "staging")), root_real)):
         raise ValueError("Temporary processing storage must be separate from the final destination.")
     target["local_archive_root"] = root
     target["managed_staging_root"] = root

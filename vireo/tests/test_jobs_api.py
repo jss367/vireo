@@ -4670,6 +4670,59 @@ def test_managed_import_preserves_originals_when_mount_replaced(app_and_db, tmp_
                            (imported["config"]["managed_staging"]["destination"],)).fetchone()
 
 
+def test_managed_import_rejects_source_alias_containing_staging(app_and_db, tmp_path):
+    from pathlib import Path
+
+    app, db = app_and_db
+    card = Path(_import_card(tmp_path))
+    alias = tmp_path / "source-alias"
+    alias.symlink_to(card, target_is_directory=True)
+    app.config["THUMB_CACHE_DIR"] = str(card / ".vireo" / "thumbs")
+    response = app.test_client().post("/api/jobs/import-photos", json={
+        "sources": [str(alias)], "destination": str(tmp_path / "NAS" / "trip"),
+        "local_processing": True, "defer_nas_transfer": True,
+        "after_import": _process_id(db, "Cull-ready"),
+    })
+    assert response.status_code == 400, response.get_json()
+    assert "cannot be inside a source directory" in response.get_json()["error"]
+    assert not (card / ".vireo" / "staging").exists()
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled", "duplicates"])
+def test_deferred_import_without_collection_preserves_result(app_and_db, tmp_path, monkeypatch, outcome):
+    import import_job
+
+    app, db = app_and_db
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()[0]
+    expected = {
+        "ok": outcome != "failed", "cancelled": outcome == "cancelled",
+        "photo_ids": [] if outcome == "duplicates" else [photo_id],
+        "copied": 0 if outcome == "duplicates" else 1,
+        "errors": ["Source read failed"] if outcome == "failed" else [],
+    }
+    monkeypatch.setattr(import_job, "run_import_job", lambda *a, **kw: dict(expected))
+    client = app.test_client()
+    response = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS" / "trip"),
+        "local_processing": True, "defer_nas_transfer": True,
+        "after_import": _process_id(db, "Cull-ready"),
+    })
+    assert response.status_code == 200, response.get_json()
+    job = wait_for_job_via_client(client, response.get_json()["job_id"])
+    result = job["result"]
+    assert result is not None, job
+    for key, value in expected.items():
+        assert result[key] == value
+    assert result["nas_transfer_deferred"] is True
+    assert result["pending_archive_id"] == job["config"]["pending_archive_id"]
+    assert result["after_import_skipped"] == {
+        "failed": "import failed", "cancelled": "import cancelled", "duplicates": "no new photos",
+    }[outcome]
+    assert "collection_id" not in result
+    assert "process_job_id" not in result
+    assert len(client.get("/api/import/pending-archives").get_json()["items"]) == 1
+
+
 def test_managed_import_requires_processing(app_and_db, tmp_path):
     app, _ = app_and_db
     response = app.test_client().post("/api/jobs/import-photos", json={

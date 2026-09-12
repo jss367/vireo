@@ -53,10 +53,11 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
     source = archive["staging_destination"]
     target = json.loads(archive["target_json"])
     root = target["managed_staging_root"]
-    if (not contains_resolved(os.path.join(vireo_dir, "staging"), root)
-            or not contains_resolved(root, source)
-            or os.path.realpath(os.path.dirname(source)) != os.path.realpath(root)
-            or os.path.realpath(source) == os.path.realpath(root)):
+    root_real, source_real = os.path.realpath(root), os.path.realpath(source)
+    if (not contains_resolved(os.path.realpath(os.path.join(vireo_dir, "staging")), root_real)
+            or not contains_resolved(root_real, source_real)
+            or os.path.realpath(os.path.dirname(source)) != root_real
+            or source_real == root_real):
         raise ValueError("The local originals no longer match their saved location.")
     if not os.path.isdir(source):
         raise ValueError("Local originals are unavailable. Reconnect their storage before sending to NAS.")

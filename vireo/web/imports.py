@@ -4149,7 +4149,8 @@ def create_imports_blueprint(
                     os.path.dirname(config["THUMB_CACHE_DIR"]), destination,
                     remote_archive_config, parent_staging, _load_known_mount_roots(db),
                 )
-                if any(path_guard.contains_resolved(s, managed_staging["destination"]) for s in sources):
+                staging_real = os.path.realpath(managed_staging["destination"])
+                if any(path_guard.contains_resolved(os.path.realpath(s), staging_real) for s in sources):
                     return json_error("Temporary processing storage cannot be inside a source directory")
             except (ValueError, OSError, RuntimeError) as e:
                 return json_error(str(e))
@@ -4362,11 +4363,12 @@ def create_imports_blueprint(
                 result, active_ws, chain_photo_ids=carry_photo_ids,
             )
             if pending_archive_id:
-                thread_db.conn.execute(
-                    "UPDATE pending_archives SET collection_id = COALESCE(?, collection_id) WHERE id = ?",
-                    (col_id, pending_archive_id),
-                )
-                thread_db.conn.commit()
+                if thread_db is not None:
+                    thread_db.conn.execute(
+                        "UPDATE pending_archives SET collection_id = COALESCE(?, collection_id) WHERE id = ?",
+                        (col_id, pending_archive_id),
+                    )
+                    thread_db.conn.commit()
                 result["nas_transfer_deferred"] = True
                 result["pending_archive_id"] = pending_archive_id
             # Recovery-retry imports may carry forward files earlier
