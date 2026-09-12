@@ -413,3 +413,40 @@ def test_navigation_uses_workspace_limit_before_metadata(live_server, page, prev
             "id": int(route.request.url.rsplit("/", 1)[1]), "width": 6000, "height": 4000,
             "full_preview_max_size": preview_size, "full_uses_original": preview_size == 0,
         })
+
+
+def test_failed_original_warmup_releases_budget_for_neighbors(live_server, page):
+    failed = []
+
+    def fail_original(route):
+        failed.append(route.request.url)
+        route.fulfill(status=404, body="Original unavailable")
+
+    page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", fail_original)
+    _open_window(page, live_server)
+    page.evaluate(
+        """() => {
+          window.savedPreloadList = _lightboxPhotoList;
+          _lightboxPhotoList = _lightboxPhotoList.filter(p => p.id === 115);
+          _lbClearAdjacentPreloads();
+        }"""
+    )
+    page.wait_for_function("_lbSpeculativeLoads.size === 0")
+    page.evaluate(
+        """() => {
+          // Exercise the final attempt after the original warmup's retry.
+          _lbOriginalPreloadWaiting = {photoId: 115, retryCount: 1};
+          _lbStartPendingOriginalPreload();
+        }"""
+    )
+    page.wait_for_function("_lbSpeculativeLoads.size === 0")
+    assert len(failed) == 1
+    assert page.evaluate("_lbPreloadBytes()") == 0
+    page.evaluate(
+        """() => {
+          _lightboxPhotoList = window.savedPreloadList;
+          _lbScheduleAdjacentPhoto('full');
+        }"""
+    )
+    page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === 12")

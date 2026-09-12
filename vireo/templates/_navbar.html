@@ -10776,8 +10776,12 @@ function _lbStartPendingOriginalPreload() {
   _lbOriginalPreload = entry;
   _lbRunSpeculativePreload(entry, function(decoded) {
     if (_lbOriginalPreload !== entry) return;
-    if (!decoded && pending.retryCount < 1 && _lbShouldPreloadOriginal(pending.photoId)) {
-      _lbScheduleOriginalPreload(pending.photoId, pending.retryCount + 1);
+    if (!decoded) {
+      // A failed image retains no pixels and must not reserve its estimate.
+      _lbOriginalPreload = null;
+      if (pending.retryCount < 1 && _lbShouldPreloadOriginal(pending.photoId)) {
+        _lbScheduleOriginalPreload(pending.photoId, pending.retryCount + 1);
+      }
     }
   });
 }
