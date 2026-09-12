@@ -867,7 +867,8 @@ class JobRunner:
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
               ephemeral=False, runtime_warning=None, counts_for_badge=True,
-              pausable=False, blocks_local_transitions=True):
+              pausable=False, blocks_local_transitions=True,
+              workspace_transfer_batch=None):
         """Start a background job.
 
         Args:
@@ -893,6 +894,8 @@ class JobRunner:
                       actions may proceed while this job runs. Reserve this
                       for observational jobs whose results are safely dropped
                       when a local transition invalidates their cache.
+            workspace_transfer_batch: identifies automatic moves whose workers
+                      call wait_for_workspace_transfer before touching originals.
 
         Returns:
             job_id string
@@ -903,6 +906,7 @@ class JobRunner:
             ephemeral=ephemeral, runtime_warning=runtime_warning,
             counts_for_badge=counts_for_badge, pausable=pausable,
             blocks_local_transitions=blocks_local_transitions,
+            workspace_transfer_batch=workspace_transfer_batch,
         )
         log.info("Job %s started type=%s", job["id"], job_type)
         if not self._start_worker_thread(job, work_fn):
@@ -930,6 +934,8 @@ class JobRunner:
             "counts_for_badge": counts_for_badge,
             "pausable": bool(pausable),
             "blocks_local_transitions": bool(blocks_local_transitions),
+            "exclusive_workspace": False,
+            "workspace_transfer_batch": None,
             "runtime_warning": runtime_warning,
             "singleton_key": singleton_key,
             "resource_wait_seconds": 0.0,
@@ -948,7 +954,7 @@ class JobRunner:
     def _register_and_prepare(self, job_type, work_fn, *, config, workspace_id,
                               ephemeral, runtime_warning, counts_for_badge,
                               pausable, blocks_local_transitions,
-                              singleton_key=None):
+                              singleton_key=None, workspace_transfer_batch=None):
         """Allocate an id and register the job dict under the runner lock.
 
         Returns the (job, work_fn) pair the caller should hand to a thread.
@@ -976,6 +982,7 @@ class JobRunner:
                 singleton_key=singleton_key,
             )
             self._prune_finished_jobs()
+            job["workspace_transfer_batch"] = workspace_transfer_batch
             self._jobs[job_id] = job
             self._events[job_id] = deque(maxlen=1000)
             self._subscribers[job_id] = []
@@ -994,6 +1001,45 @@ class JobRunner:
                 self._workspace_mutations[workspace_id] -= 1
                 if not self._workspace_mutations[workspace_id]:
                     del self._workspace_mutations[workspace_id]
+
+    def wait_for_workspace_transfer(self, job_id):
+        """Reserve an automatic transfer batch after its producing jobs finish.
+
+        All batch members register while their parent is still live. The first
+        move claims every live sibling, so the reservation survives between
+        serialized moves. Other waiting batches do not deadlock each other;
+        registration order chooses the next batch once existing work drains.
+        """
+        with self._pause_condition:
+            while True:
+                job = self._jobs[job_id]
+                if job_id in self._cancelled or self._shutting_down:
+                    return False
+                workspace_id = job["workspace_id"]
+                batch = job.get("workspace_transfer_batch")
+                if not batch:
+                    raise ValueError("Automatic transfer batch is required")
+                live = [j for j in self._jobs.values()
+                        if j.get("workspace_id") == workspace_id
+                        and j.get("status") in ("running", "queued", "pausing", "paused")
+                        and j.get("blocks_local_transitions", True)]
+                first_batch = next((j.get("workspace_transfer_batch") for j in live
+                                    if j.get("workspace_transfer_batch") and j.get("exclusive_workspace")), None)
+                if first_batch is None:
+                    first_batch = next((j.get("workspace_transfer_batch") for j in live
+                                        if j.get("workspace_transfer_batch")), None)
+                busy = any(j.get("workspace_transfer_batch") != batch
+                           and (not j.get("workspace_transfer_batch") or j.get("exclusive_workspace"))
+                           for j in live)
+                if (not busy and first_batch == batch
+                        and not self._pipeline_admissions.get(workspace_id)
+                        and not self._workspace_mutations.get(workspace_id)
+                        and not any(c.get("workspace_id") == workspace_id for c in self._queued_pipelines.values())):
+                    for sibling in live:
+                        if sibling.get("workspace_transfer_batch") == batch:
+                            sibling["exclusive_workspace"] = True
+                    return True
+                self._pause_condition.wait(timeout=0.1)
 
     def _check_workspace_admission_locked(self, workspace_id, blocking=True, exclusive=False):
         """Check both sides of a transfer reservation under the registration lock."""

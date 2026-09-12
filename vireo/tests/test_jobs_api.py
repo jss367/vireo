@@ -4723,6 +4723,56 @@ def test_deferred_import_without_collection_preserves_result(app_and_db, tmp_pat
     assert len(client.get("/api/import/pending-archives").get_json()["items"]) == 1
 
 
+def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_db, tmp_path, monkeypatch):
+    import shutil
+
+    import move
+    import pipeline_job
+
+    app, db = app_and_db
+    entered, release = threading.Event(), threading.Event()
+    existing_release = threading.Event()
+    runner = app._job_runner
+    existing = runner.start("export", lambda job: existing_release.wait(10), workspace_id=db._ws_id())
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", lambda *a, **kw: {"ok": True})
+
+    def copy(source, destination, *args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+        return 0, "", False
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", copy)
+    client = app.test_client()
+    response = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS" / "trip"),
+        "folder_template": "", "local_processing": True, "defer_nas_transfer": False,
+        "after_import": _process_id(db, "Cull-ready"),
+    })
+    try:
+        imported = wait_for_job_via_client(client, response.get_json()["job_id"])
+        processed = wait_for_job_via_client(client, imported["result"]["process_job_id"])
+        assert processed["status"] == "completed", processed
+        assert not entered.is_set()
+        existing_release.set()
+        wait_for_job_via_client(client, existing)
+        assert entered.wait(10)
+        deleted = client.post("/api/batch/delete", json={
+            "photo_ids": imported["result"]["photo_ids"], "mode": "disk_permanent",
+        })
+        assert deleted.status_code == 409, deleted.get_json()
+        scan = client.post("/api/jobs/scan", json={"root": imported["config"]["managed_staging"]["destination"]})
+        assert scan.status_code == 409, scan.get_json()
+    finally:
+        existing_release.set()
+        release.set()
+    for job_id in processed["result"]["move_job_ids"]:
+        moved = wait_for_job_via_client(client, job_id)
+        assert moved["status"] == "completed", moved
+    assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 1
+    assert not list((tmp_path / "staging").rglob("*.jpg"))
+
+
 def test_managed_import_requires_processing(app_and_db, tmp_path):
     app, _ = app_and_db
     response = app.test_client().post("/api/jobs/import-photos", json={

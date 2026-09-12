@@ -24313,6 +24313,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 }
             try:
                 check_mount = None
+                if managed_staging_root and not runner.begin_uncancellable(job["id"]):
+                    return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
                 if mount_baseline is not None:
                     from import_staging import check_staged_mount
 
@@ -24421,10 +24423,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Provenance for the jobs panel: this move was started by a
             # chained process run's completion hook, not by hand.
             job_config["chained_from"] = chained_from
+
+        def staged_work(job):
+            runner.push_event(job["id"], "progress", {
+                "current": 0, "total": 0, "current_file": "",
+                "phase": "Waiting for workspace jobs to finish before sending to NAS",
+            })
+            if not runner.wait_for_workspace_transfer(job["id"]):
+                return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
+            return work(job)
+
         return runner.start(
-            "move-folder", work,
+            "move-folder", staged_work if managed_staging_root else work,
             config=job_config,
             workspace_id=workspace_id,
+            **({"workspace_transfer_batch": managed_staging_root} if managed_staging_root else {}),
         )
 
     @app.route("/api/jobs/move-folder", methods=["POST"])

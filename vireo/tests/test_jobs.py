@@ -107,6 +107,74 @@ def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch)
     runner.shutdown()
 
 
+def test_automatic_transfer_batches_wait_and_hold_reservation_between_siblings():
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    parent_release, a_release, b_release = threading.Event(), threading.Event(), threading.Event()
+    a_started, b_started = threading.Event(), threading.Event()
+    a_lock = threading.Lock()
+    parent = runner.start("pipeline", lambda job: parent_release.wait(10), workspace_id=1)
+
+    def transfer(job, group):
+        assert runner.wait_for_workspace_transfer(job["id"])
+        if group == "a":
+            with a_lock:
+                a_started.set()
+                assert a_release.wait(10)
+        else:
+            b_started.set()
+            assert b_release.wait(10)
+
+    ids = [runner.start("move-folder", lambda job, group=group: transfer(job, group),
+                        workspace_id=1, workspace_transfer_batch=group)
+           for group in ("a", "b", "a")]
+    try:
+        assert not a_started.is_set() and not b_started.is_set()
+        parent_release.set()
+        wait_for_job_via_runner(runner, parent)
+        assert a_started.wait(10)
+        assert not b_started.is_set()
+        with pytest.raises(WorkspaceBusyError):
+            runner.start("export", lambda job: None, workspace_id=1)
+        a_release.set()
+        for job_id in (ids[0], ids[2]):
+            assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+        assert b_started.wait(10)
+        with pytest.raises(WorkspaceBusyError):
+            with runner.workspace_mutation(1):
+                pytest.fail("Synchronous mutation entered during transfer")
+    finally:
+        parent_release.set()
+        a_release.set()
+        b_release.set()
+        runner.shutdown(timeout=10)
+    assert not any(j.get("status") == "running" for j in runner.list_jobs())
+
+
+def test_automatic_transfer_can_cancel_while_waiting_for_processing():
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+    parent = runner.start("pipeline", lambda job: release.wait(10), workspace_id=1)
+    entered = threading.Event()
+
+    def transfer(job):
+        if runner.wait_for_workspace_transfer(job["id"]):
+            entered.set()
+
+    job_id = runner.start("move-folder", transfer, workspace_id=1, workspace_transfer_batch="a")
+    try:
+        assert runner.cancel_job(job_id)
+        assert wait_for_job_via_runner(runner, job_id)["status"] == "cancelled"
+        assert not entered.is_set()
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, parent)
+        runner.shutdown()
+
+
 def test_job_runner_shutdown_cancels_and_joins_workers():
     """Teardown owns worker lifetime and refuses work after it begins."""
     from jobs import JobRunner
