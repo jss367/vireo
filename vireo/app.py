@@ -14779,7 +14779,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "Sync or discard its local copy before deleting the workspace.",
                         409,
                     )
-            db.delete_workspace(ws_id)
+            try:
+                db.delete_workspace(ws_id)
+            except ValueError as e:
+                return json_error(str(e), 409)
         # Drop this workspace's cached Missing Originals payload so a
         # later workspace that reuses this SQLite rowid can't be served
         # the deleted workspace's ghost photos / folder paths.
