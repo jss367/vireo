@@ -3670,15 +3670,23 @@ def _stub_preview(page, files, duplicates=None):
           window.fetch = (input, init) => {
             const t = typeof input === 'string' ? input : input.url;
             if (t && t.indexOf('/api/import/folder-preview') === 0) {
+              window.__dayDiscoveryRequest = JSON.parse(init.body);
               return Promise.resolve(window.__previewDoneResponse({
                 total_count: files.length, total_size: 0,
                 type_breakdown: {'.jpg': files.length},
-                duplicate_count: 0, files: files,
+                duplicate_count: 0, files: files.map(file => {
+                  const copy = {...file};
+                  if (!window.__dayDiscoveryRequest.include_capture_dates) delete copy.capture_date;
+                  return copy;
+                }),
               }));
             }
             if (t && t.indexOf('/api/import/check-duplicates') === 0) {
+              window.__dayCheckRequest = JSON.parse(init.body);
               const frame = 'data: ' + JSON.stringify({
                 duplicates: dupes, checked: files.length, total: files.length,
+                capture_dates: window.__dayCheckRequest.include_capture_dates
+                  ? Object.fromEntries(files.map(file => [file.path, file.capture_date || null])) : {},
               }) + '\\n\\n' + 'data: ' + JSON.stringify({
                 done: true, duplicate_count: dupes.length,
                 checked: files.length, total: files.length,
@@ -3725,6 +3733,30 @@ def _files(n, prefix='/tmp/card/DSC_'):
 
 def _day_row(page, day):
     return page.locator(f"#importDayRows tr[data-day='{day}']")
+
+
+@pytest.mark.parametrize("skip_duplicates,with_destination,verify_by_hash", [
+    (True, True, False), (True, False, True),
+    (False, True, False), (False, True, True), (False, False, False),
+])
+def test_capture_day_metadata_is_read_by_only_one_preview_phase(
+        live_server, page, skip_duplicates, with_destination, verify_by_hash):
+    page.goto(f"{live_server['url']}/import")
+    files = _files(1)
+    files[0]['capture_date'] = '2026-08-09'
+    _stub_preview(page, files)
+    page.locator('#chkSkipDuplicates').set_checked(skip_duplicates)
+    if verify_by_hash:
+        page.locator('#chkVerifyByHash').check()
+    if with_destination:
+        _set_destination(page)
+    _preview(page)
+    expect(_day_row(page, '2026-08-09')).to_be_visible()
+    discovery = page.evaluate('window.__dayDiscoveryRequest')
+    checks_metadata = skip_duplicates or with_destination
+    assert discovery['include_capture_dates'] is not checks_metadata
+    if checks_metadata:
+        assert page.evaluate('window.__dayCheckRequest.include_capture_dates') is True
 
 
 def test_capture_day_skip_with_hidden_duplicates_reaches_import(live_server, page):

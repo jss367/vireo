@@ -663,10 +663,15 @@ def create_imports_blueprint(
         mirrors that: no ``duplicates`` are streamed, but ``recovered``
         still is — so the retry preview after a cancelled dedup-off run
         doesn't overstate the transfer.
+
+        With include_capture_dates=true, preparation frames also carry
+        capture_dates (path to ISO date or null), sharing metadata reads
+        with duplicate checking and recovery planning.
         """
         body = request.get_json(silent=True) or {}
         paths = body.get("paths", [])
         verify_by_hash = bool(body.get("verify_by_hash"))
+        include_capture_dates = bool(body.get("include_capture_dates", False))
         # Default True is the import job's default and preserves the
         # pre-existing endpoint contract; only the dedup-off preview
         # branch passes False.
@@ -703,7 +708,7 @@ def create_imports_blueprint(
             CatalogIndex.from_db(db), verify_by_hash=verify_by_hash,
         )
 
-        # str(path) -> capture datetime for recovery folder planning when
+        # str(path) -> capture datetime for recovery planning and day summaries when
         # verify_by_hash disables the checker's own EXIF batching.
         recovery_times = {}
 
@@ -928,10 +933,10 @@ def create_imports_blueprint(
             for prep_start in range(0, len(prep_paths), prep_batch):
                 chunk = prep_paths[prep_start:prep_start + prep_batch]
                 checker.prepare(chunk)
-                if recovery_base and verify_by_hash:
+                if (recovery_base or include_capture_dates) and verify_by_hash:
                     # prepare() skipped the EXIF batch (verify mode's
-                    # identity is the hash), but recovery folder planning
-                    # still needs capture times — resolve them alongside
+                    # identity is the hash), but recovery planning or day
+                    # summaries need capture times — resolve them alongside
                     # the same chunk so both prep paths share the same
                     # cancellation cadence.
                     recovery_times.update({
@@ -943,7 +948,18 @@ def create_imports_blueprint(
                 # that lets the WSGI server notice a disconnected client
                 # between chunks instead of after the entire prep phase.
                 prepared = prep_start + len(chunk)
-                yield f"data: {json.dumps({'preparing': prepared, 'total': total})}\n\n"
+                frame = {"preparing": prepared, "total": total}
+                if include_capture_dates:
+                    # Share the metadata reads used for duplicate identity
+                    # and recovery planning with the day summary. The
+                    # discovery walk need not read these headers separately.
+                    dates = {}
+                    for source_file in chunk:
+                        timestamp = (recovery_times.get(str(source_file))
+                                     if verify_by_hash else checker.capture_time(source_file))
+                        dates[str(source_file)] = timestamp.date().isoformat() if timestamp else None
+                    frame["capture_dates"] = dates
+                yield f"data: {json.dumps(frame)}\n\n"
 
             last_flush = time.monotonic()
             for checked, path in enumerate(paths, 1):

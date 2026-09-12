@@ -40,6 +40,44 @@ def parse_sse_events(response_data):
     return events
 
 
+@pytest.mark.parametrize("verify_by_hash", [False, True])
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+@pytest.mark.parametrize("with_destination", [False, True])
+def test_capture_dates_share_duplicate_preparation_reads(
+        app_and_db, tmp_path, monkeypatch, verify_by_hash, skip_duplicates, with_destination):
+    from datetime import datetime
+
+    import import_dedup
+
+    app, _, _ = app_and_db
+    dated = tmp_path / "dated.jpg"
+    unknown = tmp_path / "unknown.jpg"
+    dated.write_bytes(b"dated")
+    unknown.write_bytes(b"unknown")
+    batches = []
+
+    def capture_times(paths):
+        batches.append(list(paths))
+        return {path: datetime(2026, 8, 9, 23, 59) if path == dated else None for path in paths}
+
+    monkeypatch.setattr(import_dedup, "source_capture_timestamps", capture_times)
+    response = app.test_client().post("/api/import/check-duplicates", json={
+        "paths": [str(dated), str(unknown)],
+        "verify_by_hash": verify_by_hash,
+        "skip_duplicates": skip_duplicates,
+        "include_capture_dates": True,
+        **({"destination": str(tmp_path / "archive")} if with_destination else {}),
+    })
+    assert response.status_code == 200
+    events = parse_sse_events(response.data)
+    dates = {}
+    for event in events:
+        dates.update(event.get("capture_dates", {}))
+    assert dates == {str(dated): "2026-08-09", str(unknown): None}
+    assert batches == [[dated, unknown]]
+    assert events[-1]["done"] is True
+
+
 def test_check_duplicates_marks_known_hashes(app_and_db, tmp_path):
     """Files whose hash exists in DB are reported as duplicates."""
     app, db, fid = app_and_db

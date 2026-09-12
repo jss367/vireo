@@ -3625,6 +3625,10 @@ async function previewImport(opts) {
   importPreviewAbort = previewAbort;
   try {
     const snapshotMode = newImagesSnapshotId !== null;
+    // Duplicate/recovery preparation already reads capture metadata. Only
+    // ask discovery to read it when no follow-up check will run.
+    const captureDatesDuringDiscovery = copyMode &&
+      !document.getElementById('chkSkipDuplicates').checked && !resolvedCopyDestination();
     const resp = await fetch(
       snapshotMode
         ? '/api/import/new-images-preview'
@@ -3638,7 +3642,7 @@ async function previewImport(opts) {
           folders: sources,
           file_types: fileTypes,
           recursive: document.getElementById('chkRecursive').checked,
-          include_capture_dates: copyMode,
+          include_capture_dates: captureDatesDuringDiscovery,
         }),
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
@@ -3660,6 +3664,16 @@ async function previewImport(opts) {
     if (!data) throw new Error('preview stream ended unexpectedly');
     if (!snapshotMode) applyDoneFrameSourceCounts(data.source_counts);
     const files = data.files || [];
+    const filesByPath = new Map();
+    files.forEach(file => {
+      if (!filesByPath.has(file.path)) filesByPath.set(file.path, []);
+      filesByPath.get(file.path).push(file);
+    });
+    function applyCaptureDates(dates) {
+      Object.entries(dates || {}).forEach(([path, date]) => {
+        (filesByPath.get(path) || []).forEach(file => { file.capture_date = date; });
+      });
+    }
     // SUCCESS. This is the only place the selection is replaced: a completed
     // preview owns it, so what the user last saw and what Start would send
     // are the same list. Doing this at the top of the function instead is the
@@ -3713,8 +3727,6 @@ async function previewImport(opts) {
       return;
     }
     if (!document.getElementById('chkSkipDuplicates').checked) {
-      renderImportPreviewGrid(files, [], null);
-      updateImportSelectionUI();
       retireHideDuplicatesOptIn();
       // With duplicate-skipping OFF the run doesn't consult the library
       // checker, but crash-recovery adoption of byte-identical files at
@@ -3735,6 +3747,8 @@ async function previewImport(opts) {
       // form settles will re-check.
       const recoveryDestNoDedup = resolvedCopyDestination();
       if (!recoveryDestNoDedup) {
+        renderImportPreviewGrid(files, [], null);
+        updateImportSelectionUI();
         summary.textContent = files.length +
           ' files found · duplicates will be copied';
         const destData = await renderDestStructure([], previewAbort.signal);
@@ -3747,6 +3761,8 @@ async function previewImport(opts) {
       }
       summary.textContent = files.length +
         ' files found — checking for interrupted-run leftovers…';
+      importDupStreamPending = true;
+      updateImportSelectionUI();
       // Reuse the check-duplicates SSE endpoint with skip_duplicates:
       // false — the server matches the import job's own gate and streams
       // only ``recovered`` (no ``duplicates``) in this mode. Same
@@ -3760,6 +3776,7 @@ async function previewImport(opts) {
           paths: files.map(f => f.path),
           verify_by_hash: document.getElementById('chkVerifyByHash').checked,
           skip_duplicates: false,
+          include_capture_dates: true,
           destination: recoveryDestNoDedup,
           folder_template: selectedFolderTemplate(),
         }),
@@ -3780,6 +3797,7 @@ async function previewImport(opts) {
           if (!m) continue;
           try {
             const d = JSON.parse(m[1]);
+            applyCaptureDates(d.capture_dates);
             if (d.recovered) recoveredPathsNoDedup.push(...d.recovered);
             if (!d.done && requestSeq === importPreviewSeq &&
                 !importPreviewSignatureChanged(requestSignature) &&
@@ -3796,6 +3814,9 @@ async function previewImport(opts) {
       if (requestSeq !== importPreviewSeq) return;
       if (importPreviewSignatureChanged(requestSignature)) return;
       const recCountNoDedup = recoveredPathsNoDedup.length;
+      importDupStreamPending = false;
+      renderImportPreviewGrid(files, [], null);
+      updateImportSelectionUI();
       summary.textContent = files.length + ' files found · ' +
         (recCountNoDedup ? recCountNoDedup +
           ' already at destination from an interrupted import' +
@@ -3839,6 +3860,7 @@ async function previewImport(opts) {
       body: JSON.stringify({
         paths: files.map(f => f.path),
         verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+        include_capture_dates: true,
         ...(recoveryDestination ? {
           destination: recoveryDestination,
           folder_template: selectedFolderTemplate(),
@@ -3862,6 +3884,7 @@ async function previewImport(opts) {
         if (!m) continue;
         try {
           const d = JSON.parse(m[1]);
+          applyCaptureDates(d.capture_dates);
           if (d.duplicates) duplicatePaths.push(...d.duplicates);
           if (d.recovered) recoveredPaths.push(...d.recovered);
           if (!d.done && requestSeq === importPreviewSeq &&
