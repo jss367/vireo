@@ -1081,7 +1081,7 @@ def test_api_storage_custom_thumb_dir_ignores_unrelated_siblings(
         if category["name"] == "Catalog backups"
     )
     assert categories["Catalog backups"]["size"] == prior_backup_size + len(backup_payload)
-    assert categories["Import recovery files"]["size"] == len(staged)
+    assert categories["Local import originals"]["size"] == len(staged)
     assert categories["Species reference data"]["size"] == 2 * len(taxonomy_payload)
     entries = [entry for category in categories.values() for entry in category["entries"]]
     assert all("unrelated" not in entry["path"] and "pre-vbad" not in entry["path"] for entry in entries)

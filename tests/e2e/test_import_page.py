@@ -2367,6 +2367,121 @@ def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
     assert body["after_import"] == identify_id
 
 
+def test_mounted_nas_offers_managed_local_processing(live_server, page):
+    identify_id = next(p["id"] for p in live_server["db"].get_saved_processes()
+                       if p["name"] == "Identify birds")
+    page.route("**/api/remote-targets", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps({
+            "rsync_available": False, "ssh_available": False,
+            "targets": [{"id": "nas1", "name": "Synology NAS", "host": "nas.local",
+                         "user": "photo", "remote_path": "/volume1/Photography",
+                         "mount_path": "/Volumes/Photography", "local_archive_root": ""}],
+        }),
+    ))
+    page.goto(f"{live_server['url']}/import")
+    _suppress_auto_preview(page)
+    page.locator("#modeCopy").check()
+    page.locator("#destInput").fill("/Volumes/Photography/Raw Files/USA/2026")
+    page.locator("#afterImportSelect").select_option(str(identify_id))
+    expect(page.locator("#localProcessingRow")).to_be_visible()
+    expect(page.locator("#chkLocalProcessing")).to_be_checked()
+    expect(page.locator("#afterMoveUnavailable")).to_be_hidden()
+    expect(page.locator("#afterMoveRow")).to_be_hidden()
+    expect(page.locator("#destModeHint")).to_contain_text("final NAS destination")
+    assert page.evaluate("localProcessingRequest()") is True
+    expect(page.locator("#chkDeferNasTransfer")).to_be_checked()
+    assert page.evaluate("deferNasTransferRequest()") is True
+    expect(page.locator("#destModeHint")).to_contain_text("until you choose Send to NAS")
+    page.locator("#chkDeferNasTransfer").uncheck()
+    assert page.evaluate("deferNasTransferRequest()") is False
+    expect(page.locator("#destModeHint")).to_contain_text("then transferred here")
+    page.locator("#chkDeferNasTransfer").check()
+    assert page.evaluate("afterMoveRequest()") is None
+    page.locator("#chkLocalProcessing").uncheck()
+    assert page.evaluate("localProcessingRequest()") is False
+    assert page.evaluate("deferNasTransferRequest()") is False
+    expect(page.locator("#destModeHint")).to_contain_text("mounted volume")
+    page.locator("#chkLocalProcessing").check()
+    page.locator("#afterImportSelect").select_option("__none__")
+    expect(page.locator("#localProcessingRow")).to_be_hidden()
+    assert page.evaluate("localProcessingRequest()") is False
+    page.locator("#afterImportSelect").select_option(str(identify_id))
+    page.locator("#destInput").fill("/Users/me/Pictures")
+    expect(page.locator("#localProcessingRow")).to_be_hidden()
+    assert page.evaluate("localProcessingRequest()") is False
+
+
+@pytest.mark.parametrize("path", ["/browse", "/import", "/jobs"])
+def test_pending_archive_panel_sends_remembered_destination(live_server, page, path):
+    state = {"sent": False}
+
+    def pending(route):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "items": [] if state["sent"] else [{
+                "id": "import-test", "name": "Photos from the coast", "collection_id": 123,
+                "destination": "/Volumes/Photography/Coast", "state": "ready", "error": "",
+            }],
+        }))
+
+    def send(route):
+        assert route.request.method == "POST"
+        state["sent"] = True
+        route.fulfill(status=200, content_type="application/json", body='{"job_id":"send-to-nas-test"}')
+
+    page.route("**/api/import/pending-archives", pending)
+    page.route("**/api/import/pending-archives/import-test/send", send)
+    page.goto(live_server["url"] + path)
+    panel = page.locator("#pendingArchives")
+    expect(panel).to_be_visible()
+    expect(panel).to_contain_text("Photos from the coast")
+    expect(panel).to_contain_text("/Volumes/Photography/Coast")
+    expect(panel.get_by_role("link", name="Review photos")).to_have_attribute("href", "/browse?collection_id=123")
+    page.reload()
+    expect(panel).to_be_visible()
+    panel.get_by_role("button", name="Send to NAS", exact=True).click()
+    expect(panel).to_be_hidden()
+    assert state["sent"]
+
+
+def test_pending_archive_missing_transfer_requires_confirmation(live_server, page):
+    state = {"discarded": False}
+
+    def pending(route):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "items": [] if state["discarded"] else [{
+                "id": "missing", "name": "Missing photos", "collection_id": None,
+                "destination": "/Volumes/Photography/Coast", "state": "ready", "error": "",
+                "source_available": False,
+            }],
+        }))
+
+    def discard(route):
+        assert route.request.method == "POST"
+        assert route.request.post_data_json == {"confirmed": True}
+        state["discarded"] = True
+        route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
+
+    page.route("**/api/import/pending-archives", pending)
+    page.route("**/api/import/pending-archives/missing/discard", discard)
+    page.goto(live_server["url"] + "/import")
+    panel = page.locator("#pendingArchives")
+    expect(panel.get_by_role("link", name="Review photos")).to_have_count(0)
+    button = panel.get_by_role("button", name="Remove missing transfer")
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    button.click()
+    assert not state["discarded"]
+    expect(panel).to_be_visible()
+
+    def confirm(dialog):
+        assert "No files or catalog entries will be deleted" in dialog.message
+        dialog.accept()
+
+    page.once("dialog", confirm)
+    button.click()
+    expect(panel).to_be_hidden()
+    assert state["discarded"]
+
+
 def test_import_after_move_hint_blames_the_right_field(live_server, page):
     """Issue #1377: with a typo'd archive root (Vireo_Archive vs the real
     "Vireo Archive"), the old hint said the *destination* was outside every

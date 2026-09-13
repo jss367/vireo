@@ -10,9 +10,10 @@ Files are copied per destination-folder batch, each copy is verified by
 content hash before promotion, and each batch is cataloged via the
 scanner's restricted-scan path immediately after it lands. A run that
 dies at any point leaves a valid partial catalog; a retry's duplicate
-gate skips exactly the files that landed and copies the rest. There is
-no staging tree and no unwind step (`_deindex_staging` has no
-equivalent here).
+gate skips exactly the files that landed and copies the rest. The caller
+may supply managed temporary storage for a process-before-archive run,
+then chain a verified move to the final destination. This job always
+catalogs the supplied destination; failed runs keep those local originals.
 
 Reconnaissance notes (Task 2.0, verified 2026-07-04):
 

@@ -940,6 +940,47 @@ class Database:
                 visual_json  TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS pending_archives (
+                id TEXT PRIMARY KEY,
+                workspace_id INTEGER NOT NULL,
+                collection_id INTEGER,
+                destination TEXT NOT NULL,
+                staging_destination TEXT NOT NULL,
+                target_json TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TRIGGER IF NOT EXISTS pending_archives_require_workspace
+            BEFORE INSERT ON pending_archives
+            WHEN NOT EXISTS (SELECT 1 FROM workspaces WHERE id = NEW.workspace_id)
+            BEGIN
+                SELECT RAISE(ABORT, 'Pending NAS transfer workspace no longer exists');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pending_archives_protect_workspace
+            BEFORE DELETE ON workspaces
+            WHEN EXISTS (
+                SELECT 1 FROM pending_archives
+                WHERE workspace_id = OLD.id AND state != 'complete'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'Send pending photos to NAS before deleting this workspace');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pending_archives_cleanup_workspace
+            AFTER DELETE ON workspaces
+            BEGIN
+                DELETE FROM pending_archives WHERE workspace_id = OLD.id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pending_archives_clear_collection
+            AFTER DELETE ON collections
+            BEGIN
+                UPDATE pending_archives SET collection_id = NULL WHERE collection_id = OLD.id;
+            END;
+
             CREATE TABLE IF NOT EXISTS pending_changes (
                 id          INTEGER PRIMARY KEY,
                 photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,
@@ -2688,7 +2729,12 @@ class Database:
 
     def delete_workspace(self, workspace_id):
         """Delete a workspace and all its scoped data (cascade)."""
-        self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
+        try:
+            self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
+        except sqlite3.IntegrityError as e:
+            if "Send pending photos to NAS" in str(e):
+                raise ValueError(str(e)) from e
+            raise
         self.conn.commit()
         # Drop any cached new-images payload for this workspace. Without this,
         # if the deleted id is later reused by SQLite for a new workspace,

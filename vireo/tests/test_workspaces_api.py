@@ -1,6 +1,8 @@
 """Tests for workspace API routes (/api/workspaces/*)."""
 import json
 
+import pytest
+
 
 def test_list_workspaces(app_and_db):
     """GET /api/workspaces returns at least the Default workspace."""
@@ -157,6 +159,41 @@ def test_delete_workspace(app_and_db):
     listing = client.get("/api/workspaces").get_json()
     ids = {ws["id"] for ws in listing}
     assert ws_id not in ids
+
+
+@pytest.mark.parametrize("state", ["pending", "sending", "complete"])
+def test_delete_workspace_protects_pending_nas_originals(app_and_db, state):
+    app, db = app_and_db
+    client = app.test_client()
+    workspace_id = db.create_workspace("Awaiting NAS transfer")
+    db.conn.execute(
+        "INSERT INTO pending_archives (id, workspace_id, destination, staging_destination, target_json, state) "
+        "VALUES ('archive', ?, '/NAS/trip', '/local/trip', '{}', ?)", (workspace_id, state),
+    )
+    db.conn.commit()
+    response = client.delete(f"/api/workspaces/{workspace_id}")
+    if state == "complete":
+        assert response.status_code == 200
+        assert db.get_workspace(workspace_id) is None
+        assert db.conn.execute("SELECT 1 FROM pending_archives WHERE id = 'archive'").fetchone() is None
+    else:
+        assert response.status_code == 409
+        assert "Send pending photos to NAS" in response.get_json()["error"]
+        assert db.get_workspace(workspace_id) is not None
+        assert db.conn.execute("SELECT 1 FROM pending_archives WHERE id = 'archive'").fetchone()
+
+
+def test_pending_archive_cannot_register_after_workspace_deletion(app_and_db):
+    import sqlite3
+
+    _, db = app_and_db
+    workspace_id = db.create_workspace("Deleted before import starts")
+    db.delete_workspace(workspace_id)
+    with pytest.raises(sqlite3.IntegrityError, match="workspace no longer exists"):
+        db.conn.execute(
+            "INSERT INTO pending_archives (id, workspace_id, destination, staging_destination, target_json) "
+            "VALUES ('archive', ?, '/NAS/trip', '/local/trip', '{}')", (workspace_id,),
+        )
 
 
 def test_delete_only_workspace_fails(app_and_db):

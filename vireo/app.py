@@ -4022,7 +4022,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # Catch uncaught exceptions so they don't disappear silently
     @app.errorhandler(Exception)
     def _handle_error(e):
+        from jobs import WorkspaceBusyError
         from werkzeug.exceptions import HTTPException
+        if isinstance(e, WorkspaceBusyError):
+            return json_error(str(e), 409)
         if isinstance(e, HTTPException):
             return e
         log.exception("Unhandled error: %s %s", request.method, request.path)
@@ -4944,6 +4947,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         threading.Thread(target=_folder_health_loop, daemon=True).start()
 
     app._job_runner = JobRunner(db=init_db)
+
+    @app.before_request
+    def _reserve_workspace_mutation():
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.path.startswith("/api/"):
+            return None
+        # Sending establishes its own exclusive reservation. Control requests
+        # must remain available while a transfer holds the workspace.
+        if request.endpoint in {
+            "imports.api_send_pending_archive", "api_activate_workspace",
+            "api_shutdown", "api_v1_shutdown",
+            "jobs.api_job_cancel", "jobs.api_job_pause", "jobs.api_job_resume",
+            "jobs.api_jobs_cancel_queued",
+        }:
+            return None
+        target_ws = (request.view_args or {}).get("ws_id")
+        workspaces = {_get_db()._ws_id()}
+        if target_ws is not None:
+            workspaces.add(target_ws)
+        with contextlib.ExitStack() as reservation:
+            for workspace_id in sorted(workspaces):
+                reservation.enter_context(app._job_runner.workspace_mutation(
+                    workspace_id,
+                    exclusive=request.endpoint == "api_delete_workspace" and workspace_id == target_ws,
+                ))
+            g.nas_workspace_mutation = reservation.pop_all()
+        return None
+
+    @app.teardown_request
+    def _release_workspace_mutation(exc):
+        reservation = g.pop("nas_workspace_mutation", None)
+        if reservation is not None:
+            reservation.__exit__(None, None, None)
     # XMP sidecars are read-modify-written files; serialize sync jobs so
     # repeated clicks cannot race while touching the same sidecar.
     app._sync_job_lock = threading.Lock()
@@ -14784,7 +14819,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "Sync or discard its local copy before deleting the workspace.",
                         409,
                     )
-            db.delete_workspace(ws_id)
+            try:
+                db.delete_workspace(ws_id)
+            except ValueError as e:
+                return json_error(str(e), 409)
         # Drop this workspace's cached Missing Originals payload so a
         # later workspace that reuses this SQLite rowid can't be served
         # the deleted workspace's ghost photos / folder paths.
@@ -24178,7 +24216,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                source_path, resolved_destination,
                                merge, remote, developed_dir, folder_template="",
                                chained_from=None, serialize_lock=None,
-                               allow_tracked_merge=False):
+                               allow_tracked_merge=False,
+                               managed_staging_root=None, mount_baseline=None,
+                               mount_identities=None):
         """Enqueue a move-folder job and return its job id.
 
         Shared by the move-folder endpoint and the chained
@@ -24285,6 +24325,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     ),
                 }
             try:
+                check_mount = None
+                if managed_staging_root and not runner.begin_uncancellable(job["id"]):
+                    return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
+                if mount_baseline is not None:
+                    from import_staging import check_staged_mount
+
+                    def check_mount():
+                        check_staged_mount(resolved_destination, mount_baseline, mount_identities)
+                    check_mount()
                 if folder_template:
                     result = move_folder_by_date(
                         db=thread_db,
@@ -24305,6 +24354,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         remote=remote,
                         destination_name=destination_name,
                         allow_tracked_merge=allow_tracked_merge,
+                        **({"verify_contents": True} if managed_staging_root and not remote else {}),
+                        **({"pre_commit_check": check_mount} if check_mount else {}),
                     )
             finally:
                 if serialize_lock is not None:
@@ -24335,6 +24386,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         )
                     )
             if result.get("ok"):
+                if managed_staging_root:
+                    from path_guard import contains_resolved
+                    # Remove only empty staging ancestors. Failed transfers and
+                    # concurrent sibling moves keep their originals intact.
+                    parent = os.path.dirname(source_path)
+                    root = os.path.realpath(managed_staging_root)
+                    while contains_resolved(root, parent):
+                        try:
+                            os.rmdir(parent)
+                        except OSError:
+                            break
+                        if os.path.realpath(parent) == root:
+                            break
+                        parent = os.path.dirname(parent)
                 try:
                     _invalidate_missing_originals_cache()
                 except Exception:
@@ -24371,10 +24436,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Provenance for the jobs panel: this move was started by a
             # chained process run's completion hook, not by hand.
             job_config["chained_from"] = chained_from
+
+        def staged_work(job):
+            runner.push_event(job["id"], "progress", {
+                "current": 0, "total": 0, "current_file": "",
+                "phase": "Waiting for workspace jobs to finish before sending to NAS",
+            })
+            if not runner.wait_for_workspace_transfer(job["id"]):
+                return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
+            return work(job)
+
         return runner.start(
-            "move-folder", work,
+            "move-folder", staged_work if managed_staging_root else work,
             config=job_config,
             workspace_id=workspace_id,
+            **({"workspace_transfer_batch": managed_staging_root} if managed_staging_root else {}),
         )
 
     @app.route("/api/jobs/move-folder", methods=["POST"])
@@ -26565,6 +26641,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if guard:
             raise RuntimeError(guard)
         effective_cfg = thread_db.get_effective_config(cfg.load())
+        if target.get("transport") == "mounted":
+            folder = thread_db.conn.execute(
+                "SELECT path FROM folders WHERE id = ?", (folder_id,),
+            ).fetchone()
+            if not folder:
+                raise RuntimeError("folder no longer exists")
+            destination = os.path.join(mount_path, *posixpath.dirname(subpath).split("/"))
+            return _start_move_folder_job(
+                runner, workspace_id, folder_id=folder_id,
+                destination=destination, display_dest=destination,
+                destination_name="", source_path=folder["path"],
+                resolved_destination=os.path.join(destination, os.path.basename(folder["path"])),
+                merge=True, remote=None,
+                developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
+                chained_from=chained_from, serialize_lock=serialize_lock,
+                allow_tracked_merge=True,
+                managed_staging_root=target.get("managed_staging_root"),
+                mount_baseline=target.get("mount_baseline"),
+                mount_identities=target.get("mount_identities"),
+            )
         rsync_bin = move_mod.resolve_rsync_bin(
             effective_cfg.get("rsync_bin", "") or "")
         if not rsync_bin:
@@ -26617,6 +26713,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # file whose bytes differ, and manual moves keep the default
             # refusal.
             allow_tracked_merge=True,
+            managed_staging_root=target.get("managed_staging_root"),
         )
 
     @app.route("/api/encounters/species", methods=["POST"])
@@ -30270,6 +30367,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             enqueue_process_job=pipeline_chain.enqueue_process_job,
             chain_after_move=pipeline_chain.chain_after_move,
             bulk_gps_location_payload=_bulk_gps_location_payload,
+            guard_move_folder=_move_folder_guard_error,
         )
     )
 

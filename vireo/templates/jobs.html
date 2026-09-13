@@ -296,6 +296,7 @@
 
 <div class="jobs-layout">
   <div class="jobs-list-pane">
+    {% include '_pending_archives.html' %}
     <div class="jobs-list-header">
       Jobs <span class="badge" id="runningBadge" style="display:none;">0</span>
     </div>
@@ -545,6 +546,8 @@
         remote_target_id: cfg.after_process_move.remote_target_id,
       };
     }
+    body.local_processing = !!cfg.local_processing;
+    body.defer_nas_transfer = !!cfg.defer_nas_transfer;
     return body;
   }
 
