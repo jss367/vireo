@@ -3947,6 +3947,7 @@ async function createWorkspace() {
   <div id="lightboxNext" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
   <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!_lbVisualTransitionPending && Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <div class="lightbox-zoom-control" id="lightboxZoomControl" onclick="event.stopPropagation();">
+      <span id="lightboxPreviewStatus" role="status" style="display:none;font-size:11px;color:var(--text-dim);">Loading detail…</span>
       <button type="button" class="lightbox-zoom-badge" id="lightboxZoomBadge"
               aria-haspopup="true" aria-expanded="false"
               onclick="toggleLightboxZoomPopover();" title="Zoom controls">Fit</button>
@@ -4217,7 +4218,8 @@ var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata 
 var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
 var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
-var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
+// Bootstrap before opening any photo; metadata refreshes the workspace cap later.
+var _lbPreviewMaxSize = window.VIREO_FULL_PREVIEW_MAX_SIZE ?? null; // 0 means original
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
 var _lbPending1To1Anchor = null; // optional client-space anchor for a deferred 1:1 snap
 var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions
@@ -4243,7 +4245,13 @@ var _lbLastNavDelta = 1;
 var _lbOriginalPreloadTimer = null; // short dwell before warming the current photo's 100% source
 var _lbOriginalPreload = null; // retained decoded original for an instant first 100% click
 var _lbOriginalPreloadWaiting = null; // dwell completed; waiting for the shared slot
-var _lbSpeculativeInFlight = null; // keep even pruned requests alive until the server responds
+var _lbSpeculativeInFlight = null; // oldest outstanding request (including pruned entries)
+var _lbSpeculativeLoads = new Set();
+var _lbPreloadConcurrency = 3;
+var _lbPreloadBudgetBytes = 128 * 1024 * 1024;
+var _lbPreviewLoading = false;
+var _lbProgressiveTargetKey = null;
+var _lbSessionFullUsesOriginal = null;
 var _lbEditRecipeByPhoto = {};
 var _lbEditRecipeKnownByPhoto = {};
 var _lbEditRecipeWriteSeq = 0;
@@ -5366,7 +5374,6 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     if (_lightboxCurrentId !== photoId) return;
     if (img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
-      _lbSessionFullLongEdge = _lbFullLongEdge;
     }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
@@ -6279,7 +6286,7 @@ function _lbSrcRank(key) {
   if (key === 'original') return 3;
   if (key === '3840') return 2;
   if (key === '2560') return 1;
-  return 0; // 'full' or unknown
+  return 0; // 'full', '1920', or unknown
 }
 
 function _lbCloneViewportState(state) {
@@ -6506,6 +6513,8 @@ function _lbFlushDeferredOverlayApply() {
 }
 
 function _lbClearPendingViewportRestore() {
+  _lbProgressiveTargetKey = null;
+  _lbSetPreviewLoading(false);
   // Called from user-driven viewport mutations (wheel/keyboard/click zoom,
   // drag pan) so a still-armed restore carried over by arrow navigation
   // cannot be reapplied by a later async metadata/image-load callback and
@@ -7870,6 +7879,8 @@ function openLightbox(photoId, filename, photoList, options) {
   if (!alreadyOpen) _lbLastNavDelta = 1;
   _lbCancelOriginalPreload();
   _lbCancelAdjacentPreloadTimer();
+  _lbProgressiveTargetKey = null;
+  _lbSetPreviewLoading(false);
   var fallbackViewportState = options.fallbackViewportState || null;
   var eyeTrackAnchor = options.eyeTrackAnchor || null;
   _lbFlushPendingAdjustmentSave();
@@ -8028,13 +8039,16 @@ function openLightbox(photoId, filename, photoList, options) {
   if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'edit_recipe')) {
     _lbRememberEditRecipe(photoId, currentFromList.edit_recipe);
   }
-  _lbCurrentSrcKey = (
-    restoreWantsOneToOne ||
-    (
-      restoreViewportState &&
-      restoreViewportState.zoom > 1.001
-    )
-  ) ? 'original' : 'full';
+  var incomingPhoto = Object.assign({}, _lbPhotoDataByPhoto[String(photoId)] || {}, currentFromList || {});
+  // Catalog geometry lets us select a tier before the next image has loaded.
+  // Never consult the outgoing bitmap for the incoming photo's dimensions.
+  _lbPhotoW = incomingPhoto.width || null;
+  _lbPhotoH = incomingPhoto.height || null;
+  _lbPhotoOrientation = _lbMetadataOrientation(incomingPhoto.metadata);
+  var initialTarget = _lbInitialSourceKey(incomingPhoto, transitionZoom, restoreWantsOneToOne);
+  var warmInitial = _lbDecodedInitialPreview(photoId, initialTarget);
+  _lbCurrentSrcKey = warmInitial ? warmInitial.sourceKey : initialTarget;
+  if (_lbCurrentSrcKey !== initialTarget) _lbProgressiveTargetKey = initialTarget;
   _lbFullLongEdge = null;
   _lbPending1To1 = restoreWantsOneToOne;
   _lbUpdateZoomControl();
@@ -8124,6 +8138,11 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
       _lbFullUsesOriginal = !!data.full_uses_original;
+      _lbSessionFullUsesOriginal = _lbFullUsesOriginal;
+      if (data.full_preview_max_size != null &&
+          Number.isFinite(Number(data.full_preview_max_size)) && Number(data.full_preview_max_size) >= 0) {
+        _lbPreviewMaxSize = Number(data.full_preview_max_size);
+      }
       _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
       var currentLayoutRecipe = _lbEditRecipeByPhoto[String(photoId)];
       _lbCurrentEditRecipe = _lbRecipeHasEdits(currentLayoutRecipe)
@@ -8197,7 +8216,6 @@ function openLightbox(photoId, filename, photoList, options) {
     // dimensions as the /full threshold.
     if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'full' && img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
-      _lbSessionFullLongEdge = _lbFullLongEdge;
     }
     if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'original' && !_lbPhotoW && img.naturalWidth) {
       _lbPhotoW = img.naturalWidth;
@@ -8206,7 +8224,11 @@ function openLightbox(photoId, filename, photoList, options) {
     _lbVisualTransitionPending = false;
     _lbSetPhotoTransitionPending(false);
     _lbRecomputeNativeZoom();
-    if (
+    if (_lbProgressiveTargetKey && _lbPendingViewportState) {
+      // A ready preview may be soft, but it must show the same crop/position
+      // immediately. Explicit zoom clicks still use the sharp-source deferral.
+      _lbTryApplyPendingViewportState();
+    } else if (
       _lbCurrentSrcKey === 'full' &&
       _lbPending1To1 &&
       (
@@ -8225,11 +8247,32 @@ function openLightbox(photoId, filename, photoList, options) {
     if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
       window._lbFlushDeferredLightboxLayoutRefresh();
     }
-    _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
-    if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
+    if (_lbProgressiveTargetKey) {
+      _lbSetPreviewLoading(true);
+      _lbScheduleSourceSwap(_lbPending1To1 ? (_lbNativeZoom || transitionZoom) : _lbZoom, true);
+    } else {
+      _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
+      if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
+    }
   }
   function handleInitialImageError() {
     if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+    if (_lbProgressiveTargetKey) {
+      _lbCurrentSrcKey = _lbProgressiveTargetKey;
+      _lbProgressiveTargetKey = null;
+      _lbSetPreviewLoading(false);
+      img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
+      return;
+    }
+    if (['1920', '2560', '3840'].indexOf(_lbCurrentSrcKey) !== -1) {
+      // Sized tiers can now be the initial source. A failed render must not
+      // leave navigation on a broken image: try the original, whose existing
+      // error path falls back to /full if the original is unavailable too.
+      _lbCurrentSrcKey = 'original';
+      _lbDesiredSrcKey = null;
+      img.src = _lbSrcUrl(photoId, 'original');
+      return;
+    }
     if (_lbCurrentSrcKey !== 'original') {
       img.onload = null;
       img.onerror = null;
@@ -10457,6 +10500,56 @@ function _lbClampPan() {
 var _lbSwapTimer = null;
 var _lbDesiredSrcKey = null;
 
+function _lbSetPreviewLoading(loading) {
+  _lbPreviewLoading = !!loading;
+  var status = document.getElementById('lightboxPreviewStatus');
+  if (status) status.style.display = loading ? '' : 'none';
+}
+
+function _lbFullPreviewLimit() {
+  if (_lbPreviewMaxSize === 0 || _lbFullUsesOriginal === true || _lbSessionFullUsesOriginal === true) return Infinity;
+  return _lbPreviewMaxSize || 1920;
+}
+
+function _lbInitialSourceKey(photo, zoom, oneToOne) {
+  var w = Number(photo.width), h = Number(photo.height);
+  if (!w || !h) return oneToOne || zoom > 1.001 ? 'original' : 'full';
+  if (_vireoPairKnownByPhoto[String(photo.id)] && _vireoPairSource(photo.id) === 'jpeg') {
+    // A paired JPEG can have different geometry from its RAW catalog row.
+    return oneToOne || zoom > 1.001 ? 'original' : 'full';
+  }
+  if (_lbOrientationSwapsAxes(_lbMetadataOrientation(photo.metadata))) {
+    var tmp = w; w = h; h = tmp;
+  }
+  var dims = _lbDisplayDimsForRecipe(w, h, photo.edit_recipe);
+  var wrap = document.getElementById('lightboxWrap');
+  if (!wrap || !wrap.clientWidth || !wrap.clientHeight) return oneToOne || zoom > 1.001 ? 'original' : 'full';
+  var fit = Math.min(1, wrap.clientWidth / dims.w, wrap.clientHeight / dims.h);
+  var needed = oneToOne ? Math.max(dims.w, dims.h)
+    : Math.max(dims.w, dims.h) * fit * zoom * (window.devicePixelRatio || 1);
+  var fullEdge = _lbFullPreviewLimit();
+  if (needed <= fullEdge) return 'full';
+  if (needed <= 2560) return '2560';
+  if (needed <= 3840) return '3840';
+  return 'original';
+}
+
+function _lbDecodedInitialPreview(photoId, desired) {
+  var entries = Object.values(_lbAdjacentPreloads);
+  if (_lbOriginalPreload) entries.push(_lbOriginalPreload);
+  var ready = entries.filter(function(entry) {
+    return entry.photoId === photoId && entry.status === 'decoded' &&
+      entry.url === _lbSrcUrl(photoId, entry.sourceKey, true);
+  });
+  var exact = ready.find(function(entry) { return entry.sourceKey === desired; });
+  if (exact) return exact;
+  // A ready smaller preview is safe only for this exact render/source version.
+  // Do not flash an old crop, an unedited thumbnail, or the other RAW/JPEG pair.
+  return ready.filter(function(entry) {
+    return _lbSrcRank(entry.sourceKey) <= _lbSrcRank(desired);
+  }).sort(function(a, b) { return _lbSrcRank(b.sourceKey) - _lbSrcRank(a.sourceKey); })[0] || null;
+}
+
 function _lbPickSourceKey(targetZoom) {
   // Returns 'full' | '2560' | '3840' | 'original' based on current display needs.
   // Fall back to /full at fit and /original when zoomed whenever we can't compute
@@ -10474,9 +10567,9 @@ function _lbPickSourceKey(targetZoom) {
   var dpr = window.devicePixelRatio || 1;
   var needed = displayedLong * dpr;
   // /full's actual long edge depends on the server's preview_max_size config (default 1920).
-  // Prefer the per-photo measurement; if not yet recorded (user zoomed before /full
-  // loaded), fall back to the last photo's measurement in this session, then 1920.
-  var fullLongEdge = _lbFullLongEdge || _lbSessionFullLongEdge || 1920;
+  // Prefer this photo's decoded size. Before it loads, use the configured cap;
+  // a previous small photo may never have reached that cap.
+  var fullLongEdge = _lbFullLongEdge || _lbFullPreviewLimit();
   if (needed <= fullLongEdge) return 'full';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
@@ -10558,22 +10651,83 @@ function _lbShouldPreloadOriginal(photoId) {
 
 function _lbReleasePreloadImage(entry) {
   // Clearing src does not cancel synchronous server-side generation. Keep the
-  // one outstanding request observable even if its decoded-cache entry goes.
-  if (!entry || !entry.img || entry === _lbSpeculativeInFlight) return;
+  // outstanding requests observable even if their decoded-cache entries go.
+  if (!entry || !entry.img || _lbSpeculativeLoads.has(entry)) return;
   entry.img.onload = null;
   entry.img.onerror = null;
   entry.img.removeAttribute('src');
 }
 
+function _lbSmallPreviewKey() {
+  // /full is configurable, including an original-resolution mode. Never use
+  // that mode (or a large custom preview) for the wide navigation window.
+  return _lbFullPreviewLimit() > 1920 ? '1920' : 'full';
+}
+
+function _lbEstimatePreloadBytes(photo, key) {
+  var cached = _lbPhotoDataByPhoto[String(photo.id)] || photo;
+  var w = Number(cached.width || photo.width) || _lbPhotoW || 6000;
+  var h = Number(cached.height || photo.height) || _lbPhotoH || 4000;
+  var size = key === 'original' ? Math.max(w, h)
+    : key === 'full' ? _lbFullPreviewLimit() : Number(key);
+  var scale = Math.min(1, size / Math.max(w, h));
+  return Math.ceil(w * scale) * Math.ceil(h * scale) * 4;
+}
+
+function _lbPreloadBytes() {
+  var entries = new Set(Object.values(_lbAdjacentPreloads));
+  _lbSpeculativeLoads.forEach(function(entry) { entries.add(entry); });
+  if (_lbOriginalPreload) entries.add(_lbOriginalPreload);
+  var bytes = 0;
+  entries.forEach(function(entry) { bytes += entry.bytes || 0; });
+  return bytes;
+}
+
+function _lbTrimPreloadBudget() {
+  // Estimates reserve space before starting each decode. Correct them from
+  // actual dimensions afterward, dropping distant bitmaps first. This bounds
+  // retained pixel buffers, not the WebView's independent graphics/HTTP cache.
+  // A larger-than-estimated original should not evict the whole small-preview
+  // window before being discarded itself.
+  if (_lbPreloadBytes() > _lbPreloadBudgetBytes && _lbOriginalPreload &&
+      _lbOriginalPreload.status === 'decoded') _lbCancelOriginalPreload();
+  var currentIdx = _lightboxPhotoList.findIndex(function(p) { return p.id === _lightboxCurrentId; });
+  var entries = Object.entries(_lbAdjacentPreloads).filter(function(item) {
+    return item[1].status === 'decoded';
+  });
+  entries.sort(function(a, b) {
+    function distance(entry) {
+      return Math.abs(_lightboxPhotoList.findIndex(function(p) { return p.id === entry.photoId; }) - currentIdx);
+    }
+    return Number(b[1].bytes > _lbPreloadBudgetBytes) - Number(a[1].bytes > _lbPreloadBudgetBytes) ||
+      distance(b[1]) - distance(a[1]) || b[1].bytes - a[1].bytes;
+  });
+  while (_lbPreloadBytes() > _lbPreloadBudgetBytes && entries.length) {
+    var item = entries.shift();
+    _lbReleasePreloadImage(item[1]);
+    delete _lbAdjacentPreloads[item[0]];
+    // Do not immediately re-request an underestimated image we just evicted.
+    _lbAdjacentPreloadRetry[item[0]] = { openSeq: _lbOpenSeq, count: 2, at: 0 };
+  }
+}
+
 function _lbRunSpeculativePreload(entry, onSettled) {
-  _lbSpeculativeInFlight = entry;
+  _lbSpeculativeLoads.add(entry);
+  _lbSpeculativeInFlight = _lbSpeculativeLoads.values().next().value || null;
   var preload = entry.img;
   preload.fetchPriority = 'low';
   function settle(decoded) {
     if (entry.status !== 'loading') return;
     entry.status = decoded ? 'decoded' : 'failed';
-    if (_lbSpeculativeInFlight === entry) _lbSpeculativeInFlight = null;
+    _lbSpeculativeLoads.delete(entry);
+    _lbSpeculativeInFlight = _lbSpeculativeLoads.values().next().value || null;
+    if (decoded) entry.bytes = preload.naturalWidth * preload.naturalHeight * 4;
     onSettled(decoded);
+    _lbTrimPreloadBudget();
+    // A navigation/close may have retired this request while it was decoding.
+    if (!Object.values(_lbAdjacentPreloads).includes(entry) && _lbOriginalPreload !== entry) {
+      _lbReleasePreloadImage(entry);
+    }
     var overlay = document.getElementById('lightboxOverlay');
     if (overlay && overlay.classList.contains('active')) {
       _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
@@ -10615,13 +10769,19 @@ function _lbStartPendingOriginalPreload() {
     photoId: pending.photoId,
     sourceKey: 'original',
     url: _lbSrcUrl(pending.photoId, 'original', true),
-    status: 'loading'
+    status: 'loading',
+    bytes: _lbEstimatePreloadBytes({ id: pending.photoId, width: _lbPhotoW, height: _lbPhotoH }, 'original')
   };
+  if (_lbPreloadBytes() + entry.bytes > _lbPreloadBudgetBytes) return;
   _lbOriginalPreload = entry;
   _lbRunSpeculativePreload(entry, function(decoded) {
     if (_lbOriginalPreload !== entry) return;
-    if (!decoded && pending.retryCount < 1 && _lbShouldPreloadOriginal(pending.photoId)) {
-      _lbScheduleOriginalPreload(pending.photoId, pending.retryCount + 1);
+    if (!decoded) {
+      // A failed image retains no pixels and must not reserve its estimate.
+      _lbOriginalPreload = null;
+      if (pending.retryCount < 1 && _lbShouldPreloadOriginal(pending.photoId)) {
+        _lbScheduleOriginalPreload(pending.photoId, pending.retryCount + 1);
+      }
     }
   });
 }
@@ -10651,93 +10811,90 @@ function _lbPrimeAdjacentPhotos(sourceKey) {
 
   _lbCancelAdjacentPreloadTimer();
   var key = sourceKey || 'full';
+  var baseKey = _lbSmallPreviewKey();
   var direction = _lbLastNavDelta < 0 ? -1 : 1;
-  // Warm the likely next photo first, then protect a direction reversal.
-  // Full-resolution/zoom tiers retain fewer decoded images to bound memory.
-  // /full can itself mean original when the workspace disables sized previews.
-  var offsets = key === 'full' && _lbFullUsesOriginal === false
-    ? [direction, -direction, 2 * direction, 3 * direction]
-    : [direction, -direction];
-  var keep = {};
   var candidates = [];
-  offsets.forEach(function(offset) {
-    var idx = currentIdx + offset;
-    if (idx < 0 || idx >= _lightboxPhotoList.length) return;
-    var photo = _lightboxPhotoList[idx];
+  var keep = {};
+  function addCandidate(offset, tier) {
+    var photo = _lightboxPhotoList[currentIdx + offset];
+    if (!photo) return;
     if (Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')) {
       _lbRememberEditRecipe(photo.id, photo.edit_recipe);
     }
-    var url = _lbSrcUrl(photo.id, key, true);
+    var url = _lbSrcUrl(photo.id, tier, true);
     var cacheKey = String(photo.id) + '|' + url;
-    keep[cacheKey] = true;
-    candidates.push({ photoId: photo.id, url: url, cacheKey: cacheKey });
-  });
-
-  // Retain the decoded image we just navigated into. It becomes a warm
-  // previous neighbor on the next step, without another transfer/decode.
-  var currentUrl = _lbSrcUrl(_lightboxCurrentId, key, true);
-  var currentKey = String(_lightboxCurrentId) + '|' + currentUrl;
-  if (_lbAdjacentPreloads[currentKey] &&
-      _lbAdjacentPreloads[currentKey].status === 'decoded') keep[currentKey] = true;
-  Object.keys(_lbAdjacentPreloads).forEach(function(cacheKey) {
     if (keep[cacheKey]) return;
-    var stale = _lbAdjacentPreloads[cacheKey];
-    _lbReleasePreloadImage(stale);
+    keep[cacheKey] = true;
+    candidates.push({
+      photoId: photo.id, sourceKey: tier, url: url, cacheKey: cacheKey,
+      bytes: _lbEstimatePreloadBytes(photo, tier)
+    });
+  }
+  // Always prepare a small, immediately usable image on both sides, even at
+  // 1:1. Only the immediate neighbors also receive the current sharper tier.
+  addCandidate(direction, baseKey);
+  addCandidate(-direction, baseKey);
+  for (var distance = 2; distance <= 8; distance++) {
+    addCandidate(distance * direction, baseKey);
+    if (distance <= 4) addCandidate(-distance * direction, baseKey);
+  }
+  if (key !== baseKey) {
+    addCandidate(direction, key);
+    addCandidate(-direction, key);
+  }
+  Object.keys(_lbAdjacentPreloads).forEach(function(cacheKey) {
+    var entry = _lbAdjacentPreloads[cacheKey];
+    // Retaining the just-displayed warmup makes an immediate reversal cheap.
+    if (keep[cacheKey] || (entry.photoId === _lightboxCurrentId && entry.status === 'decoded')) return;
+    _lbReleasePreloadImage(entry);
     delete _lbAdjacentPreloads[cacheKey];
   });
   Object.keys(_lbAdjacentPreloadRetry).forEach(function(cacheKey) {
     if (!keep[cacheKey]) delete _lbAdjacentPreloadRetry[cacheKey];
   });
+  _lbTrimPreloadBudget();
 
-  // The server has one speculative generation slot. Pump one request at a
-  // time instead of sending the entire window and having its tail rejected.
-  if (_lbSpeculativeInFlight) return;
+  // Cache hits can transfer/decode concurrently. The server independently
+  // admits just one speculative cache-miss producer; declined work backs off.
+  // Count retired in-flight requests too: dropping an Image does not cancel
+  // synchronous server generation or immediately reclaim its decode memory.
   var now = Date.now();
   var retryAt = null;
-  var candidate = candidates.find(function(item) {
-    if (_lbAdjacentPreloads[item.cacheKey]) return false;
-    var retry = _lbAdjacentPreloadRetry[item.cacheKey];
+  candidates.forEach(function(candidate) {
+    if (_lbSpeculativeLoads.size >= _lbPreloadConcurrency) return;
+    if (_lbAdjacentPreloads[candidate.cacheKey]) return;
+    // Once a miss has been declined, retry it alone after active transfers
+    // finish. Parallel retries would simply collide with the same server slot.
+    if (Array.from(_lbSpeculativeLoads).some(function(entry) { return entry.retrying; })) return;
+    var retry = _lbAdjacentPreloadRetry[candidate.cacheKey];
     if (retry && retry.openSeq === _lbOpenSeq) {
-      if (retry.count > 1) return false;
+      if (retry.count > 1) return;
+      if (_lbSpeculativeLoads.size) return;
       if (retry.at > now) {
         retryAt = retryAt == null ? retry.at : Math.min(retryAt, retry.at);
-        return false;
+        return;
       }
     }
-    return true;
-  });
-  if (!candidate) {
-    // A neighbor waiting for its retry still has priority over the current
-    // photo's original; do not fill the backoff with a long RAW extraction.
-    if (retryAt != null) _lbScheduleAdjacentPhoto(key, retryAt - now);
-    else _lbStartPendingOriginalPreload();
-    return;
-  }
-
-  var preload = new Image();
-  var entry = {
-    img: preload,
-    photoId: candidate.photoId,
-    sourceKey: key,
-    url: candidate.url,
-    status: 'loading'
-  };
-  _lbAdjacentPreloads[candidate.cacheKey] = entry;
-  _lbRunSpeculativePreload(entry, function(decoded) {
-    // A pruned request still releases the shared slot, but must not restore
-    // its cache entry or retry state in the new navigation window.
-    if (_lbAdjacentPreloads[candidate.cacheKey] !== entry) return;
-    if (!decoded) {
-      delete _lbAdjacentPreloads[candidate.cacheKey];
-      var retry = _lbAdjacentPreloadRetry[candidate.cacheKey];
-      if (!retry || retry.openSeq !== _lbOpenSeq) {
-        retry = { openSeq: _lbOpenSeq, count: 0 };
+    if (_lbPreloadBytes() + candidate.bytes > _lbPreloadBudgetBytes) return;
+    var entry = {
+      img: new Image(), photoId: candidate.photoId, sourceKey: candidate.sourceKey,
+      url: candidate.url, status: 'loading', bytes: candidate.bytes, retrying: !!retry
+    };
+    _lbAdjacentPreloads[candidate.cacheKey] = entry;
+    _lbRunSpeculativePreload(entry, function(decoded) {
+      if (_lbAdjacentPreloads[candidate.cacheKey] !== entry) return;
+      if (!decoded) {
+        delete _lbAdjacentPreloads[candidate.cacheKey];
+        var retry = _lbAdjacentPreloadRetry[candidate.cacheKey];
+        if (!retry || retry.openSeq !== _lbOpenSeq) retry = { openSeq: _lbOpenSeq, count: 0 };
+        retry.count += 1;
+        retry.at = Date.now() + 750;
+        _lbAdjacentPreloadRetry[candidate.cacheKey] = retry;
       }
-      retry.count += 1;
-      retry.at = Date.now() + 750;
-      _lbAdjacentPreloadRetry[candidate.cacheKey] = retry;
-    }
+    });
   });
+  if (retryAt != null) _lbScheduleAdjacentPhoto(key, retryAt - now);
+  else if (!_lbSpeculativeLoads.size) _lbStartPendingOriginalPreload();
 }
 
 function _lbScheduleAdjacentPhoto(sourceKey, delay) {
@@ -10750,18 +10907,24 @@ function _lbScheduleAdjacentPhoto(sourceKey, delay) {
   }, delay || 0);
 }
 
-function _lbScheduleSourceSwap(targetZoom) {
+function _lbScheduleSourceSwap(targetZoom, immediate) {
   if (!_lightboxCurrentId) return;
   var desired = _lbPickSourceKey(targetZoom);
+  // Metadata may still be in flight when a warm preview first becomes visible.
+  // Keep the initial conservative tier until geometry can refine it.
+  if (_lbProgressiveTargetKey && !_lbNativeZoom) desired = _lbProgressiveTargetKey;
   _lbDesiredSrcKey = desired;
   if (_lbZoom > 1.001 && desired !== 'original') {
     _lbCancelOriginalPreload();
   }
   if (desired === _lbCurrentSrcKey) {
+    _lbProgressiveTargetKey = null;
+    _lbSetPreviewLoading(false);
     _lbScheduleAdjacentPhoto(desired);
     return;
   }
 
+  _lbSetPreviewLoading(_lbSrcRank(desired) > _lbSrcRank(_lbCurrentSrcKey) || !!_lbProgressiveTargetKey);
   if (_lbSwapTimer) clearTimeout(_lbSwapTimer);
   _lbSwapTimer = setTimeout(function() {
     _lbSwapTimer = null;
@@ -10792,6 +10955,8 @@ function _lbScheduleSourceSwap(targetZoom) {
         // case img.naturalWidth belongs to a DIFFERENT source than our closure's
         // `key`, so bail rather than record wrong dims or recalibrate stale state.
         if (_lbCurrentSrcKey !== key) return;
+        _lbProgressiveTargetKey = null;
+        _lbSetPreviewLoading(false);
         // Keep the decoded background original alive until the visible image
         // has adopted it; releasing it earlier can make some WebViews decode
         // the same full-resolution bytes a second time on the first 100% click.
@@ -10805,7 +10970,7 @@ function _lbScheduleSourceSwap(targetZoom) {
         // true 1:1 now. Route through the shared helper so the stored anchor is
         // honored — completing with a recentered zoom would make a deferred 1:1
         // jump away from the point the user clicked.
-        _lbApplyPendingOneToOneZoom();
+        if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
         // Track Eye alignment is deferred while _lbPending1To1 is armed so it
         // cannot cancel the deferred sharp-source fallback. Re-apply now that
         // the source has landed and any pending 1:1 has snapped.
@@ -10820,6 +10985,8 @@ function _lbScheduleSourceSwap(targetZoom) {
       if (_lightboxCurrentId !== photoId) return;
       if (_lbOpenSeq !== swapOpenSeq) return;
       if (_lbDesiredSrcKey !== key) return;
+      _lbProgressiveTargetKey = null;
+      _lbSetPreviewLoading(false);
       if (key === 'original') {
         var had1To1Pending = _lbPending1To1;
         _lbOriginalUnavailable = true;
@@ -10849,7 +11016,7 @@ function _lbScheduleSourceSwap(targetZoom) {
       // Keep current source on failure
     };
     preloader.src = url;
-  }, 150);
+  }, immediate ? 0 : 150);
 }
 </script>
 
