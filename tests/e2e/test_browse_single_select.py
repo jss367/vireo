@@ -442,6 +442,62 @@ def test_keyboard_activated_batch_button_is_not_swallowed_by_the_redirect(
     assert page.evaluate("getActiveSelection().length") == 0
 
 
+def test_non_card_selection_flow_shows_bar_active_immediately(
+    live_server, page
+):
+    """Ctrl/Cmd+A and Select-all raise the bar without a card gesture to
+    shield, so the bar must not start inert.
+
+    The inert-until-quiet stretch only exists to keep the bar from
+    intercepting the second half of a card double-click that raised it.
+    A selection created without any card mousedown has no such gesture,
+    and starting inert there would let a batch-button click inside the
+    quiet window pass through the transparent bar to the grid beneath,
+    replacing the just-created selection with whichever card sits under
+    the cursor.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_hidden()
+
+    # Stretch the quiet window so the assertion is about the starting state,
+    # not about a timer that would activate the bar anyway on a fast machine.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 60000")
+
+    # Simulate a Select-all-style flow: populate the selection without any
+    # card mousedown, then let updateBatchBar() raise the bar.
+    selected_ids = live_server["data"]["photos"][:3]
+    page.evaluate(
+        """
+        photoIds => {
+          selectedPhotos.clear();
+          photoIds.forEach(id => selectedPhotos.add(id));
+          selectedPhotoId = null;
+          renderGrid();
+          updateBatchBar();
+        }
+        """,
+        selected_ids,
+    )
+
+    expect(bar).to_be_visible()
+    # The bar came up for a non-card flow, so it must not be inert — a
+    # transparent bar over the grid would send the very next batch-button
+    # click straight through to the card beneath.
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+    expect(bar).to_have_css("pointer-events", "auto")
+
+    # Clicking Clear now actually runs its handler (bar hides, selection
+    # empties). Under the pre-fix behavior the click would fall through to
+    # the grid, leaving the bar visible with a different selection.
+    page.locator("#batchBar button", has_text="Clear").click()
+    expect(bar).to_be_hidden()
+    assert page.evaluate("getActiveSelection().length") == 0
+
+
 def test_export_defaults_beside_original_and_offers_folder_browser(
     live_server, page,
 ):

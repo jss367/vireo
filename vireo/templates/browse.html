@@ -8100,9 +8100,23 @@ function updateBatchBar() {
   var ids = getActiveSelection();
   if (ids.length >= 1) {
     if (bar.style.display !== 'flex') {
-      bar.classList.add('batch-bar-inert');
+      // Inert-until-quiet only exists to protect an in-flight card
+      // double-click from being intercepted by the bar raised over that
+      // card. Non-card selection flows — Ctrl/Cmd+A, a stack tray's
+      // Select all, script-driven selection — have no such gesture to
+      // shield, and starting inert there would let a batch-button click
+      // in the quiet window pass through to the grid beneath and
+      // replace the selection we just made. Only inert when a card
+      // mousedown is actually pending.
+      var cardGesturePending = batchBarLastCardMouseDown
+        && !batchBarPointerMovedSinceCardDown;
+      if (cardGesturePending) {
+        bar.classList.add('batch-bar-inert');
+        scheduleBatchBarActivation();
+      } else {
+        bar.classList.remove('batch-bar-inert');
+      }
       bar.style.display = 'flex';
-      scheduleBatchBarActivation();
     }
     document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
   } else {
