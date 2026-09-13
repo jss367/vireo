@@ -232,6 +232,8 @@ body.sidebar-resizing {
 
 /* ---------- Content Area ---------- */
 .content-area {
+  position: relative;
+  min-width: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -241,7 +243,9 @@ body.sidebar-resizing {
 /* ---------- Filter Bar ---------- */
 .browse-filter-shell { display: block; }
 .browse-filter-shell .vf-bar { width: 100%; }
-.browse-view-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.browse-view-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.browse-view-controls .filter-summary { white-space: nowrap; }
+.filter-bar.browse-filter-shell { display: block; padding: 8px 20px; }
 .browse-view-controls input[type=text] { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 5px 10px; font-size: 12px; flex: 1; min-width: 200px; }
 .browse-view-controls select { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 5px 8px; font-size: 12px; }
 .browse-stack-toggle {
@@ -326,6 +330,32 @@ body.sidebar-resizing {
 .rating-star:hover { color: var(--warning); }
 
 .filter-summary { font-size: 12px; color: var(--text-ghost); margin-left: auto; }
+
+/* Selection actions float inside the photo pane, above the bottom panel. */
+#batchBar {
+  position: absolute;
+  bottom: 12px;
+  left: 20px;
+  right: 20px;
+  z-index: 25;
+  width: fit-content;
+  max-width: calc(100% - 40px);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 6px 24px rgba(0,0,0,.2);
+}
+#batchBar > button, #batchCount { white-space: nowrap; }
+.content-area:has(#batchBar[style*="flex"]) .grid-container {
+  padding-bottom: calc(var(--batch-bar-height, 100px) + 28px);
+  scroll-padding-bottom: calc(var(--batch-bar-height, 100px) + 28px);
+}
 
 /* ---------- Photo Grid ---------- */
 .grid-container {
@@ -1923,6 +1953,12 @@ body.sidebar-resizing {
         </button>
         <span class="filter-summary" id="filterSummary"></span>
       </div>
+      <script>
+        // The desktop build resolves includes only; compose the shared row in the browser.
+        document.querySelector('#vireoFilterBar .vf-secondary').appendChild(
+          document.querySelector('.browse-view-controls')
+        );
+      </script>
     </div>
 
     <div class="offline-collection-notice" id="offlineCollectionNotice">
@@ -1948,7 +1984,7 @@ body.sidebar-resizing {
     <div class="day-tooltip" id="dayTooltip"></div>
 
     <!-- Batch Action Bar -->
-    <div id="batchBar" style="display:none;background:var(--bg-secondary);padding:8px 20px;border-bottom:1px solid var(--border-primary);align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap;">
+    <div id="batchBar" role="region" aria-label="Selected photo actions" style="display:none;">
       <span id="batchCount" style="font-size:12px;color:var(--accent);font-weight:600;"></span>
       <button onclick="batchSetRating(1)" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;1</button>
       <button onclick="batchSetRating(3)" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;3</button>
@@ -7899,6 +7935,12 @@ function updateBurstReviewButton(ids) {
 function detailMatchesSelectedPhoto() {
   return selectedPhotoId != null && window._detailPhotoId === selectedPhotoId;
 }
+
+// Wrapping and inspector/sidebar resizing change the space the bar overlays.
+new ResizeObserver(function(entries) {
+  var bar = entries[0].target;
+  bar.parentElement.style.setProperty('--batch-bar-height', bar.offsetHeight + 'px');
+}).observe(document.getElementById('batchBar'));
 
 function updateBatchBar() {
   var bar = document.getElementById('batchBar');

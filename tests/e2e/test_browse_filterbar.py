@@ -428,9 +428,10 @@ def test_quick_rating_filter_and_chip_semantics(live_server, page):
     _open_browse(page, live_server)
     assert _total(page) == 5
 
-    # Quick filters are available immediately, without opening the rule
-    # builder popover.
-    assert page.locator(".vf-quick-inline").is_visible()
+    # Quick filters stay out of the header until Filters is opened.
+    expect(page.locator(".vf-quick")).to_be_hidden()
+    page.click(".vf-filters-btn")
+    expect(page.locator(".vf-quick")).to_be_visible()
     assert page.locator('.vf-quick-rating .vf-star[data-rating="4"]').is_visible()
     page.click('.vf-quick-rating .vf-star[data-rating="4"]')
     _wait_total(page, 1)
@@ -443,6 +444,7 @@ def test_quick_rating_filter_and_chip_semantics(live_server, page):
 
 def test_quick_flags_multi_select_combines(live_server, page):
     _open_browse(page, live_server)
+    page.click(".vf-filters-btn")
     assert page.locator('.vf-quick-flags [data-flag="flagged"]').is_visible()
     page.click('.vf-quick-flags [data-flag="flagged"]')
     page.wait_for_timeout(300)
@@ -703,6 +705,7 @@ def test_visual_search_error_state_is_honest(live_server, page):
     assert page.locator(".vf-chip.visual.error").count() == 1
 
     # Metadata rules still apply alongside the broken visual clause.
+    page.click(".vf-filters-btn")
     page.click('.vf-quick-rating .vf-star[data-rating="4"]')
     _wait_total(page, 1)
 
@@ -780,3 +783,55 @@ def test_save_as_collection_and_reopen(live_server, page):
     # Quick-search group round-trips too (the hawk text clause).
     assert "hawk" in chips
     assert page.evaluate("VireoFilter.getVisual().prompt") == "a soaring hawk"
+
+
+@pytest.mark.parametrize("width", [1440, 1000])
+def test_compact_header_and_floating_selection_actions(live_server, page, width):
+    page.set_viewport_size({"width": width, "height": 900})
+    _open_browse(page, live_server)
+    header = page.locator(".browse-filter-shell")
+    grid = page.locator("#gridContainer")
+    grid_top = grid.bounding_box()["y"]
+    assert header.bounding_box()["height"] < (100 if width == 1440 else 160)
+    expect(page.locator(".vf-quick")).to_be_hidden()
+    expect(page.locator(".vf-overflow")).to_be_hidden()
+
+    page.click(".vf-filters-btn")
+    expect(page.locator(".vf-quick")).to_be_visible()
+    assert grid.bounding_box()["y"] == grid_top
+    page.click(".vf-done")
+    expect(page.locator(".vf-quick")).to_be_hidden()
+
+    page.locator("#grid .grid-card").first.click()
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    assert grid.bounding_box()["y"] == grid_top
+    assert bar.bounding_box()["y"] > grid.bounding_box()["y"]
+    pane = page.locator(".content-area").bounding_box()
+    box = bar.bounding_box()
+    assert pane["x"] <= box["x"]
+    assert box["x"] + box["width"] <= pane["x"] + pane["width"]
+    grid.evaluate("el => { el.scrollTop = el.scrollHeight; }")
+    page.wait_for_function("""() => {
+        const cards = document.querySelectorAll('#grid .grid-card');
+        return cards[cards.length - 1].getBoundingClientRect().bottom <=
+            document.getElementById('batchBar').getBoundingClientRect().top;
+    }""")
+    bar.get_by_role("button", name="More", exact=False).click()
+    expect(page.locator(".vireo-ctx-menu")).to_be_visible()
+    page.keyboard.press("Escape")
+    bar.get_by_role("button", name="Clear", exact=True).click()
+    expect(bar).to_be_hidden()
+
+    page.click(".vf-filters-btn")
+    page.click('.vf-star[data-rating="4"]')
+    _wait_total(page, 1)
+    page.click(".vf-done")
+    expect(page.locator(".vf-count")).to_have_text("1")
+    expect(page.locator(".vf-chips")).to_contain_text("Rating is at least 4 stars")
+    assert page.locator("#vireoFilterBar").evaluate("""bar => {
+        const right = bar.getBoundingClientRect().right;
+        return [...bar.querySelectorAll('.vf-primary > *, .vf-chip-row > *')]
+            .filter(el => el.getBoundingClientRect().width)
+            .every(el => el.getBoundingClientRect().right <= right + 1);
+    }""")

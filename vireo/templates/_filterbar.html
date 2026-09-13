@@ -11,7 +11,7 @@
       <kbd>⌘F</kbd>
       <div class="vf-search-suggest" role="listbox" hidden></div>
     </div>
-    <button class="vf-filters-btn" type="button" aria-expanded="false">
+    <button class="vf-filters-btn" type="button" aria-expanded="false" aria-controls="vireoFilterPopover">
       <span aria-hidden="true">≡</span> Filters <span class="vf-count" hidden>0</span>
     </button>
     <div class="vf-total" aria-live="polite"><strong>–</strong> <span>photos</span></div>
@@ -23,63 +23,65 @@
     </div>
   </div>
 
-  <section class="vf-quick vf-quick-inline" aria-label="Quick filters">
-    <div class="vf-section-heading"><h3>Quick filters</h3><span>Click again to clear · flags and colors combine</span></div>
-    <div class="vf-quick-grid">
-      <div class="vf-quick-group vf-quick-rating">
-        <span>Rating</span>
-        <div class="vf-quick-control">
-          <select aria-label="Rating comparison">
-            <option value=">=">At least (≥)</option>
-            <option value="is">Exactly (=)</option>
-            <option value="<=">At most (≤)</option>
-          </select>
-          <div class="vf-stars" aria-label="Rating value">
-            <button type="button" class="vf-star" data-rating="1" aria-label="1 star">★</button>
-            <button type="button" class="vf-star" data-rating="2" aria-label="2 stars">★</button>
-            <button type="button" class="vf-star" data-rating="3" aria-label="3 stars">★</button>
-            <button type="button" class="vf-star" data-rating="4" aria-label="4 stars">★</button>
-            <button type="button" class="vf-star" data-rating="5" aria-label="5 stars">★</button>
-          </div>
-        </div>
+  <div class="vf-secondary">
+    <div class="vf-chip-row">
+      <div class="vf-scope-chip" title="This page always applies this scope">
+        <span></span><em aria-hidden="true">⌁</em>
       </div>
-      <div class="vf-quick-group">
-        <span>Flag</span>
-        <div class="vf-segmented vf-quick-flags">
-          <button type="button" data-flag="flagged">⚑ Picked</button>
-          <button type="button" data-flag="none">– Unflagged</button>
-          <button type="button" data-flag="rejected">× Rejected</button>
-        </div>
-      </div>
-      <div class="vf-quick-group">
-        <span>Color</span>
-        <div class="vf-quick-colors" aria-label="Color label">
-          <button type="button" data-color="red" data-color-label-control aria-label="Red label"></button>
-          <button type="button" data-color="yellow" data-color-label-control aria-label="Yellow label"></button>
-          <button type="button" data-color="green" data-color-label-control aria-label="Green label"></button>
-          <button type="button" data-color="blue" data-color-label-control aria-label="Blue label"></button>
-          <button type="button" data-color="purple" data-color-label-control aria-label="Purple label"></button>
-        </div>
-      </div>
+      <div class="vf-chip-viewport"><div class="vf-chips" aria-label="Active filters"></div></div>
+      <button class="vf-overflow" type="button" hidden>+0</button>
     </div>
-  </section>
-
-  <div class="vf-chip-row">
-    <div class="vf-scope-chip" title="This page always applies this scope">
-      <span></span><em aria-hidden="true">⌁</em>
-    </div>
-    <div class="vf-chip-viewport"><div class="vf-chips" aria-label="Active filters"></div></div>
-    <button class="vf-overflow" type="button" hidden>+0</button>
   </div>
 
   <div class="vf-paused-note" hidden></div>
   <div class="vf-visual-note" hidden></div>
 
-  <div class="vf-popover" role="dialog" aria-label="Edit photo filters" hidden>
+  <div id="vireoFilterPopover" class="vf-popover" role="dialog" aria-label="Edit photo filters" hidden>
     <div class="vf-popover-header">
       <div><h2>Filter photos</h2><p>Changes update the page immediately.</p></div>
       <button class="vf-popover-close" type="button" aria-label="Close">×</button>
     </div>
+
+    <section class="vf-quick" aria-label="Quick filters">
+      <div class="vf-section-heading"><h3>Quick filters</h3><span>Click again to clear · flags and colors combine</span></div>
+      <div class="vf-quick-grid">
+        <div class="vf-quick-group vf-quick-rating">
+          <span>Rating</span>
+          <div class="vf-quick-control">
+            <select aria-label="Rating comparison">
+              <option value=">=">At least (≥)</option>
+              <option value="is">Exactly (=)</option>
+              <option value="<=">At most (≤)</option>
+            </select>
+            <div class="vf-stars" aria-label="Rating value">
+              <button type="button" class="vf-star" data-rating="1" aria-label="1 star">★</button>
+              <button type="button" class="vf-star" data-rating="2" aria-label="2 stars">★</button>
+              <button type="button" class="vf-star" data-rating="3" aria-label="3 stars">★</button>
+              <button type="button" class="vf-star" data-rating="4" aria-label="4 stars">★</button>
+              <button type="button" class="vf-star" data-rating="5" aria-label="5 stars">★</button>
+            </div>
+          </div>
+        </div>
+        <div class="vf-quick-group">
+          <span>Flag</span>
+          <div class="vf-segmented vf-quick-flags">
+            <button type="button" data-flag="flagged">⚑ Picked</button>
+            <button type="button" data-flag="none">– Unflagged</button>
+            <button type="button" data-flag="rejected">× Rejected</button>
+          </div>
+        </div>
+        <div class="vf-quick-group">
+          <span>Color</span>
+          <div class="vf-quick-colors" aria-label="Color label">
+            <button type="button" data-color="red" data-color-label-control aria-label="Red label"></button>
+            <button type="button" data-color="yellow" data-color-label-control aria-label="Yellow label"></button>
+            <button type="button" data-color="green" data-color-label-control aria-label="Green label"></button>
+            <button type="button" data-color="blue" data-color-label-control aria-label="Blue label"></button>
+            <button type="button" data-color="purple" data-color-label-control aria-label="Purple label"></button>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <section class="vf-rules">
       <div class="vf-section-heading">
@@ -128,9 +130,11 @@
 </div>
 
 <style>
+.vf-bar [hidden] { display: none !important; }
+.vf-secondary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
 .vf-bar { position: relative; z-index: 30; }
-.vf-primary { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.vf-search { position: relative; flex: 1 1 420px; min-width: 160px; }
+.vf-primary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.vf-search { position: relative; flex: 1 1 180px; min-width: 160px; }
 .vf-search input { width: 100%; height: 34px; padding: 0 46px 0 30px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-input); color: var(--text-primary); }
 .vf-search input:focus { border-color: var(--accent); outline: none; }
 .vf-search-icon { position: absolute; left: 9px; top: 6px; color: var(--text-muted); font-size: 17px; }
@@ -142,9 +146,11 @@
 .vf-mute.active { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 55%, transparent); background: color-mix(in srgb, var(--warning) 10%, transparent); }
 .vf-total { min-width: 70px; text-align: right; white-space: nowrap; color: var(--text-dim); }
 .vf-total strong { color: var(--text-primary); font-variant-numeric: tabular-nums; }
-.vf-chip-row { display: flex; align-items: center; gap: 6px; min-width: 0; height: 32px; margin-top: 6px; }
+.vf-chip-row { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 28px; flex: 1 1 220px; }
+.vf-chip-row:has(.vf-chip) { flex-basis: 420px; }
 .vf-scope-chip, .vf-chip, .vf-overflow { height: 26px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid var(--border-secondary); border-radius: 13px; background: var(--bg-secondary); color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
-.vf-scope-chip { border-style: dashed; color: var(--text-muted); flex: none; }
+.vf-scope-chip { min-width: 0; max-width: 100%; border-style: dashed; color: var(--text-muted); flex: 0 1 auto; }
+.vf-scope-chip span { overflow: hidden; text-overflow: ellipsis; }
 .vf-scope-chip em { font-style: normal; color: var(--text-faint); }
 .vf-chip-viewport { min-width: 0; flex: 1; overflow: hidden; }
 .vf-chips { display: flex; gap: 6px; }
@@ -192,9 +198,7 @@
 .vf-popover-close { width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 17px; }
 .vf-popover-close:hover { background: var(--bg-tertiary); color: var(--text-primary); }
 .vf-rules { padding: 12px 16px; }
-.vf-quick-inline { display: flex; align-items: center; gap: 18px; margin-top: 6px; padding: 7px 10px; border: 1px solid var(--border-primary); border-radius: 8px; background: color-mix(in srgb, var(--bg-secondary) 72%, transparent); }
-.vf-quick-inline > .vf-section-heading { flex: none; display: grid; justify-items: start; gap: 2px; margin: 0; }
-.vf-quick-inline > .vf-section-heading > span { white-space: nowrap; }
+.vf-quick { padding: 12px 16px; border-bottom: 1px solid var(--border-primary); }
 .vf-section-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; }
 .vf-section-heading h3 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
 .vf-section-heading > span { color: var(--text-faint); font-size: 10px; }
@@ -268,9 +272,12 @@
 .vf-done { height: 30px; padding: 0 14px; border: 0; border-radius: 7px; background: var(--accent); color: var(--accent-text); cursor: pointer; font-weight: 700; }
 .vf-toast { position: fixed; z-index: 100; left: 50%; bottom: 22px; display: flex; align-items: center; gap: 14px; transform: translateX(-50%); padding: 9px 12px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-panel); box-shadow: 0 12px 32px rgba(0,0,0,.3); color: var(--text-secondary); font-size: 12px; }
 .vf-toast button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-weight: 700; }
-@media (max-width: 900px) {
-  .vf-quick-inline { align-items: flex-start; flex-direction: column; gap: 7px; }
-  .vf-quick-inline > .vf-section-heading { display: flex; width: 100%; justify-content: space-between; align-items: center; }
+@media (max-width: 600px) {
+  .vf-primary { flex-wrap: wrap; }
+  .vf-search { flex-basis: calc(100% - 110px); min-width: 100px; }
+  .vf-total { margin-right: auto; text-align: left; }
+  .vf-section-heading { flex-wrap: wrap; gap: 5px; }
+  .vf-quick-grid { gap: 12px; }
 }
 </style>
 <script src="/static/vireo-filter.js"></script>

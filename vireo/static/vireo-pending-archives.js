@@ -20,23 +20,32 @@
       const next = JSON.stringify(data.items || []);
       if (next === signature) return;
       signature = next;
+      const expanded = new Set(Array.from(list.querySelectorAll('details[open]'), el => el.dataset.archiveId));
       list.replaceChildren();
       panel.hidden = !data.items.length;
       data.items.forEach(item => {
         const row = document.createElement('div');
-        row.style.cssText = 'margin-top:10px;font-size:12px;overflow-wrap:anywhere;';
-        const title = document.createElement('strong');
+        row.className = 'pending-archive-row';
+        const details = document.createElement('details');
+        details.className = 'pending-archive-details';
+        details.dataset.archiveId = String(item.id);
+        details.open = expanded.has(String(item.id));
+        const title = document.createElement('summary');
         title.textContent = item.name;
-        row.appendChild(title);
+        details.appendChild(title);
         const destination = document.createElement('div');
+        destination.className = 'pending-archive-destination';
         destination.textContent = 'Destination: ' + item.destination;
-        row.appendChild(destination);
+        details.appendChild(destination);
+        row.appendChild(details);
+        const actions = document.createElement('div');
+        actions.className = 'pending-archive-actions';
+        row.appendChild(actions);
         if (item.collection_id) {
           const review = document.createElement('a');
           review.href = '/browse?collection_id=' + encodeURIComponent(item.collection_id);
           review.textContent = 'Review photos';
-          review.style.marginRight = '10px';
-          row.appendChild(review);
+          actions.appendChild(review);
         }
         const button = document.createElement('button');
         button.type = 'button';
@@ -62,9 +71,10 @@
             refresh();
           }
         });
-        row.appendChild(button);
+        actions.appendChild(button);
         if (item.source_available === false) {
           const missing = document.createElement('div');
+          missing.className = 'pending-archive-note';
           missing.textContent = 'Local originals are unavailable. Reconnect their storage, or remove this transfer record if they are permanently gone.';
           row.appendChild(missing);
           const discard = document.createElement('button');
@@ -97,6 +107,7 @@
         }
         if (item.error || item.state === 'waiting') {
           const note = document.createElement('div');
+          note.className = 'pending-archive-note';
           note.textContent = item.error || 'Waiting for running jobs to finish.';
           row.appendChild(note);
         }
