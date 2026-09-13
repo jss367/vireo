@@ -658,11 +658,16 @@ def _resolve_label_set_metas(params, db):
     def _metas(paths):
         return [saved_by_file.get(p, {"labels_file": p}) for p in paths]
 
+    # ``os.path.exists`` mirrors ``_load_labels``, which filters both the
+    # plural and singular file branches through ``_existing_metas`` — a
+    # configured path that has since been deleted contributes nothing to
+    # ``labels`` there, so naming the stale path here would misreport the
+    # label source. The plural branch keeps every path that still exists;
+    # if all requested files are gone, the caller sees the same empty
+    # metadata ``_load_labels`` would produce (Tree of Life falls in one
+    # step below).
     if params.labels_files and isinstance(params.labels_files, list):
-        return _metas(params.labels_files)
-    # os.path.exists mirrors ``_load_labels`` — a configured single file that
-    # has since been deleted falls back to workspace/global lists there, so
-    # naming the stale path here would misreport the label source.
+        return _metas([p for p in params.labels_files if os.path.exists(p)])
     if params.labels_file and os.path.exists(params.labels_file):
         return _metas([params.labels_file])
     ws_labels = db.get_workspace_active_labels() if db else None

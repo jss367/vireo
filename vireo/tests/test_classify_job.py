@@ -263,13 +263,17 @@ def test_describe_label_source_single_set(tmp_path):
     assert text == "812 species from California, US Birds"
 
 
-def test_describe_label_source_truncates_many_sets():
+def test_describe_label_source_truncates_many_sets(tmp_path):
     """More than three lists: name the first three and count the rest."""
     from unittest.mock import patch
 
     from classify_job import describe_label_source
 
-    paths = [f"/l/{i}.txt" for i in range(5)]
+    paths = []
+    for i in range(5):
+        p = tmp_path / f"{i}.txt"
+        p.write_text("Robin\n")
+        paths.append(str(p))
     saved = [{"labels_file": p, "name": f"List {i}"} for i, p in enumerate(paths)]
     with patch("classify_job.get_saved_labels", return_value=saved):
         text = describe_label_source(
@@ -329,15 +333,22 @@ def test_resolve_label_sources_keeps_lookup_order(tmp_path):
 
     from classify_job import _resolve_label_sources
 
-    # ``labels_file`` (singular) requires the path to exist on disk —
-    # ``_resolve_label_set_metas`` mirrors ``_load_labels``'s file-existence
-    # check so a stale configured path falls through to the workspace list.
+    # ``labels_file`` (singular) and ``labels_files`` (plural) both require
+    # the paths to exist on disk — ``_resolve_label_set_metas`` mirrors
+    # ``_load_labels``'s file-existence check, so a stale configured path
+    # falls through to the workspace list rather than being named by the
+    # Jobs page or written into ``labels_fingerprints``.
     single = tmp_path / "a.txt"
     single.write_text("Robin\n")
+    plural_a = tmp_path / "pa.txt"
+    plural_a.write_text("Cardinal\n")
+    plural_b = tmp_path / "pb.txt"
+    plural_b.write_text("Blue Jay\n")
     with patch("classify_job.get_saved_labels", return_value=[]):
         assert _resolve_label_sources(
-            _params(labels_files=["/a.txt", "/b.txt"]), _StubDB(["/ws.txt"]),
-        ) == ["/a.txt", "/b.txt"]
+            _params(labels_files=[str(plural_a), str(plural_b)]),
+            _StubDB(["/ws.txt"]),
+        ) == [str(plural_a), str(plural_b)]
         assert _resolve_label_sources(
             _params(labels_file=str(single)), _StubDB(["/ws.txt"]),
         ) == [str(single)]
@@ -374,6 +385,33 @@ def test_resolve_label_set_metas_falls_back_when_labels_file_missing(tmp_path):
         assert _resolve_label_sources(
             _params(labels_file=deleted), db,
         ) == ["/l/ws.txt"]
+
+
+def test_resolve_label_set_metas_filters_missing_in_labels_files(tmp_path):
+    """Regression: the plural ``labels_files`` branch mirrors the singular
+    branch and drops paths whose file was deleted, matching what
+    ``_load_labels`` actually loads via ``_existing_metas``. Without this,
+    the Jobs page and ``labels_fingerprints`` would name lists that
+    contributed nothing to ``labels``.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _resolve_label_set_metas
+
+    existing = tmp_path / "birds.txt"
+    existing.write_text("Robin\n")
+    missing = str(tmp_path / "gone.txt")  # never created
+    saved = [
+        {"labels_file": str(existing), "name": "Birds"},
+        {"labels_file": missing, "name": "Deleted"},
+    ]
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        metas = _resolve_label_set_metas(
+            _params(labels_files=[str(existing), missing]), _StubDB(),
+        )
+        # Only the file that still exists on disk — the deleted path is dropped
+        # to match ``_load_labels``'s behavior.
+        assert metas == [{"labels_file": str(existing), "name": "Birds"}]
 
 
 def test_load_labels_returns_metas_used_for_display(tmp_path):
