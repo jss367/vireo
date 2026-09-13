@@ -160,6 +160,14 @@ def _get_session():
             # would park ``wait_if_paused`` under the cache lock and
             # block every unpaused peer waiting on MegaDetector until
             # Resume.
+            #
+            # Default provider order on purpose: MegaDetector is the one
+            # model Vireo runs where CoreML is a large win. It is a CNN, so
+            # CoreML takes essentially the whole graph instead of fragmenting
+            # it — 0.016s vs 0.176s per frame on an M3 Max, ~11x. Vireo's
+            # transformer models go the other way and are pinned to CPU (see
+            # ``masking.py`` and the external-data branch in
+            # ``onnx_runtime.create_session``); do not "unify" them.
             _session = create_session(
                 MEGADETECTOR_ONNX_PATH,
                 cancel_check=resolve_resource_pure_cancel_check(),

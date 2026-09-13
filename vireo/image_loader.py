@@ -1,10 +1,16 @@
 """Load images from various formats (JPEG, PNG, TIFF, NEF, CR2, ARW, etc.).
 
 Performance notes:
-- RAW decode is the bottleneck (~1.7s full, ~0.5s half-size for a 45MP NEF)
+- RAW decode is the bottleneck (~1.0s full, ~0.5s half-size for a 45MP NEF)
 - We use half_size=True when the target is ≤ half the sensor resolution (3x faster)
+- Full-size decodes demosaic with PPG, not libraw's default AHD: ~1.0s
+  instead of ~1.7s, for output that matches to 40-52 dB PSNR
+  (see :func:`_postprocess_raw`)
 - PIL resize and JPEG encode are negligible (<0.15s)
 - libraw (via rawpy) is already C — Rust/numba won't help here
+- The libraw inside the rawpy wheel is built without OpenMP, so demosaic is
+  single-threaded (measured 1.00x CPU/wall on a 16-core M3 Max). Decoding
+  many RAWs in parallel is therefore worth more than optimizing one decode.
 
 RAW strategy:
 - Modern cameras embed a full-resolution JPEG in the RAW file (the same image
@@ -918,11 +924,39 @@ def _extract_embedded_jpeg(raw):
         return None
 
 
+def _is_bayer_sensor(raw):
+    """True when this RAW's CFA is a 2x2 Bayer pattern.
+
+    X-Trans sensors expose a 6x6 ``raw_pattern`` and LibRaw remaps the
+    PPG enum's quality value to one-pass ``xtrans_interpolate(1)`` rather
+    than running PPG; leaving ``demosaic_algorithm`` unset then keeps the
+    default three-pass X-Trans path, which is higher-quality than the
+    one-pass shortcut. Foveon and monochrome raws expose no pattern at
+    all.
+    """
+    pattern = getattr(raw, "raw_pattern", None)
+    if pattern is None:
+        return False
+    shape = getattr(pattern, "shape", None)
+    return shape == (2, 2)
+
+
 def _postprocess_raw(raw, max_size, preserve_highlights=False):
     """Demosaic raw sensor data into a PIL Image.
 
     Uses half-size decode when the target fits, which is ~3x faster and still
     produces ~4000x2700 for a 45MP sensor.
+
+    Full-size Bayer decodes use PPG rather than libraw's default AHD: on
+    45MP D850 NEFs read from local disk, AHD takes 1.70-1.74s against
+    PPG's 1.00-1.03s, so roughly 0.7s of the ~1.1s demosaic disappears.
+    Output matches AHD to 40-52 dB PSNR and is indistinguishable at 1:1
+    even on demosaic worst cases — dense foliage and blown-highlight
+    frond edges. X-Trans (Fujifilm .raf) sensors keep libraw's default
+    three-pass demosaic: PPG is Bayer-only and LibRaw would otherwise
+    remap the enum to a lower-quality one-pass X-Trans path. Half-size
+    decodes bin rather than demosaic, so the algorithm choice doesn't
+    reach them.
     """
     import rawpy
 
@@ -933,6 +967,8 @@ def _postprocess_raw(raw, max_size, preserve_highlights=False):
         if max_size <= half_long:
             use_half = True
     kwargs = {"half_size": use_half}
+    if _is_bayer_sensor(raw):
+        kwargs["demosaic_algorithm"] = rawpy.DemosaicAlgorithm.PPG
     if preserve_highlights:
         kwargs.update({
             "use_camera_wb": True,

@@ -4962,9 +4962,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }:
             return None
         target_ws = (request.view_args or {}).get("ws_id")
-        workspaces = {_get_db()._ws_id()}
+        # A request with no active workspace and no explicit target has no
+        # workspace to reserve; endpoints that handle "no active workspace"
+        # themselves (e.g. the offline-banner recheck no-op) must still reach
+        # their view function instead of 500ing out of the before_request.
+        active_ws = _get_db()._active_workspace_id
+        workspaces = set()
+        if active_ws is not None:
+            workspaces.add(active_ws)
         if target_ws is not None:
             workspaces.add(target_ws)
+        if not workspaces:
+            return None
         with contextlib.ExitStack() as reservation:
             for workspace_id in sorted(workspaces):
                 reservation.enter_context(app._job_runner.workspace_mutation(
