@@ -3100,6 +3100,66 @@ def test_pipeline_loops_over_multiple_models(tmp_path, monkeypatch):
     )
 
 
+def test_pipeline_classify_step_names_the_label_set(tmp_path, monkeypatch):
+    """The classify row must say which species list the model ran against.
+
+    "Classify with BioCLIP-2.5" alone doesn't tell the user whether these
+    photos were matched against their regional lists or the whole Tree of
+    Life, and that decides which species the run could possibly return.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        classify_job, "_load_labels",
+        lambda *a, **k: (["Northern Cardinal", "Blue Jay", "Steller's Jay"], False),
+    )
+    monkeypatch.setattr(
+        classify_job, "get_active_labels",
+        lambda: [{"labels_file": "/l/birds.txt", "name": "California, US Birds"}],
+    )
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
+
+    published = [
+        kwargs["label_source"]
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == f"classify:{model_id}" and "label_source" in kwargs
+    ]
+    assert published == ["3 species from California, US Birds"], (
+        f"classify step should name the active label set; got {published!r}"
+    )
+
+
 def test_pipeline_pause_during_classifier_load_parks_and_resumes(
     tmp_path, monkeypatch,
 ):

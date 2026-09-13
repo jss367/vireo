@@ -124,6 +124,12 @@ def test_json_config_loading(tmp_path):
     assert clf._common_names["sturnus vulgaris"] == "European Starling"
 
 
+def test_label_space_size_counts_builtin_classes(tmp_path):
+    """The Jobs page names a timm model's fixed head by its class count."""
+    clf = _make_fake_classifier(tmp_path)
+    assert clf.label_space_size == 3
+
+
 def test_missing_model_dir(tmp_path):
     """__init__ raises FileNotFoundError when model directory is missing."""
     from timm_classifier import TimmClassifier

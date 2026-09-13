@@ -1219,6 +1219,49 @@ def test_job_steps_tracking(tmp_path):
     assert j["steps"][2]["status"] == "pending"
 
 
+def test_step_label_source_is_kept_and_persisted(tmp_path):
+    """A step's label_source survives update_step and lands in job_history.
+
+    Classify steps publish the label space they ran against here, and a
+    finished run has to keep saying which species lists produced its
+    predictions — not just which model did.
+    """
+    import json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        runner.set_steps(job["id"], [
+            {"id": "classify:bioclip", "label": "Classify with BioCLIP-2.5"},
+        ])
+        runner.update_step(
+            job["id"], "classify:bioclip", status="running",
+            label_source="1,327 species from 2 lists: California, Washington",
+        )
+        runner.update_step(job["id"], "classify:bioclip", status="completed")
+        return {}
+
+    job_id = runner.start("classify", work, workspace_id=1)
+    wait_for_job_via_runner(runner, job_id)
+
+    j = runner.get(job_id)
+    assert j["steps"][0]["label_source"] == (
+        "1,327 species from 2 lists: California, Washington"
+    )
+
+    row = db.conn.execute(
+        "SELECT tree FROM job_history WHERE id = ?", (job_id,)
+    ).fetchone()
+    persisted = json.loads(row["tree"])
+    assert persisted[0]["label_source"] == (
+        "1,327 species from 2 lists: California, Washington"
+    )
+
+
 def test_job_history_persists_steps_tree(tmp_path):
     """Completed jobs persist their step tree to job_history."""
     import json

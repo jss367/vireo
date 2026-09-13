@@ -608,21 +608,91 @@ def _all_photos_cache_satisfied(
     return covered_photos == len(photo_ids)
 
 
-def _resolve_label_sources(params, db):
-    """Return list of source file paths used to build the active label set.
+def _resolve_label_set_metas(params, db):
+    """Return the label-set metadata dicts _load_labels would merge, in order.
 
-    Mirrors the lookup order in _load_labels — but only produces the source
-    paths so the caller can stash them on the labels_fingerprints row.
+    Mirrors the lookup order in _load_labels — explicit files first, then the
+    workspace's active sets, then the global ones — but resolves only the
+    sources, not the species names. Callers use it for the fingerprint row's
+    source paths and for naming the sets in the UI.
     """
+    saved_by_file = {}
+    for meta in get_saved_labels() or []:
+        path = meta.get("labels_file")
+        if path:
+            saved_by_file[path] = meta
+
+    def _metas(paths):
+        return [saved_by_file.get(p, {"labels_file": p}) for p in paths]
+
     if params.labels_files and isinstance(params.labels_files, list):
-        return list(params.labels_files)
+        return _metas(params.labels_files)
     if params.labels_file:
-        return [params.labels_file]
+        return _metas([params.labels_file])
     ws_labels = db.get_workspace_active_labels() if db else None
     if ws_labels is not None:
-        return list(ws_labels)
-    active_sets = get_active_labels()
-    return [s.get("labels_file") for s in (active_sets or []) if s.get("labels_file")]
+        return _metas(list(ws_labels))
+    return list(get_active_labels() or [])
+
+
+def _resolve_label_sources(params, db):
+    """Return list of source file paths used to build the active label set."""
+    return [
+        meta.get("labels_file")
+        for meta in _resolve_label_set_metas(params, db)
+        if meta.get("labels_file")
+    ]
+
+
+def _label_set_name(meta):
+    """Display name for one label set — its saved name, else its filename."""
+    name = (meta.get("name") or "").strip()
+    if name:
+        return name
+    return os.path.basename(meta.get("labels_file") or "") or "unnamed list"
+
+
+def describe_label_source(
+    params, db, *, labels, use_tol, model_type, class_count=None,
+):
+    """One line naming the label space a classify run compares photos against.
+
+    The Jobs page names the model on each classify row, but the same model
+    against a 1,300-species regional list and against the full Tree of Life
+    are different classifiers as far as the results are concerned. The row has
+    to say which list is in play, not just which weights are loaded.
+
+    ``class_count`` is the constructed classifier's own label-space size, used
+    for the two cases where the selected lists don't describe it: Tree of Life
+    and a timm model's fixed head. Always returns a line — a run that reaches
+    here has a label space, because _load_labels raises when it finds none.
+    """
+    if model_type == "timm":
+        if class_count:
+            return (
+                f"Model's own {class_count:,} built-in classes "
+                "— species lists don't apply"
+            )
+        return "Model's own built-in classes — species lists don't apply"
+    if use_tol or not labels:
+        if class_count:
+            return (
+                f"Tree of Life: all {class_count:,} species "
+                "(no species list active)"
+            )
+        return "Tree of Life: every species the model knows (no species list active)"
+
+    names = [_label_set_name(m) for m in _resolve_label_set_metas(params, db)]
+    count = f"{len(labels):,} species"
+    if not names:
+        return count
+    if len(names) > 3:
+        shown = ", ".join(names[:3]) + f" and {len(names) - 3} more"
+    else:
+        shown = ", ".join(names)
+    if len(names) == 1:
+        return f"{count} from {shown}"
+    return f"{count} from {len(names)} lists: {shown}"
 
 
 def _detect_batch(photos, folders, runner, job, reclassify, db,
@@ -3303,6 +3373,22 @@ def run_classify_job(
             job["id"], "load_model", status="completed",
             summary=effective_name,
         )
+
+        # Name the label space on the classify step: "Classify species" alone
+        # doesn't say whether these photos are being matched against the
+        # active regional lists, the full Tree of Life, or a timm model's
+        # fixed head — and that decides what the predictions can even be.
+        label_source_text = describe_label_source(
+            params, thread_db,
+            labels=labels,
+            use_tol=use_tol,
+            model_type=model_type,
+            class_count=getattr(clf, "label_space_size", None),
+        )
+        if label_source_text:
+            runner.update_step(
+                job["id"], "classify", label_source=label_source_text,
+            )
 
         # Restamp the portable model identity with the
         # label_descriptions.json this classifier actually consumed.

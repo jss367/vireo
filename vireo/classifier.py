@@ -842,6 +842,20 @@ class Classifier:
             )
             self._mode = "tol"
 
+    @property
+    def label_space_size(self):
+        """How many classes this classifier can return, or None if unknown.
+
+        Surfaced on the Jobs page so a classify step can say what the model is
+        comparing against — a regional list of a few hundred species and the
+        full Tree of Life produce very different results from the same weights.
+        """
+        if getattr(self, "_mode", None) == "tol":
+            classes = getattr(self, "_tol_classes", None)
+        else:
+            classes = getattr(self, "_classes", None)
+        return len(classes) if classes is not None else None
+
     def _preprocess(self, image):
         """Preprocess a PIL Image for ONNX inference.
 

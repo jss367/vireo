@@ -388,6 +388,17 @@ class TimmClassifier:
             len(self._common_names),
         )
 
+    @property
+    def label_space_size(self):
+        """How many built-in classes this model can return, or None if unknown.
+
+        timm models carry a fixed classifier head, so species lists never apply
+        to them; the Jobs page says so and names the size (see
+        ``classify_job.describe_label_source``).
+        """
+        classes = getattr(self, "_class_names", None)
+        return len(classes) if classes is not None else None
+
     def notify_reuse(self):
         """Re-arm the ``label_descriptions.json`` heal on cache reuse.
 

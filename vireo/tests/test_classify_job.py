@@ -197,6 +197,148 @@ def test_load_labels_raises_when_no_labels_unsupported_model():
             )
 
 
+# ── describe_label_source: naming the label space on the Jobs page ─────────
+
+
+def _params(labels_file=None, labels_files=None):
+    return ClassifyParams(
+        collection_id="1",
+        labels_file=labels_file,
+        labels_files=labels_files,
+        model_id=None,
+        model_name=None,
+        grouping_window=60,
+        similarity_threshold=0.5,
+        reclassify=False,
+    )
+
+
+class _StubDB:
+    """Minimal stand-in exposing only the workspace label lookup."""
+
+    def __init__(self, active_labels=None):
+        self._active_labels = active_labels
+
+    def get_workspace_active_labels(self):
+        return self._active_labels
+
+
+def test_describe_label_source_names_workspace_sets():
+    """Two active lists: the row names the species count and both lists."""
+    from unittest.mock import patch
+
+    from classify_job import describe_label_source
+
+    saved = [
+        {"labels_file": "/l/ca.txt", "name": "California, US Birds"},
+        {"labels_file": "/l/wa.txt", "name": "Washington, US Birds"},
+    ]
+    db = _StubDB(["/l/ca.txt", "/l/wa.txt"])
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        text = describe_label_source(
+            _params(), db,
+            labels=["a"] * 1327, use_tol=False, model_type="bioclip",
+        )
+    assert text == (
+        "1,327 species from 2 lists: California, US Birds, Washington, US Birds"
+    )
+
+
+def test_describe_label_source_single_set():
+    from unittest.mock import patch
+
+    from classify_job import describe_label_source
+
+    saved = [{"labels_file": "/l/ca.txt", "name": "California, US Birds"}]
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        text = describe_label_source(
+            _params(labels_file="/l/ca.txt"), _StubDB(),
+            labels=["a"] * 812, use_tol=False, model_type="bioclip",
+        )
+    assert text == "812 species from California, US Birds"
+
+
+def test_describe_label_source_truncates_many_sets():
+    """More than three lists: name the first three and count the rest."""
+    from unittest.mock import patch
+
+    from classify_job import describe_label_source
+
+    paths = [f"/l/{i}.txt" for i in range(5)]
+    saved = [{"labels_file": p, "name": f"List {i}"} for i, p in enumerate(paths)]
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        text = describe_label_source(
+            _params(labels_files=paths), _StubDB(),
+            labels=["a"] * 40, use_tol=False, model_type="bioclip",
+        )
+    assert text == "40 species from 5 lists: List 0, List 1, List 2 and 2 more"
+
+
+def test_describe_label_source_falls_back_to_filename():
+    """An ad-hoc file with no saved metadata is named by its filename."""
+    from unittest.mock import patch
+
+    from classify_job import describe_label_source
+
+    with patch("classify_job.get_saved_labels", return_value=[]):
+        text = describe_label_source(
+            _params(labels_file="/tmp/my_species.txt"), _StubDB(),
+            labels=["a", "b"], use_tol=False, model_type="bioclip",
+        )
+    assert text == "2 species from my_species.txt"
+
+
+def test_describe_label_source_tree_of_life():
+    """ToL mode must say so — it is a completely different label space."""
+    from classify_job import describe_label_source
+
+    text = describe_label_source(
+        _params(), _StubDB(),
+        labels=None, use_tol=True, model_type="bioclip", class_count=214000,
+    )
+    assert text == "Tree of Life: all 214,000 species (no species list active)"
+
+    unknown = describe_label_source(
+        _params(), _StubDB(), labels=None, use_tol=True, model_type="bioclip",
+    )
+    assert "Tree of Life" in unknown
+    assert "no species list active" in unknown
+
+
+def test_describe_label_source_timm_ignores_lists():
+    """timm models carry a fixed head — active species lists do not apply."""
+    from classify_job import describe_label_source
+
+    text = describe_label_source(
+        _params(labels_files=["/l/ca.txt"]), _StubDB(["/l/ca.txt"]),
+        labels=None, use_tol=False, model_type="timm", class_count=10000,
+    )
+    assert text == "Model's own 10,000 built-in classes — species lists don't apply"
+
+
+def test_resolve_label_sources_keeps_lookup_order():
+    """Regression: the shared resolver still yields the same source paths."""
+    from unittest.mock import patch
+
+    from classify_job import _resolve_label_sources
+
+    with patch("classify_job.get_saved_labels", return_value=[]):
+        assert _resolve_label_sources(
+            _params(labels_files=["/a.txt", "/b.txt"]), _StubDB(["/ws.txt"]),
+        ) == ["/a.txt", "/b.txt"]
+        assert _resolve_label_sources(
+            _params(labels_file="/a.txt"), _StubDB(["/ws.txt"]),
+        ) == ["/a.txt"]
+        assert _resolve_label_sources(
+            _params(), _StubDB(["/ws.txt"]),
+        ) == ["/ws.txt"]
+        with patch(
+            "classify_job.get_active_labels",
+            return_value=[{"labels_file": "/g.txt"}, {"name": "no file"}],
+        ):
+            assert _resolve_label_sources(_params(), _StubDB()) == ["/g.txt"]
+
+
 # ── Task 3: _detect_subjects tests ──────────────────────────────────────────
 
 
@@ -4403,6 +4545,68 @@ def test_classify_job_skips_photos_with_subject_keywords(tmp_path):
     assert progress_events, "Expected a progress event with skipped_subject"
     assert progress_events[0]["skipped_subject"] == 1
     assert progress_events[0]["phase"] == "Step 1/5: Loading photos"
+
+
+def test_classify_job_publishes_label_source_on_classify_step(tmp_path):
+    """The standalone classify job names its label space on the classify step.
+
+    "Classify species" is the same row whether the run compares against two
+    regional lists or the whole Tree of Life, so the row has to carry which
+    one actually loaded.
+    """
+    from unittest.mock import patch
+
+    from classify_job import ClassifyParams, run_classify_job
+
+    db_path, ws, col_id, _p1, _p2 = _setup_two_photo_classify_workspace(tmp_path)
+
+    fake_model = {
+        "id": "test-model",
+        "name": "TestModel",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "weights_path": "/tmp/weights.bin",
+        "model_type": "bioclip",
+        "downloaded": True,
+    }
+    params = ClassifyParams(
+        collection_id=col_id,
+        labels_file=None,
+        labels_files=["/l/ca.txt", "/l/wa.txt"],
+        model_id=None,
+        model_name="TestModel",
+        grouping_window=10,
+        similarity_threshold=0.85,
+        reclassify=False,
+    )
+    saved = [
+        {"labels_file": "/l/ca.txt", "name": "California, US Birds"},
+        {"labels_file": "/l/wa.txt", "name": "Washington, US Birds"},
+    ]
+
+    runner = FakeRunner()
+    with patch("classify_job.get_active_model", return_value=fake_model), \
+         patch("classify_job.get_models", return_value=[fake_model]), \
+         patch("classify_job._load_taxonomy", return_value=None), \
+         patch("classify_job.get_saved_labels", return_value=saved), \
+         patch(
+            "classify_job._load_labels",
+            return_value=(["Northern Cardinal", "Blue Jay"], False),
+         ), \
+         patch("classify_job.Classifier"), \
+         patch(
+            "classify_job._detect_subjects",
+            side_effect=lambda *a, **k: ({}, 0),
+         ):
+        run_classify_job(_make_job(), runner, db_path, ws, params)
+
+    published = [
+        kwargs["label_source"]
+        for (step_id, kwargs) in runner.steps
+        if step_id == "classify" and "label_source" in kwargs
+    ]
+    assert published == [
+        "2 species from 2 lists: California, US Birds, Washington, US Birds"
+    ], f"classify step should name both active lists; got {published!r}"
 
 
 def test_classify_job_reclassify_true_bypasses_subject_skip(tmp_path):

@@ -4311,6 +4311,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             except (OSError, ValueError):
                 portable_model_identity = None
 
+            # What this model actually compares photos against — the merged
+            # species lists, Tree of Life, or a timm model's fixed head. The
+            # classify step shows it so the row names the label space, not
+            # just the weights.
+            from classify_job import describe_label_source
+
+            label_source = describe_label_source(
+                params, thread_db,
+                labels=labels,
+                use_tol=use_tol,
+                model_type=model_type,
+                class_count=getattr(clf, "label_space_size", None),
+            )
+
             return {
                 "clf": clf,
                 "_cache_handle": cache_handle,
@@ -4318,6 +4332,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 "model_name": model_name,
                 "model_str": model_str,
                 "labels": labels,
+                "label_source": label_source,
                 "labels_fingerprint": fp,
                 "labels_fingerprint_full": fp_full,
                 "classifier_model_identity": portable_model_identity,
@@ -5348,7 +5363,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # reference to the bundle that owns the handle.
                         _release_classifier_cache_handle(loaded_models)
                         for k in ("clf", "model_type", "model_name", "model_str",
-                                  "labels", "use_tol", "active_model"):
+                                  "labels", "label_source", "use_tol",
+                                  "active_model"):
                             loaded_models.pop(k, None)
                         clf = None
                         try:
@@ -5388,6 +5404,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         clf = bundle["clf"]
                         model_type = bundle["model_type"]
                         model_name = bundle["model_name"]
+
+                    # Name the label space on the row. Set for both branches
+                    # here: the first model's bundle was built by
+                    # model_loader_stage and merged into loaded_models there.
+                    if loaded_models.get("label_source"):
+                        runner.update_step(
+                            job["id"], step_id,
+                            label_source=loaded_models["label_source"],
+                        )
 
                     # The fingerprint for THIS model's label set — pinned by
                     # model_loader_stage for the first model and by _load_model_bundle
