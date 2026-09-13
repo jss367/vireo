@@ -7942,14 +7942,36 @@ new ResizeObserver(function(entries) {
   bar.parentElement.style.setProperty('--batch-bar-height', bar.offsetHeight + 'px');
 }).observe(document.getElementById('batchBar'));
 
+// The bar floats over the photo pane, and the click that raises it is also the
+// first click of a double-click. Appearing immediately would put a batch
+// button — Delete among them — under the cursor in time to take the second
+// click, so the photo opens nothing and a destructive action is one pixel of
+// bad luck away. Wait out the double-click window before showing it; hiding
+// stays immediate.
+var BATCH_BAR_SHOW_DELAY_MS = 400;
+var batchBarShowTimer = null;
+
+function showBatchBarAfterDoubleClickWindow(bar) {
+  if (bar.style.display === 'flex' || batchBarShowTimer) return;
+  batchBarShowTimer = setTimeout(function() {
+    batchBarShowTimer = null;
+    // The selection can be gone again by now (double-click, then Escape).
+    if (getActiveSelection().length >= 1) bar.style.display = 'flex';
+  }, BATCH_BAR_SHOW_DELAY_MS);
+}
+
 function updateBatchBar() {
   var bar = document.getElementById('batchBar');
   if (!bar) return;
   var ids = getActiveSelection();
   if (ids.length >= 1) {
-    bar.style.display = 'flex';
+    showBatchBarAfterDoubleClickWindow(bar);
     document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
   } else {
+    if (batchBarShowTimer) {
+      clearTimeout(batchBarShowTimer);
+      batchBarShowTimer = null;
+    }
     bar.style.display = 'none';
   }
   updateCompareButton(ids);

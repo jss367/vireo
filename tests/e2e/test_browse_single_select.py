@@ -137,6 +137,70 @@ def test_single_click_reveals_batch_bar(live_server, page):
     page.keyboard.press("Escape")
 
 
+def test_batch_bar_holds_off_until_the_double_click_window_passes(
+    live_server, page
+):
+    """The bar must not appear in time to take the second click of a
+    double-click.
+
+    It floats over the photo pane, and the click that creates the selection is
+    also the first click of a double-click. Appearing at once dropped a row of
+    batch buttons — Delete among them — under the resting cursor, so
+    double-clicking a photo low in the grid opened nothing and aimed the
+    second click at whichever button landed there.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    bar = page.locator("#batchBar")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+
+    # Stretch the hold-off so this asserts the rule rather than the clock.
+    page.evaluate("BATCH_BAR_SHOW_DELAY_MS = 4000")
+    first.click()
+
+    expect(page.locator("#batchCount")).to_have_text("1 selected")
+    expect(bar).to_be_hidden()
+    # It still arrives on its own, without any further interaction.
+    expect(bar).to_be_visible(timeout=8000)
+
+
+def test_double_click_opens_the_photo_the_batch_bar_would_cover(
+    live_server, page
+):
+    """A double-click low in the grid opens the lightbox, not a batch action.
+
+    Expanding a stack pushes its members down into the strip the batch bar
+    occupies, which is where the raised bar used to intercept the second
+    click.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'covered-burst' WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
+    expect(member).to_be_visible()
+    member.dblclick()
+
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+
+
 def test_export_defaults_beside_original_and_offers_folder_browser(
     live_server, page,
 ):
