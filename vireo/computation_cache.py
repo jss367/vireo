@@ -1883,6 +1883,77 @@ def _is_recognized_classifier_runtime(
     return False
 
 
+def _backfill_classification_enrichment(
+    conn, detection_id, classifier_model, labels_short, subject,
+):
+    """Fill in match-strength enrichment missing from an already-materialized run.
+
+    Called from the ``already_materialized`` short-circuit below: the incoming
+    artifact matches the DB's existing (photo, model, labels, runtime, input)
+    identity, so the predictions and classifier_runs marker are already
+    there. But that identity does NOT include the enrichment fields — a
+    pre-feature artifact and an enriched one for the same run share every
+    identity component, and the ``_classification_enrichment_rank`` preference
+    only wins the tiebreaker *within a single materialize call*. When the
+    pre-feature artifact was applied by an earlier import and the enriched
+    version arrives later, the short-circuit fires and (before this helper)
+    silently dropped the enrichment, permanently locking "not recorded" in
+    behind the ``classifier_runs`` gate.
+
+    Never overwrites values already recorded — a real measurement wins over a
+    later import every time. Returns True when any row was actually filled in
+    so the caller can distinguish "matched but nothing to do" from "matched
+    and backfilled" for reporting.
+    """
+    from keyword_normalization import normalize_keyword_display
+
+    filled = False
+    for candidate in subject.get("candidates", ()):
+        raw_score = candidate.get("match_score")
+        if raw_score is None:
+            continue
+        species = normalize_keyword_display(candidate.get("species", ""))
+        if not species:
+            continue
+        cursor = conn.execute(
+            """UPDATE predictions
+                 SET match_score = ?
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ? AND species = ?
+                 AND match_score IS NULL""",
+            (
+                raw_score, detection_id, classifier_model,
+                labels_short, species,
+            ),
+        )
+        if cursor.rowcount:
+            filled = True
+    match = subject.get("match")
+    if match and match.get("max_match_score") is not None:
+        existing = conn.execute(
+            """SELECT 1 FROM classifier_match_scores
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?""",
+            (detection_id, classifier_model, labels_short),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """INSERT INTO classifier_match_scores
+                     (detection_id, classifier_model, labels_fingerprint,
+                      max_match_score, match_margin, top_species,
+                      label_count, score_kind)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    detection_id, classifier_model, labels_short,
+                    match["max_match_score"], match.get("match_margin"),
+                    match.get("top_species"), match.get("label_count"),
+                    match.get("score_kind"),
+                ),
+            )
+            filled = True
+    return filled
+
+
 def materialize_artifacts(
     db, artifacts, known_runtimes=None, known_classifier_runtimes=None,
 ):
@@ -2015,6 +2086,7 @@ def materialize_artifacts(
         "detector_runs_applied": 0,
         "classifier_runs_applied": 0,
         "already_materialized": 0,
+        "enrichment_backfilled": 0,
         "stored_unmatched": 0,
         "pinned_older_runtime": 0,
         "label_collisions": 0,
@@ -2208,6 +2280,17 @@ def materialize_artifacts(
                         prior["runtime_fingerprint"] == artifact["runtime_fingerprint"]
                         and prior["input_fingerprint"] == artifact["input_fingerprint"]
                     ):
+                        # Same identity, but the artifact may carry match-
+                        # strength fields that were not part of the identity
+                        # and were dropped when the pre-feature version of
+                        # this same run was applied by an earlier import.
+                        # See ``_backfill_classification_enrichment``.
+                        if _backfill_classification_enrichment(
+                            db.conn, detection_id,
+                            artifact["classifier_model"],
+                            labels["short_fingerprint"], subject,
+                        ):
+                            result["enrichment_backfilled"] += 1
                         result["already_materialized"] += 1
                         continue
                     if _manual_review_exists(

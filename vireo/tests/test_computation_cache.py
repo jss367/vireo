@@ -1733,3 +1733,123 @@ def test_enriched_artifact_wins_over_pre_feature_same_identity(tmp_path):
         assert row["top_species"] == "Robin"
         assert row["score_kind"] == "cosine"
         destination.close()
+
+
+def test_backfill_enriches_a_prior_pre_feature_materialize(tmp_path):
+    """The dedup preference wins only inside a single ``materialize_artifacts``
+    call. When a pre-feature artifact was applied by an earlier import (or an
+    earlier local reapply) and an enriched artifact for the same run arrives
+    later, the second call finds the identity already covered and hits the
+    ``already_materialized`` short-circuit — which, before the backfill helper,
+    silently dropped every enrichment field and left "match strength not
+    recorded" locked in behind the ``classifier_runs`` gate.
+
+    Two separate calls, second call carries the enrichment: the DB must end
+    up in the same state as if the enriched artifact had arrived first.
+    """
+    destination, _folder_id, _photo_id = _database_with_photo(
+        tmp_path / "backfill.db", "photo.jpg",
+    )
+    destination.upsert_labels_fingerprint(
+        "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+    )
+    pre_feature = classification_artifact(
+        candidates=[{"species": "Robin", "confidence": 0.9}],
+    )
+    first = materialize_artifacts(
+        destination,
+        [detection_artifact(), pre_feature],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    assert first["classifier_runs_applied"] == 1
+    assert first.get("enrichment_backfilled", 0) == 0
+    # Baseline: pre-feature landed as NULL / no summary row.
+    assert destination.conn.execute(
+        "SELECT match_score FROM predictions",
+    ).fetchone()["match_score"] is None
+    assert destination.conn.execute(
+        "SELECT COUNT(*) AS c FROM classifier_match_scores",
+    ).fetchone()["c"] == 0
+
+    enriched = classification_artifact(
+        candidates=[{"species": "Robin", "confidence": 0.9,
+                     "match_score": 0.31}],
+        match={"max_match_score": 0.31, "top_species": "Robin",
+               "label_count": 1255, "score_kind": "cosine"},
+    )
+    second = materialize_artifacts(
+        destination,
+        [enriched],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    # Same identity, so no new run row is applied — the count of covered
+    # subjects increases instead, and the new counter reports the fill-in.
+    assert second["classifier_runs_applied"] == 0
+    assert second["already_materialized"] == 1
+    assert second["enrichment_backfilled"] == 1
+
+    assert destination.conn.execute(
+        "SELECT match_score FROM predictions",
+    ).fetchone()["match_score"] == 0.31
+    row = destination.conn.execute(
+        "SELECT max_match_score, top_species, label_count, score_kind "
+        "FROM classifier_match_scores",
+    ).fetchone()
+    assert row["max_match_score"] == 0.31
+    assert row["top_species"] == "Robin"
+    assert row["label_count"] == 1255
+    assert row["score_kind"] == "cosine"
+    destination.close()
+
+
+def test_backfill_never_overwrites_existing_match_scores(tmp_path):
+    """A real measurement always beats a later import.
+
+    Once ``predictions.match_score`` and ``classifier_match_scores`` carry a
+    real value, a subsequent enriched artifact for the same identity must not
+    replace either — the local measurement is authoritative, and swapping in
+    an incoming score would let a bundle rewrite live verdicts by re-importing
+    the same run with different numbers.
+    """
+    destination, _folder_id, _photo_id = _database_with_photo(
+        tmp_path / "no-overwrite.db", "photo.jpg",
+    )
+    destination.upsert_labels_fingerprint(
+        "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+    )
+    original = classification_artifact(
+        candidates=[{"species": "Robin", "confidence": 0.9,
+                     "match_score": 0.31}],
+        match={"max_match_score": 0.31, "top_species": "Robin",
+               "score_kind": "cosine"},
+    )
+    materialize_artifacts(
+        destination,
+        [detection_artifact(), original],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    replayed = classification_artifact(
+        candidates=[{"species": "Robin", "confidence": 0.9,
+                     "match_score": 0.99}],
+        match={"max_match_score": 0.99, "top_species": "Robin",
+               "score_kind": "cosine"},
+    )
+    result = materialize_artifacts(
+        destination,
+        [replayed],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    assert result["already_materialized"] == 1
+    assert result["enrichment_backfilled"] == 0
+
+    assert destination.conn.execute(
+        "SELECT match_score FROM predictions",
+    ).fetchone()["match_score"] == 0.31
+    assert destination.conn.execute(
+        "SELECT max_match_score FROM classifier_match_scores",
+    ).fetchone()["max_match_score"] == 0.31
+    destination.close()

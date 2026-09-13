@@ -77,6 +77,70 @@ def test_malformed_threshold_entries_are_ignored():
         assert mc.assess("M", "cosine", 0.1, None, cfg)["state"] == mc.UNCALIBRATED
 
 
+def test_non_finite_threshold_is_treated_as_uncalibrated():
+    """NaN silently marks every scored run 'listed' (every comparison against
+    NaN is false, and the else branch in ``assess`` picks up), +inf marks
+    every run 'unlisted', and a hand-edited config carrying either value
+    would misjudge every photo instead of abstaining. A model with a
+    non-finite floor must degrade to ``uncalibrated`` the same way a missing
+    or misspelled score kind does — no verdict beats a wrong verdict.
+    """
+    for bad in (float("nan"), float("inf"), float("-inf"), "nan", "inf",
+                "-inf"):
+        cfg = {"match_thresholds": {
+            "BioCLIP-2.5": {"threshold": bad, "score_kind": "cosine"},
+        }}
+        assert mc.threshold_for("BioCLIP-2.5", cfg) == (None, None)
+        # Both a would-be 'listed' score (0.9 > any real floor) and a
+        # would-be 'unlisted' score (0.001 < any real floor) must land as
+        # uncalibrated — the point is that the model is not judged at all.
+        for score in (0.001, 0.9):
+            assessment = mc.assess("BioCLIP-2.5", "cosine", score, None, cfg)
+            assert assessment["state"] == mc.UNCALIBRATED
+            assert not mc.is_unlisted(assessment)
+
+
+def test_oversized_integer_threshold_is_treated_as_uncalibrated():
+    """JSON integers are unbounded, and coercing 10**1000 to a C double
+    raises ``OverflowError`` rather than returning inf. Without an explicit
+    catch, a hand-edited config carrying such a value would turn the
+    predictions and pipeline endpoints into 500s. The same "no verdict beats
+    a wrong verdict" rule applies: degrade to uncalibrated, do not raise.
+    """
+    cfg = {"match_thresholds": {
+        "BioCLIP-2.5": {"threshold": 10 ** 1000, "score_kind": "cosine"},
+    }}
+    assert mc.threshold_for("BioCLIP-2.5", cfg) == (None, None)
+    assert mc.assess(
+        "BioCLIP-2.5", "cosine", 0.5, None, cfg,
+    )["state"] == mc.UNCALIBRATED
+
+
+def test_cosine_threshold_outside_unit_interval_is_treated_as_uncalibrated():
+    """Cosine similarity is bounded to ``[-1, 1]``; a floor at 5.0 cannot
+    have been calibrated on real cosine scores, and applying it as-is
+    would mark every real cosine 'unlisted' (5.0 > every valid cosine).
+    Refuse the calibration rather than let a data-entry mistake silently
+    condemn the whole catalog. Logit thresholds are unbounded on both
+    sides — a class logit is routinely well above 1 — so the bound is
+    keyed to the score kind, not applied universally.
+    """
+    bad_cos = {"match_thresholds": {
+        "BioCLIP-2.5": {"threshold": 5.0, "score_kind": "cosine"},
+    }}
+    assert mc.threshold_for("BioCLIP-2.5", bad_cos) == (None, None)
+    also_bad = {"match_thresholds": {
+        "BioCLIP-2.5": {"threshold": -1.5, "score_kind": "cosine"},
+    }}
+    assert mc.threshold_for("BioCLIP-2.5", also_bad) == (None, None)
+
+    # But an out-of-unit-interval logit floor is legitimate and stays.
+    logit_cfg = {"match_thresholds": {
+        "iNat21": {"threshold": 8.5, "score_kind": "logit"},
+    }}
+    assert mc.threshold_for("iNat21", logit_cfg) == (8.5, "logit")
+
+
 # --------------------------------------------------------------------------
 # summarize()
 # --------------------------------------------------------------------------

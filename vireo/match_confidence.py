@@ -28,6 +28,8 @@ inventing a cutoff. ``scripts/calibrate_match_threshold.py`` derives a real one
 from confirmed identifications in the catalog.
 """
 
+import math
+
 COSINE = "cosine"
 LOGIT = "logit"
 SCORE_KINDS = (COSINE, LOGIT)
@@ -46,17 +48,33 @@ def threshold_for(model, config=None):
     """Return ``(threshold, score_kind)`` configured for ``model``.
 
     Returns ``(None, None)`` when the model has no calibrated threshold, which
-    every caller must treat as "do not judge" rather than "passes".
+    every caller must treat as "do not judge" rather than "passes". Non-finite
+    values (``nan``, ``inf``, ``-inf``) and unbounded JSON integers that
+    overflow to infinity when coerced to a double are treated as malformed for
+    the same reason a missing threshold is: a NaN threshold silently marks
+    every scored run ``listed`` (every comparison against NaN is false), a
+    ``+inf`` threshold marks every run ``unlisted``, and a huge integer would
+    otherwise leak ``OverflowError`` out of ``float()`` and turn a predictions
+    or pipeline request into a 500. A cosine floor outside ``[-1, 1]`` is
+    also refused — cosine similarity cannot escape that interval, so a value
+    beyond it cannot have been calibrated on real data.
     """
     entry = ((config or {}).get(CONFIG_KEY) or {}).get(model)
     if not isinstance(entry, dict):
         return None, None
+    raw = entry.get("threshold")
+    if raw is None or isinstance(raw, bool):
+        return None, None
     try:
-        threshold = float(entry["threshold"])
-    except (KeyError, TypeError, ValueError):
+        threshold = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, None
+    if not math.isfinite(threshold):
         return None, None
     kind = entry.get("score_kind")
     if kind not in SCORE_KINDS:
+        return None, None
+    if kind == COSINE and not -1.0 <= threshold <= 1.0:
         return None, None
     return threshold, kind
 
