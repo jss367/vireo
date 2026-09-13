@@ -105,28 +105,38 @@ def _load_labels(
     `Classifier(labels=None)` and crash with FileNotFoundError.
 
     Returns:
-        (labels, use_tol) where labels is a list of species strings or None,
-        and use_tol is True if Tree of Life mode should be used.
+        (labels, use_tol, label_metas) — ``labels`` is a list of species
+        strings or None; ``use_tol`` is True if Tree of Life mode should be
+        used; ``label_metas`` is the list of label-set metadata dicts that
+        actually produced ``labels`` (empty on the Tree of Life or timm
+        paths). Downstream callers pass ``label_metas`` verbatim to
+        ``describe_label_source`` and ``_record_labels_fingerprint`` so the
+        displayed name and the fingerprint sources cannot disagree with the
+        labels — even when the on-disk sources shift under our feet between
+        this call and the display.
     """
     if model_type == "timm":
         log.info("Classification config: model=%s (timm) — no labels needed", model_str)
-        return None, False
+        return None, False, []
 
     labels = None
+    label_metas: list[dict] = []
 
     if labels_files and isinstance(labels_files, list):
         saved = get_saved_labels()
         saved_by_file = {s["labels_file"]: s for s in saved}
-        active_sets = []
         for p in labels_files:
             meta = saved_by_file.get(p, {"labels_file": p})
-            active_sets.append(meta)
-        labels = load_merged_labels(active_sets)
-        log.info("Using %d merged labels from %d sets", len(labels), len(active_sets))
+            label_metas.append(meta)
+        labels = load_merged_labels(label_metas)
+        log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
     elif labels_file and os.path.exists(labels_file):
         labels = read_label_file(labels_file)
         if getattr(labels, "identities", {}):
             labels = load_merged_labels([{"labels_file": labels_file}])
+        saved = get_saved_labels()
+        saved_by_file = {s["labels_file"]: s for s in saved}
+        label_metas = [saved_by_file.get(labels_file, {"labels_file": labels_file})]
         log.info("Using %d labels from file: %s", len(labels), labels_file)
     else:
         # Try workspace-scoped active labels first
@@ -134,12 +144,11 @@ def _load_labels(
         if ws_labels is not None:
             saved = get_saved_labels()
             saved_by_file = {s["labels_file"]: s for s in saved}
-            active_sets = []
             for p in ws_labels:
                 meta = saved_by_file.get(p, {"labels_file": p})
-                active_sets.append(meta)
-            labels = load_merged_labels(active_sets)
-            names = [s.get("name", "?") for s in active_sets]
+                label_metas.append(meta)
+            labels = load_merged_labels(label_metas)
+            names = [s.get("name", "?") for s in label_metas]
             log.info(
                 "Using %d merged labels from workspace active sets: %s",
                 len(labels),
@@ -148,8 +157,9 @@ def _load_labels(
         else:
             active_sets = get_active_labels()
             if active_sets:
-                labels = load_merged_labels(active_sets)
-                names = [s.get("name", "?") for s in active_sets]
+                label_metas = list(active_sets)
+                labels = load_merged_labels(label_metas)
+                names = [s.get("name", "?") for s in label_metas]
                 log.info(
                     "Using %d merged labels from global active sets: %s",
                     len(labels),
@@ -170,6 +180,7 @@ def _load_labels(
 
     use_tol = False
     if not labels:
+        label_metas = []
         if tree_of_life_ready(model_str, model_dir):
             log.info(
                 "No regional labels available — using Tree of Life classifier (all species)"
@@ -196,7 +207,7 @@ def _load_labels(
                 f"a species list for your region."
             )
 
-    return labels, use_tol
+    return labels, use_tol, label_metas
 
 
 def _reuse_saved_label_embeddings(db, model_str, model_dir, labels, cancel_check=None):
@@ -615,6 +626,14 @@ def _resolve_label_set_metas(params, db):
     workspace's active sets, then the global ones — but resolves only the
     sources, not the species names. Callers use it for the fingerprint row's
     source paths and for naming the sets in the UI.
+
+    Prefer passing the ``label_metas`` returned by ``_load_labels`` directly
+    to consumers so the two cannot disagree. This helper is the fallback for
+    callers that have not yet plumbed those through, and it MUST reproduce
+    ``_load_labels``'s fallback branches — otherwise a missing
+    ``params.labels_file`` names the deleted path on the Jobs page and in
+    ``labels_fingerprints`` while the actual classifier ran against the
+    workspace or global lists.
     """
     saved_by_file = {}
     for meta in get_saved_labels() or []:
@@ -627,7 +646,10 @@ def _resolve_label_set_metas(params, db):
 
     if params.labels_files and isinstance(params.labels_files, list):
         return _metas(params.labels_files)
-    if params.labels_file:
+    # os.path.exists mirrors ``_load_labels`` — a configured single file that
+    # has since been deleted falls back to workspace/global lists there, so
+    # naming the stale path here would misreport the label source.
+    if params.labels_file and os.path.exists(params.labels_file):
         return _metas([params.labels_file])
     ws_labels = db.get_workspace_active_labels() if db else None
     if ws_labels is not None:
@@ -635,13 +657,18 @@ def _resolve_label_set_metas(params, db):
     return list(get_active_labels() or [])
 
 
-def _resolve_label_sources(params, db):
-    """Return list of source file paths used to build the active label set."""
+def _sources_from_metas(label_metas):
+    """Extract ``labels_file`` source paths from a list of metadata dicts."""
     return [
         meta.get("labels_file")
-        for meta in _resolve_label_set_metas(params, db)
+        for meta in (label_metas or [])
         if meta.get("labels_file")
     ]
+
+
+def _resolve_label_sources(params, db):
+    """Return list of source file paths used to build the active label set."""
+    return _sources_from_metas(_resolve_label_set_metas(params, db))
 
 
 def _label_set_name(meta):
@@ -654,6 +681,7 @@ def _label_set_name(meta):
 
 def describe_label_source(
     params, db, *, labels, use_tol, model_type, class_count=None,
+    label_metas=None,
 ):
     """One line naming the label space a classify run compares photos against.
 
@@ -666,6 +694,13 @@ def describe_label_source(
     for the two cases where the selected lists don't describe it: Tree of Life
     and a timm model's fixed head. Always returns a line — a run that reaches
     here has a label space, because _load_labels raises when it finds none.
+
+    ``label_metas`` — pass the metadata list ``_load_labels`` returned to name
+    the exact sets that produced ``labels``. Without it, this falls back to
+    ``_resolve_label_set_metas`` which re-resolves from ``params`` and ``db``
+    and can disagree with ``labels`` if the on-disk sources shifted (a
+    configured file was deleted, or the workspace's active list was edited)
+    between when the classifier loaded and when the row is rendered.
     """
     if model_type == "timm":
         if class_count:
@@ -682,7 +717,11 @@ def describe_label_source(
             )
         return "Tree of Life: every species the model knows (no species list active)"
 
-    names = [_label_set_name(m) for m in _resolve_label_set_metas(params, db)]
+    if label_metas is None:
+        metas = _resolve_label_set_metas(params, db)
+    else:
+        metas = label_metas
+    names = [_label_set_name(m) for m in metas]
     count = f"{len(labels):,} species"
     if not names:
         return count
@@ -2502,6 +2541,8 @@ def _finalize_remaining_steps(runner, job_id, step_ids, status, summary):
 def _finalize_cached_only(
     thread_db, runner, job, params, photos,
     classifier_model, labels_fingerprint,
+    peek_model=None, peek_labels=None, peek_use_tol=False,
+    peek_label_metas=None, peek_succeeded=False,
 ):
     """Reconcile imported classifier results without loading a model.
 
@@ -2513,6 +2554,15 @@ def _finalize_cached_only(
     against destination XMP/taxonomy and stamps group_id / vote counts.
     Skipping it silently leaves imported predictions unreconciled, which
     is why the earlier early-return "success" was actually a bug.
+
+    ``peek_*`` — the labels/mode/metadata resolved earlier in
+    ``run_classify_job`` before this shortcut fired. ``peek_succeeded`` is
+    True when ``_load_labels`` actually returned (as opposed to raising and
+    the caller falling back to model-only cache filtering). Used only to
+    publish the ``label_source`` line on the classify step, so a re-run
+    against a fully cached collection still records which lists produced
+    its predictions — otherwise the classify history row is unlabeled,
+    exactly the state this feature set out to eliminate.
 
     Returns the count dict ``run_classify_job`` returns to the runner.
     """
@@ -2533,6 +2583,27 @@ def _finalize_cached_only(
         runner, job["id"], ["load_model", "detect"],
         status="completed", summary="Reused cached results",
     )
+
+    # Name the label space on the classify step BEFORE the reconcile pass.
+    # Without this, a cached-only run finishes with no label_source line and
+    # its history row looks the same as a pre-feature run. ``class_count``
+    # is unavailable here — no classifier is constructed — so the two
+    # count-dependent branches (Tree of Life exact count, timm exact count)
+    # degrade to their generic wording; that is acceptable because the
+    # regional-list branch carries its count in ``labels``.
+    if peek_succeeded:
+        peek_model_type = (peek_model or {}).get("model_type", "bioclip")
+        label_source_text = describe_label_source(
+            params, thread_db,
+            labels=peek_labels,
+            use_tol=peek_use_tol,
+            model_type=peek_model_type,
+            label_metas=peek_label_metas,
+        )
+        if label_source_text:
+            runner.update_step(
+                job["id"], "classify", label_source=label_source_text,
+            )
 
     folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
     photo_ids = [p["id"] for p in photos]
@@ -2979,13 +3050,15 @@ def run_classify_job(
         desired_labels_fingerprint_full = None
         peek_labels = None
         peek_use_tol = False
+        peek_label_metas: list[dict] = []
+        peek_succeeded = False
         try:
             from labels_fingerprint import (
                 compute_fingerprint,
                 compute_full_fingerprint,
             )
 
-            peek_labels, peek_use_tol = _load_labels(
+            peek_labels, peek_use_tol, peek_label_metas = _load_labels(
                 model_type=(peek_model or {}).get("model_type", "bioclip"),
                 model_str=(peek_model or {}).get("model_str", ""),
                 labels_file=params.labels_file,
@@ -2993,6 +3066,7 @@ def run_classify_job(
                 db=thread_db,
                 model_dir=(peek_model or {}).get("weights_path"),
             )
+            peek_succeeded = True
             desired_labels_fingerprint = compute_fingerprint(peek_labels)
             fp_full_peek = compute_full_fingerprint(peek_labels)
             if isinstance(fp_full_peek, str) and len(fp_full_peek) == 64:
@@ -3099,6 +3173,11 @@ def run_classify_job(
                 thread_db, runner, job, params, photos,
                 classifier_model=desired_classifier_model,
                 labels_fingerprint=desired_labels_fingerprint,
+                peek_model=peek_model,
+                peek_labels=peek_labels,
+                peek_use_tol=peek_use_tol,
+                peek_label_metas=peek_label_metas,
+                peek_succeeded=peek_succeeded,
             )
 
         # Resolve model (deferred until we know there is work to do)
@@ -3142,7 +3221,7 @@ def run_classify_job(
         tax = load_local_taxonomy()
 
         # Phase 3: Load labels (uses model_type/model_str from above)
-        labels, use_tol = _load_labels(
+        labels, use_tol, label_metas = _load_labels(
             model_type=model_type,
             model_str=model_str,
             labels_file=params.labels_file,
@@ -3169,7 +3248,12 @@ def run_classify_job(
                 })
         except (OSError, ValueError):
             classifier_identity = None
-        label_sources = _resolve_label_sources(params, thread_db)
+        # Derive the fingerprint's source paths from the metadata
+        # ``_load_labels`` actually consumed, not by re-resolving from
+        # ``params`` a second time. If a configured labels_file was deleted
+        # after the classifier initialized, the fresh resolve would name
+        # the stale path while ``labels`` came from the workspace fallback.
+        label_sources = _sources_from_metas(label_metas)
         _record_labels_fingerprint(
             thread_db, fp, labels, sources=label_sources,
             full_fingerprint=fp_full,
@@ -3378,12 +3462,16 @@ def run_classify_job(
         # doesn't say whether these photos are being matched against the
         # active regional lists, the full Tree of Life, or a timm model's
         # fixed head — and that decides what the predictions can even be.
+        # Pass ``label_metas`` — the metadata ``_load_labels`` actually
+        # consumed — so the displayed name matches ``labels`` even if the
+        # on-disk sources shifted between here and rendering.
         label_source_text = describe_label_source(
             params, thread_db,
             labels=labels,
             use_tol=use_tol,
             model_type=model_type,
             class_count=getattr(clf, "label_space_size", None),
+            label_metas=label_metas,
         )
         if label_source_text:
             runner.update_step(

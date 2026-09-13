@@ -1246,7 +1246,12 @@ def test_step_label_source_is_kept_and_persisted(tmp_path):
         return {}
 
     job_id = runner.start("classify", work, workspace_id=1)
-    wait_for_job_via_runner(runner, job_id)
+    # wait_for_history=True blocks until the worker thread has flushed the
+    # job_history row. Without it, ``wait_for_job_via_runner`` only waits
+    # for terminal status — which precedes ``_persist_job``'s write of the
+    # final tree — so this test can read a stale or null ``tree`` under
+    # thread scheduling that flips the two.
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
     j = runner.get(job_id)
     assert j["steps"][0]["label_source"] == (

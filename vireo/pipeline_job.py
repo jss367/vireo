@@ -3949,7 +3949,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             from classify_job import (
                 _load_labels,
                 _record_labels_fingerprint,
-                _resolve_label_sources,
+                _sources_from_metas,
             )
             from labels_fingerprint import compute_fingerprint, compute_full_fingerprint
             from models import _classify_model_state
@@ -3988,7 +3988,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     phase_current=current, phase_total=total, phase_label="Species labels",
                 )
 
-            labels, use_tol = _load_labels(
+            labels, use_tol, label_metas = _load_labels(
                 model_type=model_type,
                 model_str=model_str,
                 labels_file=params.labels_file,
@@ -3999,12 +3999,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # Compute a content-addressable fingerprint for the active label set
             # and record it in the labels_fingerprints sidecar. Kept on the bundle
             # so classify_stage can pass it to record_classifier_run for each
-            # (detection, model, fingerprint) triple.
+            # (detection, model, fingerprint) triple. Source paths come from
+            # the metadata ``_load_labels`` actually consumed so the sidecar
+            # cannot name lists that did not produce ``labels``.
             fp = compute_fingerprint(labels)
             fp_full = compute_full_fingerprint(labels)
             if len(fp_full) != 64:
                 fp_full = None
-            label_sources = _resolve_label_sources(params, thread_db)
+            label_sources = _sources_from_metas(label_metas)
             _record_labels_fingerprint(
                 thread_db, fp, labels, sources=label_sources,
                 full_fingerprint=fp_full,
@@ -4323,6 +4325,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 use_tol=use_tol,
                 model_type=model_type,
                 class_count=getattr(clf, "label_space_size", None),
+                label_metas=label_metas,
             )
 
             return {

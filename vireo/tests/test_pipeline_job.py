@@ -2720,7 +2720,7 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     # model-loading behavior.
     monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
-        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
+        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False, [])
     )
     # model_loader_stage triggers a real iNat DWCA download whenever
     # params.download_taxonomy is True (the default) and no taxonomy file is
@@ -2756,7 +2756,7 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
     models.set_active_model("bioclip-vit-b-16")
     monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
-        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
+        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False, [])
     )
     # See _setup_fake_downloaded_model for why this stub is required.
     monkeypatch.setattr(taxonomy, "download_taxonomy", lambda *a, **k: None)
@@ -3123,7 +3123,11 @@ def test_pipeline_classify_step_names_the_label_set(tmp_path, monkeypatch):
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(
         classify_job, "_load_labels",
-        lambda *a, **k: (["Northern Cardinal", "Blue Jay", "Steller's Jay"], False),
+        lambda *a, **k: (
+            ["Northern Cardinal", "Blue Jay", "Steller's Jay"],
+            False,
+            [{"labels_file": "/l/birds.txt", "name": "California, US Birds"}],
+        ),
     )
     monkeypatch.setattr(
         classify_job, "get_active_labels",

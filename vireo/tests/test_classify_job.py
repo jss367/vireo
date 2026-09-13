@@ -107,7 +107,7 @@ def test_load_labels_from_file(tmp_path):
 
     from classify_job import _load_labels
 
-    labels, use_tol = _load_labels(
+    labels, use_tol, label_metas = _load_labels(
         model_type="bioclip",
         model_str="hf-hub:imageomics/bioclip",
         labels_file=str(labels_file),
@@ -115,6 +115,7 @@ def test_load_labels_from_file(tmp_path):
     )
     assert labels == ["Northern Cardinal", "Blue Jay", "American Robin"]
     assert use_tol is False
+    assert label_metas == [{"labels_file": str(labels_file)}]
 
 
 def test_load_labels_tol_fallback(tmp_path):
@@ -132,7 +133,7 @@ def test_load_labels_tol_fallback(tmp_path):
 
     # Mock get_active_labels to return empty so we fall through to ToL
     with patch("classify_job.get_active_labels", return_value=[]):
-        labels, use_tol = _load_labels(
+        labels, use_tol, label_metas = _load_labels(
             model_type="bioclip",
             model_str="hf-hub:imageomics/bioclip",
             labels_file=None,
@@ -141,6 +142,7 @@ def test_load_labels_tol_fallback(tmp_path):
         )
     assert labels is None
     assert use_tol is True
+    assert label_metas == []
 
 
 def test_load_labels_raises_when_tol_artifacts_missing(tmp_path):
@@ -170,7 +172,7 @@ def test_load_labels_timm_skips():
     """Phase 2: timm models skip label loading entirely."""
     from classify_job import _load_labels
 
-    labels, use_tol = _load_labels(
+    labels, use_tol, label_metas = _load_labels(
         model_type="timm",
         model_str="hf-hub:timm/some_model",
         labels_file=None,
@@ -178,6 +180,7 @@ def test_load_labels_timm_skips():
     )
     assert labels is None
     assert use_tol is False
+    assert label_metas == []
 
 
 def test_load_labels_raises_when_no_labels_unsupported_model():
@@ -244,15 +247,17 @@ def test_describe_label_source_names_workspace_sets():
     )
 
 
-def test_describe_label_source_single_set():
+def test_describe_label_source_single_set(tmp_path):
     from unittest.mock import patch
 
     from classify_job import describe_label_source
 
-    saved = [{"labels_file": "/l/ca.txt", "name": "California, US Birds"}]
+    labels_file = tmp_path / "ca.txt"
+    labels_file.write_text("Robin\n")
+    saved = [{"labels_file": str(labels_file), "name": "California, US Birds"}]
     with patch("classify_job.get_saved_labels", return_value=saved):
         text = describe_label_source(
-            _params(labels_file="/l/ca.txt"), _StubDB(),
+            _params(labels_file=str(labels_file)), _StubDB(),
             labels=["a"] * 812, use_tol=False, model_type="bioclip",
         )
     assert text == "812 species from California, US Birds"
@@ -274,15 +279,17 @@ def test_describe_label_source_truncates_many_sets():
     assert text == "40 species from 5 lists: List 0, List 1, List 2 and 2 more"
 
 
-def test_describe_label_source_falls_back_to_filename():
+def test_describe_label_source_falls_back_to_filename(tmp_path):
     """An ad-hoc file with no saved metadata is named by its filename."""
     from unittest.mock import patch
 
     from classify_job import describe_label_source
 
+    labels_file = tmp_path / "my_species.txt"
+    labels_file.write_text("Robin\n")
     with patch("classify_job.get_saved_labels", return_value=[]):
         text = describe_label_source(
-            _params(labels_file="/tmp/my_species.txt"), _StubDB(),
+            _params(labels_file=str(labels_file)), _StubDB(),
             labels=["a", "b"], use_tol=False, model_type="bioclip",
         )
     assert text == "2 species from my_species.txt"
@@ -316,19 +323,24 @@ def test_describe_label_source_timm_ignores_lists():
     assert text == "Model's own 10,000 built-in classes — species lists don't apply"
 
 
-def test_resolve_label_sources_keeps_lookup_order():
+def test_resolve_label_sources_keeps_lookup_order(tmp_path):
     """Regression: the shared resolver still yields the same source paths."""
     from unittest.mock import patch
 
     from classify_job import _resolve_label_sources
 
+    # ``labels_file`` (singular) requires the path to exist on disk —
+    # ``_resolve_label_set_metas`` mirrors ``_load_labels``'s file-existence
+    # check so a stale configured path falls through to the workspace list.
+    single = tmp_path / "a.txt"
+    single.write_text("Robin\n")
     with patch("classify_job.get_saved_labels", return_value=[]):
         assert _resolve_label_sources(
             _params(labels_files=["/a.txt", "/b.txt"]), _StubDB(["/ws.txt"]),
         ) == ["/a.txt", "/b.txt"]
         assert _resolve_label_sources(
-            _params(labels_file="/a.txt"), _StubDB(["/ws.txt"]),
-        ) == ["/a.txt"]
+            _params(labels_file=str(single)), _StubDB(["/ws.txt"]),
+        ) == [str(single)]
         assert _resolve_label_sources(
             _params(), _StubDB(["/ws.txt"]),
         ) == ["/ws.txt"]
@@ -337,6 +349,85 @@ def test_resolve_label_sources_keeps_lookup_order():
             return_value=[{"labels_file": "/g.txt"}, {"name": "no file"}],
         ):
             assert _resolve_label_sources(_params(), _StubDB()) == ["/g.txt"]
+
+
+def test_resolve_label_set_metas_falls_back_when_labels_file_missing(tmp_path):
+    """Regression: a configured ``labels_file`` that no longer exists on
+    disk must not name the stale path on the Jobs page or in
+    ``labels_fingerprints``. ``_load_labels`` ignores a missing single-file
+    path and falls back to the workspace's active lists — ``_resolve_label_set_metas``
+    has to do the same, otherwise the classify step shows lists that
+    did NOT produce ``labels``.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _resolve_label_set_metas, _resolve_label_sources
+
+    deleted = str(tmp_path / "gone.txt")  # never created
+    saved = [{"labels_file": "/l/ws.txt", "name": "Workspace list"}]
+    db = _StubDB(["/l/ws.txt"])
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        metas = _resolve_label_set_metas(_params(labels_file=deleted), db)
+        # Not the stale path — the workspace fallback.
+        assert metas == [{"labels_file": "/l/ws.txt", "name": "Workspace list"}]
+        # And the sidecar source list agrees.
+        assert _resolve_label_sources(
+            _params(labels_file=deleted), db,
+        ) == ["/l/ws.txt"]
+
+
+def test_load_labels_returns_metas_used_for_display(tmp_path):
+    """The metadata returned by ``_load_labels`` must reflect what it
+    actually consumed so downstream ``describe_label_source`` and
+    ``_record_labels_fingerprint`` cannot drift from ``labels``.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _load_labels
+
+    labels_file = tmp_path / "cardinals.txt"
+    labels_file.write_text("Northern Cardinal\n")
+    saved = [{"labels_file": str(labels_file), "name": "My Cardinals"}]
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        labels, use_tol, label_metas = _load_labels(
+            model_type="bioclip",
+            model_str="hf-hub:imageomics/bioclip",
+            labels_file=str(labels_file),
+            labels_files=None,
+        )
+    assert labels == ["Northern Cardinal"]
+    assert use_tol is False
+    # The returned metadata carries the saved name — describe_label_source
+    # uses it verbatim, no second lookup required.
+    assert label_metas == [{"labels_file": str(labels_file), "name": "My Cardinals"}]
+
+
+def test_describe_label_source_prefers_supplied_metas():
+    """Regression: when the caller passes ``label_metas``, the description
+    uses those and does NOT re-resolve from ``params`` and ``db``. This
+    keeps the displayed name in sync with the ``labels`` that were loaded
+    even if the workspace's active list changed between load and render.
+    """
+    from unittest.mock import patch
+
+    from classify_job import describe_label_source
+
+    # ``params`` and ``db`` point to a totally different set — supplied
+    # ``label_metas`` must win.
+    saved = [
+        {"labels_file": "/l/loaded.txt", "name": "Actually Loaded"},
+        {"labels_file": "/l/other.txt", "name": "Not Loaded"},
+    ]
+    db = _StubDB(["/l/other.txt"])
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        text = describe_label_source(
+            _params(), db,
+            labels=["a", "b"], use_tol=False, model_type="bioclip",
+            label_metas=[
+                {"labels_file": "/l/loaded.txt", "name": "Actually Loaded"},
+            ],
+        )
+    assert text == "2 species from Actually Loaded"
 
 
 # ── Task 3: _detect_subjects tests ──────────────────────────────────────────
@@ -4251,7 +4342,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
          patch("classify_job.get_active_model", return_value=fake_model), \
          patch("classify_job.get_models", return_value=[fake_model]), \
          patch("classify_job._load_taxonomy", return_value=None), \
-         patch("classify_job._load_labels", return_value=(["Northern Cardinal"], False)), \
+         patch("classify_job._load_labels", return_value=(["Northern Cardinal"], False, [])), \
          patch("classify_job.Classifier", return_value=mock_clf), \
          patch("classify_job._detect_subjects", return_value=({}, 0)):
         result = run_classify_job(job, runner, str(tmp_path / "test.db"), 1, params)
@@ -4510,7 +4601,7 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
          patch("classify_job.get_models", return_value=[fake_model]), \
          patch("classify_job._load_taxonomy", return_value=None), \
          patch(
-            "classify_job._load_labels", return_value=(["Northern Cardinal"], False),
+            "classify_job._load_labels", return_value=(["Northern Cardinal"], False, []),
          ), \
          patch("classify_job.Classifier"), \
          patch("classify_job._detect_subjects", side_effect=_fake_detect_subjects):
@@ -4590,7 +4681,7 @@ def test_classify_job_publishes_label_source_on_classify_step(tmp_path):
          patch("classify_job.get_saved_labels", return_value=saved), \
          patch(
             "classify_job._load_labels",
-            return_value=(["Northern Cardinal", "Blue Jay"], False),
+            return_value=(["Northern Cardinal", "Blue Jay"], False, saved),
          ), \
          patch("classify_job.Classifier"), \
          patch(
@@ -4717,7 +4808,7 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
          patch("classify_job.get_models", return_value=[fake_model]), \
          patch("classify_job._load_taxonomy", return_value=None), \
          patch(
-            "classify_job._load_labels", return_value=(["Northern Cardinal"], False),
+            "classify_job._load_labels", return_value=(["Northern Cardinal"], False, []),
          ), \
          patch("classify_job.Classifier", side_effect=_record_classifier_init):
         result = run_classify_job(job, runner, db_path, ws, params)
@@ -6003,7 +6094,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
          patch("classify_job.get_models", return_value=[fake_model]), \
          patch("classify_job._load_taxonomy", return_value=None), \
          patch("classify_job._load_labels",
-               return_value=(["NewProcessed"], False)), \
+               return_value=(["NewProcessed"], False, [])), \
          patch("classify_job.Classifier", return_value=mock_clf), \
          patch("classify_job._detect_subjects",
                side_effect=fake_detect_subjects), \
@@ -6150,7 +6241,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
         patch("classify_job.get_models", return_value=[fake_model]),
         patch("classify_job._load_taxonomy", return_value=None),
         patch("classify_job._load_labels",
-              return_value=(["Restored"], False)),
+              return_value=(["Restored"], False, [])),
         patch("classify_job.Classifier", return_value=mock_clf),
         patch("classify_job._detect_subjects",
               side_effect=fake_detect_subjects),
@@ -6527,7 +6618,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
          patch("classify_job.get_models", return_value=[fake_model]), \
          patch("classify_job._load_taxonomy", return_value=None), \
          patch("classify_job._load_labels",
-               return_value=(["NewEmpty"], False)), \
+               return_value=(["NewEmpty"], False, [])), \
          patch("classify_job.Classifier", return_value=mock_clf), \
          patch("classify_job._detect_subjects",
                side_effect=fake_detect_subjects), \
@@ -7613,6 +7704,122 @@ def test_finalize_cached_only_treats_null_category_as_animal(
     )
 
     assert result["already_classified"] == 1
+
+
+def test_cached_only_path_publishes_label_source_on_classify_step(
+    tmp_path, monkeypatch,
+):
+    """Regression: re-running classification against a fully cached
+    collection must still record which lists produced its predictions on
+    the classify step. Before the fix, ``_finalize_cached_only``
+    short-circuited ``run_classify_job`` before the label_source
+    assignment ran, so the classify history row for cached-only runs was
+    the unlabeled state the whole feature set out to eliminate.
+
+    Rather than staging a full model on disk to satisfy the cache-check
+    machinery, we monkey-patch the shortcut predicates directly. That
+    isolates the specific behavior under test (label_source publication
+    for the cache-only path) from the identity-fingerprint plumbing that
+    other tests already cover.
+    """
+    import classify_job as classify_job_mod
+    import config as cfg
+    from classify_job import ClassifyParams, run_classify_job
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_id = db.save_detections(pid, [{
+        "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.add_prediction(
+        det_id, species="Robin", confidence=0.9,
+        model="BioCLIP", labels_fingerprint="fp-cached",
+    )
+    db.record_classifier_run(
+        det_id, "BioCLIP", "fp-cached", prediction_count=1,
+    )
+    coll_id = db.add_collection(
+        "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    # An active labels_file that ``_load_labels`` will actually load, so
+    # the peek path returns real labels and the cached-only branch has a
+    # concrete label space to describe.
+    labels_file = tmp_path / "birds.txt"
+    labels_file.write_text("Robin\nBlue Jay\n")
+
+    # Stand in for a downloaded model — the peek only reads model metadata,
+    # not weights, and the shortcut skips construction entirely.
+    model_dir = tmp_path / "bioclip"
+    model_dir.mkdir()
+    fake_model = {
+        "id": "bioclip-x",
+        "name": "BioCLIP",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "model_type": "bioclip",
+        "weights_path": str(model_dir),
+        "downloaded": True,
+    }
+    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [fake_model])
+    monkeypatch.setattr(
+        classify_job_mod, "get_active_model", lambda: fake_model,
+    )
+    monkeypatch.setattr(
+        classify_job_mod, "get_saved_labels",
+        lambda: [{"labels_file": str(labels_file), "name": "Backyard Birds"}],
+    )
+    monkeypatch.setattr(
+        classify_job_mod, "get_active_labels",
+        lambda: [{"labels_file": str(labels_file), "name": "Backyard Birds"}],
+    )
+
+    # Force the cache-only shortcut regardless of whether the identity
+    # fingerprints happen to align — this test is about label_source, not
+    # the fingerprint match logic (which is exercised by other tests).
+    monkeypatch.setattr(
+        classify_job_mod, "_all_photos_cache_satisfied",
+        lambda *a, **kw: True,
+    )
+
+    runner = FakeRunner()
+    run_classify_job(
+        _make_job(), runner, db_path, ws,
+        ClassifyParams(
+            collection_id=coll_id,
+            labels_files=[str(labels_file)], labels_file=None,
+            model_id="bioclip-x", model_name=None,
+            grouping_window=0, similarity_threshold=0.99,
+            reclassify=False,
+        ),
+    )
+
+    # The classify step carries a label_source line naming the actual
+    # list, not "Tree of Life" or a blank string. Runs on the cache-only
+    # path publish it via ``_finalize_cached_only`` — the model-loading
+    # branch's copy never runs on this path.
+    classify_label_sources = [
+        kwargs["label_source"]
+        for step_id, kwargs in runner.steps
+        if step_id == "classify" and "label_source" in kwargs
+    ]
+    assert classify_label_sources, (
+        "cached-only run must publish a label_source line on the classify "
+        "step; otherwise its history entry is indistinguishable from a "
+        "pre-feature run"
+    )
+    assert "Backyard Birds" in classify_label_sources[-1]
+    assert "2 species" in classify_label_sources[-1]
 
 
 def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
