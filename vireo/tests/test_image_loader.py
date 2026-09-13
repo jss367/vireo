@@ -39,13 +39,23 @@ class _FakeRaw:
     """Stand-in for a rawpy raw-file handle, used via monkeypatched imread."""
 
     def __init__(self, *, embedded_jpeg=None, postprocess_error=None,
-                 postprocess_size=(6000, 4000), sensor_size=(6000, 4000)):
+                 postprocess_size=(6000, 4000), sensor_size=(6000, 4000),
+                 raw_pattern="bayer"):
         self._embedded_jpeg = embedded_jpeg
         self._postprocess_error = postprocess_error
         self._postprocess_size = postprocess_size
         self.sizes = SimpleNamespace(width=sensor_size[0], height=sensor_size[1])
         self.postprocess_calls = 0
         self.postprocess_kwargs = []
+        import numpy as np
+        if raw_pattern == "bayer":
+            self.raw_pattern = np.array([[0, 1], [3, 2]], dtype=np.uint8)
+        elif raw_pattern == "xtrans":
+            self.raw_pattern = np.zeros((6, 6), dtype=np.uint8)
+        elif raw_pattern is None:
+            self.raw_pattern = None
+        else:
+            self.raw_pattern = raw_pattern
 
     def __enter__(self):
         return self
@@ -222,13 +232,14 @@ def test_raw_preserve_highlights_mode_bypasses_embedded_jpeg(tmp_path, monkeypat
     assert kwargs["highlight_mode"] == rawpy.HighlightMode.Blend
 
 
-def test_raw_demosaic_uses_ppg(tmp_path, monkeypatch):
-    """Full-size decodes demosaic with PPG, not libraw's default AHD.
+def test_raw_demosaic_uses_ppg_for_bayer(tmp_path, monkeypatch):
+    """Full-size Bayer decodes demosaic with PPG, not libraw's default AHD.
 
     AHD costs ~1.7s on a 45MP NEF against PPG's ~1.0s for output that
-    matches to 40-52 dB PSNR, so PPG is the default for every demosaic
-    Vireo runs. Guards the kwarg because nothing downstream would fail
-    visibly if it were dropped — the decode would just get slower again.
+    matches to 40-52 dB PSNR, so PPG is the default for every Bayer
+    demosaic Vireo runs. Guards the kwarg because nothing downstream
+    would fail visibly if it were dropped — the decode would just get
+    slower again.
     """
     import rawpy
     from image_loader import load_image
@@ -239,6 +250,7 @@ def test_raw_demosaic_uses_ppg(tmp_path, monkeypatch):
     fake = _install_fake_raw(monkeypatch, _FakeRaw(
         embedded_jpeg=_jpeg_bytes((1600, 1067)),
         postprocess_size=(6000, 4000),
+        raw_pattern="bayer",
     ))
 
     result = load_image(str(nef), max_size=None)
@@ -248,6 +260,55 @@ def test_raw_demosaic_uses_ppg(tmp_path, monkeypatch):
     kwargs = fake.postprocess_kwargs[-1]
     assert kwargs["demosaic_algorithm"] == rawpy.DemosaicAlgorithm.PPG
     assert kwargs["half_size"] is False
+
+
+def test_raw_demosaic_skips_ppg_for_xtrans(tmp_path, monkeypatch):
+    """X-Trans (Fujifilm .raf) sensors keep libraw's default demosaic.
+
+    LibRaw remaps the PPG enum's quality value to one-pass
+    ``xtrans_interpolate(1)`` rather than PPG, which is worse than the
+    default three-pass X-Trans path. Leaving ``demosaic_algorithm``
+    unset preserves that default.
+    """
+    from image_loader import load_image
+
+    raf = tmp_path / "test.raf"
+    raf.write_bytes(b"fake RAF content")
+
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((1600, 1067)),
+        postprocess_size=(6000, 4000),
+        raw_pattern="xtrans",
+    ))
+
+    result = load_image(str(raf), max_size=None)
+
+    assert result is not None
+    assert fake.postprocess_calls == 1
+    kwargs = fake.postprocess_kwargs[-1]
+    assert "demosaic_algorithm" not in kwargs
+    assert kwargs["half_size"] is False
+
+
+def test_raw_demosaic_skips_ppg_when_no_raw_pattern(tmp_path, monkeypatch):
+    """Foveon/monochrome raws expose no ``raw_pattern``; leave demosaic default."""
+    from image_loader import load_image
+
+    dng = tmp_path / "test.dng"
+    dng.write_bytes(b"fake DNG content")
+
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((1600, 1067)),
+        postprocess_size=(6000, 4000),
+        raw_pattern=None,
+    ))
+
+    result = load_image(str(dng), max_size=None)
+
+    assert result is not None
+    assert fake.postprocess_calls == 1
+    kwargs = fake.postprocess_kwargs[-1]
+    assert "demosaic_algorithm" not in kwargs
 
 
 def test_raw_falls_back_to_embedded_on_postprocess_failure(tmp_path, monkeypatch):
