@@ -497,6 +497,35 @@ def publish_detection_artifact(
     return digest
 
 
+def _match_summary_row(db, detection_id, classifier_model, labels_fingerprint):
+    """The portable half of one ``classifier_match_scores`` row, or None.
+
+    None when the run predates match-strength recording or was materialized
+    from an older artifact. Callers omit the key entirely in that case, which
+    is what keeps "never measured" distinguishable from "measured as zero" on
+    the far side of the cache.
+
+    ``run_at`` is deliberately not carried: it is local bookkeeping, and
+    including a wall-clock timestamp would change the content-addressed digest
+    of an otherwise identical run.
+    """
+    row = db.conn.execute(
+        """SELECT max_match_score, match_margin, top_species,
+                  label_count, score_kind
+           FROM classifier_match_scores
+           WHERE detection_id = ? AND classifier_model = ?
+             AND labels_fingerprint = ?""",
+        (detection_id, classifier_model, labels_fingerprint),
+    ).fetchone()
+    if row is None or row["max_match_score"] is None:
+        return None
+    match = {"max_match_score": row["max_match_score"]}
+    for field in ("match_margin", "top_species", "label_count", "score_kind"):
+        if row[field] is not None:
+            match[field] = row[field]
+    return match
+
+
 def promote_and_publish_classifier_run(
     db,
     detection_id,
@@ -561,7 +590,8 @@ def promote_and_publish_classifier_run(
     predictions = db.conn.execute(
         """SELECT species, confidence, scientific_name, source_taxon_id,
                   taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                  taxonomy_order, taxonomy_family, taxonomy_genus
+                  taxonomy_order, taxonomy_family, taxonomy_genus,
+                  match_score
            FROM predictions
            WHERE detection_id = ? AND classifier_model = ?
              AND labels_fingerprint = ?
@@ -576,6 +606,12 @@ def promote_and_publish_classifier_run(
             "species": prediction["species"],
             "confidence": prediction["confidence"],
         }
+        # Omitted rather than serialized as null when absent: an artifact
+        # published from rows written before the column existed must
+        # materialize as "not recorded", and a key that is simply not there
+        # cannot be mistaken for a measured zero.
+        if prediction["match_score"] is not None:
+            candidate["match_score"] = prediction["match_score"]
         taxonomy = {
             "taxon_id": prediction["source_taxon_id"],
             "scientific_name": prediction["scientific_name"],
@@ -591,6 +627,17 @@ def promote_and_publish_classifier_run(
             candidate["taxonomy"] = taxonomy
         candidates.append(candidate)
     subject["candidates"] = candidates
+    # The run-level summary: best raw score over the WHOLE label list, which
+    # no per-candidate row can reconstruct because the labels that lost never
+    # became prediction rows. Without it a cache-materialized detection is
+    # permanently blank — ``classifier_runs`` gates re-classification, so it
+    # would never be recomputed — and the calibration script loses exactly the
+    # rows it derives a threshold from.
+    match = _match_summary_row(
+        db, detection_id, classifier_model, labels_fingerprint,
+    )
+    if match is not None:
+        subject["match"] = match
     label_meta = db.conn.execute(
         """SELECT display_name, label_count FROM labels_fingerprints
            WHERE fingerprint = ?""",
@@ -752,6 +799,64 @@ def _validate_candidate_taxonomy(taxonomy):
             )
 
 
+_MATCH_SCALAR_FIELDS = ("max_match_score", "match_margin")
+
+
+def _validate_match_number(value, label):
+    """A raw match score is unbounded on both sides — a logit can be negative
+    and is routinely well above 1 — so it cannot reuse ``_validate_confidence``.
+    Only finiteness and numeric type are checkable; the scale is named by
+    ``score_kind`` and owned by the model that produced it.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CacheFormatError(f"{label} must be numeric")
+    try:
+        finite = math.isfinite(value)
+    except (OverflowError, ValueError) as exc:
+        raise CacheFormatError(f"{label} must be finite") from exc
+    if not finite:
+        raise CacheFormatError(f"{label} must be finite")
+
+
+def _validate_subject_match(match):
+    """Validate the optional run-level match summary on a classification subject.
+
+    Optional throughout, and absent must stay distinguishable from zero all the
+    way down: an artifact written before this block existed materializes with no
+    ``classifier_match_scores`` row at all, which reads as "not recorded". A
+    zero would read as "matched nothing", which is a measurement nobody took.
+    """
+    if match is None:
+        return
+    if not isinstance(match, dict):
+        raise CacheFormatError("subject match must be an object")
+    for field in _MATCH_SCALAR_FIELDS:
+        _validate_match_number(match.get(field), f"match.{field}")
+    top_species = match.get("top_species")
+    if top_species is not None and (
+        not isinstance(top_species, str) or len(top_species) > 500
+    ):
+        raise CacheFormatError("match.top_species must be a string")
+    score_kind = match.get("score_kind")
+    if score_kind is not None and (
+        not isinstance(score_kind, str) or len(score_kind) > 32
+    ):
+        raise CacheFormatError("match.score_kind must be a short string")
+    label_count = match.get("label_count")
+    if label_count is not None and (
+        isinstance(label_count, bool)
+        or not isinstance(label_count, int)
+        or label_count < 0
+        or label_count > _SQLITE_INT64_MAX
+    ):
+        raise CacheFormatError(
+            "match.label_count must be a non-negative integer within SQLite's "
+            "64-bit range"
+        )
+
+
 def validate_artifact(artifact):
     """Validate one artifact and return its normalized data-only form."""
     artifact = _normalize_json(artifact)
@@ -846,6 +951,10 @@ def validate_artifact(artifact):
                     raise CacheFormatError("candidate species must be a non-empty string")
                 _validate_confidence(candidate.get("confidence"))
                 _validate_candidate_taxonomy(candidate.get("taxonomy"))
+                _validate_match_number(
+                    candidate.get("match_score"), "candidate match_score",
+                )
+            _validate_subject_match(subject.get("match"))
 
     if artifact["type"] == "classification":
         if not isinstance(artifact.get("classifier_model"), str):
@@ -1513,7 +1622,8 @@ def exportable_artifacts(db, artifact_types=None):
                     """SELECT species, confidence, scientific_name, source_taxon_id,
                               taxonomy_kingdom, taxonomy_phylum,
                               taxonomy_class, taxonomy_order,
-                              taxonomy_family, taxonomy_genus
+                              taxonomy_family, taxonomy_genus,
+                              match_score
                        FROM predictions
                        WHERE detection_id = ? AND classifier_model = ?
                          AND labels_fingerprint = ?
@@ -1527,6 +1637,8 @@ def exportable_artifacts(db, artifact_types=None):
                         "species": prediction["species"],
                         "confidence": prediction["confidence"],
                     }
+                    if prediction["match_score"] is not None:
+                        candidate["match_score"] = prediction["match_score"]
                     taxonomy = {
                         "taxon_id": prediction["source_taxon_id"],
                         "scientific_name": prediction["scientific_name"],
@@ -1542,6 +1654,12 @@ def exportable_artifacts(db, artifact_types=None):
                         candidate["taxonomy"] = taxonomy
                     candidates.append(candidate)
                 subject["candidates"] = candidates
+                match = _match_summary_row(
+                    db, detection["id"], row["classifier_model"],
+                    row["labels_fingerprint"],
+                )
+                if match is not None:
+                    subject["match"] = match
                 subjects.append(subject)
             input_block, expected_input = classification_input(
                 row["file_hash"], row["detector_runtime"], subjects,
@@ -2099,8 +2217,9 @@ def materialize_artifacts(
                                   species, confidence, category, scientific_name,
                                   taxonomy_kingdom, taxonomy_phylum,
                                   taxonomy_class, taxonomy_order,
-                                  taxonomy_family, taxonomy_genus, source_taxon_id)
-                               VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  taxonomy_family, taxonomy_genus, source_taxon_id,
+                                  match_score)
+                               VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 detection_id, artifact["classifier_model"],
                                 labels["short_fingerprint"], labels["fingerprint"],
@@ -2110,6 +2229,46 @@ def materialize_artifacts(
                                 taxonomy.get("class"), taxonomy.get("order"),
                                 taxonomy.get("family"), taxonomy.get("genus"),
                                 taxonomy.get("taxon_id"),
+                                # Absent on artifacts published before the
+                                # field existed; NULL there means "not
+                                # recorded", never "matched badly".
+                                candidate.get("match_score"),
+                            ),
+                        )
+                    # Written alongside the classifier_runs marker below, and
+                    # for the same reason it has to be written here at all:
+                    # that marker is the re-classification gate, so a
+                    # detection materialized from cache is never inferred
+                    # again and would otherwise report "match strength not
+                    # recorded" forever despite originating from real
+                    # inference. Omitted from the artifact => no row, which is
+                    # the honest state for a pre-feature bundle.
+                    match = subject.get("match")
+                    if match and match.get("max_match_score") is not None:
+                        db.conn.execute(
+                            """INSERT INTO classifier_match_scores
+                                 (detection_id, classifier_model,
+                                  labels_fingerprint, max_match_score,
+                                  match_margin, top_species, label_count,
+                                  score_kind)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               ON CONFLICT(detection_id, classifier_model,
+                                           labels_fingerprint)
+                               DO UPDATE SET
+                                 max_match_score = excluded.max_match_score,
+                                 match_margin = excluded.match_margin,
+                                 top_species = excluded.top_species,
+                                 label_count = excluded.label_count,
+                                 score_kind = excluded.score_kind,
+                                 run_at = datetime('now')""",
+                            (
+                                detection_id, artifact["classifier_model"],
+                                labels["short_fingerprint"],
+                                match["max_match_score"],
+                                match.get("match_margin"),
+                                match.get("top_species"),
+                                match.get("label_count"),
+                                match.get("score_kind"),
                             ),
                         )
                     db.conn.execute(

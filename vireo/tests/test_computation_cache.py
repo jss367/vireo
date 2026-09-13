@@ -67,13 +67,16 @@ def detection_artifact(subjects=None):
     }
 
 
-def classification_artifact(candidates=None, classifier_runtime=None):
+def classification_artifact(candidates=None, classifier_runtime=None,
+                            match=None):
     box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
     subjects = [{"key": "d0", "kind": "box", "box": box, "category": "animal"}]
     subjects[0]["candidates"] = candidates if candidates is not None else [{
         "species": "Robin",
         "confidence": 0.9,
     }]
+    if match is not None:
+        subjects[0]["match"] = match
     if classifier_runtime is None:
         classifier_runtime = runtime_fingerprint({
             "type": "classification",
@@ -1380,3 +1383,162 @@ def test_materialize_handles_predictions_without_classifier_run(tmp_path, review
         assert tuple(row) == ("Erithacus rubecula", 123, .9)
         assert result["classifier_runs_applied"] == 1
     db.close()
+
+
+def _materialized_classification(tmp_path, name, **artifact_kwargs):
+    """Materialize one classification artifact and hand back the catalog."""
+    destination, _folder_id, photo_id = _database_with_photo(
+        tmp_path / name, "photo.jpg",
+    )
+    destination.upsert_labels_fingerprint(
+        "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+    )
+    applied = materialize_artifacts(
+        destination,
+        [detection_artifact(), classification_artifact(**artifact_kwargs)],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    assert applied["classifier_runs_applied"] == 1
+    return destination, photo_id
+
+
+def test_classification_artifact_carries_match_strength(tmp_path):
+    """Cache-materialized predictions must keep their absolute match score.
+
+    ``classifier_runs`` is the re-classification gate, so a detection that
+    arrives from the cache is never inferred again locally. If the artifact
+    dropped the score, those photos would report "match strength not recorded"
+    forever despite originating from real inference — and the calibration
+    script would silently lose exactly the rows it derives a floor from.
+    """
+    destination, _photo_id = _materialized_classification(
+        tmp_path, "with-match.db",
+        candidates=[{"species": "Robin", "confidence": 0.9,
+                     "match_score": 0.31}],
+        match={"max_match_score": 0.31, "match_margin": 0.04,
+               "top_species": "Robin", "label_count": 1255,
+               "score_kind": "cosine"},
+    )
+    assert destination.conn.execute(
+        "SELECT match_score FROM predictions",
+    ).fetchone()["match_score"] == 0.31
+    row = destination.conn.execute(
+        "SELECT * FROM classifier_match_scores",
+    ).fetchone()
+    assert row["max_match_score"] == 0.31
+    assert row["match_margin"] == 0.04
+    assert row["top_species"] == "Robin"
+    assert row["label_count"] == 1255
+    assert row["score_kind"] == "cosine"
+
+
+def test_artifact_without_match_strength_materializes_as_not_recorded(tmp_path):
+    """Pre-feature artifacts must land as NULL, never as a zero score.
+
+    Zero is a measurement — "the best label in the list matched nothing" — and
+    an artifact that never carried the field made no such measurement. The
+    fields are additive and optional at schema 1 precisely so old objects stay
+    valid; they must also stay honest.
+    """
+    destination, _photo_id = _materialized_classification(
+        tmp_path, "no-match.db",
+    )
+    assert destination.conn.execute(
+        "SELECT match_score FROM predictions",
+    ).fetchone()["match_score"] is None
+    assert destination.conn.execute(
+        "SELECT COUNT(*) AS c FROM classifier_match_scores",
+    ).fetchone()["c"] == 0
+
+
+def test_match_strength_survives_publish_and_export(tmp_path):
+    """The publisher must read the score out of the catalog, not drop it."""
+    source, _folder_id, photo_id = _database_with_photo(
+        tmp_path / "source.db", "source.jpg",
+    )
+    _input, detector_input_fp = source_input(
+        PHOTO_HASH, "vireo-detector-source-v1",
+    )
+    box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
+    detection_id = source.write_detection_batch(
+        photo_id,
+        "megadetector-v6",
+        [{"box": box, "confidence": 0.91, "category": "animal"}],
+        runtime_fingerprint=RUNTIME,
+        input_fingerprint=detector_input_fp,
+    )[0]
+    labels_full = "5" * 64
+    labels_short = labels_full[:12]
+    source.upsert_labels_fingerprint(
+        labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
+    )
+    source.add_prediction(
+        detection_id, "Robin", 0.92, "BioCLIP",
+        labels_fingerprint=labels_short, match_score=0.31,
+    )
+    source.record_classifier_run(
+        detection_id, "BioCLIP", labels_short, prediction_count=1,
+    )
+    source.record_classifier_match_score(
+        detection_id, "BioCLIP", labels_short, max_match_score=0.31,
+        match_margin=0.04, top_species="Robin", label_count=1255,
+        score_kind="cosine",
+    )
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "image_encoder.onnx").write_bytes(b"exact model bytes")
+    identity = classifier_model_identity({
+        "id": "bioclip-test",
+        "model_str": "ViT-test",
+        "model_type": "bioclip",
+        "weights_path": str(model_dir),
+        "files": ["image_encoder.onnx"],
+        "source": "custom",
+    })
+    store = ArtifactStore(tmp_path / "store")
+    promote_and_publish_classifier_run(
+        source, detection_id, "BioCLIP", labels_short, labels_full,
+        identity, store=store,
+    )
+    published = [a for _digest, a in store.iter_artifacts()]
+    assert len(published) == 1
+    subject = published[0]["subjects"][0]
+    assert subject["candidates"][0]["match_score"] == 0.31
+    assert subject["match"]["max_match_score"] == 0.31
+    assert subject["match"]["score_kind"] == "cosine"
+    # run_at is local bookkeeping; carrying it would change the
+    # content-addressed digest of an otherwise identical run.
+    assert "run_at" not in subject["match"]
+
+    artifacts, _summary = exportable_artifacts(source)
+    exported = [a for a in artifacts if a["type"] == "classification"]
+    assert exported and exported[0]["subjects"][0]["match"][
+        "max_match_score"
+    ] == 0.31
+
+
+def test_match_strength_fields_are_validated(tmp_path):
+    """Unbounded on both sides — a logit is routinely far outside [0, 1] —
+    so these cannot reuse the confidence validator. Only type and finiteness
+    are checkable; the scale is named by ``score_kind``.
+    """
+    ok = classification_artifact(
+        candidates=[{"species": "Robin", "confidence": 0.9,
+                     "match_score": -3.5}],
+        match={"max_match_score": 42.0, "score_kind": "logit"},
+    )
+    assert validate_artifact(ok)["subjects"][0]["match"]["max_match_score"] == 42.0
+
+    with pytest.raises(CacheFormatError, match="match_score must be numeric"):
+        validate_artifact(classification_artifact(
+            candidates=[{"species": "Robin", "confidence": 0.9,
+                         "match_score": "0.3"}],
+        ))
+    with pytest.raises(CacheFormatError, match="subject match must be an object"):
+        validate_artifact(classification_artifact(match=[0.3]))
+    with pytest.raises(CacheFormatError, match="match.label_count"):
+        validate_artifact(classification_artifact(
+            match={"max_match_score": 0.3, "label_count": -1},
+        ))
