@@ -151,6 +151,32 @@ def test_load_merged_labels_skips_missing(tmp_path):
     assert result == ["Jay", "Robin"]
 
 
+def test_load_merged_labels_with_metas_returns_consumed_only(tmp_path):
+    """``load_merged_labels_with_metas`` must return only the metadata of the
+    sets it actually opened and read — otherwise a caller naming the label
+    source would claim a file that was deleted between its own existence
+    check and the loader's read. Doing this in the same pass closes that
+    race (see ``classify_job._load_labels``).
+    """
+    from labels import load_merged_labels_with_metas
+
+    dir_ = str(tmp_path / "labels")
+    os.makedirs(dir_)
+
+    txt = os.path.join(dir_, "birds.txt")
+    with open(txt, "w") as f:
+        f.write("Robin\n")
+
+    label_sets = [
+        {"labels_file": txt, "name": "Birds"},
+        {"labels_file": "/nonexistent/gone.txt", "name": "Deleted"},
+    ]
+    labels, consumed = load_merged_labels_with_metas(label_sets)
+    assert list(labels) == ["Robin"]
+    # Only the entry whose file was actually read survives.
+    assert consumed == [{"labels_file": txt, "name": "Birds"}]
+
+
 def test_load_merged_labels_dedupes_apostrophe_variants(tmp_path):
     """Two label files that spell the same species with a curly vs plain
     apostrophe must merge into a single canonical entry — otherwise the

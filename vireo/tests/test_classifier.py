@@ -416,6 +416,11 @@ class TestCustomLabelsMode:
         finally:
             os.unlink(path)
 
+    def test_label_space_size_counts_custom_labels(self, tmp_path):
+        """Custom-label mode reports how many species it can return."""
+        clf = _make_custom_classifier(tmp_path, labels=["bird", "cat"])
+        assert clf.label_space_size == 2
+
     def test_classify_with_threshold(self, tmp_path):
         """classify() filters results below threshold."""
         clf = _make_custom_classifier(tmp_path)
@@ -648,6 +653,11 @@ class TestTreeOfLifeMode:
             assert "auto_tag" in top
         finally:
             os.unlink(path)
+
+    def test_tol_label_space_size_counts_all_species(self, tmp_path):
+        """ToL mode reports its full species count for the Jobs page row."""
+        clf = _make_tol_classifier(tmp_path)
+        assert clf.label_space_size == 3
 
     def test_tol_includes_taxonomy(self, tmp_path):
         """Tree of Life results include taxonomy hierarchy."""

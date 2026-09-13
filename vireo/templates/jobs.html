@@ -276,6 +276,10 @@
   margin-left: 26px; padding: 2px 8px; font-size: 12px;
   color: var(--text-muted); font-style: italic;
 }
+.tree-step-label-source {
+  margin-left: 26px; padding: 2px 8px; font-size: 12px;
+  color: var(--text-muted);
+}
 .tree-step-current-file {
   margin-left: 26px; padding: 2px 8px; font-size: 12px;
   color: var(--accent); font-family: var(--font-mono, monospace);
@@ -848,6 +852,14 @@
 
     // Expanded content
     if (isExpanded) {
+      // Which label space this classify step compares photos against. The
+      // header names the model; the same model against a regional species
+      // list and against Tree of Life are different classifiers as far as
+      // the results go, so the list has to be named too.
+      if (step.label_source) {
+        html += '<div class="tree-step-label-source">' + esc(step.label_source) + '</div>';
+      }
+
       // Import-in-place publishes explicit discovery and metadata sub-phases.
       // Its overall file counter intentionally pauses during those phases, so
       // extrapolating current / whole-step elapsed produces a fake ETA that

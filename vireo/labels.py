@@ -468,6 +468,12 @@ def set_active_labels(labels_files):
 def load_merged_labels(label_sets):
     """Read and merge species from multiple label sets.
 
+    Thin wrapper around ``load_merged_labels_with_metas`` that discards the
+    consumed-metas list. Prefer the ``_with_metas`` variant when the caller
+    needs to know which sets actually contributed to the returned labels —
+    e.g. to name label sources without claiming a file that was deleted
+    between the caller's existence check and this loader's read.
+
     Args:
         label_sets: list of metadata dicts, each with a 'labels_file' key.
 
@@ -500,6 +506,24 @@ def load_merged_labels(label_sets):
     label sets and strand ~70k cached runs, re-running inference over
     the whole catalog for no dedupe benefit.
     """
+    labels, _ = load_merged_labels_with_metas(label_sets)
+    return labels
+
+
+def load_merged_labels_with_metas(label_sets):
+    """Read and merge species, returning the metadata of the sets consumed.
+
+    Same as ``load_merged_labels`` (see its docstring for dedupe/fingerprint
+    semantics), plus a second return value: the sublist of ``label_sets``
+    whose file was actually opened and read in this same pass. Sets whose
+    file is missing at read time — the ``load_merged_labels`` code path
+    already skips them silently — are dropped from the returned metadata
+    too, so callers naming the label source cannot claim a list that
+    contributed nothing. Doing this in the same pass closes the race
+    between a caller's existence check and this loader's read: the Settings
+    DELETE endpoint can retire a label file while the classify job is
+    loading, so any two-pass check disagrees with reality.
+    """
     # Import here rather than at module load: ``labels.py`` is imported
     # from environments (packaging, first-run bootstrap) that don't yet
     # have ``vireo/`` on ``sys.path``, and this helper is only reachable
@@ -511,12 +535,21 @@ def load_merged_labels(label_sets):
 
     all_species = set()
     identities = {}
+    consumed_metas = []
     for ls in label_sets:
         path = ls.get("labels_file", "")
         if not path or not os.path.exists(path):
             log.warning("Label file missing, skipping: %s", path)
             continue
-        labels = read_label_file(path)
+        try:
+            labels = read_label_file(path)
+        except FileNotFoundError:
+            # Racing DELETE between os.path.exists above and the open() in
+            # read_label_file — treat identically to the exists() miss so
+            # consumed_metas reflects only files we actually read.
+            log.warning("Label file vanished during read, skipping: %s", path)
+            continue
+        consumed_metas.append(ls)
         for name, entry in labels.identities.items():
             _merge_identity(identities, keyword_match_key(name), entry)
         for name in labels:
@@ -562,4 +595,7 @@ def load_merged_labels(label_sets):
         if tid is not None:
             seen_taxa.add(tid)
         unique.append(name)
-    return SpeciesLabels(unique, {name: merged_identities[name] for name in unique if name in merged_identities})
+    return (
+        SpeciesLabels(unique, {name: merged_identities[name] for name in unique if name in merged_identities}),
+        consumed_metas,
+    )

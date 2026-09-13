@@ -602,6 +602,11 @@ def test_jobs_page_returns_200(app_and_db):
     assert b'isRunning && !importInPlacePhaseActive' in resp.data
     assert b'delete leafBuffers[step.id]' in resp.data
     assert b'leafBufferSources[step.id] !== step.source_index' in resp.data
+    # A classify step names its model in the header; the label space it
+    # compares photos against (regional lists vs Tree of Life) is published
+    # as step.label_source and must render under the step.
+    assert b'step.label_source' in resp.data
+    assert b'tree-step-label-source' in resp.data
 
 
 def test_navbar_has_jobs_link(app_and_db):

@@ -1811,6 +1811,7 @@ class JobRunner:
                     for key in (
                         "status", "summary", "error", "error_count",
                         "progress", "current_file", "source_index",
+                        "label_source",
                     ):
                         if key in kwargs:
                             step[key] = kwargs[key]

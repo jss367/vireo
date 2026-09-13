@@ -2720,7 +2720,7 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     # model-loading behavior.
     monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
-        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
+        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False, [])
     )
     # model_loader_stage triggers a real iNat DWCA download whenever
     # params.download_taxonomy is True (the default) and no taxonomy file is
@@ -2756,7 +2756,7 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
     models.set_active_model("bioclip-vit-b-16")
     monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
-        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
+        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False, [])
     )
     # See _setup_fake_downloaded_model for why this stub is required.
     monkeypatch.setattr(taxonomy, "download_taxonomy", lambda *a, **k: None)
@@ -3097,6 +3097,70 @@ def test_pipeline_loops_over_multiple_models(tmp_path, monkeypatch):
     joined = " ".join(model_loader_summaries)
     assert "BioCLIP" in joined and "BioCLIP-2" in joined, (
         f"model_loader summary should mention both models, saw: {model_loader_summaries}"
+    )
+
+
+def test_pipeline_classify_step_names_the_label_set(tmp_path, monkeypatch):
+    """The classify row must say which species list the model ran against.
+
+    "Classify with BioCLIP-2.5" alone doesn't tell the user whether these
+    photos were matched against their regional lists or the whole Tree of
+    Life, and that decides which species the run could possibly return.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        classify_job, "_load_labels",
+        lambda *a, **k: (
+            ["Northern Cardinal", "Blue Jay", "Steller's Jay"],
+            False,
+            [{"labels_file": "/l/birds.txt", "name": "California, US Birds"}],
+        ),
+    )
+    monkeypatch.setattr(
+        classify_job, "get_active_labels",
+        lambda: [{"labels_file": "/l/birds.txt", "name": "California, US Birds"}],
+    )
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
+
+    published = [
+        kwargs["label_source"]
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == f"classify:{model_id}" and "label_source" in kwargs
+    ]
+    assert published == ["3 species from California, US Birds"], (
+        f"classify step should name the active label set; got {published!r}"
     )
 
 

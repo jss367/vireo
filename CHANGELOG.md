@@ -15,6 +15,13 @@ All notable changes to Vireo are documented in this file.
   list instead of scrolling out of reach.
 
 ### Added
+- **The Jobs page names the species list a classification ran against.** A
+  classify step used to say only which model was running, so a run against
+  your active regional lists looked identical to one falling back to the full
+  Tree of Life. The step now carries a line naming the label space — the
+  species count and which lists were merged, “Tree of Life” when no list is
+  active, or the model’s own built-in classes for models that ignore lists —
+  and it stays on the step in job history.
 - **Described color labels.** Right-click any photo color label to give that
   color a short, workspace-specific meaning such as “Reptiles.” The meaning
   appears in color-label tooltips wherever that color is shown, including the
