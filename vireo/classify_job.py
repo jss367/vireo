@@ -12,7 +12,13 @@ import os
 import time
 from dataclasses import dataclass
 
-from labels import get_active_labels, get_saved_labels, load_merged_labels, read_label_file
+from labels import (
+    get_active_labels,
+    get_saved_labels,
+    load_merged_labels,
+    load_merged_labels_with_metas,
+    read_label_file,
+)
 
 try:
     from detector import detect_animals, get_primary_detection
@@ -122,17 +128,15 @@ def _load_labels(
     labels = None
     label_metas: list[dict] = []
 
-    # ``load_merged_labels`` silently skips paths whose file is missing on
-    # disk (a saved list whose source was deleted, a workspace override still
-    # pointing at a since-removed file). Retaining those metas here would let
-    # ``describe_label_source`` name and count lists that contributed nothing,
-    # and ``_record_labels_fingerprint`` would write the same false provenance
-    # into ``labels_fingerprints``. Filter with the same predicate.
-    def _existing_metas(metas):
-        return [
-            m for m in metas
-            if m.get("labels_file") and os.path.exists(m["labels_file"])
-        ]
+    # ``load_merged_labels_with_metas`` returns the metadata of the sets it
+    # actually opened and read, filtered in the same pass — so a file
+    # deleted between the caller composing ``requested`` and the loader
+    # reading it drops out of both ``labels`` and ``label_metas`` together.
+    # Without this atomic capture, ``describe_label_source`` could name and
+    # count a list that contributed no classes and
+    # ``_record_labels_fingerprint`` would write the same false provenance
+    # into ``labels_fingerprints`` (the Settings DELETE endpoint can retire
+    # a label file while this background job is loading).
 
     if labels_files and isinstance(labels_files, list):
         saved = get_saved_labels()
@@ -140,17 +144,36 @@ def _load_labels(
         requested = [
             saved_by_file.get(p, {"labels_file": p}) for p in labels_files
         ]
-        label_metas = _existing_metas(requested)
-        labels = load_merged_labels(label_metas)
+        labels, label_metas = load_merged_labels_with_metas(requested)
         log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
     elif labels_file and os.path.exists(labels_file):
-        labels = read_label_file(labels_file)
-        if getattr(labels, "identities", {}):
-            labels = load_merged_labels([{"labels_file": labels_file}])
+        # Legacy label files without saved identities are consumed in
+        # file order — merged label lists sort and dedupe, but a single
+        # hand-authored .txt has always been passed to the classifier as
+        # written. ``compute_fingerprint`` normalises via ``sorted(set)``
+        # so the cached-run key stays identical either way; the branch
+        # still preserves order for callers that observe ``labels``
+        # directly. When the file carries a ``.json`` sidecar of source
+        # identities, route through the atomic loader so identity
+        # dedupe applies and ``label_metas`` reflects a successful read.
         saved = get_saved_labels()
         saved_by_file = {s["labels_file"]: s for s in saved}
-        label_metas = [saved_by_file.get(labels_file, {"labels_file": labels_file})]
-        log.info("Using %d labels from file: %s", len(labels), labels_file)
+        single_meta = saved_by_file.get(labels_file, {"labels_file": labels_file})
+        try:
+            raw = read_label_file(labels_file)
+        except FileNotFoundError:
+            log.warning(
+                "Label file vanished between exists() and read, skipping: %s",
+                labels_file,
+            )
+            label_metas = []
+        else:
+            if getattr(raw, "identities", {}):
+                labels, label_metas = load_merged_labels_with_metas([single_meta])
+            else:
+                labels = raw
+                label_metas = [single_meta]
+            log.info("Using %d labels from file: %s", len(labels), labels_file)
     else:
         # Try workspace-scoped active labels first
         ws_labels = db.get_workspace_active_labels() if db else None
@@ -160,8 +183,7 @@ def _load_labels(
             requested = [
                 saved_by_file.get(p, {"labels_file": p}) for p in ws_labels
             ]
-            label_metas = _existing_metas(requested)
-            labels = load_merged_labels(label_metas)
+            labels, label_metas = load_merged_labels_with_metas(requested)
             names = [s.get("name", "?") for s in label_metas]
             log.info(
                 "Using %d merged labels from workspace active sets: %s",
@@ -171,8 +193,7 @@ def _load_labels(
         else:
             active_sets = get_active_labels()
             if active_sets:
-                label_metas = _existing_metas(list(active_sets))
-                labels = load_merged_labels(label_metas)
+                labels, label_metas = load_merged_labels_with_metas(list(active_sets))
                 names = [s.get("name", "?") for s in label_metas]
                 log.info(
                     "Using %d merged labels from global active sets: %s",
@@ -658,14 +679,13 @@ def _resolve_label_set_metas(params, db):
     def _metas(paths):
         return [saved_by_file.get(p, {"labels_file": p}) for p in paths]
 
-    # ``os.path.exists`` mirrors ``_load_labels``, which filters both the
-    # plural and singular file branches through ``_existing_metas`` — a
-    # configured path that has since been deleted contributes nothing to
-    # ``labels`` there, so naming the stale path here would misreport the
-    # label source. The plural branch keeps every path that still exists;
-    # if all requested files are gone, the caller sees the same empty
-    # metadata ``_load_labels`` would produce (Tree of Life falls in one
-    # step below).
+    # ``os.path.exists`` mirrors ``_load_labels``, which reads through
+    # ``load_merged_labels_with_metas`` — a configured path that has since
+    # been deleted contributes nothing to ``labels`` there, so naming the
+    # stale path here would misreport the label source. The plural branch
+    # keeps every path that still exists; if all requested files are gone,
+    # the caller sees the same empty metadata ``_load_labels`` would produce
+    # (Tree of Life falls in one step below).
     if params.labels_files and isinstance(params.labels_files, list):
         return _metas([p for p in params.labels_files if os.path.exists(p)])
     if params.labels_file and os.path.exists(params.labels_file):

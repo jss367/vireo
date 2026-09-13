@@ -390,9 +390,9 @@ def test_resolve_label_set_metas_falls_back_when_labels_file_missing(tmp_path):
 def test_resolve_label_set_metas_filters_missing_in_labels_files(tmp_path):
     """Regression: the plural ``labels_files`` branch mirrors the singular
     branch and drops paths whose file was deleted, matching what
-    ``_load_labels`` actually loads via ``_existing_metas``. Without this,
-    the Jobs page and ``labels_fingerprints`` would name lists that
-    contributed nothing to ``labels``.
+    ``_load_labels`` actually loads via ``load_merged_labels_with_metas``.
+    Without this, the Jobs page and ``labels_fingerprints`` would name
+    lists that contributed nothing to ``labels``.
     """
     from unittest.mock import patch
 
