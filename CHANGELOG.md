@@ -54,6 +54,13 @@ All notable changes to Vireo are documented in this file.
   paths on hover.
 
 ### Fixed
+- **Expanded stacks stop flickering while their details load.** Opening a
+  burst or duplicate stack painted its photos and then rebuilt the whole tray
+  twice more as iNaturalist and color-label details arrived a moment later.
+  Each rebuild replaced every member's thumbnail — so the strip blanked and
+  reloaded — and pulled the card out from under any click already underway on
+  it, including the second half of a double-click meant to open the photo.
+  The details now land on the cards where they stand.
 - **Double-clicking a photo low in the Browse grid opens it again.** The
   floating selection bar appeared the instant the first click selected a
   photo, landing on top of the photo pane in time to catch the second click —

@@ -3941,13 +3941,11 @@ async function toggleBrowseStack(event, coverId) {
   }
   function refreshCurrentStackTray() {
     if (!windowIsCurrent()) return;
-    // Rating/flag edits can promote another member while either metadata
-    // request is in flight. Resolve the current cache key through the old
-    // cover (which remains a member) instead of testing the captured key.
-    var currentCoverId = browseStackCoverIdForPhoto(coverId);
-    if (currentCoverId != null && expandedBrowseStacks.has(currentCoverId)) {
-      insertBrowseStackTray(currentCoverId);
-    }
+    // Patch the members where they stand. A rating/flag edit can promote
+    // another member while either metadata request is in flight, moving these
+    // photos into a different cover's tray; addressing them by photo id finds
+    // them wherever they ended up, and finds nothing once the tray collapses.
+    refreshStackMemberCards(loadedIds);
   }
   loadInatStatus(loadedIds).then(refreshCurrentStackTray);
   fetchColorLabels(loadedIds).then(refreshCurrentStackTray);
@@ -4119,46 +4117,71 @@ function updateGridTail() {
   tail.innerHTML = html;
 }
 
+// Patches one already-rendered card to match `p`. Grid cards and expanded
+// stack members share the same `.grid-card-img-wrap` + `.grid-card-info`
+// shape, so both are repainted here rather than re-rendered: the card keeps
+// its <img>, and therefore the thumbnail it has already decoded.
+function refreshCardBadgesAndInfo(card, p) {
+  var info = card.querySelector('.grid-card-info');
+  if (info) {
+    info.innerHTML = renderCardInfo(p);
+    refreshColorLabelControlsIn(info);
+  }
+  // iNat badge lives in img-wrap (not grid-card-info), so sync it explicitly
+  // when async metadata arrives after the card was appended.
+  var wrap = card.querySelector('.grid-card-img-wrap');
+  if (!wrap) return;
+  var speciesBadges = wrap.querySelector('.species-badges');
+  var speciesBadgeHtml = cardFields.indexOf('species') === -1
+    ? renderSpeciesBadges(p.species, false)
+    : '';
+  if (speciesBadges && speciesBadgeHtml) {
+    speciesBadges.outerHTML = speciesBadgeHtml;
+  } else if (speciesBadges) {
+    speciesBadges.remove();
+  } else if (speciesBadgeHtml) {
+    wrap.insertAdjacentHTML('beforeend', speciesBadgeHtml);
+  }
+  var existing = wrap.querySelector('.inat-badge');
+  var shouldShow = !!inatSubmitted[String(p.id)];
+  if (shouldShow && !existing) {
+    wrap.insertAdjacentHTML('beforeend', '<span class="inat-badge">iNat</span>');
+  } else if (!shouldShow && existing) {
+    existing.remove();
+  }
+  var rep = wrap.querySelector('.representative-badge');
+  if (p.is_species_representative && !rep) {
+    wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
+  } else if (!p.is_species_representative && rep) {
+    rep.remove();
+  }
+}
+
 function refreshGridCards(photoIds) {
   photoIds.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
     if (!p) return;
     var card = document.querySelector('.grid-card[data-id="' + id + '"]');
     if (!card) return;
-    var info = card.querySelector('.grid-card-info');
-    if (info) {
-      info.innerHTML = renderCardInfo(p);
-      refreshColorLabelControlsIn(info);
-    }
-    // iNat badge lives in img-wrap (not grid-card-info), so sync it explicitly
-    // when async metadata arrives after the card was appended.
-    var wrap = card.querySelector('.grid-card-img-wrap');
-    if (wrap) {
-      var speciesBadges = wrap.querySelector('.species-badges');
-      var speciesBadgeHtml = cardFields.indexOf('species') === -1
-        ? renderSpeciesBadges(p.species, false)
-        : '';
-      if (speciesBadges && speciesBadgeHtml) {
-        speciesBadges.outerHTML = speciesBadgeHtml;
-      } else if (speciesBadges) {
-        speciesBadges.remove();
-      } else if (speciesBadgeHtml) {
-        wrap.insertAdjacentHTML('beforeend', speciesBadgeHtml);
-      }
-      var existing = wrap.querySelector('.inat-badge');
-      var shouldShow = !!inatSubmitted[String(id)];
-      if (shouldShow && !existing) {
-        wrap.insertAdjacentHTML('beforeend', '<span class="inat-badge">iNat</span>');
-      } else if (!shouldShow && existing) {
-        existing.remove();
-      }
-      var rep = wrap.querySelector('.representative-badge');
-      if (p.is_species_representative && !rep) {
-        wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
-      } else if (!p.is_species_representative && rep) {
-        rep.remove();
-      }
-    }
+    refreshCardBadgesAndInfo(card, p);
+  });
+}
+
+// The same repaint for the members of an expanded stack tray. Used where
+// metadata arrives for members already on screen and only their badges and
+// info line can have changed — not which members the tray holds, nor their
+// order. Rebuilding the tray for that would give every member a fresh <img>
+// (blanking thumbnails that were already decoded) and swap the DOM out from
+// under a click the user has started.
+function refreshStackMemberCards(photoIds) {
+  photoIds.forEach(function(id) {
+    var p = findBrowsePhoto(id);
+    if (!p) return;
+    document.querySelectorAll(
+      '.browse-stack-member[data-id="' + id + '"]'
+    ).forEach(function(member) {
+      refreshCardBadgesAndInfo(member, p);
+    });
   });
 }
 
