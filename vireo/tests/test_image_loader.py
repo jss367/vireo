@@ -222,6 +222,34 @@ def test_raw_preserve_highlights_mode_bypasses_embedded_jpeg(tmp_path, monkeypat
     assert kwargs["highlight_mode"] == rawpy.HighlightMode.Blend
 
 
+def test_raw_demosaic_uses_ppg(tmp_path, monkeypatch):
+    """Full-size decodes demosaic with PPG, not libraw's default AHD.
+
+    AHD costs ~1.7s on a 45MP NEF against PPG's ~1.0s for output that
+    matches to 40-52 dB PSNR, so PPG is the default for every demosaic
+    Vireo runs. Guards the kwarg because nothing downstream would fail
+    visibly if it were dropped — the decode would just get slower again.
+    """
+    import rawpy
+    from image_loader import load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((1600, 1067)),
+        postprocess_size=(6000, 4000),
+    ))
+
+    result = load_image(str(nef), max_size=None)
+
+    assert result is not None
+    assert fake.postprocess_calls == 1
+    kwargs = fake.postprocess_kwargs[-1]
+    assert kwargs["demosaic_algorithm"] == rawpy.DemosaicAlgorithm.PPG
+    assert kwargs["half_size"] is False
+
+
 def test_raw_falls_back_to_embedded_on_postprocess_failure(tmp_path, monkeypatch):
     """HE* case: postprocess raises, but we still return the embedded JPEG."""
     import rawpy
