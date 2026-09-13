@@ -10529,6 +10529,7 @@ function _lbInitialSourceKey(photo, zoom, oneToOne) {
     : Math.max(dims.w, dims.h) * fit * zoom * (window.devicePixelRatio || 1);
   var fullEdge = _lbFullPreviewLimit();
   if (needed <= fullEdge) return 'full';
+  if (needed <= 1920) return '1920';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
   return 'original';
@@ -10571,6 +10572,7 @@ function _lbPickSourceKey(targetZoom) {
   // a previous small photo may never have reached that cap.
   var fullLongEdge = _lbFullLongEdge || _lbFullPreviewLimit();
   if (needed <= fullLongEdge) return 'full';
+  if (needed <= 1920) return '1920';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
   return _lbOriginalUnavailable ? '3840' : 'original';
@@ -10684,6 +10686,7 @@ function _lbPreloadBytes() {
 }
 
 function _lbTrimPreloadBudget() {
+  if (_lbPreloadBytes() <= _lbPreloadBudgetBytes) return;
   // Estimates reserve space before starting each decode. Correct them from
   // actual dimensions afterward, dropping distant bitmaps first. This bounds
   // retained pixel buffers, not the WebView's independent graphics/HTTP cache.
@@ -10691,13 +10694,15 @@ function _lbTrimPreloadBudget() {
   // window before being discarded itself.
   if (_lbPreloadBytes() > _lbPreloadBudgetBytes && _lbOriginalPreload &&
       _lbOriginalPreload.status === 'decoded') _lbCancelOriginalPreload();
-  var currentIdx = _lightboxPhotoList.findIndex(function(p) { return p.id === _lightboxCurrentId; });
+  var positions = new Map();
+  _lightboxPhotoList.forEach(function(photo, index) { positions.set(photo.id, index); });
+  var currentIdx = positions.get(_lightboxCurrentId) ?? -1;
   var entries = Object.entries(_lbAdjacentPreloads).filter(function(item) {
     return item[1].status === 'decoded';
   });
   entries.sort(function(a, b) {
     function distance(entry) {
-      return Math.abs(_lightboxPhotoList.findIndex(function(p) { return p.id === entry.photoId; }) - currentIdx);
+      return Math.abs((positions.get(entry.photoId) ?? -1) - currentIdx);
     }
     return Number(b[1].bytes > _lbPreloadBudgetBytes) - Number(a[1].bytes > _lbPreloadBudgetBytes) ||
       distance(b[1]) - distance(a[1]) || b[1].bytes - a[1].bytes;
@@ -10716,8 +10721,15 @@ function _lbRunSpeculativePreload(entry, onSettled) {
   _lbSpeculativeInFlight = _lbSpeculativeLoads.values().next().value || null;
   var preload = entry.img;
   preload.fetchPriority = 'low';
+  // A stalled transfer must not occupy a browser warmup slot indefinitely.
+  // The server still independently limits speculative generation to one job.
+  var settleTimer = setTimeout(function() {
+    settle(false);
+    _lbReleasePreloadImage(entry);
+  }, 30000);
   function settle(decoded) {
     if (entry.status !== 'loading') return;
+    clearTimeout(settleTimer);
     entry.status = decoded ? 'decoded' : 'failed';
     _lbSpeculativeLoads.delete(entry);
     _lbSpeculativeInFlight = _lbSpeculativeLoads.values().next().value || null;
@@ -10762,8 +10774,10 @@ function _lbScheduleOriginalPreload(photoId, retryCount) {
 function _lbStartPendingOriginalPreload() {
   if (_lbSpeculativeInFlight || !_lbOriginalPreloadWaiting) return;
   var pending = _lbOriginalPreloadWaiting;
-  _lbOriginalPreloadWaiting = null;
-  if (!_lbShouldPreloadOriginal(pending.photoId)) return;
+  if (!_lbShouldPreloadOriginal(pending.photoId)) {
+    _lbOriginalPreloadWaiting = null;
+    return;
+  }
   var entry = {
     img: new Image(),
     photoId: pending.photoId,
@@ -10773,6 +10787,7 @@ function _lbStartPendingOriginalPreload() {
     bytes: _lbEstimatePreloadBytes({ id: pending.photoId, width: _lbPhotoW, height: _lbPhotoH }, 'original')
   };
   if (_lbPreloadBytes() + entry.bytes > _lbPreloadBudgetBytes) return;
+  _lbOriginalPreloadWaiting = null;
   _lbOriginalPreload = entry;
   _lbRunSpeculativePreload(entry, function(decoded) {
     if (_lbOriginalPreload !== entry) return;
