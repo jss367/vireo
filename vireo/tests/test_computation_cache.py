@@ -1673,3 +1673,63 @@ def test_replacement_artifact_with_match_overwrites_prior_summary(tmp_path):
     assert row["max_match_score"] == 0.62
     assert row["top_species"] == "Sparrow"
     destination.close()
+
+
+def test_enriched_artifact_wins_over_pre_feature_same_identity(tmp_path):
+    """Adding the ``match`` block only changes the artifact digest — the
+    lookup identity (schema, runtime fingerprints, input fingerprint) stays
+    the same because the input identity is composed only of source hash,
+    detector runtime, and subject key/kind/box. A pre-feature artifact and
+    an enriched one for the same run therefore collide in
+    ``materialize_artifacts`` deduplication, and without a preference the
+    digest tiebreaker can drop the enriched one, permanently locking in the
+    "match strength not recorded" state behind the ``classifier_runs`` gate.
+
+    The enriched artifact must win regardless of manifest order.
+    """
+    enriched = classification_artifact(
+        candidates=[{"species": "Robin", "confidence": 0.9,
+                     "match_score": 0.31}],
+        match={"max_match_score": 0.31, "top_species": "Robin",
+               "label_count": 1255, "score_kind": "cosine"},
+    )
+    pre_feature = classification_artifact(
+        candidates=[{"species": "Robin", "confidence": 0.9}],
+    )
+    # Sanity: same lookup identity, different digests.
+    assert enriched["photo_sha256"] == pre_feature["photo_sha256"]
+    assert enriched["runtime_fingerprint"] == pre_feature["runtime_fingerprint"]
+    assert enriched["input_fingerprint"] == pre_feature["input_fingerprint"]
+    assert enriched["labels"]["fingerprint"] == pre_feature["labels"]["fingerprint"]
+    assert enriched["detector_runtime_fingerprint"] == pre_feature[
+        "detector_runtime_fingerprint"
+    ]
+    assert artifact_digest(enriched) != artifact_digest(pre_feature)
+
+    for order in ([enriched, pre_feature], [pre_feature, enriched]):
+        destination, _folder_id, _photo_id = _database_with_photo(
+            tmp_path / f"identity-{'enriched-first' if order[0] is enriched else 'pre-first'}.db",
+            "photo.jpg",
+        )
+        destination.upsert_labels_fingerprint(
+            "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+        )
+        materialize_artifacts(
+            destination,
+            [detection_artifact(), *order],
+            known_runtimes={RUNTIME},
+            known_classifier_runtimes={CLASSIFIER_RUNTIME},
+        )
+        row = destination.conn.execute(
+            "SELECT max_match_score, top_species, score_kind "
+            "FROM classifier_match_scores",
+        ).fetchone()
+        assert row is not None, (
+            "The enriched artifact must survive dedup regardless of "
+            "manifest order — otherwise a same-identity pre-feature "
+            "artifact hides real inference behind 'not recorded'."
+        )
+        assert row["max_match_score"] == 0.31
+        assert row["top_species"] == "Robin"
+        assert row["score_kind"] == "cosine"
+        destination.close()

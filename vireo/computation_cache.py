@@ -1907,15 +1907,34 @@ def materialize_artifacts(
     # and different installs would surface different boxes/species solely
     # because of manifest ordering.  Digest is canonical-bytes-derived so
     # the winner is content-defined and identical across installs.
-    def _dedup_by_lookup_identity(items, key_fn):
+    #
+    # A caller-supplied ``prefer`` returns a small integer *rank* (lower
+    # wins) that jumps ahead of the digest tiebreaker. Classification uses
+    # it to prefer artifacts carrying a ``match`` block over pre-feature
+    # artifacts for the same lookup identity — adding the block only
+    # changes the digest, so without a preference the enriched artifact
+    # loses roughly half the time and the "not recorded" state gets
+    # permanently locked in behind the ``classifier_runs`` gate.
+    def _dedup_by_lookup_identity(items, key_fn, prefer=None):
         best = {}
         for item in items:
             key = key_fn(item)
+            rank = prefer(item) if prefer is not None else 0
             digest = artifact_digest(item)
             prior = best.get(key)
-            if prior is None or digest < prior[0]:
-                best[key] = (digest, item)
-        return [entry[1] for entry in best.values()]
+            if prior is None or (rank, digest) < (prior[0], prior[1]):
+                best[key] = (rank, digest, item)
+        return [entry[2] for entry in best.values()]
+
+    def _classification_enrichment_rank(artifact):
+        # 0 = carries at least one subject-level ``match`` block (enriched),
+        # 1 = does not. Lower wins, so an enriched artifact beats a
+        # pre-feature one for the same identity even if the pre-feature
+        # digest sorts earlier.
+        for subject in artifact.get("subjects", ()):
+            if "match" in subject:
+                return 0
+        return 1
 
     detection_items = [a for a in normalized if a["type"] == "detection"]
     classification_items = [a for a in normalized if a["type"] == "classification"]
@@ -1934,6 +1953,7 @@ def materialize_artifacts(
             a["detector_runtime_fingerprint"],
             a["runtime_fingerprint"], a["input_fingerprint"],
         ),
+        prefer=_classification_enrichment_rank,
     )
 
     # Trusted detection artifacts for the same (photo, detector_model)

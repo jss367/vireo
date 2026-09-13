@@ -12,11 +12,15 @@ guessed.
 
 This script finds it the only honest way available: against species you have
 already confirmed yourself. One sample per classifier run
-(``(detection, model, labels_fingerprint)``), classified by whether the run's
-top species matches a species keyword the photo actually carries:
+(``(detection, model, labels_fingerprint)``), drawn only from photos with
+exactly one confirmed species keyword — a multi-species photo cannot serve as
+detection-level ground truth, because a detection scored as "correct" against
+any of its keywords might actually depict the other species. Each remaining
+run is classified by whether its top species matches the photo's single
+confirmed keyword:
 
-    correct   — the classifier's top species for this detection matches a
-                species keyword the photo actually carries
+    correct   — the classifier's top species for this detection matches the
+                photo's confirmed species keyword
     incorrect — it does not
 
 A threshold is then chosen to suppress at most ``--max-suppression`` of the
@@ -47,6 +51,7 @@ Caveats worth reading before trusting the number:
 """
 
 import argparse
+import bisect
 import json
 import os
 import sqlite3
@@ -54,11 +59,51 @@ import sys
 
 
 def _percentile(values, q):
-    """Nearest-rank percentile over a pre-sorted list."""
+    """Nearest-rank percentile over a pre-sorted list.
+
+    Used only for the diagnostic p1/p5/p25/p50 lines the script prints.
+    The chosen floor uses ``_floor_within_suppression_cap`` instead, because
+    nearest-rank rounding can exceed a small cap (e.g. n=252 at q=0.01 rounds
+    to index 3, hiding 3/252=1.19% of correct rows despite a 1% budget).
+    """
     if not values:
         return None
     idx = int(round(q * (len(values) - 1)))
     return values[max(0, min(len(values) - 1, idx))]
+
+
+def _floor_within_suppression_cap(sorted_values, max_suppression):
+    """Return the largest value whose strictly-lower count fits the cap.
+
+    Given a sorted list, pick the highest ``t`` such that the number of
+    values strictly less than ``t`` is at most ``floor(max_suppression * n)``.
+    Ties allow ``t`` to advance past ``floor(max_suppression * n)``: several
+    equal values do not each count against the cap because a threshold at
+    their value does not hide any of them.
+
+    Nearest-rank interpolation (``round(q * (n - 1))``) can round up and
+    quietly exceed the requested cap — at ``n = 252`` and
+    ``max_suppression = 0.01`` it picks index 3, hiding 3/252 = 1.19% of
+    correct rows behind a stated 1% budget. This routine caps by
+    construction: ``floor(max_suppression * n)`` is the maximum number of
+    strictly-lower samples allowed, and the returned value never violates
+    it.
+    """
+    if not sorted_values:
+        return None
+    n = len(sorted_values)
+    budget = int(max_suppression * n)  # floor
+    # ``sorted_values[budget]`` has exactly ``bisect_left(sorted_values,
+    # sorted_values[budget])`` values strictly less than it; that count is
+    # <= budget by construction (indices 0..budget-1 sit below or equal to
+    # it, and equal-value neighbours are not strictly less). Ties can let a
+    # higher index name the same value; take ``bisect_right - 1`` so we
+    # return the largest index whose value is still ``sorted_values[budget]``.
+    if budget >= n:
+        return sorted_values[-1]
+    threshold_value = sorted_values[budget]
+    last_idx = bisect.bisect_right(sorted_values, threshold_value) - 1
+    return sorted_values[last_idx]
 
 
 def schema_gap(conn):
@@ -123,15 +168,27 @@ def collect(conn):
         JOIN detections d ON d.id = cms.detection_id
         WHERE cms.max_match_score IS NOT NULL
           AND cms.top_species IS NOT NULL
-          -- Only photos that carry at least one confirmed species keyword can
-          -- serve as ground truth. An unlabelled photo is not evidence that
-          -- the prediction was wrong, and counting it as such would drag the
-          -- threshold up until it suppressed real identifications.
-          AND EXISTS (
-                SELECT 1 FROM photo_keywords pk2
+          -- Only photos with EXACTLY ONE distinct confirmed species keyword
+          -- can serve as ground truth. Vireo is explicitly a multi-species
+          -- app: two detections on one photo are routinely two different
+          -- animals. If the photo carries keywords for both, a detection
+          -- whose top_species matches EITHER keyword would be scored
+          -- ``correct`` here even when it actually depicts the OTHER species,
+          -- which lets false positives into the low-percentile "correct"
+          -- distribution and lowers the fitted floor. Restricting to
+          -- single-species photos is conservative but honest: the row scores
+          -- what the keyword says the photo is of, without a second species
+          -- to confuse it. Zero-species photos are still excluded (their
+          -- keyword can never make the prediction wrong).
+          AND (
+                SELECT COUNT(DISTINCT LOWER(k2.name))
+                FROM photo_keywords pk2
                 JOIN keywords k2 ON k2.id = pk2.keyword_id
-                WHERE pk2.photo_id = d.photo_id AND k2.is_species = 1
-          )
+                LEFT JOIN taxa t2 ON t2.id = k2.taxon_id
+                WHERE pk2.photo_id = d.photo_id
+                  AND (k2.is_species = 1 OR k2.type = 'taxonomy')
+                  AND (t2.rank IS NULL OR t2.rank = 'species')
+          ) = 1
         """
     ).fetchall()
 
@@ -152,13 +209,16 @@ def suggest(correct, incorrect, max_suppression):
     floor catches more bad identifications, so taking the highest one that
     still respects the suppression budget spends that budget rather than
     leaving it unused.
+
+    The floor is the largest order statistic whose strictly-lower count
+    fits ``floor(max_suppression * n)`` — see
+    ``_floor_within_suppression_cap`` for why nearest-rank rounding cannot
+    honour a small cap.
     """
     if not correct:
         return None, None, None
     ordered = sorted(correct)
-    # The value at the max_suppression quantile is the largest floor under
-    # which no more than that fraction of correct IDs fall.
-    threshold = _percentile(ordered, max_suppression)
+    threshold = _floor_within_suppression_cap(ordered, max_suppression)
     if threshold is None:
         return None, None, None
     suppressed = sum(1 for v in correct if v < threshold) / len(correct)

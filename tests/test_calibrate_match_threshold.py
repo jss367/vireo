@@ -202,3 +202,117 @@ def test_collect_groups_by_model_and_score_kind():
     }
     assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
     assert buckets[("inat21", "logit")]["correct"] == [3.1]
+
+
+def _add_species_keyword(conn, photo_id, species):
+    cur = conn.execute(
+        "INSERT INTO keywords(name, is_species) VALUES (?, 1)", (species,),
+    )
+    conn.execute(
+        "INSERT INTO photo_keywords(photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, cur.lastrowid),
+    )
+
+
+def test_collect_excludes_multi_species_photos():
+    """A photo with two species keywords cannot serve as ground truth: a
+    detection whose top pick happens to equal EITHER keyword would be scored
+    ``correct`` here even if the detection actually depicts the OTHER
+    species. Those false positives sit at the low end of the correct
+    distribution and would pull the fitted floor down. Restrict to photos
+    with exactly one confirmed species keyword.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    # Photo 1: two species keywords, the run's top pick matches one of them.
+    # Under the old ``EXISTS`` predicate this would land in ``correct``.
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_species_keyword(conn, 1, "Robin")
+    _add_species_keyword(conn, 1, "Yellow-breasted Chat")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Yellow-breasted Chat", max_match_score=0.11,
+    )
+    # Photo 2: exactly one species keyword; a correct sample.
+    _add_photo_with_keyword(conn, photo_id=2, species="Robin")
+    _add_run(
+        conn, det_id=20, photo_id=2, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+    )
+
+    buckets = mod.collect(conn)
+    key = ("bioclip", "cosine")
+    assert buckets[key]["correct"] == [0.42], (
+        "The multi-species photo must not contribute — its keyword doesn't "
+        "prove which species this detection depicts."
+    )
+    assert buckets[key]["incorrect"] == []
+
+
+def test_collect_includes_single_species_photo_with_repeated_keyword():
+    """A photo whose 'multiple' species keywords are the same word in
+    different casing is still a single-species photo. Case-insensitive
+    ``COUNT(DISTINCT LOWER(name))`` keeps it in — losing it would just
+    silently shrink the calibration set.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_species_keyword(conn, 1, "Robin")
+    _add_species_keyword(conn, 1, "robin")  # same species, different case
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+    )
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
+
+
+def test_floor_within_suppression_cap_never_exceeds_budget():
+    """Nearest-rank rounding can exceed a small cap: for n=252 at q=0.01 it
+    rounds to index 3, hiding 3/252 = 1.19% of correct rows behind a stated
+    1% budget. The suppression-capped floor must never rise above
+    ``floor(max_suppression * n)`` strictly-lower samples.
+    """
+    mod = _load_module()
+    values = sorted(float(i) for i in range(252))
+    n = len(values)
+    for max_suppression in (0.005, 0.01, 0.05, 0.1):
+        budget = int(max_suppression * n)  # floor
+        threshold = mod._floor_within_suppression_cap(values, max_suppression)
+        strictly_lower = sum(1 for v in values if v < threshold)
+        assert strictly_lower <= budget, (
+            f"At n={n}, cap={max_suppression}: threshold={threshold} hides "
+            f"{strictly_lower} samples > budget {budget}"
+        )
+
+
+def test_floor_within_suppression_cap_respects_ties():
+    """Equal values at the budget boundary do not each count against the cap
+    — a threshold set at their common value hides none of them. The floor
+    should advance across the tied block instead of stopping short.
+    """
+    mod = _load_module()
+    values = [0.0, 0.1, 0.1, 0.1, 0.2, 0.3, 0.4]
+    threshold = mod._floor_within_suppression_cap(values, 0.2)  # budget=1
+    assert threshold == 0.1, (
+        "The largest value with strictly-lower count <= 1 is 0.1 (only 0.0 "
+        "sits strictly below it), and ties do not each spend the budget."
+    )
+    strictly_lower = sum(1 for v in values if v < threshold)
+    assert strictly_lower == 1
+
+
+def test_suggest_respects_cap_on_borderline_sample_count():
+    """End-to-end regression: with a distribution where nearest-rank
+    rounding would round up, ``suggest`` must return a threshold whose
+    reported ``suppressed`` fraction is at most the requested cap.
+    """
+    mod = _load_module()
+    correct = [float(i) / 1000 for i in range(1, 253)]  # 252 unique values
+    threshold, suppressed, _caught = mod.suggest(correct, [], 0.01)
+    assert threshold is not None
+    assert suppressed <= 0.01 + 1e-12, (
+        f"suggest reported suppressed={suppressed:.6f} > cap 0.01 — "
+        "the floor exceeds the advertised suppression budget."
+    )
