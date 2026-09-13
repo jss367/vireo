@@ -1420,6 +1420,18 @@ def create_imports_blueprint(
     @background_job
     def api_job_import_full(ctx):
         """Full-chain import: copy files -> scan -> create collection."""
+        # A full import without an active workspace would copy files and
+        # then leave catalog rows invisible to every workspace: the
+        # worker's scan calls ``set_active_workspace(None)`` and
+        # ``Database.add_folder`` skips the workspace link, and the later
+        # ``add_collection()`` call raises because ``_ws_id()`` is
+        # unavailable — after the scanner has already committed rows.
+        # The mutation-reservation hook deliberately lets no-workspace
+        # requests through so routes that answer that state can respond
+        # cleanly; this route is not one of them, so refuse here. See
+        # the parallel guard at the top of ``api_job_scan``.
+        if ctx.workspace_id is None:
+            return json_error("no active workspace", 400)
         body = request.get_json(silent=True) or {}
         source = body.get("source", "")
         destination = body.get("destination", "")
@@ -1824,7 +1836,16 @@ def create_imports_blueprint(
         inherit stale per-workspace caches from a reused SQLite rowid.
         """
         if "new_workspace_name" not in body:
-            return db._active_workspace_id, None, None
+            active_ws = db._active_workspace_id
+            if active_ws is None:
+                # Without a target workspace ``run_import_job`` would bind
+                # ``active_ws=None`` and its batch scans would insert
+                # folders/photos while ``Database.add_folder`` skipped the
+                # workspace link, leaving catalog rows invisible to every
+                # workspace. Reject at the route boundary so the request
+                # never enqueues instead.
+                return None, None, json_error("no active workspace", 400)
+            return active_ws, None, None
         raw_name = body.get("new_workspace_name")
         if not isinstance(raw_name, str):
             return None, None, json_error("new_workspace_name must be a string")

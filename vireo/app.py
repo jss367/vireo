@@ -4966,6 +4966,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # workspace to reserve; endpoints that handle "no active workspace"
         # themselves (e.g. the offline-banner recheck no-op) must still reach
         # their view function instead of 500ing out of the before_request.
+        # Background-job routes that capture ``ctx.workspace_id`` here and
+        # hand it to a worker (scan, import-full, import-photos,
+        # import-in-place) must reject the no-workspace case themselves so
+        # they do not commit catalog rows invisible to every workspace.
         active_ws = _get_db()._active_workspace_id
         workspaces = set()
         if active_ws is not None:
@@ -22737,6 +22741,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             UI enqueued one job per root (PR #634 added retry/backoff
             as defense-in-depth; this is the root-cause fix).
         """
+        # A scan without an active workspace would create catalog entries
+        # invisible to every workspace: the worker calls
+        # ``set_active_workspace(None)`` and ``Database.add_folder`` then
+        # skips the workspace link because ``_active_workspace_id is None``.
+        # The mutation-reservation hook deliberately lets no-workspace
+        # requests through so routes that answer that state can respond
+        # cleanly; this route is not one of them, so refuse here.
+        if ctx.workspace_id is None:
+            return json_error("no active workspace", 400)
         body = request.get_json(silent=True) or {}
         incremental = body.get("incremental", False)
 

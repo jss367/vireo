@@ -80,6 +80,32 @@ def test_job_scan_invalid_root(app_and_db):
     assert resp.status_code == 400
 
 
+def test_job_scan_rejects_no_active_workspace(app_and_db, tmp_path, monkeypatch):
+    """POST /api/jobs/scan must refuse when no workspace is active.
+
+    Without this guard the request rides through the mutation-reservation
+    ``before_request`` hook (which deliberately allows no-workspace
+    requests so routes that answer that state can respond cleanly), the
+    scan worker calls ``set_active_workspace(None)``, and
+    ``Database.add_folder`` silently skips the workspace link — creating
+    catalog entries invisible to every workspace.
+    """
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    scan_dir = str(tmp_path / "scanme")
+    os.makedirs(scan_dir)
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'test.jpg'))
+
+    resp = client.post('/api/jobs/scan', json={'root': scan_dir})
+    assert resp.status_code == 400
+    assert "workspace" in resp.get_json()["error"].lower()
+
+
 def test_job_scan_rejects_macos_other_app_bundle(app_and_db, tmp_path):
     """POST /api/jobs/scan must reject a ``.photoslibrary`` root before
     calling ``os.path.isdir`` on it. ``os.path.isdir`` against an Apple
@@ -479,6 +505,101 @@ def test_import_full_rejects_macos_other_app_bundle(app_and_db, tmp_path):
         })
         assert resp.status_code == 400
         assert "macos" in resp.get_json()["error"].lower()
+
+
+def test_job_import_full_rejects_no_active_workspace(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POST /api/jobs/import-full must refuse when no workspace is active.
+
+    Without this guard the request rides through the mutation-reservation
+    ``before_request`` hook (which lets no-workspace requests through so
+    routes that answer that state can respond cleanly), the worker's scan
+    calls ``set_active_workspace(None)`` and ``Database.add_folder``
+    silently skips the workspace link, and the later ``add_collection()``
+    raises — after the scanner has already committed catalog rows
+    invisible to every workspace.
+    """
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    Image.new('RGB', (100, 100)).save(os.path.join(str(src), 'test.jpg'))
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    resp = client.post('/api/jobs/import-full', json={
+        'source': str(src),
+        'destination': str(dst),
+    })
+    assert resp.status_code == 400
+    assert "workspace" in resp.get_json()["error"].lower()
+
+
+def test_job_import_photos_rejects_no_active_workspace(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POST /api/jobs/import-photos must refuse when no workspace is
+    active and no ``new_workspace_name`` was provided.
+
+    Without this guard ``_prepare_import_workspace`` returns ``None`` for
+    ``active_ws`` and ``run_import_job`` binds that value; its batch
+    scans then insert folders/photos while ``Database.add_folder`` skips
+    the workspace link, leaving catalog rows invisible to every
+    workspace.
+    """
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    Image.new('RGB', (100, 100)).save(os.path.join(str(src), 'test.jpg'))
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    resp = client.post('/api/jobs/import-photos', json={
+        'sources': [str(src)],
+        'destination': str(dst),
+    })
+    assert resp.status_code == 400
+    assert "workspace" in resp.get_json()["error"].lower()
+
+
+def test_job_import_in_place_rejects_no_active_workspace(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POST /api/jobs/import-in-place must refuse when no workspace is
+    active and no ``new_workspace_name`` was provided.
+
+    In-place imports skip the file copy but still commit catalog rows via
+    the same ``run_import_job`` batch-scan path; a ``None`` workspace
+    would leave those rows invisible to every workspace.
+    """
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    Image.new('RGB', (100, 100)).save(os.path.join(str(src), 'test.jpg'))
+
+    resp = client.post('/api/jobs/import-in-place', json={
+        'sources': [str(src)],
+    })
+    assert resp.status_code == 400
+    assert "workspace" in resp.get_json()["error"].lower()
 
 
 def test_scan_and_ingest_reject_non_string_path_with_400(app_and_db, tmp_path):
