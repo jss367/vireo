@@ -208,6 +208,67 @@ def test_double_click_opens_the_photo_the_batch_bar_would_cover(
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
 
 
+def test_slow_double_click_still_opens_photo_when_bar_activated_between_clicks(
+    live_server, page
+):
+    """The second click of a slow double-click must open the photo even if
+    the batch bar has already activated between the two clicks.
+
+    Accessibility settings can push the platform double-click threshold well
+    past the fixed quiet window, so the bar can become clickable before the
+    second click lands. A stack expansion pushes a card into the strip the
+    bar covers; with the quiet window collapsed, the bar activates before
+    the second click; the guard is expected to detect the click on the
+    (now-active) bar as the straggling half of a double-click and dispatch
+    a dblclick to the card underneath.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'slow-dbl-burst' WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    # Collapse the quiet window so the bar activates immediately after the
+    # first click — the scenario the guard has to cover.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 1")
+
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
+    expect(member).to_be_visible()
+
+    # First click of the slow double-click lands on the stack member.
+    box = member.bounding_box()
+    assert box is not None
+    click_x = box["x"] + box["width"] / 2
+    click_y = box["y"] + box["height"] / 2
+    page.mouse.click(click_x, click_y)
+
+    # The bar shows and, with the shortened quiet window, activates before
+    # the second click arrives.
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=2000)
+
+    # The second click at the same coordinates — the pointer has not moved,
+    # as a real double-click's pointer does not — now targets the active
+    # bar. The straggling-click guard must redirect it to the card.
+    page.mouse.click(click_x, click_y)
+
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg", timeout=3000)
+
+
 def test_export_defaults_beside_original_and_offers_folder_browser(
     live_server, page,
 ):

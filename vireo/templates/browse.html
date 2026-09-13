@@ -7955,15 +7955,34 @@ new ResizeObserver(function(entries) {
 // a destructive action is one pixel of bad luck away. Show the bar as
 // inert (visible for feedback but pointer-events: none, so the second
 // click passes through to the photo underneath) and only activate it once
-// the click gesture is clearly done — a fixed hide-delay cannot be trusted
-// because platform double-click thresholds vary: macOS defaults around
+// the click gesture is clearly done. A fixed hide-delay cannot be trusted
+// alone because platform double-click thresholds vary widely (macOS around
 // 500 ms, Windows around 500, and accessibility settings can push either
-// well past a second. The quiet timer below is a fallback for a stationary
-// pointer; every fresh mousedown while the bar is still inert refreshes
-// it, so a slow double- or triple-click all pass through together. Hiding
-// stays immediate.
-var BATCH_BAR_ACTIVATE_QUIET_MS = 600;
+// past a second), so activation combines three signals: (1) the pointer
+// moves noticeably from the last card mousedown — the real signal that
+// the user is reaching for a button rather than clicking again; (2) a
+// quiet fallback timer covers a truly stationary pointer; (3) a click
+// that lands on the bar while it looks like the second half of a card
+// double-click is redirected to the card underneath as a synthetic
+// dblclick, so even a bar that activated between the two clicks of an
+// unusually slow double-click cannot swallow it. Every fresh card
+// mousedown refreshes the inert state and the quiet timer. Hiding stays
+// immediate.
+var BATCH_BAR_ACTIVATE_QUIET_MS = 1500;
+// Distance the pointer has to travel before we treat the movement as a
+// deliberate reach for a batch button. Well within the noise of a
+// stationary hand, well below the distance from any card centre to the
+// nearest batch button.
+var BATCH_BAR_ACTIVATE_MOVE_PX = 8;
+// Upper bound on any plausible platform double-click threshold used by
+// the straggling-click redirect below. Broader than macOS/Windows
+// defaults; still narrow enough that a deliberate batch click at the
+// same coordinates is rare (a real batch click needs the pointer moved
+// to a button, which trips the move threshold above first).
+var BATCH_BAR_STRAGGLING_CLICK_MS = 1500;
+var BATCH_BAR_STRAGGLING_CLICK_PX = 12;
 var batchBarActivateTimer = null;
+var batchBarLastCardMouseDown = null;
 
 function scheduleBatchBarActivation() {
   if (batchBarActivateTimer) clearTimeout(batchBarActivateTimer);
@@ -7980,25 +7999,84 @@ function activateBatchBar() {
 }
 
 // A mousedown on a photo card could be the first (or Nth) click of a
-// double-click. Re-inert the bar and extend the quiet window so a slow
-// second click passes through to the card underneath — this covers both
-// the initial gesture that raises the bar and gestures on cards while the
-// bar is already visible from an earlier selection. Mousedowns targeting
-// the bar itself (a batch button) are left alone so those buttons stay
-// clickable. Capture phase so this runs even if a card's handler stops
-// propagation.
+// double-click. Record its position/time for the straggling-click guard
+// below (recording happens even before the bar is visible, so the very
+// first click of a fresh double-click is covered), and re-inert the bar
+// and extend the quiet window whenever the bar is already up — this
+// covers both the initial gesture that raises the bar and gestures on
+// cards while the bar is already visible from an earlier selection.
+// Mousedowns targeting the bar itself (a batch button) are left to the
+// click guard below. Capture phase so this runs even if a card's handler
+// stops propagation.
 document.addEventListener('mousedown', function(event) {
   if (event.button !== 0) return;
-  var bar = document.getElementById('batchBar');
-  if (!bar || bar.style.display !== 'flex') return;
   var target = event.target;
   if (!target || !target.closest) return;
+  if (target.closest('.grid-card, .browse-stack-member')) {
+    batchBarLastCardMouseDown = {
+      t: event.timeStamp, x: event.clientX, y: event.clientY,
+    };
+  }
+  var bar = document.getElementById('batchBar');
+  if (!bar || bar.style.display !== 'flex') return;
   if (target.closest('#batchBar')) return;
   if (!target.closest('.grid-card, .browse-stack-member')) return;
   if (!bar.classList.contains('batch-bar-inert')) {
     bar.classList.add('batch-bar-inert');
   }
   scheduleBatchBarActivation();
+}, true);
+
+// Pointer movement past a small threshold from the last card mousedown
+// means the user is reaching for a button rather than continuing to
+// click at the same spot. Activate immediately so batch buttons respond
+// as soon as the user actually wants them to.
+document.addEventListener('mousemove', function(event) {
+  var bar = document.getElementById('batchBar');
+  if (!bar || bar.style.display !== 'flex') return;
+  if (!bar.classList.contains('batch-bar-inert')) return;
+  var last = batchBarLastCardMouseDown;
+  if (!last) return;
+  var dx = event.clientX - last.x;
+  var dy = event.clientY - last.y;
+  if (dx * dx + dy * dy < BATCH_BAR_ACTIVATE_MOVE_PX * BATCH_BAR_ACTIVATE_MOVE_PX) return;
+  activateBatchBar();
+}, true);
+
+// A click on the bar close in time and position to a card mousedown is
+// the second half of a double-click that raised the bar over the card.
+// If the bar activated between the two clicks (an accessibility setting
+// with an unusually slow double-click threshold, or any timer that
+// happened to fire in between), this cancels the click on the bar and
+// dispatches a dblclick on the card underneath, so the photo opens
+// instead of the button firing.
+document.addEventListener('click', function(event) {
+  var target = event.target;
+  if (!target || !target.closest) return;
+  if (!target.closest('#batchBar')) return;
+  var bar = document.getElementById('batchBar');
+  if (!bar || bar.style.display !== 'flex') return;
+  var last = batchBarLastCardMouseDown;
+  if (!last) return;
+  if (event.timeStamp - last.t > BATCH_BAR_STRAGGLING_CLICK_MS) return;
+  if (Math.abs(event.clientX - last.x) > BATCH_BAR_STRAGGLING_CLICK_PX) return;
+  if (Math.abs(event.clientY - last.y) > BATCH_BAR_STRAGGLING_CLICK_PX) return;
+  event.stopImmediatePropagation();
+  event.preventDefault();
+  bar.classList.add('batch-bar-inert');
+  scheduleBatchBarActivation();
+  var priorPointerEvents = bar.style.pointerEvents;
+  bar.style.pointerEvents = 'none';
+  var under = document.elementFromPoint(event.clientX, event.clientY);
+  bar.style.pointerEvents = priorPointerEvents;
+  var card = under && under.closest
+    ? under.closest('.grid-card, .browse-stack-member')
+    : null;
+  if (!card) return;
+  card.dispatchEvent(new MouseEvent('dblclick', {
+    bubbles: true, cancelable: true, view: window,
+    button: 0, clientX: event.clientX, clientY: event.clientY,
+  }));
 }, true);
 
 function updateBatchBar() {
