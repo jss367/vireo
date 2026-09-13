@@ -45,7 +45,8 @@ def _seed_conn():
             labels_fingerprint TEXT NOT NULL,
             species TEXT NOT NULL,
             confidence REAL,
-            match_score REAL
+            match_score REAL,
+            source_taxon_id INTEGER
         );
         CREATE TABLE classifier_match_scores (
             detection_id INTEGER NOT NULL,
@@ -63,7 +64,8 @@ def _seed_conn():
             name TEXT NOT NULL,
             is_species INTEGER DEFAULT 0,
             type TEXT,
-            taxon_id INTEGER
+            taxon_id INTEGER,
+            source_taxon_id INTEGER
         );
         CREATE TABLE photo_keywords (
             photo_id INTEGER NOT NULL,
@@ -91,6 +93,12 @@ def _add_photo_with_keyword(conn, photo_id, species):
 
 def _add_run(conn, det_id, photo_id, model, fp, top_species,
              max_match_score, score_kind="cosine", candidates=()):
+    """Seed a classifier run row and any per-candidate predictions.
+
+    ``candidates`` entries are either ``(species, score)`` tuples or
+    ``(species, score, source_taxon_id)``. The taxon id is optional so
+    existing tests that don't care about taxonomy continue to work.
+    """
     conn.execute(
         "INSERT INTO detections(id, photo_id) VALUES (?, ?)",
         (det_id, photo_id),
@@ -103,13 +111,19 @@ def _add_run(conn, det_id, photo_id, model, fp, top_species,
         (det_id, model, fp, max_match_score, top_species,
          max(len(candidates), 1), score_kind),
     )
-    for candidate_species, candidate_score in candidates:
+    for candidate in candidates:
+        if len(candidate) == 2:
+            candidate_species, candidate_score = candidate
+            source_taxon_id = None
+        else:
+            candidate_species, candidate_score, source_taxon_id = candidate
         conn.execute(
             """INSERT INTO predictions
                  (detection_id, classifier_model, labels_fingerprint,
-                  species, confidence, match_score)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (det_id, model, fp, candidate_species, 0.5, candidate_score),
+                  species, confidence, match_score, source_taxon_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (det_id, model, fp, candidate_species, 0.5, candidate_score,
+             source_taxon_id),
         )
 
 
@@ -247,6 +261,74 @@ def test_collect_excludes_multi_species_photos():
         "prove which species this detection depicts."
     )
     assert buckets[key]["incorrect"] == []
+
+
+def _add_taxon_keyword(conn, photo_id, name, source_taxon_id):
+    """Attach a keyword whose canonical id is known (e.g. the iNat id)."""
+    cur = conn.execute(
+        """INSERT INTO keywords(name, is_species, source_taxon_id)
+           VALUES (?, 1, ?)""",
+        (name, source_taxon_id),
+    )
+    conn.execute(
+        "INSERT INTO photo_keywords(photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, cur.lastrowid),
+    )
+
+
+def test_collect_matches_by_taxon_identity_across_name_variants():
+    """A scientific-name keyword and a common-name ``top_species`` (or vice
+    versa) name the same taxon: a run whose top species is the common name
+    must be scored ``correct`` when the photo's confirmed keyword is the
+    scientific name and both sides agree on ``source_taxon_id``. Falling
+    back to exact-string comparison here would drop real correct runs
+    into the ``incorrect`` bucket and pull the fitted floor down.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_taxon_keyword(conn, 1, "Setophaga citrina", source_taxon_id=7788)
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Hooded Warbler", max_match_score=0.42,
+        candidates=[("Hooded Warbler", 0.42, 7788)],
+    )
+
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42], (
+        "The scientific-name keyword and the common-name top pick refer to "
+        "the same taxon — the run must be scored correct, not incorrect."
+    )
+    assert buckets[("bioclip", "cosine")]["incorrect"] == []
+
+
+def test_collect_taxon_identity_does_not_leak_across_species():
+    """The taxon-id fallback matches only the winning prediction row, not
+    every candidate: a photo confirmed as one species must not be scored
+    ``correct`` just because some non-top candidate in the same run happens
+    to share a taxon id with the keyword.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    # Confirmed keyword is the scientific name of taxon 7788.
+    _add_taxon_keyword(conn, 1, "Setophaga citrina", source_taxon_id=7788)
+    # Top pick is a different species; the confirmed taxon shows up only
+    # lower in the candidate list. That's an incorrect run — the floor is
+    # applied to the winner, not to whichever candidate happens to match.
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Yellow Warbler", max_match_score=0.35,
+        candidates=[
+            ("Yellow Warbler", 0.35, 9999),
+            ("Hooded Warbler", 0.20, 7788),
+        ],
+    )
+
+    buckets = mod.collect(conn)
+    key = ("bioclip", "cosine")
+    assert buckets[key]["correct"] == []
+    assert buckets[key]["incorrect"] == [0.35]
 
 
 def test_collect_includes_single_species_photo_with_repeated_keyword():

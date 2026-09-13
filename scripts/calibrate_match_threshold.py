@@ -148,6 +148,17 @@ def collect(conn):
     Keyword comparison is COLLATE NOCASE because that is the collation every
     other keyword join in the app uses — matching it here keeps a
     capitalization difference from being scored as a wrong identification.
+
+    Names alone are not enough: a scientific-name keyword
+    (``Setophaga citrina``) and a common-name ``top_species`` (``Hooded
+    Warbler``) refer to the same bird, and an exact-string comparison would
+    score that correct run as ``incorrect``. So the predicate also matches
+    on canonical taxon identity: the winning prediction's
+    ``source_taxon_id`` against the keyword's ``source_taxon_id``. Both
+    sides store the same external (iNat) id, and the join is against the
+    prediction row that names the run's ``top_species`` — the identity of
+    the winner, not of any lower-ranked alternate. Rows with no recorded
+    taxon id on either side fall back to the name comparison.
     """
     rows = conn.execute(
         """
@@ -162,7 +173,21 @@ def collect(conn):
                    WHERE pk.photo_id = d.photo_id
                      AND (k.is_species = 1 OR k.type = 'taxonomy')
                      AND (t.rank IS NULL OR t.rank = 'species')
-                     AND k.name = cms.top_species COLLATE NOCASE
+                     AND (
+                           k.name = cms.top_species COLLATE NOCASE
+                           OR (
+                                 k.source_taxon_id IS NOT NULL
+                                 AND k.source_taxon_id IN (
+                                     SELECT pw.source_taxon_id
+                                     FROM predictions pw
+                                     WHERE pw.detection_id = cms.detection_id
+                                       AND pw.classifier_model = cms.classifier_model
+                                       AND pw.labels_fingerprint = cms.labels_fingerprint
+                                       AND pw.species = cms.top_species COLLATE NOCASE
+                                       AND pw.source_taxon_id IS NOT NULL
+                                 )
+                           )
+                     )
                ) AS is_correct
         FROM classifier_match_scores cms
         JOIN detections d ON d.id = cms.detection_id
