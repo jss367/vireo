@@ -1836,7 +1836,16 @@ def create_imports_blueprint(
         inherit stale per-workspace caches from a reused SQLite rowid.
         """
         if "new_workspace_name" not in body:
-            return db._active_workspace_id, None, None
+            active_ws = db._active_workspace_id
+            if active_ws is None:
+                # Without a target workspace ``run_import_job`` would bind
+                # ``active_ws=None`` and its batch scans would insert
+                # folders/photos while ``Database.add_folder`` skipped the
+                # workspace link, leaving catalog rows invisible to every
+                # workspace. Reject at the route boundary so the request
+                # never enqueues instead.
+                return None, None, json_error("no active workspace", 400)
+            return active_ws, None, None
         raw_name = body.get("new_workspace_name")
         if not isinstance(raw_name, str):
             return None, None, json_error("new_workspace_name must be a string")

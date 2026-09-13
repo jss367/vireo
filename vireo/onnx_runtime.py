@@ -335,16 +335,30 @@ def create_session(model_path, providers=None, *, cancel_check=None):
 
     providers = list(providers) if providers is not None else get_providers()
 
-    # onnxruntime 1.24+ CoreMLExecutionProvider crashes when loading models
-    # that use external data (.onnx.data sidecar files).  Fall back to the
-    # remaining providers for these models.
+    # Models with external data (.onnx.data sidecar files) skip CoreML for two
+    # independent reasons, either of which alone would justify it:
+    #
+    #  1. onnxruntime 1.24 raises "model_path must not be empty" while
+    #     initializing such a model under CoreML. Fixed upstream by 1.30.
+    #  2. Every external-data model Vireo ships is a large ViT (dinov2,
+    #     bioclip ViT-H/14, inat21 eva02-L), and CoreML is *slower* than CPU
+    #     on those regardless of the load bug. Measured on an M3 Max with
+    #     onnxruntime 1.30, where the load succeeds: dinov2-vit-b14 runs
+    #     0.55s/image on CPU and 1.57s/image on CoreML, because CoreML claims
+    #     314 of 565 nodes and shatters the graph into 98 partitions.
+    #
+    # So do not drop this when the onnxruntime floor moves past 1.30 — the
+    # crash goes away, the slowdown does not. See vireo/masking.py for the
+    # same trade-off on SAM2, and vireo/detector.py for the CNN counterexample
+    # where CoreML wins by ~11x.
     if str(model_path).endswith(".onnx") and os.path.exists(str(model_path) + ".data"):
         before = list(providers)
         providers = [p for p in providers if p != "CoreMLExecutionProvider"]
         if providers != before:
             log.info(
                 "Model %s uses external data (.onnx.data); "
-                "excluding CoreMLExecutionProvider to avoid crash",
+                "excluding CoreMLExecutionProvider (slower than CPU for "
+                "these ViT models, and unloadable on onnxruntime < 1.30)",
                 model_path,
             )
 

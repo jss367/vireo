@@ -4962,26 +4962,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }:
             return None
         target_ws = (request.view_args or {}).get("ws_id")
+        # A request with no active workspace and no explicit target has no
+        # workspace to reserve; endpoints that handle "no active workspace"
+        # themselves (e.g. the offline-banner recheck no-op) must still reach
+        # their view function instead of 500ing out of the before_request.
+        # Background-job routes that capture ``ctx.workspace_id`` here and
+        # hand it to a worker (scan, import-full, import-photos,
+        # import-in-place) must reject the no-workspace case themselves so
+        # they do not commit catalog rows invisible to every workspace.
+        active_ws = _get_db()._active_workspace_id
         workspaces = set()
-        try:
-            workspaces.add(_get_db()._ws_id())
-        except RuntimeError:
-            # No active workspace, so there is nothing to reserve on the
-            # session's behalf. This hook runs before *every* mutating
-            # /api/ request, so letting ``_ws_id()`` raise here turns a
-            # missing active workspace into a blanket 500 and pre-empts
-            # routes that answer the no-workspace case deliberately —
-            # ``/api/workspaces/active/new-images/recheck`` is supposed to
-            # return ``{"workspace_id": None, "rechecked": False}``.
-            # Routes that mutate workspace-scoped state must reject the
-            # no-workspace case themselves rather than rely on this hook:
-            # background-job routes in particular capture
-            # ``ctx.workspace_id`` here and hand it to their worker, which
-            # would then write orphaned rows against ``workspace_id=None``.
-            # See the guard at the top of ``api_job_scan``.
-            pass
+        if active_ws is not None:
+            workspaces.add(active_ws)
         if target_ws is not None:
             workspaces.add(target_ws)
+        if not workspaces:
+            return None
         with contextlib.ExitStack() as reservation:
             for workspace_id in sorted(workspaces):
                 reservation.enter_context(app._job_runner.workspace_mutation(

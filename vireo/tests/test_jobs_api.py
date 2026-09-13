@@ -541,6 +541,67 @@ def test_job_import_full_rejects_no_active_workspace(
     assert "workspace" in resp.get_json()["error"].lower()
 
 
+def test_job_import_photos_rejects_no_active_workspace(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POST /api/jobs/import-photos must refuse when no workspace is
+    active and no ``new_workspace_name`` was provided.
+
+    Without this guard ``_prepare_import_workspace`` returns ``None`` for
+    ``active_ws`` and ``run_import_job`` binds that value; its batch
+    scans then insert folders/photos while ``Database.add_folder`` skips
+    the workspace link, leaving catalog rows invisible to every
+    workspace.
+    """
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    Image.new('RGB', (100, 100)).save(os.path.join(str(src), 'test.jpg'))
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    resp = client.post('/api/jobs/import-photos', json={
+        'sources': [str(src)],
+        'destination': str(dst),
+    })
+    assert resp.status_code == 400
+    assert "workspace" in resp.get_json()["error"].lower()
+
+
+def test_job_import_in_place_rejects_no_active_workspace(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POST /api/jobs/import-in-place must refuse when no workspace is
+    active and no ``new_workspace_name`` was provided.
+
+    In-place imports skip the file copy but still commit catalog rows via
+    the same ``run_import_job`` batch-scan path; a ``None`` workspace
+    would leave those rows invisible to every workspace.
+    """
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    Image.new('RGB', (100, 100)).save(os.path.join(str(src), 'test.jpg'))
+
+    resp = client.post('/api/jobs/import-in-place', json={
+        'sources': [str(src)],
+    })
+    assert resp.status_code == 400
+    assert "workspace" in resp.get_json()["error"].lower()
+
+
 def test_scan_and_ingest_reject_non_string_path_with_400(app_and_db, tmp_path):
     """JSON primitives (``{"root": 123}``, ``{"source": true}``) reach the
     excluded-bundle helper before the directory check. The helper must not
