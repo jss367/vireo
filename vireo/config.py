@@ -20,6 +20,16 @@ _lock = threading.Lock()
 
 DEFAULTS = {
     "classification_threshold": 0.4,
+    # Per-model floor on the raw, pre-softmax match score, below which the best
+    # label in the list is reported as not matching the image at all. Shaped
+    # ``{model_name: {"threshold": float, "score_kind": "cosine"|"logit"}}``.
+    #
+    # Empty by default, and deliberately so: a cosine floor and a logit floor
+    # are different scales, and neither can be guessed from the model name. An
+    # unconfigured model records its scores and declines to judge them, which
+    # is the honest state. Derive a real floor from your own confirmed
+    # identifications with ``scripts/calibrate_match_threshold.py``.
+    "match_thresholds": {},
     "grouping_window_seconds": 10,
     "similarity_threshold": 0.85,
     "preview_max_size": 1920,

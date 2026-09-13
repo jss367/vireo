@@ -11053,6 +11053,78 @@ function closePipeline() {
   if (wasOpen) Keymap.unlockBodyScroll();
 }
 
+// Raw match scores come in two scales that must never be mixed: a bounded
+// cosine similarity (BioCLIP) and an unbounded class logit (iNat21). Render
+// each at the precision its scale deserves; the server already refuses to
+// compare one against a threshold calibrated for the other.
+function formatMatchScore(value, scoreKind) {
+  if (value == null) return '—';
+  return scoreKind === 'logit' ? Number(value).toFixed(1) : Number(value).toFixed(3);
+}
+
+// The one line that answers what a confidence pill gets read as: did anything
+// in the list actually match? "uncalibrated" and "unavailable" deliberately
+// render as neither pass nor fail — no threshold means no verdict, and
+// dressing a missing verdict up as a passing one is the exact failure this
+// whole surface exists to remove.
+var MATCH_SUMMARY_STYLES = {
+  unlisted:     { color: 'var(--warning)', label: 'No good match in this label list' },
+  listed:       { color: 'var(--accent)',  label: 'Matched a label in this list' },
+  uncalibrated: { color: 'var(--text-dim)', label: 'Match strength recorded, not judged' },
+  unavailable:  { color: 'var(--text-dim)', label: 'Match strength not recorded' },
+};
+
+function renderMatchSummary(summary) {
+  if (!summary || !summary.state) return '';
+  var style = MATCH_SUMMARY_STYLES[summary.state];
+  if (!style) return '';
+  var assessments = summary.assessments || [];
+  var html = '<div class="pipeline-match-summary" style="border-left:3px solid ' +
+    style.color + ';padding:8px 10px;margin:8px 0;background:var(--bg-secondary);border-radius:0 4px 4px 0;">';
+  html += '<div style="color:' + style.color + ';font-weight:600;font-size:13px;">' +
+    escapeHtml(style.label) + '</div>';
+  assessments.forEach(function(a) {
+    if (!a || !a.explanation) return;
+    html += '<div style="color:var(--text-dim);font-size:12px;margin-top:4px;">' +
+      escapeHtml(a.model) + ': ' + escapeHtml(a.explanation) + '</div>';
+  });
+  if (summary.state === 'uncalibrated') {
+    html += '<div style="color:var(--text-muted);font-size:11px;margin-top:6px;">' +
+      'Run scripts/calibrate_match_threshold.py to derive a floor from your own confirmed IDs.</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// Every recorded run on this photo, including the ones step 4's table cannot
+// show: full-image classification and detections under the current detector
+// threshold. Those are routinely where the species a user is asking about
+// actually came from, so listing them here is the difference between the
+// inspector explaining the photo and quietly omitting the relevant half.
+function renderMatchScoreTable(rows) {
+  if (!rows || rows.length === 0) return '';
+  var html = '<div style="margin-top:10px;">';
+  html += '<div class="pipeline-stat" style="color:var(--text-muted);">Match strength per run</div>';
+  html += '<table class="pipeline-table"><tr><th>Model</th><th>Best label</th><th>Match</th>' +
+    '<th>Margin</th><th>Labels</th><th>Detection</th></tr>';
+  rows.forEach(function(r) {
+    var det = r.detector_model === 'full-image'
+      ? 'full image'
+      : escapeHtml(String(r.detector_model || '')) + ' ' +
+        (r.detector_confidence == null ? '' : Math.round(r.detector_confidence * 100) + '%');
+    html += '<tr>' +
+      '<td style="color:var(--text-dim);">' + escapeHtml(r.classifier_model) + '</td>' +
+      '<td>' + escapeHtml(r.top_species || '—') + '</td>' +
+      '<td>' + escapeHtml(formatMatchScore(r.max_match_score, r.score_kind)) + '</td>' +
+      '<td style="color:var(--text-dim);">' + escapeHtml(formatMatchScore(r.match_margin, r.score_kind)) + '</td>' +
+      '<td style="color:var(--text-dim);">' + (r.label_count == null ? '—' : r.label_count) + '</td>' +
+      '<td style="color:var(--text-dim);">' + det + '</td>' +
+    '</tr>';
+  });
+  html += '</table></div>';
+  return html;
+}
+
 function renderPipeline(data, photoId) {
   var c = document.getElementById('pipelineContent');
   var diag = data.classification_diagnostics || {};
@@ -11113,8 +11185,15 @@ function renderPipeline(data, photoId) {
   html += '<div class="pipeline-step">' +
     '<div class="pipeline-step-header"><span class="pipeline-step-num">4</span><span class="pipeline-step-title">Classification Results</span></div>';
 
+  // The confidence column below is a softmax over whichever label list ran,
+  // so it always sums to 1 and always crowns a winner — it cannot say whether
+  // anything in the list actually fit. Lead with the verdict that can, so a
+  // 99% is never read as agreement when the list simply had nothing right in
+  // it. Rendered above the table because it qualifies every row in it.
+  html += renderMatchSummary(data.match_summary);
+
   if (data.predictions && data.predictions.length > 0) {
-    html += '<table class="pipeline-table"><tr><th>Species</th><th>Confidence</th><th>Model</th><th>Status</th><th>Category</th></tr>';
+    html += '<table class="pipeline-table"><tr><th>Species</th><th>Confidence</th><th>Match</th><th>Model</th><th>Status</th><th>Category</th></tr>';
     data.predictions.forEach(function(p) {
       var pct = Math.round(p.confidence * 100);
       var statusColor = p.status === 'accepted' ? 'var(--accent)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--text-dim)';
@@ -11123,6 +11202,8 @@ function renderPipeline(data, photoId) {
       html += '<tr>' +
         '<td>' + escapeHtml(p.species) + (p.scientific_name ? '<br><span style="font-size:11px;color:var(--text-dim);font-style:italic;">' + escapeHtml(p.scientific_name) + '</span>' : '') + '</td>' +
         '<td><span class="pipeline-conf-bar" style="width:' + pct + 'px;"></span> ' + pct + '%</td>' +
+        '<td style="color:var(--text-dim);" title="Raw pre-softmax match score — absolute, and unchanged by which other labels are in the list">' +
+          (p.match_score == null ? '&mdash;' : escapeHtml(formatMatchScore(p.match_score))) + '</td>' +
         '<td style="color:var(--text-dim);">' + escapeHtml(p.model) + '</td>' +
         '<td style="color:' + statusColor + ';">' + escapeHtml(p.status) + '</td>' +
         '<td style="color:var(--text-dim);">' + escapeHtml(p.category) + '</td>' +
@@ -11166,6 +11247,15 @@ function renderPipeline(data, photoId) {
         ' attached to detection' + (hiddenPreds === 1 ? '' : 's') +
         ' below the current detector threshold' +
         (maxDetectorPct != null ? ' (best detection ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
+      // Both conditions routinely hold at once — a weak box plus a full-image
+      // pass. Naming only the first left the species the user is looking at
+      // unexplained, because it usually came from the full-image run this
+      // table excludes. The per-run table below lists them.
+      if (fullImagePreds > 0) {
+        html += '<p style="color:var(--text-dim);font-size:13px;">' + fullImagePreds +
+          ' further prediction' + (fullImagePreds === 1 ? '' : 's') +
+          ' came from classifying the full image, which this table excludes.</p>';
+      }
     } else if (fullImagePreds > 0) {
       html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran using the full image because no detector box was available.</p>';
     } else if (fullImageRuns > 0) {
@@ -11178,6 +11268,7 @@ function renderPipeline(data, photoId) {
       html += '<p style="color:var(--text-dim);font-size:13px;">No predictions yet &mdash; run classification first</p>';
     }
   }
+  html += renderMatchScoreTable(data.match_scores);
   html += '</div>';
 
   // Step 5: Quality scoring

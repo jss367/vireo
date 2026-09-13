@@ -867,6 +867,24 @@ body.sidebar-resizing {
   text-align: left;
 }
 .prediction-toggle:hover { text-decoration: underline; }
+.match-banner {
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border-primary));
+  border-left-width: 3px;
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg-primary));
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.match-banner-title {
+  color: var(--warning);
+  font-weight: 600;
+  font-size: 12px;
+}
+.match-banner-detail {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 3px;
+}
 .prediction-below-threshold {
   margin-top: 8px;
   color: var(--text-muted);
@@ -8659,6 +8677,32 @@ function predictionAmbiguityReason(p) {
 // "nothing detected" would be a stale explanation. `hiddenCount` splits the
 // last case in two — blaming the threshold when the classifier produced no
 // species at all would name a cause that never fired.
+// A banner, not a row: it qualifies the whole list rather than describing one
+// prediction. Only the `unlisted` verdict is shown, and deliberately so —
+// `listed` would add reassuring chrome to the ordinary case, while
+// `uncalibrated` and `unavailable` have nothing to report. Absence of a
+// threshold is not a passing grade, so neither may be rendered as one.
+function buildMatchBanner(matchState) {
+  if (!matchState || matchState.state !== 'unlisted') return '';
+  var lines = (matchState.assessments || [])
+    .filter(function(a) { return a && a.state === 'unlisted' && a.explanation; })
+    .map(function(a) {
+      return '<div class="match-banner-detail">' + escapeHtml(a.model) + ': ' +
+        escapeHtml(a.explanation) + '</div>';
+    }).join('');
+  var modelCount = matchState.judged_models || 0;
+  return '<div class="match-banner">' +
+    '<div class="match-banner-title">No label in your list matches this photo well</div>' +
+    '<div class="match-banner-detail">' +
+      'Every species below is the closest available label, not a match. ' +
+      (modelCount === 1
+        ? 'One model was judged.'
+        : modelCount + ' models were judged and all agree.') +
+      ' Widening the label list is what would change this.' +
+    '</div>' + lines +
+  '</div>';
+}
+
 function predictionEmptyMessage(state, hiddenCount) {
   if (!state) return 'No predictions for this photo.';
   if (!state.detector_ran) return 'Not yet classified — no detector has run on this photo.';
@@ -8813,6 +8857,13 @@ function renderDetailPredictions(data, photoId) {
   detailPredictionGroupsPhotoId = photoId;
   _detailPredictionData = { data: data, photoId: photoId };
   var state = (data.photo_states || {})[String(photoId)] || null;
+  // Whether anything in the label list actually matched. This qualifies every
+  // row below: a confidence is a rank within the list, so on its own it cannot
+  // distinguish the right bird from the closest of a list that never contained
+  // it. Rendered first, because reading the rows without it is the mistake.
+  var matchBanner = buildMatchBanner(
+    (data.match_states || {})[String(photoId)] || null,
+  );
   var threshold = state && state.threshold ? state.threshold : 0;
   var rows = (data.predictions || []).filter(function(p) {
     return p.photo_id === photoId;
@@ -8823,7 +8874,8 @@ function renderDetailPredictions(data, photoId) {
   var hidden = rows.length - visible.length;
 
   if (!visible.length) {
-    list.innerHTML = '<div class="selection-empty">' +
+    list.innerHTML = matchBanner +
+      '<div class="selection-empty">' +
       escapeHtml(predictionEmptyMessage(state, hidden)) + '</div>' +
       (hidden ? '<div class="prediction-below-threshold">' + hidden +
         (hidden === 1 ? ' prediction' : ' predictions') + ' below your confidence threshold (' +
@@ -8985,7 +9037,7 @@ function renderDetailPredictions(data, photoId) {
       (hidden === 1 ? ' more prediction is' : ' more predictions are') +
       ' below your confidence threshold (' + formatPredictionConfidence(threshold) + ').</div>';
   }
-  list.innerHTML = html;
+  list.innerHTML = matchBanner + html;
 }
 
 function openPredictionInReview(photoId) {

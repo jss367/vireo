@@ -1078,6 +1078,34 @@ class Database:
                 PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
             );
 
+            -- Absolute (pre-softmax) match strength for one classifier run.
+            --
+            -- Deliberately NOT folded into classifier_runs: that table is the
+            -- skip-gate for re-classification and is written only when a run
+            -- produced at least one prediction, because a zero-count row there
+            -- would strand the detection as permanently "done". The run that
+            -- matched nothing is exactly the run this table exists to record,
+            -- so it keeps its own key and is written unconditionally. It has
+            -- no effect on caching.
+            --
+            -- max_match_score is the best raw score over the WHOLE label list,
+            -- including labels that never cleared the prediction threshold.
+            -- score_kind names its scale ('cosine' for BioCLIP, 'logit' for a
+            -- supervised model) because the two are not comparable and a
+            -- threshold calibrated on one is meaningless on the other.
+            CREATE TABLE IF NOT EXISTS classifier_match_scores (
+                detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
+                classifier_model     TEXT NOT NULL,
+                labels_fingerprint   TEXT NOT NULL,
+                max_match_score      REAL,
+                match_margin         REAL,
+                top_species          TEXT,
+                label_count          INTEGER,
+                score_kind           TEXT,
+                run_at               TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
+            );
+
             CREATE TABLE IF NOT EXISTS photo_embeddings (
                 photo_id    INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
                 model       TEXT NOT NULL,
@@ -1370,6 +1398,8 @@ class Database:
                                labels_fingerprint, species);
             CREATE INDEX IF NOT EXISTS idx_classifier_runs_detection
                 ON classifier_runs(detection_id);
+            CREATE INDEX IF NOT EXISTS idx_classifier_match_scores_detection
+                ON classifier_match_scores(detection_id);
             CREATE INDEX IF NOT EXISTS idx_photo_embeddings_model
                 ON photo_embeddings(model, variant);
             CREATE INDEX IF NOT EXISTS idx_prediction_review_workspace
@@ -1476,8 +1506,18 @@ class Database:
         """
         )
         cur = self.conn.cursor()
-        if "source_taxon_id" not in {r[1] for r in cur.execute("PRAGMA table_info(predictions)")}:
+        pred_cols = {r[1] for r in cur.execute("PRAGMA table_info(predictions)")}
+        if "source_taxon_id" not in pred_cols:
             cur.execute("ALTER TABLE predictions ADD COLUMN source_taxon_id INTEGER")
+        # This row's own raw (pre-softmax) score. NULL on every row written
+        # before the column existed, and NULL is the honest value there — it
+        # means "not recorded", never "matched badly". Probed by column rather
+        # than PRAGMA user_version for the reason normalize_keyword_data()
+        # documents: branch builds have already advanced live DBs past the
+        # next free version number, so a version-gated migration silently
+        # skips on exactly the databases that need it.
+        if "match_score" not in pred_cols:
+            cur.execute("ALTER TABLE predictions ADD COLUMN match_score REAL")
         cur.execute("PRAGMA table_info(keywords)")
         kw_cols = {row[1] for row in cur.fetchall()}
         if "source_taxon_id" not in kw_cols:
@@ -17047,6 +17087,7 @@ class Database:
         labels_fingerprint="legacy",
         labels_fingerprint_full=None,
         preserve_manual_review=False,
+        match_score=None,
     ):
         """Store a classification prediction for a detection.
 
@@ -17069,6 +17110,10 @@ class Database:
             preserve_manual_review: when True, do not overwrite an existing
                 accepted/rejected review row unless it was auto-created for an
                 XMP taxonomy match.
+            match_score: this species' raw pre-softmax score (cosine or logit,
+                per the model). Optional; ``confidence`` alone cannot say
+                whether the label fits, only that it fit better than the rest
+                of the list.
         """
         if detection_id is None:
             raise ValueError(
@@ -17097,8 +17142,8 @@ class Database:
                 species, confidence, category,
                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
                 taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name,
-                source_taxon_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_taxon_id, match_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 detection_id,
                 model,
@@ -17115,6 +17160,7 @@ class Database:
                 tax.get("genus"),
                 tax.get("scientific_name"),
                 tax.get("taxon_id"),
+                match_score,
             ),
         )
         # SQLite's ``cur.lastrowid`` stays at the previous successful insert
@@ -17138,6 +17184,21 @@ class Database:
                        SET labels_fingerprint_full = ?
                        WHERE id = ? AND labels_fingerprint_full IS NULL""",
                     (labels_fingerprint_full, pred_id),
+                )
+            # Same fill-the-gap-only rule as the fingerprint above: a row
+            # first written before this column existed can gain its score
+            # from a later identical run, but a re-run never overwrites a
+            # score that is already there. The (detection, model, list, species)
+            # key pins all four inputs to the score, so a present value and an
+            # incoming one can only differ by float noise — and preferring the
+            # stored one keeps the column stable for a calibration pass that
+            # may already have read it.
+            if pred_id is not None and match_score is not None:
+                self.conn.execute(
+                    """UPDATE predictions
+                       SET match_score = ?
+                       WHERE id = ? AND match_score IS NULL""",
+                    (match_score, pred_id),
                 )
         # Write workspace-scoped review state only when the caller actually
         # supplied something beyond the defaults. Keeping pending rows out of
@@ -17371,6 +17432,25 @@ class Database:
                         JOIN workspace_folders wf
                           ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
                         {run_where}
+                    )""",
+                [ws, *run_params],
+            )
+            # Match scores are keyed and scoped exactly like the run keys
+            # above, so they are cleared with them. Leaving them behind would
+            # let a stale "nothing in the list matched" verdict outlive the
+            # predictions it described and be shown against a re-run that has
+            # not happened yet.
+            cms_where = run_where.replace("cr.", "cms.")
+            self.conn.execute(
+                f"""DELETE FROM classifier_match_scores
+                    WHERE rowid IN (
+                        SELECT cms.rowid
+                        FROM classifier_match_scores cms
+                        JOIN detections d ON d.id = cms.detection_id
+                        JOIN photos ph ON ph.id = d.photo_id
+                        JOIN workspace_folders wf
+                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                        {cms_where}
                     )""",
                 [ws, *run_params],
             )
@@ -19399,6 +19479,67 @@ class Database:
              input_fingerprint, prediction_count),
         )
         commit_with_retry(self.conn)
+
+    def record_classifier_match_score(
+        self,
+        detection_id,
+        classifier_model,
+        labels_fingerprint,
+        max_match_score,
+        match_margin=None,
+        top_species=None,
+        label_count=None,
+        score_kind=None,
+    ):
+        """Record how well the best label in a list actually matched.
+
+        Written for every completed run, including runs that produced no
+        prediction at all — unlike ``record_classifier_run``, whose zero-count
+        rows are suppressed because that table gates re-classification. A run
+        that matched nothing is the most informative case here, so suppressing
+        it would defeat the purpose.
+
+        ``max_match_score`` must be the best score over the entire label list,
+        not merely over the predictions that cleared the confidence threshold.
+        """
+        self.conn.execute(
+            """INSERT INTO classifier_match_scores
+                 (detection_id, classifier_model, labels_fingerprint,
+                  max_match_score, match_margin, top_species, label_count,
+                  score_kind)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(detection_id, classifier_model, labels_fingerprint)
+               DO UPDATE SET max_match_score = excluded.max_match_score,
+                             match_margin = excluded.match_margin,
+                             top_species = excluded.top_species,
+                             label_count = excluded.label_count,
+                             score_kind = excluded.score_kind,
+                             run_at = datetime('now')""",
+            (detection_id, classifier_model, labels_fingerprint,
+             max_match_score, match_margin, top_species, label_count,
+             score_kind),
+        )
+        commit_with_retry(self.conn)
+
+    def get_match_scores_for_photo(self, photo_id):
+        """Return match-score rows for every detection on one photo.
+
+        Rows are returned for all detections regardless of detector threshold:
+        the caller decides what to show, and a detection hidden by the current
+        threshold is often exactly the one a user is asking about.
+
+        Not workspace-scoped — ``photo_id`` is assumed already verified by the
+        caller, as the existing per-photo routes do before reaching here.
+        """
+        rows = self.conn.execute(
+            """SELECT cms.*, d.detector_confidence, d.detector_model
+               FROM classifier_match_scores cms
+               JOIN detections d ON d.id = cms.detection_id
+               WHERE d.photo_id = ?
+               ORDER BY cms.max_match_score DESC""",
+            (photo_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_classifier_run_keys(self, detection_id, runtime_fingerprint=None):
         params = [detection_id]

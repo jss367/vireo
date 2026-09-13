@@ -2399,7 +2399,8 @@ def create_pipeline_blueprint(
         # counts so the UI can distinguish "not run" from "hidden by threshold".
         import config as cfg
         ws = db._active_workspace_id
-        min_conf = db.get_effective_config(cfg.load()).get(
+        effective_cfg = db.get_effective_config(cfg.load())
+        min_conf = effective_cfg.get(
             "detector_confidence", 0.2
         )
         try:
@@ -2435,7 +2436,7 @@ def create_pipeline_blueprint(
         # sets doesn't see a debug payload mixing stale and current labels.
         preds = db.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
-                      pr.category,
+                      pr.category, pr.match_score,
                       COALESCE(pr_rev.status, 'pending') AS status,
                       pr_rev.individual AS individual,
                       pr_rev.group_id AS group_id,
@@ -2460,6 +2461,30 @@ def create_pipeline_blueprint(
             (ws, photo_id, min_conf),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
+
+        # Match strength: how well the best label in each list actually fit,
+        # as opposed to which label fit least badly. Reported for every
+        # detection on the photo, including the full-image pseudo-detection
+        # and boxes under the detector threshold — those are excluded from
+        # `predictions` above, and a run this page hides is very often the one
+        # that produced the species the user is asking about.
+        import match_confidence
+        match_rows = db.get_match_scores_for_photo(photo_id)
+        for row in match_rows:
+            # Per-row verdicts as well as the summary: this page is the one
+            # place that shows every run side by side, so each needs its own
+            # explanation rather than inheriting the photo's.
+            row["assessment"] = match_confidence.assess(
+                row["classifier_model"],
+                row.get("score_kind"),
+                row.get("max_match_score"),
+                row.get("match_margin"),
+                effective_cfg,
+            )
+        result["match_scores"] = match_rows
+        result["match_summary"] = match_confidence.summarize_photo(
+            match_rows, effective_cfg,
+        )
 
         current_pred_rows = db.conn.execute(
             """SELECT pr.id, d.detector_confidence

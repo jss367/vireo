@@ -12,8 +12,16 @@ import time
 
 import numpy as np
 import onnx_runtime
+from match_confidence import LOGIT
 
 log = logging.getLogger(__name__)
+
+#: Kind of raw, pre-softmax score this classifier reports as ``raw_score``.
+#: This is a supervised closed-set model, so the raw number is a class logit —
+#: absolute and independent of the label list, like BioCLIP's cosine, but on a
+#: completely different scale. Thresholds calibrated for one kind must never be
+#: applied to the other; ``match_confidence.assess`` enforces that.
+SCORE_KIND = LOGIT
 
 # Map model_str identifiers to local model directory names
 _MODEL_DIR_MAP = {
@@ -463,8 +471,13 @@ class TimmClassifier:
 
         return scientific_name
 
-    def _build_results(self, probs, threshold):
-        """Build sorted prediction dicts from a probability array."""
+    def _build_results(self, probs, threshold, raw_scores=None):
+        """Build sorted prediction dicts from a probability array.
+
+        ``raw_scores`` is the pre-softmax logit per class, aligned with
+        ``probs``. It rides along as ``raw_score`` so callers can distinguish a
+        real match from the closest of a set that contains nothing right.
+        """
         indexed = sorted(enumerate(probs), key=lambda x: x[1], reverse=True)
         results = []
         for idx, score in indexed:
@@ -492,6 +505,9 @@ class TimmClassifier:
                 {
                     "species": common_name,
                     "score": score,
+                    "raw_score": (
+                        None if raw_scores is None else float(raw_scores[idx])
+                    ),
                     "auto_tag": f"auto:{common_name}",
                     "confidence_tag": f"auto:confidence:{score:.2f}",
                     "taxonomy": taxonomy,
@@ -544,7 +560,7 @@ class TimmClassifier:
         logits = output[0]  # shape: (1, num_classes)
         probs = onnx_runtime.softmax(logits, axis=-1).flatten()
 
-        return self._build_results(probs, threshold)
+        return self._build_results(probs, threshold, np.asarray(logits).flatten())
 
     def classify_batch(self, images, threshold=0.1):
         """Classify multiple PIL images.
@@ -570,10 +586,10 @@ class TimmClassifier:
         # outside it.
         with acquire_inference_resources(self._session):
             output = self._session.run(None, {self._input_name: input_arr})
-        logits = output[0]
+        logits = np.asarray(output[0])
         probs_batch = onnx_runtime.softmax(logits, axis=-1)
 
         results = []
-        for probs in probs_batch:
-            results.append(self._build_results(probs, threshold))
+        for i, probs in enumerate(probs_batch):
+            results.append(self._build_results(probs, threshold, logits[i]))
         return results
