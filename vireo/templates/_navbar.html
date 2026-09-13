@@ -11103,10 +11103,20 @@ function renderMatchSummary(summary) {
         ' on detection ' + escapeHtml(String(run.detection_id)) + ': ' +
         escapeHtml(run.explanation || '') + '</div>';
     });
+    // Why the photo is not being called unidentifiable has two different
+    // answers, and saying the wrong one would invent a passing grade nobody
+    // gave. `listed` means another run genuinely cleared its floor.
+    // `uncalibrated`/`unavailable` mean another run was never judged at all —
+    // which blocks the photo-wide verdict without vouching for anything.
+    var mixedReason = summary.state === 'listed'
+      ? 'Another run on this photo did clear its floor, so the photo is not ' +
+        'unidentifiable — but the predictions from the runs above are the ' +
+        'closest available labels, not matches.'
+      : 'Another model ran on this photo with no calibrated floor, so it was ' +
+        'recorded but not judged — the photo is not being called unmatched on ' +
+        'the strength of the runs above, but nothing has vouched for it either.';
     html += '<div style="color:var(--text-muted);font-size:11px;margin-top:6px;">' +
-      'Another run on this photo did clear its floor, so the photo is not ' +
-      'unidentifiable — but the predictions from the runs above are the ' +
-      'closest available labels, not matches.</div>';
+      escapeHtml(mixedReason) + '</div>';
   } else {
     (summary.assessments || []).forEach(function(a) {
       if (!a || !a.explanation) return;

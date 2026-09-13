@@ -148,11 +148,12 @@ def assess(model, score_kind, max_match_score, margin=None, config=None):
 def summarize(assessments):
     """Collapse several runs' assessments into one *photo-level* verdict.
 
-    ``unlisted`` is returned only when at least one model was actually judged
-    and *every* judged model came back unlisted. One model finding a good match
-    is enough to make the photo a match, so a single ``listed`` wins — a
-    detector that found a bad crop for one model should not be able to label
-    the photo unidentifiable when another model saw it clearly.
+    ``unlisted`` is returned only when at least one model was actually judged,
+    *every* judged model came back unlisted, and no model ran unjudged. One
+    model finding a good match is enough to make the photo a match, so a
+    single ``listed`` wins — a detector that found a bad crop for one model
+    should not be able to label the photo unidentifiable when another model
+    saw it clearly.
 
     This aggregate is deliberately coarse, and on its own it is not enough to
     render: a photo can hold two species, and two models can disagree, so
@@ -165,24 +166,45 @@ def summarize(assessments):
     either way. They cannot: no threshold means no verdict, and treating a
     missing verdict as a passing one is precisely how a "99%" comes to mean
     "best of a bad list".
+
+    Not voting is not the same as not counting. A model that ran and was not
+    judged also *blocks* the photo-wide ``unlisted`` verdict: that verdict is
+    read as "nothing here matched anything in your list", and the UI renders
+    it as a banner over every prediction on the photo. With one calibrated
+    model below its floor and a second uncalibrated model on the same photo,
+    the honest statement is "the calibrated model matched nothing" — the
+    uncalibrated one may have identified the bird perfectly and nobody looked.
+    So ``unlisted`` requires that every run that reached a state at all was
+    judged and failed; a single ``uncalibrated`` run degrades the photo-level
+    verdict to ``uncalibrated`` while ``unlisted_models`` /
+    ``summarize_photo``'s ``unlisted_runs`` still carry the failure through,
+    so the UI drops the blanket banner and warns on the run that actually
+    failed instead. ``unavailable`` runs (no score recorded at all) do not
+    block: they are genuinely absent rather than deliberately unjudged.
     """
     judged = [a for a in assessments if a.get("state") in (LISTED, UNLISTED)]
+    unjudged = [a for a in assessments if a.get("state") == UNCALIBRATED]
     if not judged:
-        has_scores = any(
-            a.get("state") == UNCALIBRATED for a in assessments
-        )
-        state = UNCALIBRATED if has_scores else UNAVAILABLE
+        state = UNCALIBRATED if unjudged else UNAVAILABLE
         return {
             "state": state,
             "judged_models": 0,
             "unlisted_models": 0,
+            "unjudged_models": len(unjudged),
             "assessments": list(assessments),
         }
     unlisted = [a for a in judged if a["state"] == UNLISTED]
+    if len(unlisted) < len(judged):
+        state = LISTED
+    elif unjudged:
+        state = UNCALIBRATED
+    else:
+        state = UNLISTED
     return {
-        "state": UNLISTED if len(unlisted) == len(judged) else LISTED,
+        "state": state,
         "judged_models": len(judged),
         "unlisted_models": len(unlisted),
+        "unjudged_models": len(unjudged),
         "assessments": list(assessments),
     }
 

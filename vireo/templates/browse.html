@@ -8689,6 +8689,13 @@ function predictionAmbiguityReason(p) {
 // `listed` while a displayed prediction is still explicitly `unlisted`.
 // `buildUnlistedRunIndex` below carries those failures down to the rows that
 // produced them, so a passing run can never silence a failing one.
+//
+// The same `unlisted` gate also keeps the banner off a photo where one model
+// failed its floor and another model ran with no calibrated floor at all:
+// `match_confidence.summarize` degrades that photo to `uncalibrated`, because
+// "every species below is not a match" would be asserting a verdict for a
+// model nobody judged. The per-row warning still fires and names the model
+// that actually failed.
 function buildMatchBanner(matchState) {
   if (!matchState || matchState.state !== 'unlisted') return '';
   var lines = (matchState.assessments || [])

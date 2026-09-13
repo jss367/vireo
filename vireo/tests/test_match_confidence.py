@@ -183,10 +183,53 @@ def test_unjudged_runs_do_not_vote():
     assert mc.summarize([unjudged])["state"] == mc.UNCALIBRATED
     assert mc.summarize([])["state"] == mc.UNAVAILABLE
 
-    bad = mc.assess("BioCLIP-2.5", "cosine", 0.10, None, _COSINE_CFG)
-    mixed = mc.summarize([bad, unjudged])
-    assert mixed["state"] == mc.UNLISTED
+    good = mc.assess("BioCLIP-2.5", "cosine", 0.40, None, _COSINE_CFG)
+    mixed = mc.summarize([good, unjudged])
+    assert mixed["state"] == mc.LISTED
     assert mixed["judged_models"] == 1
+    assert mixed["unjudged_models"] == 1
+
+
+def test_uncalibrated_run_blocks_the_photo_wide_failure():
+    """An unjudged model must not be conscripted into a unanimous failure.
+
+    One calibrated model below its floor plus one model with no calibrated
+    threshold is not "nothing here matches your list" — the uncalibrated model
+    may have identified the bird perfectly and nobody looked. The photo-level
+    verdict degrades to ``uncalibrated`` so the blanket banner stays off, while
+    the failing run is still carried through for a warning that names it.
+    """
+    bad = mc.assess("BioCLIP-2.5", "cosine", 0.10, None, _COSINE_CFG)
+    unjudged = mc.assess("Other", "cosine", 0.10, None, _COSINE_CFG)
+    assert bad["state"] == mc.UNLISTED
+    assert unjudged["state"] == mc.UNCALIBRATED
+
+    summary = mc.summarize([bad, unjudged])
+    assert summary["state"] == mc.UNCALIBRATED
+    assert summary["judged_models"] == 1
+    assert summary["unlisted_models"] == 1
+    assert summary["unjudged_models"] == 1
+
+    # Still unanimous-and-judged when the second model is genuinely absent
+    # rather than deliberately unjudged.
+    absent = mc.assess("BioCLIP-2.5", "cosine", None, None, _COSINE_CFG)
+    assert absent["state"] == mc.UNAVAILABLE
+    assert mc.summarize([bad, absent])["state"] == mc.UNLISTED
+
+
+def test_photo_with_an_uncalibrated_model_keeps_the_per_run_failure():
+    """End to end through summarize_photo: no banner, but the warning survives."""
+    rows = [
+        {"detection_id": 1, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.10},
+        {"detection_id": 1, "classifier_model": "Other",
+         "score_kind": "cosine", "max_match_score": 0.10},
+    ]
+    summary = mc.summarize_photo(rows, _COSINE_CFG)
+    assert summary["state"] == mc.UNCALIBRATED
+    assert [r["classifier_model"] for r in summary["unlisted_runs"]] == [
+        "BioCLIP-2.5",
+    ]
 
 
 # --------------------------------------------------------------------------
