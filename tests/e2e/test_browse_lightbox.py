@@ -2121,6 +2121,7 @@ def test_browse_lightbox_queues_warmups_and_continues_past_failures(live_server,
     )
     page.wait_for_timeout(200)
     assert requests[0] == failing_id
+    assert len(requests) == 4
     assert set(requests) == {failing_id, ids[0], ids[3], ids[4]}
     assert len(held) == 1
     held.pop().fulfill(status=503, body="Busy")

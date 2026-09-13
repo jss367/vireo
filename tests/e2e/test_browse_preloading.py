@@ -227,7 +227,9 @@ def test_originals_larger_than_budget_are_not_preloaded(live_server, page):
     page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === 12")
     page.wait_for_function("_lbSpeculativeLoads.size === 0")
     page.evaluate("_lbPrimeAdjacentPhotos('original')")
-    page.wait_for_timeout(200)
+    page.wait_for_function("""!_lbAdjacentPreloadTimer && !_lbOriginalPreloadTimer &&
+        !_lbOriginalPreloadWaiting && !_lbSwapTimer && _lbSpeculativeLoads.size === 0 &&
+        Object.keys(_lbAdjacentPreloadRetry).length === 0""")
     assert original_requests == []
     assert page.evaluate("_lbPreloadBytes()") <= 128 * 1024 * 1024
 
@@ -321,7 +323,8 @@ def test_failed_initial_sized_preview_falls_back_to_usable_image(live_server, pa
     expect(page.locator("#lightboxActions")).not_to_have_attribute("inert", "")
     source = "/full" if original_fails else "/original"
     assert source in page.locator("#lightboxImg").get_attribute("src")
-    page.wait_for_timeout(400)
+    page.wait_for_function("""!_lbSwapTimer && !_lbPreviewLoading &&
+        (!_lbDesiredSrcKey || _lbDesiredSrcKey === _lbCurrentSrcKey)""")
     # Restoring the viewport may attempt the requested tier once more, but
     # its failure must keep the usable fallback and cannot cause a retry loop.
     assert len(failed_requests) <= 2
@@ -372,7 +375,7 @@ def test_small_photo_does_not_lower_workspace_preview_limit(live_server, page, p
     assert incoming and "/full" in incoming[0]
 
 
-@pytest.mark.parametrize("preview_size,needed", [(3000, 2800), (5000, 4500), (0, 5000)])
+@pytest.mark.parametrize("preview_size,needed", [(960, 1500), (3000, 2800), (5000, 4500), (0, 5000)])
 def test_navigation_uses_workspace_limit_before_metadata(live_server, page, preview_size, needed):
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
@@ -407,7 +410,8 @@ def test_navigation_uses_workspace_limit_before_metadata(live_server, page, prev
     )
     page.wait_for_function("id => _lightboxCommittedId === id", arg=photo_id + 1)
     incoming = [url for url in requested if f"/photos/{photo_id + 1}/" in url]
-    assert incoming and "/full" in incoming[0]
+    target = "size=1920" if preview_size == 960 else "/full"
+    assert incoming and target in incoming[0]
     for route in held_metadata:
         route.fulfill(json={
             "id": int(route.request.url.rsplit("/", 1)[1]), "width": 6000, "height": 4000,
@@ -450,3 +454,63 @@ def test_failed_original_warmup_releases_budget_for_neighbors(live_server, page)
         }"""
     )
     page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === 12")
+
+
+def test_stalled_preloads_release_slots_and_allow_window_to_fill(live_server, page):
+    held = []
+
+    def serve(route):
+        if "prefetch=1" in route.request.url and len(held) < 3:
+            held.append(route)
+            return
+        route.fulfill(body=_jpeg(), content_type="image/jpeg")
+
+    page.clock.install()
+    page.route("**/photos/*/full*", serve)
+    _open_window(page, live_server)
+    page.wait_for_function("_lbSpeculativeLoads.size === 3")
+    page.wait_for_timeout(50)  # Dispatch the three held requests to Python.
+    assert len(held) == 3
+    page.evaluate("window.stalledPreloads = Array.from(_lbSpeculativeLoads)")
+    page.clock.fast_forward(30001)
+    page.wait_for_function(
+        "Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length >= 9",
+        timeout=5000,
+    )
+    assert page.evaluate("window.stalledPreloads.every(e => e.status === 'failed' && !e.img.getAttribute('src'))")
+    # WebKit can coalesce retries onto the original transfer even after its
+    # Image is retired. Late responses must not revive those retired entries.
+    for route in held:
+        route.fulfill(body=_jpeg(), content_type="image/jpeg")
+    page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === 12")
+    assert page.evaluate("window.stalledPreloads.every(e => e.status === 'failed')")
+    assert page.evaluate("_lbPreloadBytes()") <= 128 * 1024 * 1024
+
+
+def test_pending_original_retries_after_preload_budget_is_released(live_server, page):
+    originals = []
+    page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", lambda route: originals.append(route))
+    _open_window(page, live_server)
+    page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === 12")
+    page.evaluate(
+        """() => {
+          _lbOriginalPreloadWaiting = {photoId: 115, retryCount: 0};
+          _lbStartPendingOriginalPreload();
+        }"""
+    )
+    assert page.evaluate("_lbOriginalPreloadWaiting !== null && _lbOriginalPreload === null")
+    assert not originals
+    page.evaluate(
+        """() => {
+          _lightboxPhotoList = _lightboxPhotoList.filter(p => p.id === 115);
+          _lbClearAdjacentPreloads();
+          _lbPrimeAdjacentPhotos('full');
+        }"""
+    )
+    page.wait_for_function("_lbOriginalPreload && _lbOriginalPreload.status === 'loading'")
+    page.wait_for_timeout(50)
+    assert len(originals) == 1
+    originals[0].fulfill(body=_jpeg(6000, 4000), content_type="image/jpeg")
+    page.wait_for_function("_lbOriginalPreload && _lbOriginalPreload.status === 'decoded'")
+    assert page.evaluate("_lbPreloadBytes()") == 6000 * 4000 * 4
