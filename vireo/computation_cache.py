@@ -598,7 +598,25 @@ def promote_and_publish_classifier_run(
            ORDER BY confidence DESC, species COLLATE NOCASE""",
         (detection_id, classifier_model, labels_fingerprint),
     ).fetchall()
-    if not predictions:
+    # The run-level summary: best raw score over the WHOLE label list, which
+    # no per-candidate row can reconstruct because the labels that lost never
+    # became prediction rows. Without it a cache-materialized detection is
+    # permanently blank — ``classifier_runs`` gates re-classification, so it
+    # would never be recomputed — and the calibration script loses exactly the
+    # rows it derives a threshold from.
+    #
+    # Computed BEFORE the empty-predictions bail-out on purpose. A completed
+    # run whose every label fell under the confidence floor produces no
+    # prediction rows at all, and that run is the single most informative
+    # thing this feature records: "nothing in your list fits this image". If
+    # a zero-candidate run were unpublishable, the verdict would survive
+    # locally and vanish on export — losing the one case the feature exists
+    # for. A run with neither predictions nor a summary carries no output
+    # whatsoever and is still not worth an artifact.
+    match = _match_summary_row(
+        db, detection_id, classifier_model, labels_fingerprint,
+    )
+    if not predictions and match is None:
         return None
     candidates = []
     for prediction in predictions:
@@ -627,15 +645,6 @@ def promote_and_publish_classifier_run(
             candidate["taxonomy"] = taxonomy
         candidates.append(candidate)
     subject["candidates"] = candidates
-    # The run-level summary: best raw score over the WHOLE label list, which
-    # no per-candidate row can reconstruct because the labels that lost never
-    # became prediction rows. Without it a cache-materialized detection is
-    # permanently blank — ``classifier_runs`` gates re-classification, so it
-    # would never be recomputed — and the calibration script loses exactly the
-    # rows it derives a threshold from.
-    match = _match_summary_row(
-        db, detection_id, classifier_model, labels_fingerprint,
-    )
     if match is not None:
         subject["match"] = match
     label_meta = db.conn.execute(
@@ -857,6 +866,19 @@ def _validate_subject_match(match):
         )
 
 
+def _has_measured_match(subject):
+    """Whether a classification subject carries a real run-level match score.
+
+    "Real" means a numeric ``max_match_score``: the shape check in
+    ``_validate_subject_match`` accepts a ``match`` block with every field
+    absent, and an empty block is exactly as contentless as no block at all.
+    """
+    match = subject.get("match")
+    return isinstance(match, dict) and isinstance(
+        match.get("max_match_score"), (int, float)
+    ) and not isinstance(match.get("max_match_score"), bool)
+
+
 def validate_artifact(artifact):
     """Validate one artifact and return its normalized data-only form."""
     artifact = _normalize_json(artifact)
@@ -932,16 +954,33 @@ def validate_artifact(artifact):
                 raise CacheFormatError("detection category must be a string")
         else:
             candidates = subject.get("candidates")
-            # Reject empty candidate lists — a completed classification
-            # subject with no predictions still writes a classifier_runs
-            # marker on materialize, which _all_photos_cache_satisfied
-            # counts as covered.  That would let a bundle containing
-            # empty subjects short-circuit an entire Classify job and
-            # leave the photo permanently unclassified until a forced
-            # reclassify.
-            if not isinstance(candidates, list) or not candidates:
+            if not isinstance(candidates, list):
                 raise CacheFormatError(
                     "classification subject needs at least one candidate"
+                )
+            # An empty candidate list is allowed ONLY when the subject also
+            # carries a measured run-level ``match`` block.
+            #
+            # The bare empty list stays rejected because a completed
+            # classification subject with no predictions still writes a
+            # classifier_runs marker on materialize, which
+            # _all_photos_cache_satisfied counts as covered: a bundle of
+            # contentless subjects could short-circuit an entire Classify job
+            # and leave the photos permanently unclassified until a forced
+            # reclassify.
+            #
+            # A ``match`` block is what distinguishes the real thing from
+            # that. A run whose every label fell under the confidence floor
+            # produces no prediction rows but does produce a maximum raw score
+            # over the full list, and "nothing in this list matched" is the
+            # verdict this whole feature exists to record. Requiring the
+            # measurement means an empty subject has to carry evidence that
+            # inference actually happened, rather than asserting coverage it
+            # never earned.
+            if not candidates and not _has_measured_match(subject):
+                raise CacheFormatError(
+                    "classification subject needs at least one candidate or a "
+                    "measured match summary"
                 )
             for candidate in candidates:
                 if not isinstance(candidate, dict):

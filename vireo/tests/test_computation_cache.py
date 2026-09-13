@@ -1544,6 +1544,108 @@ def test_match_strength_fields_are_validated(tmp_path):
         ))
 
 
+def test_zero_candidate_run_is_publishable_when_it_recorded_a_match(tmp_path):
+    """The run that matched nothing is the headline case of this feature.
+
+    A completed run whose every candidate was dropped (all under the floor, or
+    all discarded as already-labeled) leaves no ``predictions`` rows but does
+    leave a ``classifier_match_scores`` row saying "the best label in your
+    list only reached 0.09". If that run were unpublishable, the verdict would
+    live locally and vanish on export, which is exactly backwards: it is the
+    single most informative thing the cache could carry.
+    """
+    source, _folder_id, photo_id = _database_with_photo(
+        tmp_path / "empty-source.db", "source.jpg",
+    )
+    _input, detector_input_fp = source_input(
+        PHOTO_HASH, "vireo-detector-source-v1",
+    )
+    detection_id = source.write_detection_batch(
+        photo_id,
+        "megadetector-v6",
+        [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+          "confidence": 0.91, "category": "animal"}],
+        runtime_fingerprint=RUNTIME,
+        input_fingerprint=detector_input_fp,
+    )[0]
+    labels_full = "7" * 64
+    labels_short = labels_full[:12]
+    source.upsert_labels_fingerprint(
+        labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
+    )
+    # No add_prediction at all — this run produced nothing.
+    source.record_classifier_match_score(
+        detection_id, "BioCLIP", labels_short, max_match_score=0.09,
+        match_margin=0.002, top_species="Robin", label_count=1255,
+        score_kind="cosine",
+    )
+
+    model_dir = tmp_path / "empty-model"
+    model_dir.mkdir()
+    (model_dir / "image_encoder.onnx").write_bytes(b"exact model bytes")
+    identity = classifier_model_identity({
+        "id": "bioclip-test",
+        "model_str": "ViT-test",
+        "model_type": "bioclip",
+        "weights_path": str(model_dir),
+        "files": ["image_encoder.onnx"],
+        "source": "custom",
+    })
+    store = ArtifactStore(tmp_path / "empty-store")
+    digest = promote_and_publish_classifier_run(
+        source, detection_id, "BioCLIP", labels_short, labels_full,
+        identity, store=store,
+    )
+    assert digest
+    published = [a for _d, a in store.iter_artifacts()]
+    assert len(published) == 1
+    subject = published[0]["subjects"][0]
+    assert subject["candidates"] == []
+    assert subject["match"]["max_match_score"] == 0.09
+    source.close()
+
+
+def test_zero_candidate_run_materializes_its_verdict(tmp_path):
+    """...and lands on the far side as a summary with no prediction rows."""
+    destination, _photo_id = _materialized_classification(
+        tmp_path, "empty-dest.db",
+        candidates=[],
+        match={"max_match_score": 0.09, "top_species": "Robin",
+               "label_count": 1255, "score_kind": "cosine"},
+    )
+    assert destination.conn.execute(
+        "SELECT COUNT(*) AS c FROM predictions",
+    ).fetchone()["c"] == 0
+    row = destination.conn.execute(
+        "SELECT * FROM classifier_match_scores",
+    ).fetchone()
+    assert row["max_match_score"] == 0.09
+    assert destination.conn.execute(
+        "SELECT prediction_count FROM classifier_runs",
+    ).fetchone()["prediction_count"] == 0
+    destination.close()
+
+
+def test_contentless_classification_subject_is_still_rejected(tmp_path):
+    """An empty subject with no measurement may not claim classifier coverage.
+
+    Materializing writes a ``classifier_runs`` marker, and that marker is the
+    re-classification gate. A bundle of empty subjects carrying no evidence
+    that inference ever happened would short-circuit a whole Classify job and
+    strand the photos unclassified until a forced reclassify.
+    """
+    with pytest.raises(CacheFormatError, match="at least one candidate"):
+        validate_artifact(classification_artifact(candidates=[]))
+    with pytest.raises(CacheFormatError, match="at least one candidate"):
+        validate_artifact(classification_artifact(
+            candidates=[], match={"score_kind": "cosine"},
+        ))
+    ok = validate_artifact(classification_artifact(
+        candidates=[], match={"max_match_score": 0.09, "score_kind": "cosine"},
+    ))
+    assert ok["subjects"][0]["candidates"] == []
+
+
 def test_replacement_artifact_without_match_clears_prior_summary(tmp_path):
     """Materializing a recognized artifact from a different runtime replaces
     that run's predictions. If the incoming artifact carries no ``match``
