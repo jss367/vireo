@@ -4973,8 +4973,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # routes that answer the no-workspace case deliberately —
             # ``/api/workspaces/active/new-images/recheck`` is supposed to
             # return ``{"workspace_id": None, "rechecked": False}``.
-            # A request that genuinely needs an active workspace still
-            # fails in the route, where the error can be specific.
+            # Routes that mutate workspace-scoped state must reject the
+            # no-workspace case themselves rather than rely on this hook:
+            # background-job routes in particular capture
+            # ``ctx.workspace_id`` here and hand it to their worker, which
+            # would then write orphaned rows against ``workspace_id=None``.
+            # See the guard at the top of ``api_job_scan``.
             pass
         if target_ws is not None:
             workspaces.add(target_ws)
@@ -22741,6 +22745,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             UI enqueued one job per root (PR #634 added retry/backoff
             as defense-in-depth; this is the root-cause fix).
         """
+        # A scan without an active workspace would create catalog entries
+        # invisible to every workspace: the worker calls
+        # ``set_active_workspace(None)`` and ``Database.add_folder`` then
+        # skips the workspace link because ``_active_workspace_id is None``.
+        # The mutation-reservation hook deliberately lets no-workspace
+        # requests through so routes that answer that state can respond
+        # cleanly; this route is not one of them, so refuse here.
+        if ctx.workspace_id is None:
+            return json_error("no active workspace", 400)
         body = request.get_json(silent=True) or {}
         incremental = body.get("incremental", False)
 

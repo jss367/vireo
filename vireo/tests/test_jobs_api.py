@@ -80,6 +80,32 @@ def test_job_scan_invalid_root(app_and_db):
     assert resp.status_code == 400
 
 
+def test_job_scan_rejects_no_active_workspace(app_and_db, tmp_path, monkeypatch):
+    """POST /api/jobs/scan must refuse when no workspace is active.
+
+    Without this guard the request rides through the mutation-reservation
+    ``before_request`` hook (which deliberately allows no-workspace
+    requests so routes that answer that state can respond cleanly), the
+    scan worker calls ``set_active_workspace(None)``, and
+    ``Database.add_folder`` silently skips the workspace link — creating
+    catalog entries invisible to every workspace.
+    """
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    scan_dir = str(tmp_path / "scanme")
+    os.makedirs(scan_dir)
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'test.jpg'))
+
+    resp = client.post('/api/jobs/scan', json={'root': scan_dir})
+    assert resp.status_code == 400
+    assert "workspace" in resp.get_json()["error"].lower()
+
+
 def test_job_scan_rejects_macos_other_app_bundle(app_and_db, tmp_path):
     """POST /api/jobs/scan must reject a ``.photoslibrary`` root before
     calling ``os.path.isdir`` on it. ``os.path.isdir`` against an Apple
