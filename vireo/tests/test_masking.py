@@ -417,9 +417,10 @@ def test_sam2_sessions_reloads_for_different_variant(tmp_path):
     masking._sam2_variant_loaded = None
 
 
-def test_sam2_sessions_pin_cpu_provider(tmp_path):
-    """SAM2 loads CPU-only: CoreML fragments the Hiera encoder and runs
-    2x slower on sam2-small and ~5x slower on sam2-large."""
+def test_sam2_sessions_drop_coreml_on_apple(tmp_path):
+    """SAM2 filters CoreML out of the provider list: it fragments the Hiera
+    encoder and runs 2x slower on sam2-small and ~5x slower on sam2-large.
+    On an M3 Mac the remaining provider is CPU."""
     from unittest.mock import MagicMock, patch
 
     import masking
@@ -439,13 +440,63 @@ def test_sam2_sessions_pin_cpu_provider(tmp_path):
         seen.append(kwargs.get("providers"))
         return MagicMock()
 
+    def mock_get_providers():
+        return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+
     with patch("os.path.expanduser", return_value=str(tmp_path)):
         with patch("masking.onnx_runtime.create_session",
                    side_effect=mock_create_session):
-            masking._get_sam2_sessions("sam2-small")
+            with patch("masking.onnx_runtime.get_providers",
+                       side_effect=mock_get_providers):
+                masking._get_sam2_sessions("sam2-small")
 
     assert seen == [["CPUExecutionProvider"], ["CPUExecutionProvider"]], (
-        "both the image encoder and the mask decoder must pin CPU"
+        "both the image encoder and the mask decoder must drop CoreML "
+        "on an Apple install where get_providers returns [CoreML, CPU]"
+    )
+
+    masking._encoder_session = None
+    masking._decoder_session = None
+    masking._sam2_variant_loaded = None
+
+
+def test_sam2_sessions_keep_cuda_on_linux_gpu(tmp_path):
+    """SAM2 keeps CUDA when the installed onnxruntime exposes it: the
+    slow-vs-CoreML measurement rules out CoreML, not CUDA, and pinning to
+    CPU would silently regress Linux + onnxruntime-gpu users."""
+    from unittest.mock import MagicMock, patch
+
+    import masking
+
+    masking._encoder_session = None
+    masking._decoder_session = None
+    masking._sam2_variant_loaded = None
+
+    model_dir = tmp_path / ".vireo" / "models" / "sam2-small"
+    model_dir.mkdir(parents=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "mask_decoder.onnx").write_bytes(b"fake")
+
+    seen = []
+
+    def mock_create_session(path, **kwargs):
+        seen.append(kwargs.get("providers"))
+        return MagicMock()
+
+    def mock_get_providers():
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    with patch("os.path.expanduser", return_value=str(tmp_path)):
+        with patch("masking.onnx_runtime.create_session",
+                   side_effect=mock_create_session):
+            with patch("masking.onnx_runtime.get_providers",
+                       side_effect=mock_get_providers):
+                masking._get_sam2_sessions("sam2-small")
+
+    expected = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert seen == [expected, expected], (
+        "both the image encoder and the mask decoder must keep CUDA "
+        "on Linux + onnxruntime-gpu; only CoreML is filtered out"
     )
 
     masking._encoder_session = None

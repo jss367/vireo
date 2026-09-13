@@ -229,22 +229,31 @@ def _get_sam2_sessions(variant="sam2-small"):
         # block every unpaused peer waiting on SAM2 until Resume.
         from resource_ledger import resolve_resource_pure_cancel_check
         pure_probe = resolve_resource_pure_cancel_check()
-        # CPU on purpose. SAM2's Hiera encoder is a transformer, and CoreML
-        # claims only ~340 of its ~1570 nodes, splitting the graph into ~110
-        # partitions; the resulting round trips cost more than the accelerated
-        # ops save. Image-encoder medians on an M3 Max at 1024px, CPU vs
-        # CoreML: small 0.94s vs 1.85s, base-plus 1.61s vs 3.29s, large 3.44s
-        # vs 16.75s. It gets worse as the encoder grows, so do not re-enable
-        # CoreML here for the bigger variants. First load is also 4-5x slower
-        # on CoreML. MegaDetector is the counterexample and deliberately keeps
-        # the default provider order: it is a CNN, CoreML takes the whole
-        # graph, and it runs ~11x faster there (0.016s vs 0.176s).
-        cpu_only = ["CPUExecutionProvider"]
+        # Drop CoreML on purpose. SAM2's Hiera encoder is a transformer, and
+        # CoreML claims only ~340 of its ~1570 nodes, splitting the graph into
+        # ~110 partitions; the resulting round trips cost more than the
+        # accelerated ops save. Image-encoder medians on an M3 Max at 1024px,
+        # CPU vs CoreML: small 0.94s vs 1.85s, base-plus 1.61s vs 3.29s, large
+        # 3.44s vs 16.75s. It gets worse as the encoder grows, so do not
+        # re-enable CoreML here for the bigger variants. First load is also
+        # 4-5x slower on CoreML. MegaDetector is the counterexample and
+        # deliberately keeps the default provider order: it is a CNN, CoreML
+        # takes the whole graph, and it runs ~11x faster there (0.016s vs
+        # 0.176s).
+        #
+        # CUDA is kept when the installed onnxruntime exposes it (Linux with
+        # ``onnxruntime-gpu``). The measurements above only compare CPU to
+        # CoreML on an M3 Max; CUDA runs SAM2's Hiera encoder well and pinning
+        # to CPU would silently regress GPU users.
+        providers_no_coreml = [
+            p for p in onnx_runtime.get_providers()
+            if p != "CoreMLExecutionProvider"
+        ]
         enc_sess = onnx_runtime.create_session(
-            encoder_path, providers=cpu_only, cancel_check=pure_probe,
+            encoder_path, providers=providers_no_coreml, cancel_check=pure_probe,
         )
         dec_sess = onnx_runtime.create_session(
-            decoder_path, providers=cpu_only, cancel_check=pure_probe,
+            decoder_path, providers=providers_no_coreml, cancel_check=pure_probe,
         )
 
         _encoder_session = enc_sess
