@@ -4962,7 +4962,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }:
             return None
         target_ws = (request.view_args or {}).get("ws_id")
-        workspaces = {_get_db()._ws_id()}
+        workspaces = set()
+        try:
+            workspaces.add(_get_db()._ws_id())
+        except RuntimeError:
+            # No active workspace, so there is nothing to reserve on the
+            # session's behalf. This hook runs before *every* mutating
+            # /api/ request, so letting ``_ws_id()`` raise here turns a
+            # missing active workspace into a blanket 500 and pre-empts
+            # routes that answer the no-workspace case deliberately —
+            # ``/api/workspaces/active/new-images/recheck`` is supposed to
+            # return ``{"workspace_id": None, "rechecked": False}``.
+            # A request that genuinely needs an active workspace still
+            # fails in the route, where the error can be specific.
+            pass
         if target_ws is not None:
             workspaces.add(target_ws)
         with contextlib.ExitStack() as reservation:
