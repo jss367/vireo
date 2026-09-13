@@ -351,6 +351,12 @@ body.sidebar-resizing {
   background: var(--bg-panel);
   box-shadow: 0 6px 24px rgba(0,0,0,.2);
 }
+/* Visible for feedback but transparent to clicks while a double-click may
+   still be in flight — the second click passes through to the photo. */
+#batchBar.batch-bar-inert,
+#batchBar.batch-bar-inert * {
+  pointer-events: none;
+}
 #batchBar > button, #batchCount { white-space: nowrap; }
 .content-area:has(#batchBar[style*="flex"]) .grid-container {
   padding-bottom: calc(var(--batch-bar-height, 100px) + 28px);
@@ -7942,36 +7948,76 @@ new ResizeObserver(function(entries) {
   bar.parentElement.style.setProperty('--batch-bar-height', bar.offsetHeight + 'px');
 }).observe(document.getElementById('batchBar'));
 
-// The bar floats over the photo pane, and the click that raises it is also the
-// first click of a double-click. Appearing immediately would put a batch
-// button — Delete among them — under the cursor in time to take the second
-// click, so the photo opens nothing and a destructive action is one pixel of
-// bad luck away. Wait out the double-click window before showing it; hiding
+// The bar floats over the photo pane, and the click that raises it is also
+// the first click of a double-click. If the bar accepted clicks the moment
+// it appeared, a batch button — Delete among them — would sit under the
+// cursor in time to take the second click, so the photo opens nothing and
+// a destructive action is one pixel of bad luck away. Show the bar as
+// inert (visible for feedback but pointer-events: none, so the second
+// click passes through to the photo underneath) and only activate it once
+// the click gesture is clearly done — a fixed hide-delay cannot be trusted
+// because platform double-click thresholds vary: macOS defaults around
+// 500 ms, Windows around 500, and accessibility settings can push either
+// well past a second. The quiet timer below is a fallback for a stationary
+// pointer; every fresh mousedown while the bar is still inert refreshes
+// it, so a slow double- or triple-click all pass through together. Hiding
 // stays immediate.
-var BATCH_BAR_SHOW_DELAY_MS = 400;
-var batchBarShowTimer = null;
+var BATCH_BAR_ACTIVATE_QUIET_MS = 600;
+var batchBarActivateTimer = null;
 
-function showBatchBarAfterDoubleClickWindow(bar) {
-  if (bar.style.display === 'flex' || batchBarShowTimer) return;
-  batchBarShowTimer = setTimeout(function() {
-    batchBarShowTimer = null;
-    // The selection can be gone again by now (double-click, then Escape).
-    if (getActiveSelection().length >= 1) bar.style.display = 'flex';
-  }, BATCH_BAR_SHOW_DELAY_MS);
+function scheduleBatchBarActivation() {
+  if (batchBarActivateTimer) clearTimeout(batchBarActivateTimer);
+  batchBarActivateTimer = setTimeout(activateBatchBar, BATCH_BAR_ACTIVATE_QUIET_MS);
 }
+
+function activateBatchBar() {
+  var bar = document.getElementById('batchBar');
+  if (bar) bar.classList.remove('batch-bar-inert');
+  if (batchBarActivateTimer) {
+    clearTimeout(batchBarActivateTimer);
+    batchBarActivateTimer = null;
+  }
+}
+
+// A mousedown on a photo card could be the first (or Nth) click of a
+// double-click. Re-inert the bar and extend the quiet window so a slow
+// second click passes through to the card underneath — this covers both
+// the initial gesture that raises the bar and gestures on cards while the
+// bar is already visible from an earlier selection. Mousedowns targeting
+// the bar itself (a batch button) are left alone so those buttons stay
+// clickable. Capture phase so this runs even if a card's handler stops
+// propagation.
+document.addEventListener('mousedown', function(event) {
+  if (event.button !== 0) return;
+  var bar = document.getElementById('batchBar');
+  if (!bar || bar.style.display !== 'flex') return;
+  var target = event.target;
+  if (!target || !target.closest) return;
+  if (target.closest('#batchBar')) return;
+  if (!target.closest('.grid-card, .browse-stack-member')) return;
+  if (!bar.classList.contains('batch-bar-inert')) {
+    bar.classList.add('batch-bar-inert');
+  }
+  scheduleBatchBarActivation();
+}, true);
 
 function updateBatchBar() {
   var bar = document.getElementById('batchBar');
   if (!bar) return;
   var ids = getActiveSelection();
   if (ids.length >= 1) {
-    showBatchBarAfterDoubleClickWindow(bar);
+    if (bar.style.display !== 'flex') {
+      bar.classList.add('batch-bar-inert');
+      bar.style.display = 'flex';
+      scheduleBatchBarActivation();
+    }
     document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
   } else {
-    if (batchBarShowTimer) {
-      clearTimeout(batchBarShowTimer);
-      batchBarShowTimer = null;
+    if (batchBarActivateTimer) {
+      clearTimeout(batchBarActivateTimer);
+      batchBarActivateTimer = null;
     }
+    bar.classList.remove('batch-bar-inert');
     bar.style.display = 'none';
   }
   updateCompareButton(ids);

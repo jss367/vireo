@@ -1,4 +1,5 @@
 import json
+import re
 
 from playwright.sync_api import expect
 
@@ -137,17 +138,17 @@ def test_single_click_reveals_batch_bar(live_server, page):
     page.keyboard.press("Escape")
 
 
-def test_batch_bar_holds_off_until_the_double_click_window_passes(
+def test_batch_bar_starts_inert_so_a_slow_double_click_passes_through(
     live_server, page
 ):
-    """The bar must not appear in time to take the second click of a
-    double-click.
+    """The bar must not intercept clicks while a double-click is in flight.
 
-    It floats over the photo pane, and the click that creates the selection is
-    also the first click of a double-click. Appearing at once dropped a row of
-    batch buttons — Delete among them — under the resting cursor, so
-    double-clicking a photo low in the grid opened nothing and aimed the
-    second click at whichever button landed there.
+    It floats over the photo pane, and the click that creates the selection
+    is also the first click of a double-click. A fixed hide-delay cannot be
+    trusted here — macOS defaults around 500 ms, and accessibility settings
+    can push the platform threshold well past a second — so the bar shows
+    inert (pointer-events: none) and only activates once the click flurry
+    has been quiet for a window that any fresh mousedown refreshes.
     """
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -156,14 +157,20 @@ def test_batch_bar_holds_off_until_the_double_click_window_passes(
     first = page.locator(".grid-card").first
     first.wait_for(state="visible")
 
-    # Stretch the hold-off so this asserts the rule rather than the clock.
-    page.evaluate("BATCH_BAR_SHOW_DELAY_MS = 4000")
+    # Stretch the quiet window so this asserts the rule rather than the clock.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 4000")
     first.click()
 
+    # The bar appears immediately for feedback but starts inert — its clicks
+    # (and its children's) pass through to the photo underneath.
+    expect(bar).to_be_visible()
+    expect(bar).to_have_class(re.compile(r"\bbatch-bar-inert\b"))
     expect(page.locator("#batchCount")).to_have_text("1 selected")
-    expect(bar).to_be_hidden()
-    # It still arrives on its own, without any further interaction.
-    expect(bar).to_be_visible(timeout=8000)
+    expect(bar).to_have_css("pointer-events", "none")
+    # It activates on its own once the quiet window elapses, without any
+    # further interaction.
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=8000)
+    expect(bar).to_have_css("pointer-events", "auto")
 
 
 def test_double_click_opens_the_photo_the_batch_bar_would_cover(

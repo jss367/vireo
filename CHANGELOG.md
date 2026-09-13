@@ -58,8 +58,11 @@ All notable changes to Vireo are documented in this file.
   floating selection bar appeared the instant the first click selected a
   photo, landing on top of the photo pane in time to catch the second click —
   so the photo never opened and the click went to whichever batch button was
-  underneath, Delete included. The bar now waits out the double-click window
-  before appearing.
+  underneath, Delete included. The bar now shows inert (visible for
+  feedback, but transparent to clicks) until the click gesture is clearly
+  over, so a slow second click — including on systems whose double-click
+  window is much longer than a fixed hide-delay could safely cover — passes
+  through to the photo.
 - **Offline NAS no longer breaks the new-images check.** When a registered
   folder's volume is unreachable (an SMB share that dropped mid-walk, or one
   that is not mounted), the new-images walk now skips that folder and keeps
