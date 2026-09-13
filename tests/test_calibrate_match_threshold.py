@@ -73,6 +73,7 @@ def _seed_conn():
         );
         CREATE TABLE taxa (
             id INTEGER PRIMARY KEY,
+            inat_id INTEGER UNIQUE,
             rank TEXT
         );
         """
@@ -331,6 +332,102 @@ def test_collect_taxon_identity_does_not_leak_across_species():
     assert buckets[key]["incorrect"] == [0.35]
 
 
+def _add_local_taxon_keyword(conn, photo_id, name, taxon_row_id, inat_id):
+    """A keyword resolved by NAME, the way XMP/manual keywording resolves.
+
+    ``Database.add_keyword`` fills the local ``keywords.taxon_id`` and leaves
+    ``source_taxon_id`` NULL; only a prediction-created keyword carries the
+    external id directly. These are the human-confirmed identifications the
+    calibration leans on hardest, so the canonical id has to be reachable
+    through ``taxa.inat_id``.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO taxa(id, inat_id, rank) VALUES (?, ?, 'species')",
+        (taxon_row_id, inat_id),
+    )
+    cur = conn.execute(
+        """INSERT INTO keywords(name, is_species, type, taxon_id)
+           VALUES (?, 1, 'taxonomy', ?)""",
+        (name, taxon_row_id),
+    )
+    conn.execute(
+        "INSERT INTO photo_keywords(photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, cur.lastrowid),
+    )
+
+
+def test_collect_resolves_taxon_identity_through_the_taxa_table():
+    """A name-resolved keyword has no ``source_taxon_id`` — only a local
+    ``taxon_id`` pointing at a ``taxa`` row that holds the external id. The
+    predicate must reach it, or every XMP/manual identification whose keyword
+    spells the species differently from the model's label lands in the
+    ``incorrect`` bucket and drags the fitted floor down.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_local_taxon_keyword(
+        conn, 1, "Setophaga citrina", taxon_row_id=42, inat_id=7788,
+    )
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Hooded Warbler", max_match_score=0.42,
+        candidates=[("Hooded Warbler", 0.42, 7788)],
+    )
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
+    assert buckets[("bioclip", "cosine")]["incorrect"] == []
+
+
+def test_collect_counts_canonical_taxa_not_keyword_names():
+    """Two keywords, one taxon, is a single-species photo.
+
+    A photo keyworded with both the scientific and the common name of one
+    bird carries one species. Counting distinct names would read it as two
+    and discard the photo as multi-species — throwing away exactly the
+    carefully-identified rows, and disagreeing with the correctness predicate
+    above, which already treats the two names as the same taxon.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_local_taxon_keyword(
+        conn, 1, "Setophaga citrina", taxon_row_id=42, inat_id=7788,
+    )
+    _add_local_taxon_keyword(
+        conn, 1, "Hooded Warbler", taxon_row_id=42, inat_id=7788,
+    )
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Hooded Warbler", max_match_score=0.42,
+        candidates=[("Hooded Warbler", 0.42, 7788)],
+    )
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42], (
+        "One taxon under two names is one species — the photo must stay in "
+        "the calibration set."
+    )
+
+
+def test_collect_still_excludes_two_genuinely_different_taxa():
+    """The canonical count must not collapse two real species into one."""
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_local_taxon_keyword(
+        conn, 1, "Setophaga citrina", taxon_row_id=42, inat_id=7788,
+    )
+    _add_local_taxon_keyword(
+        conn, 1, "Setophaga petechia", taxon_row_id=43, inat_id=9999,
+    )
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Hooded Warbler", max_match_score=0.42,
+        candidates=[("Hooded Warbler", 0.42, 7788)],
+    )
+    assert mod.collect(conn) == {}
+
+
 def test_collect_includes_single_species_photo_with_repeated_keyword():
     """A photo whose 'multiple' species keywords are the same word in
     different casing is still a single-species photo. Case-insensitive
@@ -348,6 +445,63 @@ def test_collect_includes_single_species_photo_with_repeated_keyword():
     )
     buckets = mod.collect(conn)
     assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
+
+
+def test_collect_breaks_pooled_rows_down_by_label_list():
+    """One model's floor is fitted across every label list it has been run
+    against, because the threshold is stored and applied per model. The
+    breakdown has to come back with it so the report can say so.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    _add_photo_with_keyword(conn, photo_id=2, species="Robin")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-small",
+        top_species="Robin", max_match_score=0.42,
+        candidates=[("Robin", 0.42)],
+    )
+    _add_run(
+        conn, det_id=20, photo_id=2, model="bioclip", fp="fp-big",
+        top_species="Sparrow", max_match_score=0.30,
+    )
+    bucket = mod.collect(conn)[("bioclip", "cosine")]
+    assert sorted(bucket["fingerprints"]) == ["fp-big", "fp-small"]
+    assert bucket["fingerprints"]["fp-small"]["correct"] == 1
+    assert bucket["fingerprints"]["fp-big"]["incorrect"] == 1
+
+
+def test_label_list_warning_fires_only_on_a_wide_size_spread():
+    """Every cosine is list-independent, but ``max_match_score`` is a maximum
+    over the list, so its distribution moves with list size. Pooling similar
+    lists is fine and should stay quiet; pooling an 800-label list with a
+    2,000-label list is worth saying out loud.
+    """
+    mod = _load_module()
+    close = {
+        "fp-a": {"correct": 300, "incorrect": 10, "label_count": 900},
+        "fp-b": {"correct": 200, "incorrect": 5, "label_count": 1000},
+    }
+    lines, warning = mod._label_list_warning(close)
+    assert len(lines) == 2
+    assert warning is None
+
+    wide = {
+        "fp-a": {"correct": 300, "incorrect": 10, "label_count": 800},
+        "fp-b": {"correct": 200, "incorrect": 5, "label_count": 2000},
+    }
+    _lines, warning = mod._label_list_warning(wide)
+    assert warning is not None and "2.5x" in warning
+
+    # A list whose label count was never recorded cannot be compared; it is
+    # still listed, but it must not invent a spread.
+    unknown = {
+        "fp-a": {"correct": 300, "incorrect": 10, "label_count": None},
+        "fp-b": {"correct": 200, "incorrect": 5, "label_count": 2000},
+    }
+    lines, warning = mod._label_list_warning(unknown)
+    assert "label count unrecorded" in lines[0]
+    assert warning is None
 
 
 def test_floor_within_suppression_cap_never_exceeds_budget():

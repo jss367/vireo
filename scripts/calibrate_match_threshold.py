@@ -128,7 +128,7 @@ def schema_gap(conn):
 
 
 def collect(conn):
-    """Return ``{(model, score_kind): {"correct": [...], "incorrect": [...]}}``.
+    """Return ``{(model, score_kind): {"correct", "incorrect", "fingerprints"}}``.
 
     One sample per ``(detection, model, labels_fingerprint)`` classifier run,
     keyed by ``classifier_match_scores.max_match_score`` — the run-level
@@ -154,17 +154,35 @@ def collect(conn):
     Warbler``) refer to the same bird, and an exact-string comparison would
     score that correct run as ``incorrect``. So the predicate also matches
     on canonical taxon identity: the winning prediction's
-    ``source_taxon_id`` against the keyword's ``source_taxon_id``. Both
-    sides store the same external (iNat) id, and the join is against the
-    prediction row that names the run's ``top_species`` — the identity of
-    the winner, not of any lower-ranked alternate. Rows with no recorded
-    taxon id on either side fall back to the name comparison.
+    ``source_taxon_id`` against the keyword's canonical id, and the join is
+    against the prediction row that names the run's ``top_species`` — the
+    identity of the winner, not of any lower-ranked alternate. Rows with no
+    recorded taxon id on either side fall back to the name comparison.
+
+    A keyword's canonical id is ``COALESCE(k.source_taxon_id, t.inat_id)``,
+    not ``k.source_taxon_id`` alone. Only ``_add_source_species_keyword`` —
+    the path taken when a *prediction* creates the keyword — records
+    ``source_taxon_id``. A keyword that arrived from XMP or by hand goes
+    through the name-resolving ``add_keyword`` path, which fills the local
+    ``keywords.taxon_id`` and leaves ``source_taxon_id`` NULL. Those are
+    precisely the human-confirmed identifications this script calibrates
+    against, so comparing only ``source_taxon_id`` would drop the
+    common-name/scientific-name case for exactly the rows that matter and
+    bias the fitted floor downward by filing confirmed-correct runs as
+    ``incorrect``. ``taxa.inat_id`` is the same external id under a
+    different column.
+
+    ``fingerprints`` breaks the same rows down by the label list they were
+    scored against — see ``_label_list_warning`` for why a pooled floor needs
+    that breakdown printed beside it.
     """
     rows = conn.execute(
         """
         SELECT cms.classifier_model    AS model,
                cms.score_kind          AS score_kind,
                cms.max_match_score     AS match_score,
+               cms.labels_fingerprint  AS labels_fingerprint,
+               cms.label_count         AS label_count,
                EXISTS (
                    SELECT 1
                    FROM photo_keywords pk
@@ -176,8 +194,8 @@ def collect(conn):
                      AND (
                            k.name = cms.top_species COLLATE NOCASE
                            OR (
-                                 k.source_taxon_id IS NOT NULL
-                                 AND k.source_taxon_id IN (
+                                 COALESCE(k.source_taxon_id, t.inat_id) IS NOT NULL
+                                 AND COALESCE(k.source_taxon_id, t.inat_id) IN (
                                      SELECT pw.source_taxon_id
                                      FROM predictions pw
                                      WHERE pw.detection_id = cms.detection_id
@@ -205,8 +223,23 @@ def collect(conn):
           -- what the keyword says the photo is of, without a second species
           -- to confuse it. Zero-species photos are still excluded (their
           -- keyword can never make the prediction wrong).
+          --
+          -- Counted over canonical taxon identity, not over names. A photo
+          -- keyworded both "Hooded Warbler" and "Setophaga citrina" carries
+          -- one species, and counting names would read it as two and throw
+          -- the photo out — discarding exactly the carefully-identified rows
+          -- this calibration wants most, and doing so inconsistently with
+          -- the correctness predicate above, which already treats the two
+          -- names as the same taxon. The identity ladder matches that
+          -- predicate: external id first (from either column), then the
+          -- local ``taxa`` row, then the folded name for a keyword that
+          -- resolved to no taxon at all.
           AND (
-                SELECT COUNT(DISTINCT LOWER(k2.name))
+                SELECT COUNT(DISTINCT COALESCE(
+                    'inat:' || CAST(COALESCE(k2.source_taxon_id, t2.inat_id) AS TEXT),
+                    'taxon:' || CAST(k2.taxon_id AS TEXT),
+                    'name:' || LOWER(k2.name)
+                ))
                 FROM photo_keywords pk2
                 JOIN keywords k2 ON k2.id = pk2.keyword_id
                 LEFT JOIN taxa t2 ON t2.id = k2.taxon_id
@@ -220,11 +253,75 @@ def collect(conn):
     buckets = {}
     for row in rows:
         key = (row["model"], row["score_kind"] or "unknown")
-        bucket = buckets.setdefault(key, {"correct": [], "incorrect": []})
-        bucket["correct" if row["is_correct"] else "incorrect"].append(
-            float(row["match_score"])
+        bucket = buckets.setdefault(
+            key, {"correct": [], "incorrect": [], "fingerprints": {}},
         )
+        side = "correct" if row["is_correct"] else "incorrect"
+        bucket[side].append(float(row["match_score"]))
+        seen = bucket["fingerprints"].setdefault(
+            row["labels_fingerprint"],
+            {"correct": 0, "incorrect": 0, "label_count": None},
+        )
+        seen[side] += 1
+        if row["label_count"] is not None:
+            seen["label_count"] = row["label_count"]
     return buckets
+
+
+#: Ratio between the largest and smallest label list contributing to one
+#: model's pooled floor, above which the pooling is called out rather than
+#: quietly applied. Two-to-one is the point where "maximum over N labels"
+#: stops being roughly the same statistic on both sides.
+LABEL_SPREAD_WARN_RATIO = 2.0
+
+
+def _label_list_warning(fingerprints):
+    """Describe the label lists behind a pooled floor, and flag a wide spread.
+
+    Thresholds are stored and applied per MODEL (``match_confidence`` looks up
+    ``match_thresholds[model]``), so calibration pools every label list that
+    model has ever been run against. Each individual cosine or logit is
+    genuinely list-independent — that is the property the whole feature rests
+    on — but the statistic being calibrated is ``max_match_score``, the
+    maximum over the loaded list. The expected maximum grows with the number
+    of labels, so a 1,400-label list and an 800-label list are not quite
+    samples from the same distribution, and a pooled floor can respect the
+    suppression cap in aggregate while exceeding it for the list actually on
+    screen.
+
+    Calibrating per fingerprint instead would fix that and cost more than it
+    buys: ``--min-samples`` exists because a floor fitted to a few dozen rows
+    describes noise, and splitting one model's confirmed IDs across every
+    list it has ever seen is the fastest way to push every bucket under that
+    bar and emit no threshold at all. So the default stays pooled — and says
+    so out loud, with the counts, rather than presenting one number as if a
+    single population produced it.
+    """
+    lines = []
+    ordered = sorted(
+        fingerprints.items(),
+        key=lambda item: -(item[1]["correct"] + item[1]["incorrect"]),
+    )
+    for fingerprint, counts in ordered:
+        labels = counts["label_count"]
+        lines.append(
+            f"    {fingerprint or '(none)'}: "
+            f"{counts['correct']:,} correct, {counts['incorrect']:,} disagreed"
+            + (f", {labels:,} labels" if labels else ", label count unrecorded")
+        )
+    sizes = [c["label_count"] for c in fingerprints.values() if c["label_count"]]
+    warning = None
+    if len(sizes) > 1 and max(sizes) >= min(sizes) * LABEL_SPREAD_WARN_RATIO:
+        warning = (
+            f"    NOTE: these lists differ in size by "
+            f"{max(sizes) / min(sizes):.1f}x ({min(sizes):,} to {max(sizes):,} "
+            "labels). max_match_score is a maximum over the loaded list, so "
+            "its distribution shifts with list size; one pooled floor will "
+            "suppress more than the requested cap on the smaller list and "
+            "less on the larger. Consider calibrating against only the list "
+            "you actually classify with."
+        )
+    return lines, warning
 
 
 def suggest(correct, incorrect, max_suppression):
@@ -315,6 +412,15 @@ def main(argv=None):
         print(f"\n{model}  [{score_kind}]")
         print(f"  confirmed correct:   {len(correct):>7,}")
         print(f"  disagreed w/ keyword:{len(incorrect):>7,}")
+
+        fingerprints = bucket.get("fingerprints") or {}
+        if len(fingerprints) > 1:
+            print(f"  pooled from {len(fingerprints)} label lists:")
+            lines, warning = _label_list_warning(fingerprints)
+            for line in lines:
+                print(line)
+            if warning:
+                print(warning)
 
         if correct:
             ordered = sorted(correct)
