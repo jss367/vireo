@@ -507,6 +507,40 @@ def test_import_full_rejects_macos_other_app_bundle(app_and_db, tmp_path):
         assert "macos" in resp.get_json()["error"].lower()
 
 
+def test_job_import_full_rejects_no_active_workspace(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POST /api/jobs/import-full must refuse when no workspace is active.
+
+    Without this guard the request rides through the mutation-reservation
+    ``before_request`` hook (which lets no-workspace requests through so
+    routes that answer that state can respond cleanly), the worker's scan
+    calls ``set_active_workspace(None)`` and ``Database.add_folder``
+    silently skips the workspace link, and the later ``add_collection()``
+    raises — after the scanner has already committed catalog rows
+    invisible to every workspace.
+    """
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    Image.new('RGB', (100, 100)).save(os.path.join(str(src), 'test.jpg'))
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    resp = client.post('/api/jobs/import-full', json={
+        'source': str(src),
+        'destination': str(dst),
+    })
+    assert resp.status_code == 400
+    assert "workspace" in resp.get_json()["error"].lower()
+
+
 def test_scan_and_ingest_reject_non_string_path_with_400(app_and_db, tmp_path):
     """JSON primitives (``{"root": 123}``, ``{"source": true}``) reach the
     excluded-bundle helper before the directory check. The helper must not

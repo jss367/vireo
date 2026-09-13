@@ -1420,6 +1420,18 @@ def create_imports_blueprint(
     @background_job
     def api_job_import_full(ctx):
         """Full-chain import: copy files -> scan -> create collection."""
+        # A full import without an active workspace would copy files and
+        # then leave catalog rows invisible to every workspace: the
+        # worker's scan calls ``set_active_workspace(None)`` and
+        # ``Database.add_folder`` skips the workspace link, and the later
+        # ``add_collection()`` call raises because ``_ws_id()`` is
+        # unavailable — after the scanner has already committed rows.
+        # The mutation-reservation hook deliberately lets no-workspace
+        # requests through so routes that answer that state can respond
+        # cleanly; this route is not one of them, so refuse here. See
+        # the parallel guard at the top of ``api_job_scan``.
+        if ctx.workspace_id is None:
+            return json_error("no active workspace", 400)
         body = request.get_json(silent=True) or {}
         source = body.get("source", "")
         destination = body.get("destination", "")
