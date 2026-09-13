@@ -491,6 +491,74 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     assert abs(top_after - top_before) < 4
 
 
+def test_expanded_stack_paints_its_members_once(live_server, page):
+    """A tray's members are rendered once, not again per metadata response.
+
+    Expanding a stack paints its members, then two metadata requests (iNat
+    badges, colour labels) resolve a beat later. Re-rendering the tray for
+    each of those hands every member a fresh <img>, so a thumbnail the
+    browser had already decoded blanks and redownloads — and any click the
+    user has begun on a member lands on a node that no longer exists.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    hidden_member_id = burst_ids[0]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'late-metadata-burst' "
+            "WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+    # A hidden member only learns its iNat state from the request the
+    # expansion fires, so this badge appearing is proof that metadata landed
+    # on a card that was already on screen.
+    db.record_inat_submission(
+        hidden_member_id, 12345, "https://www.inaturalist.org/observations/12345"
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    # Count member cards as they are created rather than comparing before and
+    # after: the metadata responses land within milliseconds of the tray, far
+    # inside one round trip from the test.
+    page.evaluate(
+        """() => {
+          window.__memberNodesCreated = 0;
+          new MutationObserver(function(records) {
+            records.forEach(function(record) {
+              Array.prototype.forEach.call(record.addedNodes, function(node) {
+                if (node.nodeType !== 1) return;
+                if (node.classList.contains('browse-stack-member')) {
+                  window.__memberNodesCreated++;
+                }
+                window.__memberNodesCreated +=
+                  node.querySelectorAll('.browse-stack-member').length;
+              });
+            });
+          }).observe(document.body, {childList: true, subtree: true});
+        }"""
+    )
+
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    expect(tray.locator(".browse-stack-member")).to_have_count(3)
+    expect(
+        tray.locator(f'.browse-stack-member[data-id="{hidden_member_id}"] .inat-badge')
+    ).to_be_visible()
+    # The colour-label request resolves independently of the iNat one; give it
+    # room to land before counting.
+    page.wait_for_timeout(500)
+    assert page.evaluate("() => window.__memberNodesCreated") == 3
+
+
 def test_stack_metadata_callbacks_follow_promoted_cover(live_server, page):
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
@@ -513,15 +581,33 @@ def test_stack_metadata_callbacks_follow_promoted_cover(live_server, page):
         """async ids => {
           var oldCoverId = ids[1];
           var promotedId = ids[0];
+          // The colour dot only renders for someone who has the colour field
+          // on their cards, which this profile does not by default.
+          if (cardFields.indexOf('color_label') === -1) {
+            cardFields = cardFields.concat(['color_label']);
+          }
           var originalLoadInatStatus = loadInatStatus;
           var originalFetchColorLabels = fetchColorLabels;
           var releaseInat;
           var releaseColors;
+          // Each fake lands its metadata the way the real fetch does — into
+          // the shared map the cards read — so the assertions below are about
+          // what the member card shows, not about which function repainted it.
           loadInatStatus = function() {
-            return new Promise(function(resolve) { releaseInat = resolve; });
+            return new Promise(function(resolve) {
+              releaseInat = function() {
+                inatSubmitted[String(promotedId)] = true;
+                resolve();
+              };
+            });
           };
           fetchColorLabels = function() {
-            return new Promise(function(resolve) { releaseColors = resolve; });
+            return new Promise(function(resolve) {
+              releaseColors = function() {
+                colorLabels[promotedId] = 'red';
+                resolve();
+              };
+            });
           };
           try {
             await toggleBrowseStack(null, oldCoverId);
@@ -531,24 +617,31 @@ def test_stack_metadata_callbacks_follow_promoted_cover(live_server, page):
             await reconcileBrowseStackCovers([oldCoverId, promotedId]);
 
             var currentCoverId = browseStackCoverIdForPhoto(oldCoverId);
-            var traySelector = '.browse-stack-tray[data-stack-cover-id="'
-              + currentCoverId + '"]';
-            var tray = document.querySelector(traySelector);
-            tray.dataset.beforeInatRefresh = '1';
+            var memberSelector = '.browse-stack-tray[data-stack-cover-id="'
+              + currentCoverId + '"] .browse-stack-member[data-id="'
+              + promotedId + '"]';
+            // Tag the member node itself: a repaint has to reach this card
+            // without replacing it, or a thumbnail it already decoded — and a
+            // click the user is halfway through — go with the old node.
+            document.querySelector(memberSelector).dataset.sameNode = '1';
+
             releaseInat();
             await new Promise(function(resolve) { setTimeout(resolve, 0); });
-            var inatRefreshed = !document.querySelector(traySelector)
-              .hasAttribute('data-before-inat-refresh');
+            var inatRefreshed = !!document.querySelector(
+              memberSelector + ' .inat-badge'
+            );
 
-            document.querySelector(traySelector).dataset.beforeColorRefresh = '1';
             releaseColors();
             await new Promise(function(resolve) { setTimeout(resolve, 0); });
-            var colorsRefreshed = !document.querySelector(traySelector)
-              .hasAttribute('data-before-color-refresh');
+            var colorsRefreshed = !!document.querySelector(
+              memberSelector + ' .grid-card-color[data-color="red"]'
+            );
             return {
               currentCoverId: currentCoverId,
               inatRefreshed: inatRefreshed,
               colorsRefreshed: colorsRefreshed,
+              memberKeptItsNode: document.querySelector(memberSelector)
+                .dataset.sameNode === '1',
             };
           } finally {
             loadInatStatus = originalLoadInatStatus;
@@ -561,6 +654,7 @@ def test_stack_metadata_callbacks_follow_promoted_cover(live_server, page):
         "currentCoverId": burst_ids[0],
         "inatRefreshed": True,
         "colorsRefreshed": True,
+        "memberKeptItsNode": True,
     }
 
 
