@@ -1,4 +1,5 @@
 import json
+import re
 
 from playwright.sync_api import expect
 
@@ -135,6 +136,366 @@ def test_single_click_reveals_batch_bar(live_server, page):
         "Develop", exact=True
     )).to_be_visible()
     page.keyboard.press("Escape")
+
+
+def test_batch_bar_starts_inert_so_a_slow_double_click_passes_through(
+    live_server, page
+):
+    """The bar must not intercept clicks while a double-click is in flight.
+
+    It floats over the photo pane, and the click that creates the selection
+    is also the first click of a double-click. A fixed hide-delay cannot be
+    trusted here — macOS defaults around 500 ms, and accessibility settings
+    can push the platform threshold well past a second — so the bar shows
+    inert (pointer-events: none) and only activates once the click flurry
+    has been quiet for a window that any fresh mousedown refreshes.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    bar = page.locator("#batchBar")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+
+    # Stretch the quiet window so this asserts the rule rather than the clock.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 4000")
+    first.click()
+
+    # The bar appears immediately for feedback but starts inert — its clicks
+    # (and its children's) pass through to the photo underneath.
+    expect(bar).to_be_visible()
+    expect(bar).to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+    expect(page.locator("#batchCount")).to_have_text("1 selected")
+    expect(bar).to_have_css("pointer-events", "none")
+    # It activates on its own once the quiet window elapses, without any
+    # further interaction.
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=8000)
+    expect(bar).to_have_css("pointer-events", "auto")
+
+
+def test_double_click_opens_the_photo_the_batch_bar_would_cover(
+    live_server, page
+):
+    """A double-click low in the grid opens the lightbox, not a batch action.
+
+    Expanding a stack pushes its members down into the strip the batch bar
+    occupies, which is where the raised bar used to intercept the second
+    click.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'covered-burst' WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
+    expect(member).to_be_visible()
+    member.dblclick()
+
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+
+
+def test_batch_bar_activates_as_soon_as_the_pointer_moves(live_server, page):
+    """Pointer movement, not a clock, is what ends the click gesture.
+
+    Reaching a button in the bar means moving the pointer there and a
+    double-click does not move it, so movement releases the bar immediately
+    however long the platform's double-click interval is. The quiet timer is
+    only a hatch for a pointer that never moves at all, so it must not be
+    what does the work here.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    bar = page.locator("#batchBar")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+
+    # Far longer than any platform double-click interval, so the timer cannot
+    # be what activates the bar below.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 60000")
+    first.click()
+    expect(bar).to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+
+    page.mouse.move(5, 5)
+
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+    expect(bar).to_have_css("pointer-events", "auto")
+
+
+def test_a_bar_click_after_deliberate_movement_is_not_redirected_to_the_photo(
+    live_server, page
+):
+    """Nudging the pointer off a card and clicking the bar above it hits the
+    bar, not the photo.
+
+    The straggling-click guard cancels a click that lands on the bar near a
+    recent card mousedown, which is right when the quiet timer stranded the
+    user mid-gesture and wrong once the pointer has moved — moving is how
+    anyone reaches the bar. Without that distinction, a few pixels of travel
+    between selecting a card and clicking the bar over it would turn a batch
+    action into a lightbox open.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'nudge-burst' WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
+    expect(member).to_be_visible()
+
+    box = member.bounding_box()
+    assert box is not None
+    click_x = box["x"] + box["width"] / 2
+    click_y = box["y"] + box["height"] / 2
+    page.mouse.click(click_x, click_y)
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    # The bar now covers this point; travel far enough to release it, but stay
+    # inside the straggling-click guard's radius of the card mousedown.
+    page.mouse.move(click_x + 10, click_y)
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+    assert page.evaluate(
+        "p => !!document.elementFromPoint(p[0], p[1]).closest('#batchBar')",
+        [click_x + 10, click_y],
+    )
+    page.mouse.click(click_x + 10, click_y)
+
+    # The click belonged to the bar; it must not have been turned into a
+    # double-click on the photo underneath.
+    expect(page.locator("#lightboxOverlay")).to_be_hidden()
+
+
+def test_slow_double_click_still_opens_photo_when_bar_activated_between_clicks(
+    live_server, page
+):
+    """The second click of a slow double-click must open the photo even if
+    the batch bar has already activated between the two clicks.
+
+    Accessibility settings can push the platform double-click threshold well
+    past the fixed quiet window, so the bar can become clickable before the
+    second click lands. A stack expansion pushes a card into the strip the
+    bar covers; with the quiet window collapsed, the bar activates before
+    the second click; the guard is expected to detect the click on the
+    (now-active) bar as the straggling half of a double-click and dispatch
+    a dblclick to the card underneath.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'slow-dbl-burst' WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    # Collapse the quiet window so the bar activates immediately after the
+    # first click — the scenario the guard has to cover.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 1")
+
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
+    expect(member).to_be_visible()
+
+    # First click of the slow double-click lands on the stack member.
+    box = member.bounding_box()
+    assert box is not None
+    click_x = box["x"] + box["width"] / 2
+    click_y = box["y"] + box["height"] / 2
+    page.mouse.click(click_x, click_y)
+
+    # The bar shows and, with the shortened quiet window, activates before
+    # the second click arrives.
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=2000)
+
+    # The second click at the same coordinates — the pointer has not moved,
+    # as a real double-click's pointer does not — now targets the active
+    # bar. The straggling-click guard must redirect it to the card.
+    page.mouse.click(click_x, click_y)
+
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg", timeout=3000)
+
+
+def test_double_click_slower_than_every_timer_still_opens_the_photo(
+    live_server, page
+):
+    """A second click arriving long after the quiet window has lapsed still
+    opens the photo.
+
+    A platform double-click interval can be configured past any constant we
+    could pick, so the guard is bounded by pointer movement instead of a
+    clock: while the pointer has not left the card, a click landing on the
+    bar belongs to that card's gesture however late it is. This runs with the
+    shipped quiet window and then waits well past it.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'late-dbl-burst' WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
+    expect(member).to_be_visible()
+
+    box = member.bounding_box()
+    assert box is not None
+    click_x = box["x"] + box["width"] / 2
+    click_y = box["y"] + box["height"] / 2
+    page.mouse.click(click_x, click_y)
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    # Let the quiet timer lapse, then wait far longer than any interval a
+    # platform offers before the second click of the gesture arrives.
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=5000)
+    page.wait_for_timeout(2500)
+    page.mouse.click(click_x, click_y)
+
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg", timeout=3000)
+
+
+def test_keyboard_activated_batch_button_is_not_swallowed_by_the_redirect(
+    live_server, page
+):
+    """Enter/Space on a focused batch button must fire the button.
+
+    The straggling-click redirect keeps the second half of a stationary
+    mouse double-click from firing a batch action instead of opening the
+    photo. It reads pointer state — where the last card mousedown landed
+    and whether the pointer has moved since — which a keyboard-triggered
+    click cannot supply. Without an exemption, that click looks identical
+    to a stationary mouse click on the bar and is silently cancelled
+    (stopImmediatePropagation), so the requested batch action never runs.
+    """
+    page.goto(f"{live_server['url']}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+
+    bar = page.locator("#batchBar")
+    # Collapse the quiet window so the bar activates immediately and the
+    # test does not need to wait a second for the shipped interval.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 1")
+    first.click()
+    expect(bar).to_be_visible()
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=2000)
+
+    # The Clear button clears the selection when its handler runs; its
+    # observable effect (bar hidden, selection empty) is a clean signal
+    # that the click reached the button rather than being swallowed.
+    clear_btn = page.get_by_role("button", name="Clear", exact=True)
+    clear_btn.focus()
+    page.keyboard.press("Enter")
+
+    expect(bar).to_be_hidden()
+    assert page.evaluate("getActiveSelection().length") == 0
+
+
+def test_non_card_selection_flow_shows_bar_active_immediately(
+    live_server, page
+):
+    """Ctrl/Cmd+A and Select-all raise the bar without a card gesture to
+    shield, so the bar must not start inert.
+
+    The inert-until-quiet stretch only exists to keep the bar from
+    intercepting the second half of a card double-click that raised it.
+    A selection created without any card mousedown has no such gesture,
+    and starting inert there would let a batch-button click inside the
+    quiet window pass through the transparent bar to the grid beneath,
+    replacing the just-created selection with whichever card sits under
+    the cursor.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_hidden()
+
+    # Stretch the quiet window so the assertion is about the starting state,
+    # not about a timer that would activate the bar anyway on a fast machine.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 60000")
+
+    # Simulate a Select-all-style flow: populate the selection without any
+    # card mousedown, then let updateBatchBar() raise the bar.
+    selected_ids = live_server["data"]["photos"][:3]
+    page.evaluate(
+        """
+        photoIds => {
+          selectedPhotos.clear();
+          photoIds.forEach(id => selectedPhotos.add(id));
+          selectedPhotoId = null;
+          renderGrid();
+          updateBatchBar();
+        }
+        """,
+        selected_ids,
+    )
+
+    expect(bar).to_be_visible()
+    # The bar came up for a non-card flow, so it must not be inert — a
+    # transparent bar over the grid would send the very next batch-button
+    # click straight through to the card beneath.
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+    expect(bar).to_have_css("pointer-events", "auto")
+
+    # Clicking Clear now actually runs its handler (bar hides, selection
+    # empties). Under the pre-fix behavior the click would fall through to
+    # the grid, leaving the bar visible with a different selection.
+    page.locator("#batchBar button", has_text="Clear").click()
+    expect(bar).to_be_hidden()
+    assert page.evaluate("getActiveSelection().length") == 0
 
 
 def test_export_defaults_beside_original_and_offers_folder_browser(
