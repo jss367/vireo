@@ -7958,15 +7958,16 @@ new ResizeObserver(function(entries) {
 // the click gesture is clearly done. A fixed hide-delay cannot be trusted
 // alone because platform double-click thresholds vary widely (macOS around
 // 500 ms, Windows around 500, and accessibility settings can push either
-// past a second), so activation combines three signals: (1) the pointer
-// moves noticeably from the last card mousedown — the real signal that
-// the user is reaching for a button rather than clicking again; (2) a
-// quiet fallback timer covers a truly stationary pointer; (3) a click
-// that lands on the bar while it looks like the second half of a card
-// double-click is redirected to the card underneath as a synthetic
-// dblclick, so even a bar that activated between the two clicks of an
-// unusually slow double-click cannot swallow it. Every fresh card
-// mousedown refreshes the inert state and the quiet timer. Hiding stays
+// past a second), so what ends the inert state is the pointer leaving the
+// card it was pressed on: every batch button is somewhere it has to travel
+// to, and a double-click does not travel. (1) That movement releases the
+// bar at once, so buttons respond as soon as someone actually reaches for
+// them; (2) a quiet timer releases it anyway for a pointer that never
+// moves, so the bar is not stuck inert; (3) until the pointer does move, a
+// click landing on the bar is redirected to the card underneath as a
+// synthetic dblclick — which is what covers a double-click slower than
+// that timer, without anyone having to guess the interval. Every fresh
+// card mousedown re-inerts the bar and restarts the timer. Hiding stays
 // immediate.
 var BATCH_BAR_ACTIVATE_QUIET_MS = 1500;
 // Distance the pointer has to travel before we treat the movement as a
@@ -7974,24 +7975,17 @@ var BATCH_BAR_ACTIVATE_QUIET_MS = 1500;
 // stationary hand, well below the distance from any card centre to the
 // nearest batch button.
 var BATCH_BAR_ACTIVATE_MOVE_PX = 8;
-// Upper bound on any plausible platform double-click threshold used by
-// the straggling-click redirect below. Broader than macOS/Windows
-// defaults; still narrow enough that a deliberate batch click at the
-// same coordinates is rare (a real batch click needs the pointer moved
-// to a button, which trips the move threshold above first).
-var BATCH_BAR_STRAGGLING_CLICK_MS = 1500;
-var BATCH_BAR_STRAGGLING_CLICK_PX = 12;
 var batchBarActivateTimer = null;
 var batchBarLastCardMouseDown = null;
-// Whether the bar was released by the pointer moving off the card rather than
-// by the quiet timer. Movement is a deliberate reach for a button, so a click
-// that follows it is meant for the bar and must not be redirected.
-var batchBarActivatedByMovement = false;
+// Whether the pointer has left that mousedown's neighbourhood. This, and not
+// any elapsed time, is what says the click gesture is over: every batch button
+// is somewhere the pointer has to travel to, and a double-click does not
+// travel. While it stays false the gesture is still open no matter how long
+// the platform's double-click interval is, so neither the release below nor
+// the straggling-click redirect needs a window to guess at.
+var batchBarPointerMovedSinceCardDown = true;
 
 function scheduleBatchBarActivation() {
-  // Re-inerting starts a fresh gesture: whatever released the bar last time
-  // says nothing about this one.
-  batchBarActivatedByMovement = false;
   if (batchBarActivateTimer) clearTimeout(batchBarActivateTimer);
   batchBarActivateTimer = setTimeout(activateBatchBar, BATCH_BAR_ACTIVATE_QUIET_MS);
 }
@@ -8006,8 +8000,8 @@ function activateBatchBar() {
 }
 
 // A mousedown on a photo card could be the first (or Nth) click of a
-// double-click. Record its position/time for the straggling-click guard
-// below (recording happens even before the bar is visible, so the very
+// double-click. Record where it landed and reset the moved-since flag the
+// guards below read (recorded even before the bar is visible, so the very
 // first click of a fresh double-click is covered), and re-inert the bar
 // and extend the quiet window whenever the bar is already up — this
 // covers both the initial gesture that raises the bar and gestures on
@@ -8020,9 +8014,8 @@ document.addEventListener('mousedown', function(event) {
   var target = event.target;
   if (!target || !target.closest) return;
   if (target.closest('.grid-card, .browse-stack-member')) {
-    batchBarLastCardMouseDown = {
-      t: event.timeStamp, x: event.clientX, y: event.clientY,
-    };
+    batchBarLastCardMouseDown = {x: event.clientX, y: event.clientY};
+    batchBarPointerMovedSinceCardDown = false;
   }
   var bar = document.getElementById('batchBar');
   if (!bar || bar.style.display !== 'flex') return;
@@ -8039,23 +8032,26 @@ document.addEventListener('mousedown', function(event) {
 // click at the same spot. Activate immediately so batch buttons respond
 // as soon as the user actually wants them to.
 document.addEventListener('mousemove', function(event) {
-  var bar = document.getElementById('batchBar');
-  if (!bar || bar.style.display !== 'flex') return;
-  if (!bar.classList.contains('batch-bar-inert')) return;
   var last = batchBarLastCardMouseDown;
-  if (!last) return;
+  if (!last || batchBarPointerMovedSinceCardDown) return;
   var dx = event.clientX - last.x;
   var dy = event.clientY - last.y;
   if (dx * dx + dy * dy < BATCH_BAR_ACTIVATE_MOVE_PX * BATCH_BAR_ACTIVATE_MOVE_PX) return;
-  batchBarActivatedByMovement = true;
-  activateBatchBar();
+  // Recorded whatever the bar is doing, because the straggling-click redirect
+  // below reads it after the quiet timer has already released the bar.
+  batchBarPointerMovedSinceCardDown = true;
+  var bar = document.getElementById('batchBar');
+  if (bar && bar.style.display === 'flex'
+      && bar.classList.contains('batch-bar-inert')) {
+    activateBatchBar();
+  }
 }, true);
 
-// A click on the bar close in time and position to a card mousedown is
-// the second half of a double-click that raised the bar over the card.
-// If the bar activated between the two clicks (an accessibility setting
-// with an unusually slow double-click threshold, or any timer that
-// happened to fire in between), this cancels the click on the bar and
+// A click that lands on the bar without the pointer having left the card
+// it was last pressed on is the second half of a double-click that raised
+// the bar over that card. If the bar activated between the two clicks —
+// a double-click interval slower than the quiet timer, which any platform
+// can be configured to have — this cancels the click on the bar and
 // dispatches a dblclick on the card underneath, so the photo opens
 // instead of the button firing.
 document.addEventListener('click', function(event) {
@@ -8064,17 +8060,14 @@ document.addEventListener('click', function(event) {
   if (!target.closest('#batchBar')) return;
   var bar = document.getElementById('batchBar');
   if (!bar || bar.style.display !== 'flex') return;
-  // Only the quiet timer can strand a user mid-gesture. If the pointer moved
-  // off the card instead, the bar was released deliberately and this click is
-  // meant for the button under it — redirecting it would turn a batch action
-  // into a lightbox open for anyone who nudges the mouse a few pixels between
-  // selecting a card and clicking the bar above it.
-  if (batchBarActivatedByMovement) return;
-  var last = batchBarLastCardMouseDown;
-  if (!last) return;
-  if (event.timeStamp - last.t > BATCH_BAR_STRAGGLING_CLICK_MS) return;
-  if (Math.abs(event.clientX - last.x) > BATCH_BAR_STRAGGLING_CLICK_PX) return;
-  if (Math.abs(event.clientY - last.y) > BATCH_BAR_STRAGGLING_CLICK_PX) return;
+  if (!batchBarLastCardMouseDown) return;
+  // The pointer has not left the card it was pressed on, so this click cannot
+  // be a reach for a button — every button is somewhere it would have had to
+  // travel to. It is the second half of that card's double-click, arriving
+  // after the quiet timer gave up waiting. No elapsed-time bound: the whole
+  // point is that the platform's interval is not ours to guess. Once the
+  // pointer does move, the release above fires and this stops applying.
+  if (batchBarPointerMovedSinceCardDown) return;
   event.stopImmediatePropagation();
   event.preventDefault();
   bar.classList.add('batch-bar-inert');

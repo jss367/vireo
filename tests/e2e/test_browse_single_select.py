@@ -355,6 +355,57 @@ def test_slow_double_click_still_opens_photo_when_bar_activated_between_clicks(
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg", timeout=3000)
 
 
+def test_double_click_slower_than_every_timer_still_opens_the_photo(
+    live_server, page
+):
+    """A second click arriving long after the quiet window has lapsed still
+    opens the photo.
+
+    A platform double-click interval can be configured past any constant we
+    could pick, so the guard is bounded by pointer movement instead of a
+    clock: while the pointer has not left the card, a click landing on the
+    bar belongs to that card's gesture however late it is. This runs with the
+    shipped quiet window and then waits well past it.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'late-dbl-burst' WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
+    expect(member).to_be_visible()
+
+    box = member.bounding_box()
+    assert box is not None
+    click_x = box["x"] + box["width"] / 2
+    click_y = box["y"] + box["height"] / 2
+    page.mouse.click(click_x, click_y)
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    # Let the quiet timer lapse, then wait far longer than any interval a
+    # platform offers before the second click of the gesture arrives.
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=5000)
+    page.wait_for_timeout(2500)
+    page.mouse.click(click_x, click_y)
+
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg", timeout=3000)
+
+
 def test_export_defaults_beside_original_and_offers_folder_browser(
     live_server, page,
 ):
