@@ -4730,6 +4730,8 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
     import pipeline_job
 
     app, db = app_and_db
+    original_workspace = db._ws_id()
+    other_workspace = db.create_workspace("Other photos")
     entered, release = threading.Event(), threading.Event()
     existing_release = threading.Event()
     runner = app._job_runner
@@ -4757,6 +4759,11 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
         existing_release.set()
         wait_for_job_via_client(client, existing)
         assert entered.wait(10)
+        assert client.post(f"/api/workspaces/{other_workspace}/activate").status_code == 200
+        delete_workspace = client.delete(f"/api/workspaces/{original_workspace}")
+        assert delete_workspace.status_code == 409, delete_workspace.get_json()
+        assert db.get_workspace(original_workspace) is not None
+        assert client.post(f"/api/workspaces/{original_workspace}/activate").status_code == 200
         deleted = client.post("/api/batch/delete", json={
             "photo_ids": imported["result"]["photo_ids"], "mode": "disk_permanent",
         })
@@ -4771,6 +4778,9 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
         assert moved["status"] == "completed", moved
     assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 1
     assert not list((tmp_path / "staging").rglob("*.jpg"))
+    assert client.post(f"/api/workspaces/{other_workspace}/activate").status_code == 200
+    assert client.delete(f"/api/workspaces/{original_workspace}").status_code == 200
+    assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 1
 
 
 def test_managed_import_requires_processing(app_and_db, tmp_path):
@@ -4931,6 +4941,45 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     assert not os.path.exists(staging)
     assert client.get("/api/import/pending-archives").get_json()["items"] == []
     assert client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["already_sent"]
+
+
+def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_and_db, tmp_path, monkeypatch):
+    import shutil
+
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    workspace_id = db._ws_id()
+    other = db.create_workspace("Other photos")
+    staging = imported["config"]["managed_staging"]["destination"]
+    archive_id = imported["config"]["pending_archive_id"]
+    remove = shutil.rmtree
+
+    def cleanup(path, *args, **kwargs):
+        if os.path.realpath(path) == os.path.realpath(staging):
+            raise PermissionError("Local cleanup permission denied")
+        return remove(path, *args, **kwargs)
+
+    def no_rsync(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(shutil, "rmtree", cleanup)
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    client = app.test_client()
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send")
+    sent = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert "permission denied" in sent["result"]["cleanup_error"]
+    assert "local cleanup needs attention" in sent["result"]["summary"]
+    assert staging in sent["result"]["summary"]
+    assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 2
+    assert len(list((tmp_path / "staging").rglob("*.jpg"))) == 2
+    assert client.get("/api/import/pending-archives").get_json()["items"] == []
+    assert client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["already_sent"]
+    assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
+    assert client.delete(f"/api/workspaces/{workspace_id}").status_code == 200
+    assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 2
 
 
 def test_pending_archive_persists_without_job_history_and_scopes_workspace(app_and_db, tmp_path, monkeypatch):

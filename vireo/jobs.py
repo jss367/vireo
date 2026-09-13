@@ -132,6 +132,7 @@ class JobRunner:
         self._queued_pipelines = {}  # job_id -> dict(work_fn, config, ...)
         self._pipeline_admissions = {}  # workspace -> enqueues persisting outside the lock
         self._workspace_mutations = {}  # workspace -> synchronous API requests
+        self._exclusive_workspace_mutations = set()
         # Monotonic suffix so two enqueues landing in the same
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
@@ -989,11 +990,13 @@ class JobRunner:
         return job, work_fn
 
     @contextmanager
-    def workspace_mutation(self, workspace_id):
+    def workspace_mutation(self, workspace_id, *, exclusive=False):
         """Reserve synchronous mutations against transfers for their full duration."""
         with self._lock:
-            self._check_workspace_admission_locked(workspace_id)
+            self._check_workspace_admission_locked(workspace_id, exclusive=exclusive)
             self._workspace_mutations[workspace_id] = self._workspace_mutations.get(workspace_id, 0) + 1
+            if exclusive:
+                self._exclusive_workspace_mutations.add(workspace_id)
         try:
             yield
         finally:
@@ -1001,6 +1004,8 @@ class JobRunner:
                 self._workspace_mutations[workspace_id] -= 1
                 if not self._workspace_mutations[workspace_id]:
                     del self._workspace_mutations[workspace_id]
+                if exclusive:
+                    self._exclusive_workspace_mutations.discard(workspace_id)
 
     def wait_for_workspace_transfer(self, job_id):
         """Reserve an automatic transfer batch after its producing jobs finish.
@@ -1045,6 +1050,8 @@ class JobRunner:
         """Check both sides of a transfer reservation under the registration lock."""
         if not blocking:
             return
+        if workspace_id in self._exclusive_workspace_mutations:
+            raise WorkspaceBusyError("Wait for the workspace operation to finish before starting another job or change")
         active = [j for j in self._jobs.values()
                   if j.get("workspace_id") == workspace_id
                   and j.get("status") in ("running", "queued", "pausing", "paused")
@@ -1054,7 +1061,7 @@ class JobRunner:
         if exclusive and (active or self._pipeline_admissions.get(workspace_id)
                           or self._workspace_mutations.get(workspace_id)
                           or any(c.get("workspace_id") == workspace_id for c in self._queued_pipelines.values())):
-            raise WorkspaceBusyError("Wait for running jobs to finish before sending these photos to NAS")
+            raise WorkspaceBusyError("Wait for running jobs or changes in this workspace to finish")
 
     def _find_singleton_locked(self, job_type, singleton_key):
         """Find an active singleton job by (job_type, singleton_key).

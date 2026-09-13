@@ -4961,9 +4961,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "jobs.api_jobs_cancel_queued",
         }:
             return None
-        reservation = app._job_runner.workspace_mutation(_get_db()._ws_id())
-        reservation.__enter__()
-        g.nas_workspace_mutation = reservation
+        target_ws = (request.view_args or {}).get("ws_id")
+        workspaces = {_get_db()._ws_id()}
+        if target_ws is not None:
+            workspaces.add(target_ws)
+        with contextlib.ExitStack() as reservation:
+            for workspace_id in sorted(workspaces):
+                reservation.enter_context(app._job_runner.workspace_mutation(
+                    workspace_id,
+                    exclusive=request.endpoint == "api_delete_workspace" and workspace_id == target_ws,
+                ))
+            g.nas_workspace_mutation = reservation.pop_all()
         return None
 
     @app.teardown_request

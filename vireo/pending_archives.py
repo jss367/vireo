@@ -86,10 +86,13 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
         verify_contents=remote is None,
         **({"pre_commit_check": check_mount} if check_mount else {}),
     )
-    if result.get("errors") or result.get("needs_merge") or result.get("cleanup_error"):
-        raise ValueError("; ".join(result.get("errors") or [result.get("cleanup_error") or "The NAS transfer needs attention."]))
+    if result.get("errors") or result.get("needs_merge"):
+        raise ValueError("; ".join(result.get("errors") or ["The NAS transfer needs attention."]))
     # No rmtree: only verified move_folder may delete originals. Empty import
     # parents can be removed after successful catalog publication.
     with contextlib.suppress(OSError):
         os.rmdir(root)
-    return {**result, "ok": True, "summary": "Remaining photos sent to NAS"}
+    summary = "Remaining photos sent to NAS"
+    if result.get("cleanup_error"):
+        summary += f"; local cleanup needs attention at {source}: {result['cleanup_error']}"
+    return {**result, "ok": True, "summary": summary}

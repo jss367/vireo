@@ -175,6 +175,25 @@ def test_automatic_transfer_can_cancel_while_waiting_for_processing():
         runner.shutdown()
 
 
+def test_exclusive_workspace_mutation_blocks_job_admission_and_releases():
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    with runner.workspace_mutation(1, exclusive=True):
+        with pytest.raises(WorkspaceBusyError):
+            runner.start("import", lambda job: None, workspace_id=1)
+        with pytest.raises(WorkspaceBusyError):
+            runner.enqueue_pipeline(lambda job: None, workspace_id=1)
+        with pytest.raises(WorkspaceBusyError):
+            with runner.workspace_mutation(1):
+                pytest.fail("Mutation entered a workspace being deleted")
+    job_id = runner.start("import", lambda job: None, workspace_id=1)
+    assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+    assert not runner._exclusive_workspace_mutations
+    assert not runner._workspace_mutations
+    runner.shutdown()
+
+
 def test_job_runner_shutdown_cancels_and_joins_workers():
     """Teardown owns worker lifetime and refuses work after it begins."""
     from jobs import JobRunner
