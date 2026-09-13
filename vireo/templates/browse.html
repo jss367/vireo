@@ -8682,6 +8682,13 @@ function predictionAmbiguityReason(p) {
 // `listed` would add reassuring chrome to the ordinary case, while
 // `uncalibrated` and `unavailable` have nothing to report. Absence of a
 // threshold is not a passing grade, so neither may be rendered as one.
+//
+// The banner covers the case where EVERY judged run failed. That is not the
+// whole story: a photo can hold two species, and two models can disagree
+// about one subject, so a single passing run flips the photo-level state to
+// `listed` while a displayed prediction is still explicitly `unlisted`.
+// `buildUnlistedRunIndex` below carries those failures down to the rows that
+// produced them, so a passing run can never silence a failing one.
 function buildMatchBanner(matchState) {
   if (!matchState || matchState.state !== 'unlisted') return '';
   var lines = (matchState.assessments || [])
@@ -8701,6 +8708,48 @@ function buildMatchBanner(matchState) {
       ' Widening the label list is what would change this.' +
     '</div>' + lines +
   '</div>';
+}
+
+// (detection, model) -> the verdict of the run that produced that row, for
+// runs positively judged as matching nothing in their label list. Only
+// `unlisted` runs are indexed: `uncalibrated` and `unavailable` mean no
+// verdict was reached, and a row must never be marked failing on the strength
+// of a measurement nobody judged.
+function buildUnlistedRunIndex(matchState) {
+  var index = {};
+  ((matchState && matchState.unlisted_runs) || []).forEach(function(run) {
+    if (!run || run.state !== 'unlisted' || run.detection_id == null) return;
+    index[run.detection_id + '|' + (run.classifier_model || '')] = run;
+  });
+  return index;
+}
+
+// Why this bucket carries a warning even though the photo as a whole was not
+// flagged. Names the models that failed and how much of the bucket they
+// account for, because the alternative — a bare "no good match" over a row
+// pooling five detections of which one failed — would replace one misleading
+// number with another.
+function unlistedGroupReason(group) {
+  var models = group.unlisted.map(function(run) {
+    return run.classifier_model || run.model || 'this model';
+  });
+  var uniqueModels = models.filter(function(m, i) {
+    return models.indexOf(m) === i;
+  });
+  // Counted over DETECTIONS, not over prediction rows. A bucket can hold
+  // several rows from one detection (one per model, plus promoted
+  // alternatives), so "3 of the 3 detections" computed from row counts would
+  // be a number the photo does not contain.
+  var total = Object.keys(group.detections).length;
+  var failed = Object.keys(group.unlistedDetections).length;
+  var scope = total === 1
+    ? 'This detection'
+    : (failed >= total
+        ? 'Every detection behind this row'
+        : failed + ' of the ' + total + ' detections behind this row');
+  return scope + ' matched nothing in the label list ' +
+    uniqueModels.join(' and ') + ' ran — the species above is the closest ' +
+    'available label, not a match.';
 }
 
 function predictionEmptyMessage(state, hiddenCount) {
@@ -8861,9 +8910,15 @@ function renderDetailPredictions(data, photoId) {
   // row below: a confidence is a rank within the list, so on its own it cannot
   // distinguish the right bird from the closest of a list that never contained
   // it. Rendered first, because reading the rows without it is the mistake.
-  var matchBanner = buildMatchBanner(
-    (data.match_states || {})[String(photoId)] || null,
-  );
+  var matchState = (data.match_states || {})[String(photoId)] || null;
+  var matchBanner = buildMatchBanner(matchState);
+  // Per-row failures, for the rows the banner does not speak for. When the
+  // banner rendered, every judged run on the photo failed and it has already
+  // said so for all of them; repeating it per row would be noise. When it did
+  // not, some run still may have failed — a second model, or a second
+  // detection holding a different animal — and those rows are exactly the
+  // ones that would otherwise show a 99% with no warning at all.
+  var unlistedRuns = matchBanner ? {} : buildUnlistedRunIndex(matchState);
   var threshold = state && state.threshold ? state.threshold : 0;
   var rows = (data.predictions || []).filter(function(p) {
     return p.photo_id === photoId;
@@ -8911,12 +8966,23 @@ function renderDetailPredictions(data, photoId) {
       g = groupByKey[key] = {
         species: displaySpecies, status: decided ? p.status : 'pending',
         decided: decided, ids: [], models: {}, ambiguous: [], confidence: null, count: 0,
+        unlisted: [], detections: {}, unlistedDetections: {},
       };
       groups.push(g);
     }
     g.count++;
     g.ids.push(p.id);
     if (p.model) g.models[p.model] = true;
+    // A bucket pools rows from several detections and models, so the failure
+    // is recorded per contributing row and reported with its own count — "on
+    // 3 detections" beside a warning that only applies to one of them would
+    // be a new way of overstating the evidence.
+    if (p.detection_id != null) g.detections[p.detection_id] = true;
+    var failedRun = unlistedRuns[p.detection_id + '|' + (p.model || '')];
+    if (failedRun) {
+      g.unlistedDetections[p.detection_id] = true;
+      if (g.unlisted.indexOf(failedRun) === -1) g.unlisted.push(failedRun);
+    }
     // Credit ``p.confidence`` to the bucket only when the row's own raw
     // label agrees with the consensus. A Sparrow-labelled frame in a
     // Robin-majority burst is stored with ``p.species == "Sparrow"`` and
@@ -9010,6 +9076,8 @@ function renderDetailPredictions(data, photoId) {
         '<div class="prediction-meta">' + escapeHtml(meta) + '</div>' +
         (ambiguous ? '<div class="prediction-why">' +
           escapeHtml(predictionAmbiguityReason(g.ambiguous[0])) + '</div>' : '') +
+        (g.unlisted.length ? '<div class="prediction-why">' +
+          escapeHtml(unlistedGroupReason(g)) + '</div>' : '') +
       '</div>' +
       '<div class="prediction-actions">' + actions + '</div>' +
     '</div>';

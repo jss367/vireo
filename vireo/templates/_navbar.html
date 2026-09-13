@@ -11074,26 +11074,81 @@ var MATCH_SUMMARY_STYLES = {
   unavailable:  { color: 'var(--text-dim)', label: 'Match strength not recorded' },
 };
 
+// The photo-level state alone is not safe to render. It resolves to `listed`
+// as soon as ONE run clears its floor, and a photo can hold two species or be
+// scored by two models — so "matched a label" would sit above a table in which
+// a specific run explicitly matched nothing. Whenever a positively-failing run
+// exists it takes the headline, and the failing runs are named individually.
 function renderMatchSummary(summary) {
   if (!summary || !summary.state) return '';
-  var style = MATCH_SUMMARY_STYLES[summary.state];
+  var failures = summary.unlisted_runs || [];
+  var mixed = summary.state !== 'unlisted' && failures.length > 0;
+  var style = mixed
+    ? { color: 'var(--warning)',
+        label: failures.length + (failures.length === 1 ? ' run' : ' runs') +
+               ' matched nothing in the label list' }
+    : MATCH_SUMMARY_STYLES[summary.state];
   if (!style) return '';
-  var assessments = summary.assessments || [];
   var html = '<div class="pipeline-match-summary" style="border-left:3px solid ' +
     style.color + ';padding:8px 10px;margin:8px 0;background:var(--bg-secondary);border-radius:0 4px 4px 0;">';
   html += '<div style="color:' + style.color + ';font-weight:600;font-size:13px;">' +
     escapeHtml(style.label) + '</div>';
-  assessments.forEach(function(a) {
-    if (!a || !a.explanation) return;
-    html += '<div style="color:var(--text-dim);font-size:12px;margin-top:4px;">' +
-      escapeHtml(a.model) + ': ' + escapeHtml(a.explanation) + '</div>';
-  });
+  if (mixed) {
+    // Name the detection as well as the model: with two animals in the frame
+    // "BioCLIP failed" is ambiguous about which subject it failed on, and the
+    // per-run table below is keyed by detection.
+    failures.forEach(function(run) {
+      html += '<div style="color:var(--text-dim);font-size:12px;margin-top:4px;">' +
+        escapeHtml(run.classifier_model || run.model || '') +
+        ' on detection ' + escapeHtml(String(run.detection_id)) + ': ' +
+        escapeHtml(run.explanation || '') + '</div>';
+    });
+    html += '<div style="color:var(--text-muted);font-size:11px;margin-top:6px;">' +
+      'Another run on this photo did clear its floor, so the photo is not ' +
+      'unidentifiable — but the predictions from the runs above are the ' +
+      'closest available labels, not matches.</div>';
+  } else {
+    (summary.assessments || []).forEach(function(a) {
+      if (!a || !a.explanation) return;
+      html += '<div style="color:var(--text-dim);font-size:12px;margin-top:4px;">' +
+        escapeHtml(a.model) + ': ' + escapeHtml(a.explanation) + '</div>';
+    });
+  }
   if (summary.state === 'uncalibrated') {
     html += '<div style="color:var(--text-muted);font-size:11px;margin-top:6px;">' +
       'Run scripts/calibrate_match_threshold.py to derive a floor from your own confirmed IDs.</div>';
   }
   html += '</div>';
   return html;
+}
+
+// One run's own verdict, for the table that lists every run this photo has.
+// A run against a label list the user has since replaced is labelled
+// superseded rather than pass/fail: the number is real, but judging it beside
+// the current list's rows would put a verdict from an abandoned list next to
+// predictions it never produced. `is_current` is set by the same
+// latest-fingerprint rule the predictions table is pinned to.
+var MATCH_RUN_VERDICTS = {
+  unlisted:     { color: 'var(--warning)',  label: 'no match',
+                  title: 'Nothing in this label list matched, by the calibrated floor for this model.' },
+  listed:       { color: 'var(--accent)',   label: 'match',
+                  title: 'The best label cleared the calibrated floor for this model.' },
+  uncalibrated: { color: 'var(--text-dim)', label: 'not judged',
+                  title: 'Score recorded, but no threshold is calibrated for this model.' },
+  unavailable:  { color: 'var(--text-dim)', label: 'not recorded',
+                  title: 'No raw score was stored for this run.' },
+};
+
+function matchRunVerdict(row) {
+  if (row.is_current === 0 || row.is_current === false) {
+    return {
+      color: 'var(--text-muted)', label: 'superseded',
+      title: 'Run against a label list that has since been replaced for this ' +
+             'detection. Kept for history; it does not affect the verdict above.',
+    };
+  }
+  var state = (row.assessment && row.assessment.state) || 'unavailable';
+  return MATCH_RUN_VERDICTS[state] || MATCH_RUN_VERDICTS.unavailable;
 }
 
 // Every recorded run on this photo, including the ones step 4's table cannot
@@ -11106,12 +11161,13 @@ function renderMatchScoreTable(rows) {
   var html = '<div style="margin-top:10px;">';
   html += '<div class="pipeline-stat" style="color:var(--text-muted);">Match strength per run</div>';
   html += '<table class="pipeline-table"><tr><th>Model</th><th>Best label</th><th>Match</th>' +
-    '<th>Margin</th><th>Labels</th><th>Detection</th></tr>';
+    '<th>Margin</th><th>Labels</th><th>Detection</th><th>Verdict</th></tr>';
   rows.forEach(function(r) {
     var det = r.detector_model === 'full-image'
       ? 'full image'
       : escapeHtml(String(r.detector_model || '')) + ' ' +
         (r.detector_confidence == null ? '' : Math.round(r.detector_confidence * 100) + '%');
+    var verdict = matchRunVerdict(r);
     html += '<tr>' +
       '<td style="color:var(--text-dim);">' + escapeHtml(r.classifier_model) + '</td>' +
       '<td>' + escapeHtml(r.top_species || '—') + '</td>' +
@@ -11119,6 +11175,8 @@ function renderMatchScoreTable(rows) {
       '<td style="color:var(--text-dim);">' + escapeHtml(formatMatchScore(r.match_margin, r.score_kind)) + '</td>' +
       '<td style="color:var(--text-dim);">' + (r.label_count == null ? '—' : r.label_count) + '</td>' +
       '<td style="color:var(--text-dim);">' + det + '</td>' +
+      '<td style="color:' + verdict.color + ';" title="' + escapeAttr(verdict.title) + '">' +
+        escapeHtml(verdict.label) + '</td>' +
     '</tr>';
   });
   html += '</table></div>';

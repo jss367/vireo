@@ -118,13 +118,20 @@ def assess(model, score_kind, max_match_score, margin=None, config=None):
 
 
 def summarize(assessments):
-    """Collapse several runs' assessments into one verdict for a photo.
+    """Collapse several runs' assessments into one *photo-level* verdict.
 
     ``unlisted`` is returned only when at least one model was actually judged
     and *every* judged model came back unlisted. One model finding a good match
     is enough to make the photo a match, so a single ``listed`` wins — a
     detector that found a bad crop for one model should not be able to label
     the photo unidentifiable when another model saw it clearly.
+
+    This aggregate is deliberately coarse, and on its own it is not enough to
+    render: a photo can hold two species, and two models can disagree, so
+    "some run passed" must never be allowed to silence a run that positively
+    failed. ``unlisted_models`` (and ``summarize_photo``'s ``runs`` /
+    ``unlisted_runs``) carry the per-run verdicts through so the UI can warn on
+    the predictions that actually failed instead of only on the all-fail case.
 
     Runs that could not be judged (uncalibrated, or never recorded) do not vote
     either way. They cannot: no threshold means no verdict, and treating a
@@ -137,7 +144,12 @@ def summarize(assessments):
             a.get("state") == UNCALIBRATED for a in assessments
         )
         state = UNCALIBRATED if has_scores else UNAVAILABLE
-        return {"state": state, "judged_models": 0, "assessments": list(assessments)}
+        return {
+            "state": state,
+            "judged_models": 0,
+            "unlisted_models": 0,
+            "assessments": list(assessments),
+        }
     unlisted = [a for a in judged if a["state"] == UNLISTED]
     return {
         "state": UNLISTED if len(unlisted) == len(judged) else LISTED,
@@ -147,35 +159,75 @@ def summarize(assessments):
     }
 
 
+def is_current_row(row):
+    """Whether a match-score row belongs to the label list on screen.
+
+    ``Database.get_match_scores_for_photo`` stamps ``is_current`` by the same
+    latest-fingerprint-per-(detection, model) rule ``get_predictions`` pins to,
+    so a run against a label list the user has since replaced cannot vote on
+    the verdict that qualifies the predictions currently displayed. The
+    superseded rows are still returned — the Pipeline Inspector shows every run
+    on purpose — they simply do not get a say here.
+
+    Absent means current: a hand-built row (a test, a caller that has no
+    fingerprint context) keeps the plain "judge everything I gave you"
+    behaviour instead of silently summarizing nothing.
+    """
+    return bool(row.get("is_current", 1))
+
+
 def summarize_photo(match_rows, config=None):
     """Assess ``classifier_match_scores`` rows for one photo and summarize.
 
-    A photo can carry several detections per model — a good crop and a bad one,
-    plus the full-image pass — and each is its own run. Only each model's BEST
-    run is judged: the question is whether that model ever got a good look at
-    the subject, and a detector that produced a poor crop should not be able
-    to report the photo as unidentifiable on that model's behalf.
+    Two things come back, and the difference between them is the whole point:
 
-    Rows without a score are skipped rather than scored as zero.
+    * ``runs`` — one verdict per (detection, model) run, carrying its
+      ``detection_id`` and ``classifier_model`` so the UI can attach a warning
+      to the prediction rows that run actually produced. A photo can hold two
+      species, and two models can disagree about one subject; neither case may
+      be collapsed into a single photo-level flag.
+    * the photo-level rollup from ``summarize`` — each model's BEST run only,
+      because the question it answers is "did this model ever get a good look
+      at this photo", and a detector that produced one poor crop should not be
+      able to report the photo as unidentifiable on that model's behalf.
+
+    Only current-fingerprint rows (see ``is_current_row``) feed either one, so
+    a strong match against a label list that has since been replaced cannot
+    mark the list on screen as matched. Rows without a score are skipped
+    rather than scored as zero.
     """
     best = {}
+    runs = []
     for row in match_rows or []:
         score = row.get("max_match_score")
-        if score is None:
+        if score is None or not is_current_row(row):
             continue
         model = row.get("classifier_model")
-        if model not in best or score > best[model].get("max_match_score"):
-            best[model] = row
-    return summarize([
-        assess(
+        assessment = assess(
             model,
             row.get("score_kind"),
-            row.get("max_match_score"),
+            score,
             row.get("match_margin"),
             config,
         )
-        for model, row in best.items()
-    ])
+        runs.append({
+            **assessment,
+            "detection_id": row.get("detection_id"),
+            "classifier_model": model,
+            "labels_fingerprint": row.get("labels_fingerprint"),
+            "top_species": row.get("top_species"),
+            "detector_model": row.get("detector_model"),
+        })
+        if model not in best or score > best[model][0]:
+            best[model] = (score, assessment)
+    summary = summarize([assessment for _score, assessment in best.values()])
+    summary["runs"] = runs
+    # The failures that the photo-level rollup is allowed to outvote but the
+    # UI is not allowed to drop. Empty unless a run was positively judged
+    # unlisted — uncalibrated and unavailable runs never appear here, because
+    # absence of a verdict is not a verdict.
+    summary["unlisted_runs"] = [r for r in runs if r["state"] == UNLISTED]
+    return summary
 
 
 def is_unlisted(assessment):

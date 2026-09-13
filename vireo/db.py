@@ -19528,11 +19528,40 @@ class Database:
         the caller decides what to show, and a detection hidden by the current
         threshold is often exactly the one a user is asking about.
 
+        Every run is returned, including ones superseded by a later
+        re-classification against a different label list — the Pipeline
+        Inspector's per-run table deliberately shows the history. Each row is
+        stamped ``is_current`` so the user-facing verdict can be built from the
+        same label set as the predictions on screen: re-running a detection
+        against a second list leaves the first list's row in this table, and a
+        strong match from an abandoned list must not be allowed to certify the
+        weak list that replaced it.
+
+        ``is_current`` follows ``get_predictions``: the latest
+        ``labels_fingerprint`` per ``(detection_id, classifier_model)`` as the
+        predictions table orders it. A run that produced no prediction at all
+        has no row to pin against — and that run is the single most important
+        one here — so it falls back to the most recent match-score row for the
+        same pair.
+
         Not workspace-scoped — ``photo_id`` is assumed already verified by the
         caller, as the existing per-photo routes do before reaching here.
         """
         rows = self.conn.execute(
-            """SELECT cms.*, d.detector_confidence, d.detector_model
+            """SELECT cms.*, d.detector_confidence, d.detector_model,
+                      CASE WHEN cms.labels_fingerprint = COALESCE(
+                             (SELECT pr2.labels_fingerprint FROM predictions pr2
+                               WHERE pr2.detection_id = cms.detection_id
+                                 AND pr2.classifier_model = cms.classifier_model
+                               ORDER BY pr2.created_at DESC, pr2.id DESC
+                               LIMIT 1),
+                             (SELECT cms2.labels_fingerprint
+                                FROM classifier_match_scores cms2
+                               WHERE cms2.detection_id = cms.detection_id
+                                 AND cms2.classifier_model = cms.classifier_model
+                               ORDER BY cms2.run_at DESC, cms2.rowid DESC
+                               LIMIT 1)
+                           ) THEN 1 ELSE 0 END AS is_current
                FROM classifier_match_scores cms
                JOIN detections d ON d.id = cms.detection_id
                WHERE d.photo_id = ?

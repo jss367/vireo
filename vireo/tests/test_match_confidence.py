@@ -360,3 +360,183 @@ def test_summarize_photo_skips_rows_without_a_score():
     ]
     assert mc.summarize_photo(rows, _COSINE_CFG)["state"] == mc.UNAVAILABLE
     assert mc.summarize_photo([], _COSINE_CFG)["state"] == mc.UNAVAILABLE
+
+
+# --------------------------------------------------------------------------
+# A passing run must never silence a failing one
+# --------------------------------------------------------------------------
+
+_TWO_MODEL_CFG = {
+    "match_thresholds": {
+        "BioCLIP-2.5": {"threshold": 0.25, "score_kind": "cosine"},
+        "iNat21": {"threshold": 10.0, "score_kind": "logit"},
+    }
+}
+
+
+def test_a_failing_model_keeps_its_verdict_when_another_model_passes():
+    """The photo-level rollup may be outvoted; the failing run may not vanish.
+
+    Two models classify the same photo. BioCLIP clears its floor, iNat21 does
+    not. The photo is not unidentifiable — so the rollup is `listed` — but the
+    iNat21 predictions on screen matched nothing in their list, and rendering
+    them beside a 99% with no warning is the exact failure this module exists
+    to remove.
+    """
+    rows = [
+        {"detection_id": 7, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.40},
+        {"detection_id": 7, "classifier_model": "iNat21",
+         "score_kind": "logit", "max_match_score": 3.0},
+    ]
+    summary = mc.summarize_photo(rows, _TWO_MODEL_CFG)
+    assert summary["state"] == mc.LISTED
+    assert summary["unlisted_models"] == 1
+    failures = summary["unlisted_runs"]
+    assert [(f["detection_id"], f["classifier_model"]) for f in failures] == [
+        (7, "iNat21")
+    ]
+    assert "closest available label" in failures[0]["explanation"]
+
+
+def test_two_detections_keep_separate_verdicts():
+    """A photo can hold two species; one good subject does not vouch for the
+    other. The rollup still says `listed` (this model did see something
+    clearly), but detection 9's own run is carried through as failing."""
+    rows = [
+        {"detection_id": 8, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.40},
+        {"detection_id": 9, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.11},
+    ]
+    summary = mc.summarize_photo(rows, _COSINE_CFG)
+    assert summary["state"] == mc.LISTED
+    assert len(summary["runs"]) == 2
+    assert [f["detection_id"] for f in summary["unlisted_runs"]] == [9]
+
+
+def test_unjudged_runs_never_surface_as_failures():
+    """Uncalibrated is not a failure any more than it is a pass."""
+    rows = [
+        {"detection_id": 8, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.40},
+        {"detection_id": 9, "classifier_model": "iNat21",
+         "score_kind": "logit", "max_match_score": 3.0},
+    ]
+    summary = mc.summarize_photo(rows, _COSINE_CFG)
+    assert summary["unlisted_runs"] == []
+    assert {r["state"] for r in summary["runs"]} == {mc.LISTED, mc.UNCALIBRATED}
+
+
+# --------------------------------------------------------------------------
+# The verdict must describe the label list the predictions came from
+# --------------------------------------------------------------------------
+
+def _reclassified_against_two_lists(db):
+    """One detection classified against a wide list, then a narrow one."""
+    photo_id, det = _photo(db)
+    db.add_prediction(detection_id=det, species="Yellow-breasted Chat",
+                      confidence=0.99, model="BioCLIP-2.5",
+                      labels_fingerprint="us-wide", match_score=0.40)
+    db.record_classifier_match_score(
+        det, "BioCLIP-2.5", "us-wide", max_match_score=0.40,
+        top_species="Yellow-breasted Chat", score_kind="cosine")
+    db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
+                      confidence=0.99, model="BioCLIP-2.5",
+                      labels_fingerprint="california", match_score=0.11)
+    db.record_classifier_match_score(
+        det, "BioCLIP-2.5", "california", max_match_score=0.11,
+        top_species="Rufous-winged Sparrow", score_kind="cosine")
+    return photo_id, det
+
+
+def test_obsolete_label_list_cannot_certify_the_current_one(db):
+    """The verdict must be built from the same list as the rows on screen.
+
+    ``get_predictions`` pins to the newest fingerprint per (detection, model),
+    so the panel shows the California run. Its 0.11 is under the floor. The
+    abandoned US-wide run's 0.40 is still in the table — and must not be
+    allowed to mark the list the user is actually looking at as matched.
+    """
+    photo_id, _det = _reclassified_against_two_lists(db)
+    rows = db.get_match_scores_for_photo(photo_id)
+    assert {r["labels_fingerprint"]: r["is_current"] for r in rows} == {
+        "us-wide": 0, "california": 1,
+    }
+    summary = mc.summarize_photo(rows, _COSINE_CFG)
+    assert summary["state"] == mc.UNLISTED
+    assert [r["labels_fingerprint"] for r in summary["runs"]] == ["california"]
+
+
+def test_superseded_runs_stay_visible_to_the_inspector(db):
+    """History is not dropped — the per-run table exists to show it."""
+    photo_id, _det = _reclassified_against_two_lists(db)
+    rows = db.get_match_scores_for_photo(photo_id)
+    assert len(rows) == 2
+
+
+def test_a_run_with_no_predictions_is_still_current(db):
+    """The zero-prediction run has nothing in ``predictions`` to pin against.
+
+    It is also the single most informative run this table records, so it falls
+    back to its own recency rather than being written off as superseded.
+    """
+    photo_id, det = _photo(db)
+    db.record_classifier_match_score(
+        det, "BioCLIP-2.5", "california", max_match_score=0.11,
+        score_kind="cosine")
+    rows = db.get_match_scores_for_photo(photo_id)
+    assert [r["is_current"] for r in rows] == [1]
+    assert mc.summarize_photo(rows, _COSINE_CFG)["state"] == mc.UNLISTED
+
+
+def test_hand_built_rows_default_to_current():
+    """Absent ``is_current`` means current, so a caller with no fingerprint
+    context summarizes what it was given instead of silently nothing."""
+    assert mc.is_current_row({"classifier_model": "BioCLIP-2.5"})
+    assert not mc.is_current_row({"is_current": 0})
+
+
+def test_pipeline_reports_superseded_runs_with_the_current_verdict(app_and_db):
+    """End-to-end: the inspector lists both runs, the verdict follows the
+    current one, and the failing run is attached to its detection."""
+    import json as _json
+
+    app, db = app_and_db
+    db.conn.execute(
+        "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+        (_json.dumps({"match_thresholds": {
+            "BioCLIP-2.5": {"threshold": 0.25, "score_kind": "cosine"},
+        }}), db._active_workspace_id),
+    )
+    db.conn.commit()
+    photo_id = db.get_photos()[0]["id"]
+    det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
+    db.add_prediction(detection_id=det, species="Yellow-breasted Chat",
+                      confidence=0.99, model="BioCLIP-2.5",
+                      labels_fingerprint="us-wide", match_score=0.40)
+    db.record_classifier_match_score(
+        det, "BioCLIP-2.5", "us-wide", max_match_score=0.40,
+        top_species="Yellow-breasted Chat", score_kind="cosine")
+    db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
+                      confidence=0.99, model="BioCLIP-2.5",
+                      labels_fingerprint="california", match_score=0.11)
+    db.record_classifier_match_score(
+        det, "BioCLIP-2.5", "california", max_match_score=0.11,
+        top_species="Rufous-winged Sparrow", score_kind="cosine")
+
+    data = app.test_client().get(
+        f"/api/photos/{photo_id}/pipeline"
+    ).get_json()
+    assert len(data["match_scores"]) == 2
+    assert data["match_summary"]["state"] == mc.UNLISTED
+    assert [r["detection_id"] for r in data["match_summary"]["unlisted_runs"]] \
+        == [det]
+
+    preds = app.test_client().get(
+        f"/api/predictions?photo_ids={photo_id}"
+    ).get_json()
+    failures = preds["match_states"][str(photo_id)]["unlisted_runs"]
+    assert [(f["detection_id"], f["classifier_model"]) for f in failures] == [
+        (det, "BioCLIP-2.5")
+    ]
