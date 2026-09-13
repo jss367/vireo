@@ -7996,6 +7996,14 @@ def test_describe_cached_label_source_falls_back_when_no_sidecar(
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
+    # Pair the run with a matching predictions row so the eligibility
+    # filter can select it — otherwise the "no sidecar" branch is never
+    # reached and this test would collapse into the eligibility test
+    # below.
+    db.add_prediction(
+        det_id, species="Robin", confidence=0.9,
+        model="BioCLIP", labels_fingerprint="fp-orphan",
+    )
     db.record_classifier_run(
         det_id, "BioCLIP", "fp-orphan", prediction_count=1,
     )
@@ -8003,6 +8011,101 @@ def test_describe_cached_label_source_falls_back_when_no_sidecar(
 
     text = _describe_cached_label_source(db, [pid])
     assert text == "Reused cached predictions (label source unavailable)"
+
+
+def test_describe_cached_label_source_skips_ineligible_runs(
+    tmp_path, monkeypatch,
+):
+    """When a photo carries cached runs for BOTH an eligible detection
+    (the one ``_all_photos_cache_satisfied`` counts as covered) and an
+    ineligible one — a sub-threshold detection, or a torn classifier_run
+    with no matching predictions row — the fingerprint lookup must only
+    consider the eligible run's fingerprint. Otherwise the persisted
+    ``label_source`` names a list that did not produce these predictions,
+    because the ``DISTINCT ... LIMIT 1`` query might pick the excluded
+    row first.
+    """
+    from classify_job import _describe_cached_label_source
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Two real detections: one above the workspace threshold (eligible),
+    # one below (ineligible). Distinct boxes so ``detection_id`` (which
+    # is content-addressed) does not collapse them into one row.
+    dets = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 2, "y": 2, "w": 1, "h": 1},
+         "confidence": 0.05, "category": "animal"},
+    ], detector_model="megadetector-v6")
+    eligible_det = dets[0]
+    ineligible_det = dets[1]
+
+    # Eligible detection: run against the list actually reused
+    # ("fp-eligible") — a matching predictions row proves the cache hit
+    # is real.
+    db.add_prediction(
+        eligible_det, species="Robin", confidence=0.9,
+        model="BioCLIP", labels_fingerprint="fp-eligible",
+    )
+    db.record_classifier_run(
+        eligible_det, "BioCLIP", "fp-eligible", prediction_count=1,
+    )
+
+    # Ineligible detection: a stale run for a DIFFERENT label set
+    # ("fp-below-threshold"). Also insert a "torn" classifier_run on the
+    # eligible detection under a THIRD fingerprint ("fp-torn") that has
+    # no matching predictions row — covers the second exclusion in the
+    # coverage query.
+    db.add_prediction(
+        ineligible_det, species="Sparrow", confidence=0.5,
+        model="BioCLIP", labels_fingerprint="fp-below-threshold",
+    )
+    db.record_classifier_run(
+        ineligible_det, "BioCLIP", "fp-below-threshold", prediction_count=1,
+    )
+    db.record_classifier_run(
+        eligible_det, "BioCLIP", "fp-torn", prediction_count=1,
+    )
+
+    # Populate only the sidecar for the fingerprint that should win.
+    db.upsert_labels_fingerprint(
+        fingerprint="fp-eligible",
+        display_name="California",
+        sources=["/imported/california.txt"],
+        label_count=1327,
+    )
+    # And a decoy for the fingerprint that MUST NOT be reported.
+    db.upsert_labels_fingerprint(
+        fingerprint="fp-below-threshold",
+        display_name="Should-not-appear",
+        sources=["/imported/should-not-appear.txt"],
+        label_count=42,
+    )
+    db.upsert_labels_fingerprint(
+        fingerprint="fp-torn",
+        display_name="Also-should-not-appear",
+        sources=["/imported/also-should-not-appear.txt"],
+        label_count=7,
+    )
+
+    text = _describe_cached_label_source(
+        db, [pid], classifier_model="BioCLIP",
+        detector_confidence=0.2,
+    )
+    assert text is not None
+    assert "california.txt" in text
+    assert "1,327 species" in text
+    assert "should-not-appear" not in text
+    assert "also-should-not-appear" not in text
 
 
 def test_run_classify_job_short_circuits_when_cache_covers_every_photo(

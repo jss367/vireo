@@ -695,6 +695,7 @@ def _label_set_name(meta):
 
 def _describe_cached_label_source(
     db, photo_ids, *, classifier_model=None, labels_fingerprint=None,
+    detector_confidence=0.0,
 ):
     """Name the label space of a reused-cache classify step when no peek loaded.
 
@@ -708,6 +709,14 @@ def _describe_cached_label_source(
     at least name the sources that originally produced these predictions.
     Returns ``None`` if we cannot recover any source — the caller then
     leaves the step unlabeled rather than inventing a description.
+
+    ``detector_confidence`` — mirror the workspace threshold
+    ``_all_photos_cache_satisfied`` used, so the fingerprint lookup only
+    considers the same eligible detections. Without this, a photo also
+    carrying runs on sub-threshold detections (or torn runs without any
+    predictions row) could contribute a fingerprint that is not the one
+    actually reused, so the persisted ``label_source`` would name a list
+    that did not produce these predictions.
     """
     if not photo_ids:
         return None
@@ -721,6 +730,22 @@ def _describe_cached_label_source(
             if classifier_model is not None:
                 filter_sql = " AND cr.classifier_model = ?"
                 filter_args.append(classifier_model)
+            # Match ``_all_photos_cache_satisfied``'s eligibility filters:
+            # only classifiable detections at the workspace threshold, and
+            # only classifier_runs backed by an actual predictions row
+            # (a torn run without predictions is not a real cache hit).
+            classifiable_detection = (
+                "(d.detector_model = 'full-image' OR "
+                "(d.detector_model != 'full-image' "
+                "AND COALESCE(d.category, 'animal') = 'animal' "
+                "AND d.detector_confidence >= ?))"
+            )
+            predictions_exists = (
+                "EXISTS (SELECT 1 FROM predictions p "
+                "WHERE p.detection_id = cr.detection_id "
+                "AND p.classifier_model = cr.classifier_model "
+                "AND p.labels_fingerprint = cr.labels_fingerprint)"
+            )
             for chunk in _chunks(photo_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 row = db.conn.execute(
@@ -729,9 +754,11 @@ def _describe_cached_label_source(
                          JOIN classifier_runs cr
                            ON cr.detection_id = d.id{filter_sql}
                         WHERE d.photo_id IN ({placeholders})
+                          AND {classifiable_detection}
+                          AND {predictions_exists}
                           AND cr.labels_fingerprint IS NOT NULL
                         LIMIT 1""",
-                    filter_args + list(chunk),
+                    filter_args + list(chunk) + [detector_confidence],
                 ).fetchone()
                 if row and row["fp"]:
                     found_fp = row["fp"]
@@ -2640,6 +2667,7 @@ def _finalize_cached_only(
     classifier_model, labels_fingerprint,
     peek_model=None, peek_labels=None, peek_use_tol=False,
     peek_label_metas=None, peek_succeeded=False,
+    detector_confidence=0.0,
 ):
     """Reconcile imported classifier results without loading a model.
 
@@ -2712,6 +2740,7 @@ def _finalize_cached_only(
             [p["id"] for p in photos],
             classifier_model=classifier_model,
             labels_fingerprint=labels_fingerprint,
+            detector_confidence=detector_confidence,
         )
     if label_source_text:
         runner.update_step(
@@ -3291,6 +3320,7 @@ def run_classify_job(
                 peek_use_tol=peek_use_tol,
                 peek_label_metas=peek_label_metas,
                 peek_succeeded=peek_succeeded,
+                detector_confidence=cache_detector_confidence,
             )
 
         # Resolve model (deferred until we know there is work to do)
