@@ -17358,6 +17358,19 @@ class Database:
         else:
             id_chunks = [None]
 
+        # Base filters for the classifier_match_scores companion delete
+        # below — same shape as ``extra_conds`` for predictions, but
+        # referencing the ``cms.`` alias since match scores have their own
+        # (classifier_model, labels_fingerprint) columns.
+        cms_extra_conds = []
+        cms_extra_params = []
+        if model:
+            cms_extra_conds.append("cms.classifier_model = ?")
+            cms_extra_params.append(model)
+        if labels_fingerprint is not None:
+            cms_extra_conds.append("cms.labels_fingerprint = ?")
+            cms_extra_params.append(labels_fingerprint)
+
         for chunk in id_chunks:
             conds = list(extra_conds)
             params = list(extra_params)
@@ -17376,6 +17389,41 @@ class Database:
                     {where_clause}
                 )""",
                 [ws, *params],
+            )
+
+            # Match summaries live at the same key as the predictions we just
+            # cleared, and outlast their predictions when left behind: a
+            # detection whose predictions are cleared but whose
+            # classifier_match_scores row survives keeps reporting the prior
+            # run's verdict in Browse and the Pipeline Inspector, even though
+            # the predictions that verdict described are gone. This has to
+            # fire whether or not classifier_runs is being cleared — in
+            # particular, the pipeline's deferred reclassify path calls
+            # ``clear_predictions(..., clear_run_keys=False)`` after writing
+            # fresh runs for detections that succeeded, and would otherwise
+            # leave the previous run's match score attached to any detection
+            # whose inference failed.
+            cms_conds = list(cms_extra_conds)
+            cms_params = list(cms_extra_params)
+            if chunk is not None:
+                placeholders = ",".join("?" for _ in chunk)
+                cms_conds.append(f"d.photo_id IN ({placeholders})")
+                cms_params.extend(chunk)
+            cms_where = (
+                " WHERE " + " AND ".join(cms_conds)
+            ) if cms_conds else ""
+            self.conn.execute(
+                f"""DELETE FROM classifier_match_scores
+                    WHERE rowid IN (
+                        SELECT cms.rowid
+                        FROM classifier_match_scores cms
+                        JOIN detections d ON d.id = cms.detection_id
+                        JOIN photos ph ON ph.id = d.photo_id
+                        JOIN workspace_folders wf
+                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                        {cms_where}
+                    )""",
+                [ws, *cms_params],
             )
 
         if not clear_run_keys:
@@ -17435,25 +17483,9 @@ class Database:
                     )""",
                 [ws, *run_params],
             )
-            # Match scores are keyed and scoped exactly like the run keys
-            # above, so they are cleared with them. Leaving them behind would
-            # let a stale "nothing in the list matched" verdict outlive the
-            # predictions it described and be shown against a re-run that has
-            # not happened yet.
-            cms_where = run_where.replace("cr.", "cms.")
-            self.conn.execute(
-                f"""DELETE FROM classifier_match_scores
-                    WHERE rowid IN (
-                        SELECT cms.rowid
-                        FROM classifier_match_scores cms
-                        JOIN detections d ON d.id = cms.detection_id
-                        JOIN photos ph ON ph.id = d.photo_id
-                        JOIN workspace_folders wf
-                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
-                        {cms_where}
-                    )""",
-                [ws, *run_params],
-            )
+        # ``classifier_match_scores`` is already cleared alongside the
+        # predictions above, whether or not classifier_runs is being wiped
+        # here — see the companion delete inside the predictions loop.
         self.conn.commit()
 
     def get_prediction_states(self, photo_ids):

@@ -3,16 +3,20 @@
 
 Classifier confidence is a softmax over whichever label list was loaded, so it
 sums to 1 and always names a winner however badly every label fit. The raw
-pre-softmax score stored beside it (``predictions.match_score``) does not
-renormalize, so it can say whether anything in the list matched at all — but
-only once you know where the cutoff falls, and that is a property of the model
-and of your own photos, not something that can be guessed.
+pre-softmax score recorded per classifier run
+(``classifier_match_scores.max_match_score`` — the winner score across the
+whole label list) does not renormalize, so it can say whether anything in the
+list matched at all — but only once you know where the cutoff falls, and that
+is a property of the model and of your own photos, not something that can be
+guessed.
 
 This script finds it the only honest way available: against species you have
-already confirmed yourself.
+already confirmed yourself. One sample per classifier run
+(``(detection, model, labels_fingerprint)``), classified by whether the run's
+top species matches a species keyword the photo actually carries:
 
-    correct   — the classifier's species for this detection matches a species
-                keyword the photo actually carries
+    correct   — the classifier's top species for this detection matches a
+                species keyword the photo actually carries
     incorrect — it does not
 
 A threshold is then chosen to suppress at most ``--max-suppression`` of the
@@ -31,10 +35,10 @@ without it the script only prints, including the exact JSON to paste.
 
 Caveats worth reading before trusting the number:
 
-* Rows written before ``predictions.match_score`` existed are NULL and are
-  skipped. A catalog classified entirely before this change has nothing to
-  calibrate against and will report zero usable rows until something is
-  re-classified.
+* Runs written before ``classifier_match_scores`` existed leave no row here
+  and are skipped. A catalog classified entirely before this change has
+  nothing to calibrate against and will report zero usable rows until
+  something is re-classified.
 * "Incorrect" here means "disagreed with your keyword", which bundles genuinely
   out-of-list birds together with in-list mistakes. It over-counts, so the
   catch rate reported below is a floor, not an estimate.
@@ -64,12 +68,11 @@ def schema_gap(conn):
     neither the column nor the table, and the query below would die on it. That
     is a normal state, not a bug, so say what to do about it.
     """
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}
     has_table = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='classifier_match_scores'"
     ).fetchone() is not None
-    if "match_score" not in cols or not has_table:
+    if not has_table:
         return (
             "This catalog has no match-score schema yet — it has not been\n"
             "opened by a build that records it. Start Vireo against this\n"
@@ -82,17 +85,30 @@ def schema_gap(conn):
 def collect(conn):
     """Return ``{(model, score_kind): {"correct": [...], "incorrect": [...]}}``.
 
-    One row per (detection, model, list, species) prediction that carries a
-    match score, labelled by whether its species is among the species keywords
-    on the photo. Keyword comparison is COLLATE NOCASE because that is the
-    collation every other keyword join in the app uses — matching it here keeps
-    a capitalization difference from being scored as a wrong identification.
+    One sample per ``(detection, model, labels_fingerprint)`` classifier run,
+    keyed by ``classifier_match_scores.max_match_score`` — the run-level
+    winner score across the whole label list. The sample is labelled by
+    whether the run's ``top_species`` matches a species keyword the photo
+    carries.
+
+    Why the run-level score and not per-candidate ``predictions.match_score``:
+    the configured threshold is applied to a run's maximum. Bucketing every
+    top-k candidate would treat one classifier run as multiple independent
+    samples — every correct top-1 run would contribute up to k-1 alternative
+    species as "incorrect" and the ground-truth species appearing lower in
+    the list would contribute its (lower) per-label score to the "correct"
+    bucket. Both distortions push the fitted floor away from the quantity it
+    will actually be applied to.
+
+    Keyword comparison is COLLATE NOCASE because that is the collation every
+    other keyword join in the app uses — matching it here keeps a
+    capitalization difference from being scored as a wrong identification.
     """
     rows = conn.execute(
         """
-        SELECT pr.classifier_model AS model,
-               cms.score_kind      AS score_kind,
-               pr.match_score      AS match_score,
+        SELECT cms.classifier_model    AS model,
+               cms.score_kind          AS score_kind,
+               cms.max_match_score     AS match_score,
                EXISTS (
                    SELECT 1
                    FROM photo_keywords pk
@@ -101,15 +117,12 @@ def collect(conn):
                    WHERE pk.photo_id = d.photo_id
                      AND (k.is_species = 1 OR k.type = 'taxonomy')
                      AND (t.rank IS NULL OR t.rank = 'species')
-                     AND k.name = pr.species COLLATE NOCASE
+                     AND k.name = cms.top_species COLLATE NOCASE
                ) AS is_correct
-        FROM predictions pr
-        JOIN detections d ON d.id = pr.detection_id
-        LEFT JOIN classifier_match_scores cms
-               ON cms.detection_id = pr.detection_id
-              AND cms.classifier_model = pr.classifier_model
-              AND cms.labels_fingerprint = pr.labels_fingerprint
-        WHERE pr.match_score IS NOT NULL
+        FROM classifier_match_scores cms
+        JOIN detections d ON d.id = cms.detection_id
+        WHERE cms.max_match_score IS NOT NULL
+          AND cms.top_species IS NOT NULL
           -- Only photos that carry at least one confirmed species keyword can
           -- serve as ground truth. An unlabelled photo is not evidence that
           -- the prediction was wrong, and counting it as such would drag the

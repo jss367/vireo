@@ -4502,6 +4502,90 @@ def test_clear_predictions_no_model_clears_classifier_runs(tmp_path):
     )
 
 
+def test_clear_predictions_clears_match_scores_when_preserving_run_keys(tmp_path):
+    """The pipeline's deferred reclassify path calls
+    ``clear_predictions(clear_run_keys=False)`` after writing fresh
+    classifier_runs for detections that succeeded. If inference fails for a
+    reached detection, its predictions are removed but its stale
+    ``classifier_match_scores`` row must not linger, otherwise Browse and the
+    Pipeline Inspector would keep reporting the previous run's verdict.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-a")
+    db.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
+    db.record_classifier_match_score(
+        det_id, "bioclip-2", "fp-a",
+        max_match_score=0.87, top_species="Robin", label_count=1200,
+        score_kind="cosine",
+    )
+    # Sanity: the summary row is there before the clear.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM classifier_match_scores WHERE detection_id=?",
+        (det_id,),
+    ).fetchone()[0] == 1
+
+    db.clear_predictions(
+        model="bioclip-2", labels_fingerprint="fp-a",
+        clear_run_keys=False,
+    )
+
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM classifier_match_scores WHERE detection_id=?",
+        (det_id,),
+    ).fetchone()[0] == 0, (
+        "Stale match summaries must be cleared alongside predictions even "
+        "when clear_run_keys=False — otherwise a failed reclassify would "
+        "leave the prior run's verdict attached to a detection with no "
+        "predictions."
+    )
+    # The run key itself must survive — that is the whole point of
+    # clear_run_keys=False.
+    assert ("bioclip-2", "fp-a") in db.get_classifier_run_keys(det_id)
+
+
+def test_clear_predictions_match_scores_respect_fingerprint_scope(tmp_path):
+    """A fingerprint-scoped clear must not touch match summaries under a
+    different fingerprint. Shared-folder setups reclassify one workspace's
+    label set without disturbing another workspace's cached data.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.record_classifier_match_score(
+        det_id, "bioclip-2", "fp-a",
+        max_match_score=0.30, top_species="Robin", label_count=100,
+        score_kind="cosine",
+    )
+    db.record_classifier_match_score(
+        det_id, "bioclip-2", "fp-b",
+        max_match_score=0.71, top_species="Sparrow", label_count=800,
+        score_kind="cosine",
+    )
+
+    db.clear_predictions(
+        model="bioclip-2", labels_fingerprint="fp-a",
+        clear_run_keys=False,
+    )
+
+    remaining = {
+        row["labels_fingerprint"] for row in db.conn.execute(
+            "SELECT labels_fingerprint FROM classifier_match_scores "
+            "WHERE detection_id=?",
+            (det_id,),
+        ).fetchall()
+    }
+    assert remaining == {"fp-b"}, (
+        "Only the targeted fingerprint's match summary should be cleared"
+    )
+
+
 def test_get_predictions_filters_to_latest_fingerprint(tmp_path):
     """get_predictions() must return only the most recent fingerprint per
     (detection, classifier_model). Mixing stale and current fingerprints

@@ -2243,6 +2243,24 @@ def materialize_artifacts(
                     # recorded" forever despite originating from real
                     # inference. Omitted from the artifact => no row, which is
                     # the honest state for a pre-feature bundle.
+                    #
+                    # Delete the existing summary as part of the replacement
+                    # BEFORE the conditional insert: materializing an older
+                    # artifact (no ``match`` block) over a catalog that
+                    # already carries a score for the same
+                    # (detection, model, fingerprint) would otherwise leave
+                    # the previous runtime's score attached to the fresh
+                    # prediction rows, contradicting the "not recorded" state
+                    # the missing block is meant to express.
+                    db.conn.execute(
+                        """DELETE FROM classifier_match_scores
+                           WHERE detection_id = ? AND classifier_model = ?
+                             AND labels_fingerprint = ?""",
+                        (
+                            detection_id, artifact["classifier_model"],
+                            labels["short_fingerprint"],
+                        ),
+                    )
                     match = subject.get("match")
                     if match and match.get("max_match_score") is not None:
                         db.conn.execute(
@@ -2251,16 +2269,7 @@ def materialize_artifacts(
                                   labels_fingerprint, max_match_score,
                                   match_margin, top_species, label_count,
                                   score_kind)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                               ON CONFLICT(detection_id, classifier_model,
-                                           labels_fingerprint)
-                               DO UPDATE SET
-                                 max_match_score = excluded.max_match_score,
-                                 match_margin = excluded.match_margin,
-                                 top_species = excluded.top_species,
-                                 label_count = excluded.label_count,
-                                 score_kind = excluded.score_kind,
-                                 run_at = datetime('now')""",
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 detection_id, artifact["classifier_model"],
                                 labels["short_fingerprint"],

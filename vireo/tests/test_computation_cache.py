@@ -1542,3 +1542,134 @@ def test_match_strength_fields_are_validated(tmp_path):
         validate_artifact(classification_artifact(
             match={"max_match_score": 0.3, "label_count": -1},
         ))
+
+
+def test_replacement_artifact_without_match_clears_prior_summary(tmp_path):
+    """Materializing a recognized artifact from a different runtime replaces
+    that run's predictions. If the incoming artifact carries no ``match``
+    block, the previous runtime's summary must be removed as part of the
+    replacement — leaving it attached would let a stale verdict outlive the
+    predictions it described, exactly the "not recorded" case older artifacts
+    are meant to express.
+    """
+    destination, _folder_id, _photo_id = _database_with_photo(
+        tmp_path / "replace.db", "photo.jpg",
+    )
+    destination.upsert_labels_fingerprint(
+        "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+    )
+    # First materialization records a summary row.
+    first_runtime = runtime_fingerprint({
+        "type": "classification",
+        "model": "bioclip-2.5",
+        "weights_sha256": "4" * 64,
+        "labels_fingerprint": "3" * 64,
+        "detector_runtime_fingerprint": RUNTIME,
+        "revision": "v1",
+    })
+    materialize_artifacts(
+        destination,
+        [
+            detection_artifact(),
+            classification_artifact(
+                classifier_runtime=first_runtime,
+                candidates=[{"species": "Robin", "confidence": 0.9,
+                             "match_score": 0.31}],
+                match={"max_match_score": 0.31, "top_species": "Robin",
+                       "label_count": 1255, "score_kind": "cosine"},
+            ),
+        ],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={first_runtime},
+    )
+    assert destination.conn.execute(
+        "SELECT COUNT(*) FROM classifier_match_scores",
+    ).fetchone()[0] == 1
+
+    # Second materialization from a different runtime with an OLDER-shape
+    # artifact (no `match` block). The replacement must drop the prior
+    # summary; leaving it would attribute a runtime-A verdict to a
+    # runtime-B prediction that made no such measurement.
+    second_runtime = runtime_fingerprint({
+        "type": "classification",
+        "model": "bioclip-2.5",
+        "weights_sha256": "4" * 64,
+        "labels_fingerprint": "3" * 64,
+        "detector_runtime_fingerprint": RUNTIME,
+        "revision": "v2",
+    })
+    materialize_artifacts(
+        destination,
+        [classification_artifact(classifier_runtime=second_runtime)],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={second_runtime},
+    )
+    assert destination.conn.execute(
+        "SELECT COUNT(*) FROM classifier_match_scores",
+    ).fetchone()[0] == 0, (
+        "The prior runtime's summary must not survive replacement by an "
+        "artifact that omits the match block."
+    )
+    destination.close()
+
+
+def test_replacement_artifact_with_match_overwrites_prior_summary(tmp_path):
+    """A replacement carrying its own ``match`` block writes fresh values in
+    place of the old ones. Regression guard for the delete-then-insert order:
+    the delete must not remove the new summary too.
+    """
+    destination, _folder_id, _photo_id = _database_with_photo(
+        tmp_path / "replace-with-match.db", "photo.jpg",
+    )
+    destination.upsert_labels_fingerprint(
+        "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+    )
+    first_runtime = runtime_fingerprint({
+        "type": "classification",
+        "model": "bioclip-2.5",
+        "weights_sha256": "4" * 64,
+        "labels_fingerprint": "3" * 64,
+        "detector_runtime_fingerprint": RUNTIME,
+        "revision": "v1",
+    })
+    materialize_artifacts(
+        destination,
+        [
+            detection_artifact(),
+            classification_artifact(
+                classifier_runtime=first_runtime,
+                candidates=[{"species": "Robin", "confidence": 0.9,
+                             "match_score": 0.31}],
+                match={"max_match_score": 0.31, "top_species": "Robin",
+                       "label_count": 1255, "score_kind": "cosine"},
+            ),
+        ],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={first_runtime},
+    )
+    second_runtime = runtime_fingerprint({
+        "type": "classification",
+        "model": "bioclip-2.5",
+        "weights_sha256": "4" * 64,
+        "labels_fingerprint": "3" * 64,
+        "detector_runtime_fingerprint": RUNTIME,
+        "revision": "v2",
+    })
+    materialize_artifacts(
+        destination,
+        [classification_artifact(
+            classifier_runtime=second_runtime,
+            candidates=[{"species": "Sparrow", "confidence": 0.88,
+                         "match_score": 0.62}],
+            match={"max_match_score": 0.62, "top_species": "Sparrow",
+                   "label_count": 1255, "score_kind": "cosine"},
+        )],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={second_runtime},
+    )
+    row = destination.conn.execute(
+        "SELECT max_match_score, top_species FROM classifier_match_scores",
+    ).fetchone()
+    assert row["max_match_score"] == 0.62
+    assert row["top_species"] == "Sparrow"
+    destination.close()
