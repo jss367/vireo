@@ -1917,7 +1917,7 @@ body.sidebar-resizing {
 
     <!-- Universal filter bar (shared module) + Browse view controls -->
     <div class="filter-bar browse-filter-shell">
-      {% set vf_view_controls %}
+      {% include '_filterbar.html' %}
       <div class="browse-view-controls">
         <select id="sortSelect" onchange="applyFilters()" title="Sort order"
                 data-view-preference="vireo.browse.sort">
@@ -1953,8 +1953,12 @@ body.sidebar-resizing {
         </button>
         <span class="filter-summary" id="filterSummary"></span>
       </div>
-      {% endset %}
-      {% include '_filterbar.html' %}
+      <script>
+        // The desktop build resolves includes only; compose the shared row in the browser.
+        document.querySelector('#vireoFilterBar .vf-secondary').appendChild(
+          document.querySelector('.browse-view-controls')
+        );
+      </script>
     </div>
 
     <div class="offline-collection-notice" id="offlineCollectionNotice">
