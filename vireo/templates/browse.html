@@ -7983,8 +7983,15 @@ var BATCH_BAR_STRAGGLING_CLICK_MS = 1500;
 var BATCH_BAR_STRAGGLING_CLICK_PX = 12;
 var batchBarActivateTimer = null;
 var batchBarLastCardMouseDown = null;
+// Whether the bar was released by the pointer moving off the card rather than
+// by the quiet timer. Movement is a deliberate reach for a button, so a click
+// that follows it is meant for the bar and must not be redirected.
+var batchBarActivatedByMovement = false;
 
 function scheduleBatchBarActivation() {
+  // Re-inerting starts a fresh gesture: whatever released the bar last time
+  // says nothing about this one.
+  batchBarActivatedByMovement = false;
   if (batchBarActivateTimer) clearTimeout(batchBarActivateTimer);
   batchBarActivateTimer = setTimeout(activateBatchBar, BATCH_BAR_ACTIVATE_QUIET_MS);
 }
@@ -8040,6 +8047,7 @@ document.addEventListener('mousemove', function(event) {
   var dx = event.clientX - last.x;
   var dy = event.clientY - last.y;
   if (dx * dx + dy * dy < BATCH_BAR_ACTIVATE_MOVE_PX * BATCH_BAR_ACTIVATE_MOVE_PX) return;
+  batchBarActivatedByMovement = true;
   activateBatchBar();
 }, true);
 
@@ -8056,6 +8064,12 @@ document.addEventListener('click', function(event) {
   if (!target.closest('#batchBar')) return;
   var bar = document.getElementById('batchBar');
   if (!bar || bar.style.display !== 'flex') return;
+  // Only the quiet timer can strand a user mid-gesture. If the pointer moved
+  // off the card instead, the bar was released deliberately and this click is
+  // meant for the button under it — redirecting it would turn a batch action
+  // into a lightbox open for anyone who nudges the mouse a few pixels between
+  // selecting a card and clicking the bar above it.
+  if (batchBarActivatedByMovement) return;
   var last = batchBarLastCardMouseDown;
   if (!last) return;
   if (event.timeStamp - last.t > BATCH_BAR_STRAGGLING_CLICK_MS) return;

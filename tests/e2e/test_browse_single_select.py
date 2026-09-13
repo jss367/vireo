@@ -208,6 +208,92 @@ def test_double_click_opens_the_photo_the_batch_bar_would_cover(
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
 
 
+def test_batch_bar_activates_as_soon_as_the_pointer_moves(live_server, page):
+    """Pointer movement, not a clock, is what ends the click gesture.
+
+    Reaching a button in the bar means moving the pointer there and a
+    double-click does not move it, so movement releases the bar immediately
+    however long the platform's double-click interval is. The quiet timer is
+    only a hatch for a pointer that never moves at all, so it must not be
+    what does the work here.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    bar = page.locator("#batchBar")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+
+    # Far longer than any platform double-click interval, so the timer cannot
+    # be what activates the bar below.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 60000")
+    first.click()
+    expect(bar).to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+
+    page.mouse.move(5, 5)
+
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+    expect(bar).to_have_css("pointer-events", "auto")
+
+
+def test_a_bar_click_after_deliberate_movement_is_not_redirected_to_the_photo(
+    live_server, page
+):
+    """Nudging the pointer off a card and clicking the bar above it hits the
+    bar, not the photo.
+
+    The straggling-click guard cancels a click that lands on the bar near a
+    recent card mousedown, which is right when the quiet timer stranded the
+    user mid-gesture and wrong once the pointer has moved — moving is how
+    anyone reaches the bar. Without that distinction, a few pixels of travel
+    between selecting a card and clicking the bar over it would turn a batch
+    action into a lightbox open.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'nudge-burst' WHERE id IN (?, ?, ?)",
+            burst_ids,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.locator(".browse-stack-badge").click()
+
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
+    expect(member).to_be_visible()
+
+    box = member.bounding_box()
+    assert box is not None
+    click_x = box["x"] + box["width"] / 2
+    click_y = box["y"] + box["height"] / 2
+    page.mouse.click(click_x, click_y)
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    # The bar now covers this point; travel far enough to release it, but stay
+    # inside the straggling-click guard's radius of the card mousedown.
+    page.mouse.move(click_x + 10, click_y)
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"))
+    assert page.evaluate(
+        "p => !!document.elementFromPoint(p[0], p[1]).closest('#batchBar')",
+        [click_x + 10, click_y],
+    )
+    page.mouse.click(click_x + 10, click_y)
+
+    # The click belonged to the bar; it must not have been turned into a
+    # double-click on the photo underneath.
+    expect(page.locator("#lightboxOverlay")).to_be_hidden()
+
+
 def test_slow_double_click_still_opens_photo_when_bar_activated_between_clicks(
     live_server, page
 ):
