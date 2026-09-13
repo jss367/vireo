@@ -58,8 +58,18 @@ def threshold_for(model, config=None):
     or pipeline request into a 500. A cosine floor outside ``[-1, 1]`` is
     also refused — cosine similarity cannot escape that interval, so a value
     beyond it cannot have been calibrated on real data.
+
+    A ``match_thresholds`` value that is not a mapping (e.g. a hand-edited
+    config carrying ``"match_thresholds": "bad"`` or a list) is treated as
+    "no thresholds configured" rather than raising ``AttributeError`` when
+    looking up the model: the per-photo predictions endpoint and the Pipeline
+    Inspector assess match states inside the request, and a truthy non-mapping
+    would otherwise turn every affected request into a 500.
     """
-    entry = ((config or {}).get(CONFIG_KEY) or {}).get(model)
+    thresholds = (config or {}).get(CONFIG_KEY)
+    if not isinstance(thresholds, dict):
+        return None, None
+    entry = thresholds.get(model)
     if not isinstance(entry, dict):
         return None, None
     raw = entry.get("threshold")

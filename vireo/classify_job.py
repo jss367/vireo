@@ -1345,10 +1345,18 @@ def _match_stats(all_preds, model_type):
         second_raw = all_preds[1].get("raw_score")
         if second_raw is not None:
             margin = float(top_raw) - float(second_raw)
+    # Fold ``top_species`` through the same normalization ``add_prediction``
+    # applies to its ``species`` column. The calibration query in
+    # ``scripts/calibrate_match_threshold.py`` joins this summary against the
+    # normalized keyword and the normalized prediction row, so a bundled label
+    # with a curly apostrophe (``Swinhoe’s White-eye``) would otherwise be
+    # recorded here in the un-normalized form and miss both sides of the join,
+    # dropping the confirmed-correct row into the ``incorrect`` bucket and
+    # biasing the fitted floor.
     return {
         "max_match_score": float(top_raw),
         "match_margin": margin,
-        "top_species": all_preds[0].get("species"),
+        "top_species": _folded_species_key(all_preds[0].get("species")),
         "label_count": len(all_preds),
         "score_kind": score_kind,
     }

@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from classify_job import _detect_batch
+from classify_job import _detect_batch, _match_stats
 
 
 def test_detect_batch_returns_detection_map():
@@ -53,3 +53,38 @@ def test_detect_batch_uses_cached_detection():
     assert detection_map[1][0]["box_x"] == 0.1
     assert detected == 1
     assert 1 in processed_ids
+
+
+def test_match_stats_normalizes_top_species_apostrophe():
+    """``add_prediction`` folds curly apostrophes in ``species`` before
+    storing the row, but the run summary used to record whatever spelling
+    the classifier returned. The calibration query compares
+    ``classifier_match_scores.top_species`` both to the normalized keyword
+    and to the normalized prediction row before looking up its taxon ID, so
+    an un-folded curly-apostrophe label would miss both sides of the join
+    and drop a confirmed-correct run into the ``incorrect`` bucket, biasing
+    the fitted floor. Fold ``top_species`` through the same rule as the
+    prediction so both sides of the join agree.
+    """
+    stats = _match_stats(
+        [
+            {"species": "Swinhoe’s White-eye", "raw_score": 0.42},
+            {"species": "Zebra Finch", "raw_score": 0.11},
+        ],
+        model_type="timm",
+    )
+    assert stats is not None
+    assert stats["top_species"] == "Swinhoe's White-eye"
+
+
+def test_match_stats_handles_missing_top_species():
+    """``_folded_species_key(None)`` returns ``None`` so a classifier that
+    reports no species keeps the ``None`` signal instead of collapsing to
+    the empty string that a fold would produce.
+    """
+    stats = _match_stats(
+        [{"species": None, "raw_score": 0.5}],
+        model_type="timm",
+    )
+    assert stats is not None
+    assert stats["top_species"] is None

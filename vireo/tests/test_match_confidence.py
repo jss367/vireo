@@ -116,6 +116,24 @@ def test_oversized_integer_threshold_is_treated_as_uncalibrated():
     )["state"] == mc.UNCALIBRATED
 
 
+def test_malformed_threshold_container_is_treated_as_uncalibrated():
+    """A hand-edited config or API-accepted workspace override that stores
+    ``match_thresholds`` as anything other than a mapping (a string, a list,
+    a number) used to raise ``AttributeError`` inside ``threshold_for`` when
+    it reached ``.get(model)`` on the non-mapping value. Both the per-photo
+    predictions endpoint and the Pipeline Inspector assess match states in
+    the request, so an affected workspace turned every read into a 500.
+    The right degrade is the same one a missing threshold takes: report
+    ``uncalibrated`` and let the caller decide, never raise.
+    """
+    for bad in ("bad", ["BioCLIP-2.5"], 3, 3.14, True):
+        cfg = {"match_thresholds": bad}
+        assert mc.threshold_for("BioCLIP-2.5", cfg) == (None, None)
+        assert mc.assess(
+            "BioCLIP-2.5", "cosine", 0.9, None, cfg,
+        )["state"] == mc.UNCALIBRATED
+
+
 def test_cosine_threshold_outside_unit_interval_is_treated_as_uncalibrated():
     """Cosine similarity is bounded to ``[-1, 1]``; a floor at 5.0 cannot
     have been calibrated on real cosine scores, and applying it as-is
