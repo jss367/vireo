@@ -783,7 +783,7 @@
     const chips = $$('.vf-chips .vf-chip');
     chips.forEach((c) => { c.style.display = 'inline-flex'; });
     overflow.hidden = true;
-    if (!chips.length || viewport.clientWidth <= 0) return;
+    if (!chips.length) return;
     let used = 0;
     let hidden = 0;
     chips.forEach((chip) => {
@@ -1017,10 +1017,12 @@
   function openPopover(open) {
     const pop = $('.vf-popover');
     const shouldOpen = open == null ? pop.hidden : Boolean(open);
+    const restoreFocus = !shouldOpen && pop.contains(document.activeElement);
     pop.hidden = !shouldOpen;
     $('.vf-filters-btn').classList.toggle('open', shouldOpen);
     $('.vf-filters-btn').setAttribute('aria-expanded', String(shouldOpen));
     if (shouldOpen) renderRules();
+    if (restoreFocus) $('.vf-filters-btn').focus();
   }
 
   function fieldAvailable(field) {
@@ -1395,6 +1397,7 @@
       }
     });
     window.addEventListener('resize', updateChipOverflow);
+    new ResizeObserver(updateChipOverflow).observe(rootEl);
   }
 
   function expressionSummary() {

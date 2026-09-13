@@ -109,6 +109,7 @@ def test_color_description_can_be_removed_and_right_click_does_not_filter(
         "title", "Blue label — Waterbirds · Right-click to edit"
     )
 
+    page.click(".vf-filters-btn")
     blue.click(button="right")
     assert "active" not in (blue.get_attribute("class") or "").split()
     field = page.locator("#colorLabelDescriptionInput")
