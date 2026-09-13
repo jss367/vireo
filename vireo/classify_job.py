@@ -122,12 +122,25 @@ def _load_labels(
     labels = None
     label_metas: list[dict] = []
 
+    # ``load_merged_labels`` silently skips paths whose file is missing on
+    # disk (a saved list whose source was deleted, a workspace override still
+    # pointing at a since-removed file). Retaining those metas here would let
+    # ``describe_label_source`` name and count lists that contributed nothing,
+    # and ``_record_labels_fingerprint`` would write the same false provenance
+    # into ``labels_fingerprints``. Filter with the same predicate.
+    def _existing_metas(metas):
+        return [
+            m for m in metas
+            if m.get("labels_file") and os.path.exists(m["labels_file"])
+        ]
+
     if labels_files and isinstance(labels_files, list):
         saved = get_saved_labels()
         saved_by_file = {s["labels_file"]: s for s in saved}
-        for p in labels_files:
-            meta = saved_by_file.get(p, {"labels_file": p})
-            label_metas.append(meta)
+        requested = [
+            saved_by_file.get(p, {"labels_file": p}) for p in labels_files
+        ]
+        label_metas = _existing_metas(requested)
         labels = load_merged_labels(label_metas)
         log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
     elif labels_file and os.path.exists(labels_file):
@@ -144,9 +157,10 @@ def _load_labels(
         if ws_labels is not None:
             saved = get_saved_labels()
             saved_by_file = {s["labels_file"]: s for s in saved}
-            for p in ws_labels:
-                meta = saved_by_file.get(p, {"labels_file": p})
-                label_metas.append(meta)
+            requested = [
+                saved_by_file.get(p, {"labels_file": p}) for p in ws_labels
+            ]
+            label_metas = _existing_metas(requested)
             labels = load_merged_labels(label_metas)
             names = [s.get("name", "?") for s in label_metas]
             log.info(
@@ -157,7 +171,7 @@ def _load_labels(
         else:
             active_sets = get_active_labels()
             if active_sets:
-                label_metas = list(active_sets)
+                label_metas = _existing_metas(list(active_sets))
                 labels = load_merged_labels(label_metas)
                 names = [s.get("name", "?") for s in label_metas]
                 log.info(
@@ -677,6 +691,89 @@ def _label_set_name(meta):
     if name:
         return name
     return os.path.basename(meta.get("labels_file") or "") or "unnamed list"
+
+
+def _describe_cached_label_source(
+    db, photo_ids, *, classifier_model=None, labels_fingerprint=None,
+):
+    """Name the label space of a reused-cache classify step when no peek loaded.
+
+    Used only when ``_finalize_cached_only`` fires with ``peek_succeeded=False``
+    — the label peek raised (missing files on a fresh install with an
+    imported cache) so we have no live ``labels``/``use_tol``/``metas`` to
+    hand ``describe_label_source``. The identity gate in
+    ``_all_photos_cache_satisfied`` guarantees one canonical
+    ``(classifier_model, labels_fingerprint)`` pair covers every reused row,
+    so we can look up the corresponding ``labels_fingerprints`` sidecar and
+    at least name the sources that originally produced these predictions.
+    Returns ``None`` if we cannot recover any source — the caller then
+    leaves the step unlabeled rather than inventing a description.
+    """
+    if not photo_ids:
+        return None
+    try:
+        from db import _chunks
+
+        found_fp = labels_fingerprint
+        if found_fp is None:
+            filter_sql = ""
+            filter_args = []
+            if classifier_model is not None:
+                filter_sql = " AND cr.classifier_model = ?"
+                filter_args.append(classifier_model)
+            for chunk in _chunks(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                row = db.conn.execute(
+                    f"""SELECT DISTINCT cr.labels_fingerprint AS fp
+                         FROM detections d
+                         JOIN classifier_runs cr
+                           ON cr.detection_id = d.id{filter_sql}
+                        WHERE d.photo_id IN ({placeholders})
+                          AND cr.labels_fingerprint IS NOT NULL
+                        LIMIT 1""",
+                    filter_args + list(chunk),
+                ).fetchone()
+                if row and row["fp"]:
+                    found_fp = row["fp"]
+                    break
+        if not found_fp:
+            return "Reused cached predictions (label source unavailable)"
+
+        sidecar = None
+        for entry in db.get_labels_fingerprints() or []:
+            if entry.get("fingerprint") == found_fp:
+                sidecar = entry
+                break
+        if not sidecar:
+            return "Reused cached predictions (label source unavailable)"
+
+        sources = sidecar.get("sources") or []
+        names = [os.path.basename(s) for s in sources if s]
+        count = sidecar.get("label_count") or 0
+        count_text = f"{count:,} species" if count else "cached label set"
+        if not names:
+            display = (sidecar.get("display_name") or "").strip()
+            if display:
+                return (
+                    f"Reused cached predictions from "
+                    f"{count_text}: {display}"
+                )
+            return "Reused cached predictions (label source unavailable)"
+        if len(names) > 3:
+            shown = ", ".join(names[:3]) + f" and {len(names) - 3} more"
+        else:
+            shown = ", ".join(names)
+        if len(names) == 1:
+            return f"Reused cached predictions from {count_text}: {shown}"
+        return (
+            f"Reused cached predictions from {count_text} across "
+            f"{len(names)} lists: {shown}"
+        )
+    except Exception:
+        log.debug(
+            "Could not describe cached label source", exc_info=True,
+        )
+        return None
 
 
 def describe_label_source(
@@ -2591,6 +2688,7 @@ def _finalize_cached_only(
     # count-dependent branches (Tree of Life exact count, timm exact count)
     # degrade to their generic wording; that is acceptable because the
     # regional-list branch carries its count in ``labels``.
+    label_source_text = None
     if peek_succeeded:
         peek_model_type = (peek_model or {}).get("model_type", "bioclip")
         label_source_text = describe_label_source(
@@ -2600,10 +2698,25 @@ def _finalize_cached_only(
             model_type=peek_model_type,
             label_metas=peek_label_metas,
         )
-        if label_source_text:
-            runner.update_step(
-                job["id"], "classify", label_source=label_source_text,
-            )
+    else:
+        # ``_load_labels`` raised (e.g. an imported cache on a fresh install
+        # whose selected labels or Tree-of-Life artifacts aren't present),
+        # so we don't have a live label space to name. The identity gate in
+        # ``_all_photos_cache_satisfied`` guarantees a single (model, fp)
+        # pair covers every reused row — recover its provenance from
+        # ``labels_fingerprints`` so the classify history row still says
+        # which list produced the predictions instead of being unlabeled,
+        # which was exactly the pre-feature state.
+        label_source_text = _describe_cached_label_source(
+            thread_db,
+            [p["id"] for p in photos],
+            classifier_model=classifier_model,
+            labels_fingerprint=labels_fingerprint,
+        )
+    if label_source_text:
+        runner.update_step(
+            job["id"], "classify", label_source=label_source_text,
+        )
 
     folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
     photo_ids = [p["id"] for p in photos]

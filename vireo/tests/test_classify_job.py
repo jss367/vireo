@@ -430,6 +430,70 @@ def test_describe_label_source_prefers_supplied_metas():
     assert text == "2 species from Actually Loaded"
 
 
+def test_load_labels_drops_missing_files_from_returned_metas(tmp_path):
+    """Regression: ``load_merged_labels`` silently skips paths whose file is
+    missing on disk (a saved list whose source was deleted, a workspace
+    override still pointing at a since-removed file). Before the fix,
+    ``_load_labels`` still returned metadata for those skipped paths — so
+    ``describe_label_source`` named lists that contributed no classes and
+    ``_record_labels_fingerprint`` wrote the same false provenance into
+    ``labels_fingerprints``.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _load_labels
+
+    present = tmp_path / "birds.txt"
+    present.write_text("Robin\n")
+    gone = tmp_path / "removed.txt"  # never created
+    saved = [
+        {"labels_file": str(present), "name": "Backyard Birds"},
+        {"labels_file": str(gone), "name": "Removed Set"},
+    ]
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        labels, use_tol, label_metas = _load_labels(
+            model_type="bioclip",
+            model_str="hf-hub:imageomics/bioclip",
+            labels_file=None,
+            labels_files=[str(present), str(gone)],
+        )
+    assert labels == ["Robin"]
+    assert use_tol is False
+    # The missing file's metadata is dropped — only the list that actually
+    # produced ``labels`` survives.
+    assert label_metas == [{"labels_file": str(present), "name": "Backyard Birds"}]
+
+
+def test_load_labels_workspace_fallback_drops_missing_files(tmp_path):
+    """Same guarantee for the workspace-scoped fallback: a workspace override
+    pointing at a deleted file must not name that stale list on the classify
+    step even though ``load_merged_labels`` silently skipped it.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _load_labels
+
+    present = tmp_path / "ws.txt"
+    present.write_text("Cardinal\n")
+    gone = tmp_path / "ws_gone.txt"
+    db = _StubDB([str(present), str(gone)])
+    saved = [
+        {"labels_file": str(present), "name": "Workspace Set"},
+        {"labels_file": str(gone), "name": "Deleted"},
+    ]
+    with patch("classify_job.get_saved_labels", return_value=saved):
+        labels, use_tol, label_metas = _load_labels(
+            model_type="bioclip",
+            model_str="hf-hub:imageomics/bioclip",
+            labels_file=None,
+            labels_files=None,
+            db=db,
+        )
+    assert labels == ["Cardinal"]
+    assert use_tol is False
+    assert label_metas == [{"labels_file": str(present), "name": "Workspace Set"}]
+
+
 # ── Task 3: _detect_subjects tests ──────────────────────────────────────────
 
 
@@ -7820,6 +7884,125 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
     )
     assert "Backyard Birds" in classify_label_sources[-1]
     assert "2 species" in classify_label_sources[-1]
+
+
+def test_cached_only_path_publishes_source_when_peek_fails(
+    tmp_path, monkeypatch,
+):
+    """Regression: on a fresh install with an imported cache, ``_load_labels``
+    can raise (selected lists deleted, Tree-of-Life artifacts missing) and
+    the classify job falls back to model-only cache filtering. Before the
+    fix, ``_finalize_cached_only`` only published a ``label_source`` when
+    the peek succeeded, so this shortcut left the classify history row
+    unlabeled — exactly the state the whole feature set out to eliminate.
+    Recover the source from ``labels_fingerprints`` so the row still names
+    which list produced the cached predictions.
+    """
+    import classify_job as classify_job_mod
+    import config as cfg
+    from classify_job import ClassifyParams, run_classify_job
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_id = db.save_detections(pid, [{
+        "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.add_prediction(
+        det_id, species="Robin", confidence=0.9,
+        model="BioCLIP", labels_fingerprint="fp-cached",
+    )
+    db.record_classifier_run(
+        det_id, "BioCLIP", "fp-cached", prediction_count=1,
+    )
+    # Populate the sidecar as the original run would have — this is the
+    # provenance the cached-only fallback recovers from.
+    db.upsert_labels_fingerprint(
+        fingerprint="fp-cached",
+        display_name="California, US Birds",
+        sources=["/imported/california.txt"],
+        label_count=1327,
+    )
+    coll_id = db.add_collection(
+        "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    # No models are installed anywhere, and no label list is active — the
+    # label peek raises RuntimeError, so ``peek_succeeded`` stays False.
+    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [])
+    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
+    monkeypatch.setattr(classify_job_mod, "get_saved_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
+
+    runner = FakeRunner()
+    run_classify_job(
+        _make_job(), runner, db_path, ws,
+        ClassifyParams(
+            collection_id=coll_id,
+            labels_files=None, labels_file=None,
+            model_id=None, model_name=None,
+            grouping_window=0, similarity_threshold=0.99,
+            reclassify=False,
+        ),
+    )
+
+    classify_label_sources = [
+        kwargs["label_source"]
+        for step_id, kwargs in runner.steps
+        if step_id == "classify" and "label_source" in kwargs
+    ]
+    assert classify_label_sources, (
+        "cached-only run must publish a label_source even when the label "
+        "peek raised; without it the classify step is unlabeled and the "
+        "history row is indistinguishable from a pre-feature run"
+    )
+    text = classify_label_sources[-1]
+    assert "cached" in text.lower()
+    assert "california.txt" in text
+    assert "1,327 species" in text
+
+
+def test_describe_cached_label_source_falls_back_when_no_sidecar(
+    tmp_path, monkeypatch,
+):
+    """When the peek fails AND no ``labels_fingerprints`` row exists for
+    the cached fingerprint, publish an explicit \"label source unavailable\"
+    line rather than inventing a description — an honest unknown beats a
+    misleading name.
+    """
+    from classify_job import _describe_cached_label_source
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_id = db.save_detections(pid, [{
+        "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.record_classifier_run(
+        det_id, "BioCLIP", "fp-orphan", prediction_count=1,
+    )
+    # Deliberately NO upsert_labels_fingerprint call — the sidecar is empty.
+
+    text = _describe_cached_label_source(db, [pid])
+    assert text == "Reused cached predictions (label source unavailable)"
 
 
 def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
