@@ -406,6 +406,42 @@ def test_double_click_slower_than_every_timer_still_opens_the_photo(
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg", timeout=3000)
 
 
+def test_keyboard_activated_batch_button_is_not_swallowed_by_the_redirect(
+    live_server, page
+):
+    """Enter/Space on a focused batch button must fire the button.
+
+    The straggling-click redirect keeps the second half of a stationary
+    mouse double-click from firing a batch action instead of opening the
+    photo. It reads pointer state — where the last card mousedown landed
+    and whether the pointer has moved since — which a keyboard-triggered
+    click cannot supply. Without an exemption, that click looks identical
+    to a stationary mouse click on the bar and is silently cancelled
+    (stopImmediatePropagation), so the requested batch action never runs.
+    """
+    page.goto(f"{live_server['url']}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+
+    bar = page.locator("#batchBar")
+    # Collapse the quiet window so the bar activates immediately and the
+    # test does not need to wait a second for the shipped interval.
+    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 1")
+    first.click()
+    expect(bar).to_be_visible()
+    expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=2000)
+
+    # The Clear button clears the selection when its handler runs; its
+    # observable effect (bar hidden, selection empty) is a clean signal
+    # that the click reached the button rather than being swallowed.
+    clear_btn = page.get_by_role("button", name="Clear", exact=True)
+    clear_btn.focus()
+    page.keyboard.press("Enter")
+
+    expect(bar).to_be_hidden()
+    assert page.evaluate("getActiveSelection().length") == 0
+
+
 def test_export_defaults_beside_original_and_offers_folder_browser(
     live_server, page,
 ):

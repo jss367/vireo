@@ -8060,6 +8060,14 @@ document.addEventListener('click', function(event) {
   if (!target.closest('#batchBar')) return;
   var bar = document.getElementById('batchBar');
   if (!bar || bar.style.display !== 'flex') return;
+  // A keyboard-activated click (Enter/Space on a focused batch button, or a
+  // script-dispatched click on one) belongs to that button, not to any
+  // mouse gesture. The pointer never moved for it — its coordinates are
+  // meaningless for elementFromPoint — so the guards below would misread
+  // it as the stationary tail of a card's double-click and swallow it. The
+  // browser marks such clicks with detail === 0; a real mouse click is 1
+  // or more.
+  if (event.detail === 0) return;
   if (!batchBarLastCardMouseDown) return;
   // The pointer has not left the card it was pressed on, so this click cannot
   // be a reach for a button — every button is somewhere it would have had to
