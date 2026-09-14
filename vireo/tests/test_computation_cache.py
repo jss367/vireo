@@ -1955,3 +1955,105 @@ def test_backfill_never_overwrites_existing_match_scores(tmp_path):
         "SELECT max_match_score FROM classifier_match_scores",
     ).fetchone()["max_match_score"] == 0.31
     destination.close()
+
+
+def test_complete_enrichment_beats_partial_enrichment_same_identity(tmp_path):
+    """Multi-detection classification artifacts sharing lookup identity may
+    differ only in how many subjects were fully enriched with a ``match``
+    block. A boolean "has at least one match block" tiebreaker ties the
+    partial artifact with the fully-enriched one and lets the digest
+    tiebreaker hand the win to the partial artifact — after which the
+    un-enriched detections materialize with ``match_score`` NULL and no
+    ``classifier_match_scores`` row, permanently locked in behind the
+    ``classifier_runs`` gate.
+
+    Coverage-based ranking must pick the fully-enriched artifact regardless
+    of manifest order and regardless of which digest sorts earlier.
+    """
+    d0_box = {"x": 0.10, "y": 0.20, "w": 0.30, "h": 0.40}
+    d1_box = {"x": 0.50, "y": 0.55, "w": 0.25, "h": 0.30}
+    detection = detection_artifact(subjects=[
+        {"key": "d0", "kind": "box", "box": d0_box,
+         "confidence": 0.91, "category": "animal"},
+        {"key": "d1", "kind": "box", "box": d1_box,
+         "confidence": 0.88, "category": "animal"},
+    ])
+
+    def _classification(*, match_on_d1):
+        d0_subject = {
+            "key": "d0", "kind": "box", "box": d0_box, "category": "animal",
+            "candidates": [{"species": "Robin", "confidence": 0.9,
+                            "match_score": 0.31}],
+            "match": {"max_match_score": 0.31, "top_species": "Robin",
+                      "score_kind": "cosine"},
+        }
+        d1_subject = {
+            "key": "d1", "kind": "box", "box": d1_box, "category": "animal",
+            "candidates": [{"species": "Sparrow", "confidence": 0.85,
+                            "match_score": 0.29}],
+        }
+        if match_on_d1:
+            d1_subject["match"] = {
+                "max_match_score": 0.29, "top_species": "Sparrow",
+                "score_kind": "cosine",
+            }
+        subjects = [d0_subject, d1_subject]
+        input_block, input_fp = classification_input(
+            PHOTO_HASH, RUNTIME, subjects,
+        )
+        return {
+            "artifact_schema": 1,
+            "type": "classification",
+            "classifier_model": "bioclip-2.5",
+            "detector_model": "megadetector-v6",
+            "detector_runtime_fingerprint": RUNTIME,
+            "labels": {"fingerprint": "3" * 64, "short_fingerprint": "3" * 12},
+            "photo_sha256": PHOTO_HASH,
+            "runtime_fingerprint": CLASSIFIER_RUNTIME,
+            "input_fingerprint": input_fp,
+            "input": input_block,
+            "completed": True,
+            "subjects": subjects,
+        }
+
+    complete = _classification(match_on_d1=True)
+    partial = _classification(match_on_d1=False)
+    # Same lookup identity, different digests — the two collide in dedup.
+    assert complete["input_fingerprint"] == partial["input_fingerprint"]
+    assert complete["runtime_fingerprint"] == partial["runtime_fingerprint"]
+    assert artifact_digest(complete) != artifact_digest(partial)
+
+    for order in ([complete, partial], [partial, complete]):
+        label = "complete-first" if order[0] is complete else "partial-first"
+        destination, _folder_id, _photo_id = _database_with_photo(
+            tmp_path / f"partial-{label}.db", "photo.jpg",
+        )
+        destination.upsert_labels_fingerprint(
+            "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+        )
+        materialize_artifacts(
+            destination,
+            [detection, *order],
+            known_runtimes={RUNTIME},
+            known_classifier_runtimes={CLASSIFIER_RUNTIME},
+        )
+        # Both detections must land with match_score recorded.
+        pred_rows = destination.conn.execute(
+            "SELECT species, match_score FROM predictions "
+            "ORDER BY species",
+        ).fetchall()
+        assert len(pred_rows) == 2
+        pred_by_species = {row["species"]: row["match_score"] for row in pred_rows}
+        assert pred_by_species["Robin"] == 0.31
+        assert pred_by_species["Sparrow"] == 0.29, (
+            f"[{label}] partial artifact won dedup; d1's match_score was "
+            "dropped and locked behind the classifier_runs gate"
+        )
+        summary_rows = destination.conn.execute(
+            "SELECT top_species FROM classifier_match_scores "
+            "ORDER BY top_species",
+        ).fetchall()
+        assert [row["top_species"] for row in summary_rows] == [
+            "Robin", "Sparrow",
+        ]
+        destination.close()

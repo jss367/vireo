@@ -2037,14 +2037,25 @@ def materialize_artifacts(
         return [entry[2] for entry in best.values()]
 
     def _classification_enrichment_rank(artifact):
-        # 0 = carries at least one subject-level ``match`` block (enriched),
-        # 1 = does not. Lower wins, so an enriched artifact beats a
-        # pre-feature one for the same identity even if the pre-feature
-        # digest sorts earlier.
-        for subject in artifact.get("subjects", ()):
-            if "match" in subject:
-                return 0
-        return 1
+        # Rank by the number of subjects missing a ``match`` block (lower
+        # wins). 0 = every subject enriched; a positive count = partial
+        # enrichment; equal to ``len(subjects)`` = pre-feature, no
+        # subject enriched at all.
+        #
+        # A boolean "has at least one enriched subject" tiebreaker is not
+        # enough for multi-detection artifacts: an interrupted enrichment
+        # pass can leave one subject's ``match`` block behind, and a
+        # later complete artifact carrying blocks for every subject then
+        # ties on rank 0 and falls back to the digest sort. If the
+        # partial digest wins, ``materialize_artifacts`` writes the
+        # classifier-run marker but the un-enriched detections
+        # permanently land with ``match_score`` NULL and no
+        # ``classifier_match_scores`` row — the very "not recorded"
+        # state this feature exists to close (Codex P2 on a1be510).
+        return sum(
+            1 for subject in artifact.get("subjects", ())
+            if "match" not in subject
+        )
 
     detection_items = [a for a in normalized if a["type"] == "detection"]
     classification_items = [a for a in normalized if a["type"] == "classification"]
