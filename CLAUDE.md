@@ -51,6 +51,21 @@ CI does the same: PRs (`test.yml`) run the selected subset on Linux; every push 
 
 Do not monkeypatch `sqlite3.connect` globally in tests: coverage flushes per-test contexts to its own SQLite file at every test boundary, so a global fake crashes the xdist worker. Fake only the connection for the database path under test (see `test_pipeline_queue.py`).
 
+### Browser tests
+
+`tests/e2e` is excluded from the default `addopts`, so the browser suite only runs
+when asked for by name. It is timing-sensitive: under machine load a page load can
+stall past a locator's 30s timeout and fail a test that has nothing wrong with it.
+The release gate (`e2e-full.yml`) absorbs that with reruns — match it locally rather
+than chasing a one-off red line.
+
+```bash
+python -m pytest -o addopts='' -q tests/e2e/ --reruns 2 --reruns-delay 1
+```
+
+Reruns retry only the failed test, with fresh fixtures. A genuinely broken test still
+fails all three attempts; only one that passes on retry is tolerated.
+
 ## Architecture
 
 - `vireo/app.py` — Flask app with all routes. Created via `create_app(db_path, thumb_cache_dir)`.
