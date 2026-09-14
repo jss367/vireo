@@ -59,7 +59,12 @@ stall past a locator's 30s timeout and fail a test that has nothing wrong with i
 The release gate (`e2e-full.yml`) absorbs that with reruns — match it locally rather
 than chasing a one-off red line.
 
+`pip install -e ".[dev]"` installs the Playwright Python package but not the browser
+binary, so a clean checkout needs the one-time download first (add `--with-deps` on
+Linux to pull the system libraries too, as `e2e-full.yml` does):
+
 ```bash
+python -m playwright install chromium
 python -m pytest -o addopts='' -q tests/e2e/ --reruns 2 --reruns-delay 1
 ```
 
