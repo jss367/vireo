@@ -28,6 +28,35 @@ def disable_infinite_scroll(page):
     """)
 
 
+def point_covered_by_batch_bar(page, member):
+    """Measure the real overlap, then clear the setup selection for the test.
+
+    System fonts change the stack's height: its center falls under the bar
+    on macOS but just above it on Linux. Select once to measure the rendered
+    bar instead of assuming that the center is covered.
+    """
+    member.click()
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    image_box = member.locator(".grid-card-img-wrap").bounding_box()
+    bar_box = bar.bounding_box()
+    assert image_box is not None and bar_box is not None
+    left = max(image_box["x"], bar_box["x"])
+    right = min(image_box["x"] + image_box["width"], bar_box["x"] + bar_box["width"])
+    top = max(image_box["y"], bar_box["y"])
+    bottom = min(image_box["y"] + image_box["height"], bar_box["y"] + bar_box["height"])
+    # Leave room for the deliberate-movement test's ten-pixel nudge.
+    assert right - left > 24 and bottom - top > 4, "Photo must overlap the batch bar"
+    point = [(left + right) / 2, (top + bottom) / 2]
+
+    bar.get_by_role("button", name="Clear", exact=True).click()
+    expect(bar).to_be_hidden()
+    assert member.evaluate(
+        "(el, p) => el.contains(document.elementFromPoint(p[0], p[1]))", point
+    ), "Clearing the setup selection must leave the photo at the measured point"
+    return point
+
+
 def test_large_library_uses_bounded_placeholder_runway(live_server, page):
     """A large result set must not expose its unloaded tail as scroll space.
 
@@ -271,16 +300,13 @@ def test_a_bar_click_after_deliberate_movement_is_not_redirected_to_the_photo(
     member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
     expect(member).to_be_visible()
 
-    box = member.bounding_box()
-    assert box is not None
-    click_x = box["x"] + box["width"] / 2
-    click_y = box["y"] + box["height"] / 2
+    click_x, click_y = point_covered_by_batch_bar(page, member)
     page.mouse.click(click_x, click_y)
 
     bar = page.locator("#batchBar")
     expect(bar).to_be_visible()
-    # The bar now covers this point; travel far enough to release it, but stay
-    # inside the straggling-click guard's radius of the card mousedown.
+    # Travel far enough to release the bar while remaining inside its overlap
+    # with the photo.
     page.mouse.move(click_x + 10, click_y)
     expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"))
     assert page.evaluate(
@@ -335,10 +361,7 @@ def test_slow_double_click_still_opens_photo_when_bar_activated_between_clicks(
     expect(member).to_be_visible()
 
     # First click of the slow double-click lands on the stack member.
-    box = member.bounding_box()
-    assert box is not None
-    click_x = box["x"] + box["width"] / 2
-    click_y = box["y"] + box["height"] / 2
+    click_x, click_y = point_covered_by_batch_bar(page, member)
     page.mouse.click(click_x, click_y)
 
     # The bar shows and, with the shortened quiet window, activates before
@@ -350,6 +373,10 @@ def test_slow_double_click_still_opens_photo_when_bar_activated_between_clicks(
     # The second click at the same coordinates — the pointer has not moved,
     # as a real double-click's pointer does not — now targets the active
     # bar. The straggling-click guard must redirect it to the card.
+    assert page.evaluate(
+        "p => !!document.elementFromPoint(p[0], p[1]).closest('#batchBar')",
+        [click_x, click_y],
+    )
     page.mouse.click(click_x, click_y)
 
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg", timeout=3000)
@@ -389,10 +416,7 @@ def test_double_click_slower_than_every_timer_still_opens_the_photo(
     member = tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]')
     expect(member).to_be_visible()
 
-    box = member.bounding_box()
-    assert box is not None
-    click_x = box["x"] + box["width"] / 2
-    click_y = box["y"] + box["height"] / 2
+    click_x, click_y = point_covered_by_batch_bar(page, member)
     page.mouse.click(click_x, click_y)
 
     bar = page.locator("#batchBar")
@@ -401,6 +425,10 @@ def test_double_click_slower_than_every_timer_still_opens_the_photo(
     # platform offers before the second click of the gesture arrives.
     expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=5000)
     page.wait_for_timeout(2500)
+    assert page.evaluate(
+        "p => !!document.elementFromPoint(p[0], p[1]).closest('#batchBar')",
+        [click_x, click_y],
+    )
     page.mouse.click(click_x, click_y)
 
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg", timeout=3000)
