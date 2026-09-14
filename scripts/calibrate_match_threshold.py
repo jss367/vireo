@@ -517,7 +517,15 @@ def main(argv=None):
         import config as cfg
 
         current = cfg.load()
-        merged = dict(current.get("match_thresholds") or {})
+        # A hand-edited config can carry a non-mapping ``match_thresholds``
+        # (e.g. ``"match_thresholds": "bad"``); ``dict()`` would raise
+        # ``ValueError`` on a string and lose the calibration work. Treat
+        # non-mappings as an empty map, matching ``threshold_for()`` in
+        # ``vireo/match_confidence.py`` — ``--apply`` replaces the malformed
+        # value with the calibrated one instead of crashing (Codex P2 on
+        # f074d0c).
+        existing = current.get("match_thresholds")
+        merged = dict(existing) if isinstance(existing, dict) else {}
         merged.update(suggested)
         cfg.save({**current, "match_thresholds": merged})
         print(f"\nWritten to {cfg.CONFIG_PATH}")

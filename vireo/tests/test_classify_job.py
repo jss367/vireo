@@ -1536,6 +1536,68 @@ def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     mock_clf.classify_batch_with_embedding.assert_not_called()
 
 
+def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path):
+    """Mirror of the boxed-detection zero-candidate gate for full-image runs.
+
+    A full-image ``classifier_runs`` row with no prediction rows and a
+    measured ``classifier_match_scores`` summary is a completed no-match:
+    the classifier looked at the whole image, nothing cleared the confidence
+    floor, and the match-score row is its output-of-record. The boxed
+    branch already honors this; the full-image branch used to fall through
+    to re-inference, needlessly recomputing whenever another photo
+    prevented the all-covered shortcut from firing (Codex P2 on f074d0c).
+    """
+    from unittest.mock import MagicMock
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+
+    mock_clf = MagicMock()
+    mock_db = MagicMock()
+    # No real detections → full-image path. Existing full-image detection
+    # is reused; its (model, fingerprint) run key exists; no cached
+    # predictions; but a measured match-score row records the run as a
+    # zero-candidate no-match.
+    mock_db.get_detections.return_value = [{"id": 999}]
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.get_photo_embedding.return_value = None
+    mock_db.has_classifier_match_score.return_value = True
+
+    import os
+    img_path = os.path.join(str(tmp_path), "bird.jpg")
+    Image.new("RGB", (400, 400), color="green").save(img_path)
+
+    raw_results, failed, skipped = _classify_photos(
+        photos=photos,
+        folders=folders,
+        detection_map={},  # no real detections → full-image branch
+        existing_preds=set(),
+        clf=mock_clf,
+        model_type="bioclip",
+        model_name="BioCLIP",
+        runner=runner,
+        job=job,
+        db=mock_db,
+        labels_fingerprint="fp-x",
+    )
+
+    mock_db.has_classifier_match_score.assert_called_with(999, "BioCLIP", "fp-x")
+    assert skipped == 1, (
+        "the full-image gate must honor the measured no-match summary"
+    )
+    mock_clf.classify_with_embedding.assert_not_called()
+    mock_clf.classify_batch_with_embedding.assert_not_called()
+
+
 def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypatch):
     """When a photo has no real detections, classify_photos falls back to a
     synthetic ('full-image') detection. Because save_detections is

@@ -1927,7 +1927,20 @@ def _classify_photos(
                             "_existing": True,
                         })
                         continue
-                    # Run key without cached rows → fall through to
+                    # Run key without cached rows: mirror the boxed-detection
+                    # gate above. A measured ``classifier_match_scores`` row
+                    # for the same triple is a completed zero-candidate run —
+                    # re-running would discard the "nothing in your list
+                    # fits" verdict this feature exists to preserve, and on
+                    # an install without weights it would fail model loading
+                    # instead of reusing the cache (Codex P2 on f074d0c).
+                    if db.has_classifier_match_score(
+                        full_det_id, model_name, fp,
+                    ):
+                        skipped_existing += 1
+                        continue
+                    # Otherwise the run key is a torn write or a
+                    # deliberately-hidden ``match`` row → fall through to
                     # re-classify this full-image detection.
             img, folder_path, image_path = _prepare_image(photo, folders, None, vireo_dir=vireo_dir)
             if img is None:

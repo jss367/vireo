@@ -642,3 +642,98 @@ def test_apply_writes_threshold_within_advertised_cap(tmp_path, monkeypatch):
         f"floor {threshold!r} — the advertised suppression cap can be "
         "exceeded on the values equal to the original."
     )
+
+
+def test_apply_replaces_malformed_match_thresholds_map(tmp_path, monkeypatch):
+    """A hand-edited ``match_thresholds: "bad"`` must not crash ``--apply``.
+
+    ``dict("bad")`` raises ``ValueError``, so before the fix a run that
+    successfully computed a suggestion would then crash on write, stranding
+    the calibration work. ``threshold_for()`` already treats a non-mapping
+    value as "no thresholds configured"; ``--apply`` now agrees and replaces
+    the malformed value with the calibrated one (Codex P2 on f074d0c).
+    """
+    # A tiny in-memory DB just big enough for ``main`` to compute one
+    # suggestion; the interesting failure is in the apply/save step, so we
+    # keep the calibration path minimal.
+    db_path = tmp_path / "calibrate.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE photos (id INTEGER PRIMARY KEY);
+        CREATE TABLE detections (id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL, detector_model TEXT);
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY,
+            detection_id INTEGER NOT NULL,
+            classifier_model TEXT NOT NULL,
+            labels_fingerprint TEXT NOT NULL,
+            species TEXT NOT NULL,
+            confidence REAL,
+            match_score REAL,
+            source_taxon_id INTEGER
+        );
+        CREATE TABLE classifier_match_scores (
+            detection_id INTEGER NOT NULL,
+            classifier_model TEXT NOT NULL,
+            labels_fingerprint TEXT NOT NULL,
+            max_match_score REAL,
+            match_margin REAL,
+            top_species TEXT,
+            label_count INTEGER,
+            score_kind TEXT,
+            PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
+        );
+        CREATE TABLE keywords (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_species INTEGER DEFAULT 0,
+            type TEXT,
+            taxon_id INTEGER,
+            source_taxon_id INTEGER
+        );
+        CREATE TABLE photo_keywords (
+            photo_id INTEGER NOT NULL,
+            keyword_id INTEGER NOT NULL
+        );
+        CREATE TABLE taxa (
+            id INTEGER PRIMARY KEY,
+            inat_id INTEGER UNIQUE,
+            rank TEXT
+        );
+    """)
+    # Seed 300 correct rows (above the default ``--min-samples`` of 200).
+    for i in range(300):
+        _add_photo_with_keyword(conn, photo_id=i + 1, species="Robin")
+        _add_run(
+            conn, det_id=i + 1, photo_id=i + 1, model="bioclip", fp="fp-a",
+            top_species="Robin", max_match_score=0.5 + i * 0.001,
+        )
+    conn.commit()
+    conn.close()
+
+    mod = _load_module()
+
+    # Stub the calibration script's ``config`` module so we control what
+    # ``cfg.load()`` returns and can observe what ``cfg.save()`` writes.
+    class _StubCfg:
+        CONFIG_PATH = str(tmp_path / "config.json")
+
+        def __init__(self):
+            self._loaded = {"match_thresholds": "bad"}
+            self.saved = None
+
+        def load(self):
+            return dict(self._loaded)
+
+        def save(self, payload):
+            self.saved = payload
+
+    stub = _StubCfg()
+    monkeypatch.setitem(sys.modules, "config", stub)
+
+    exit_code = mod.main(["--db", str(db_path), "--apply", "--min-samples", "50"])
+    assert exit_code == 0
+    assert stub.saved is not None, "--apply crashed before writing"
+    # The malformed scalar is gone; the calibrated map is in its place.
+    assert isinstance(stub.saved.get("match_thresholds"), dict)
+    assert "bioclip" in stub.saved["match_thresholds"]

@@ -271,6 +271,7 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
     best = {}
     runs = []
     seen_scored = set()
+    unscored_assessments = []
     for row in match_rows or []:
         score = row.get("max_match_score")
         if score is None or not is_current_row(row):
@@ -326,12 +327,18 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
             "top_species": row.get("top_species"),
             "detector_model": row.get("detector_model"),
         })
-        # An unscored pair contributes to the photo-level rollup only when the
-        # model has no scored run at all; a model with a scored (listed or
-        # unlisted) run has already had its say for this photo.
-        if model not in best:
-            best[model] = (None, assessment)
-    summary = summarize([assessment for _score, assessment in best.values()])
+        # Every unscored run must feed the rollup, not just those whose model
+        # has no scored run: a scored failing run on one detection and an
+        # unscored run on a different detection of the same model are two
+        # separate pieces of evidence. The scored one may say "no label
+        # matches", but the unscored one was never judged — the blanket
+        # verdict must stay blocked over the panel that still displays it
+        # (Codex P1 on f074d0c).
+        unscored_assessments.append(assessment)
+    summary = summarize(
+        [assessment for _score, assessment in best.values()]
+        + unscored_assessments
+    )
     summary["runs"] = runs
     # The failures that the photo-level rollup is allowed to outvote but the
     # UI is not allowed to drop. Empty unless a run was positively judged

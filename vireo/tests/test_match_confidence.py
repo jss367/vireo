@@ -730,6 +730,39 @@ def test_unscored_pair_ignored_when_it_duplicates_a_scored_row():
     ]
 
 
+def test_unscored_pair_blocks_blanket_verdict_even_when_model_has_scored_run():
+    """A different-detection unscored run must still block the blanket verdict.
+
+    A photo with two detections classified by the same model — one detection
+    scored and failing, one detection carried over from before match scoring
+    existed — used to summarize as ``unlisted`` because the model was already
+    in ``best`` from the scored run. Browse would then paint its "no label
+    matches" banner over the legacy prediction that no one ever judged
+    (Codex P1 on f074d0c). Each unscored current run stands for its own
+    detection and must block the rollup regardless of which other detections
+    of the same model got a score.
+    """
+    scored = [
+        {"detection_id": 7, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.11,
+         "labels_fingerprint": "california"},
+    ]
+    unscored = [
+        {"detection_id": 8, "classifier_model": "BioCLIP-2.5",
+         "labels_fingerprint": "california"},
+    ]
+    summary = mc.summarize_photo(
+        scored, _COSINE_CFG, unscored_current_runs=unscored,
+    )
+    assert summary["state"] == mc.UNCALIBRATED
+    assert summary["unjudged_models"] == 1
+    # Both runs must show up so the UI can attach a warning to the failing
+    # scored detection and refuse to over-report the unscored one.
+    assert sorted(
+        (r["detection_id"], r["state"]) for r in summary["runs"]
+    ) == [(7, mc.UNLISTED), (8, mc.UNAVAILABLE)]
+
+
 def test_get_unscored_current_prediction_runs_matches_migrated_shape(db):
     """The DB helper names exactly the pairs summarize_photo must be told about.
 
