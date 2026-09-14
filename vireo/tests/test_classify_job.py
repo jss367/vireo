@@ -1272,6 +1272,10 @@ def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
     mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
     mock_db.get_predictions_for_detection.return_value = []
     mock_db.get_photo_embedding.return_value = None
+    # No measured match-score summary for this triple either — a torn
+    # write from a crashed local job (or a suppressed ``match`` row),
+    # not a completed no-match. Must fall through to classify.
+    mock_db.has_classifier_match_score.return_value = False
 
     # Need a real image on disk so _prepare_image succeeds.
     import os
@@ -1307,6 +1311,66 @@ def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
         "Gate fired with no cached rows and short-circuited classification; "
         "the detection is stranded until --reclassify."
     )
+
+
+def test_classify_photos_honors_measured_zero_candidate_run(tmp_path):
+    """A ``classifier_runs`` row with a measured match-score summary but no
+    prediction rows is a completed no-match — the run looked, nothing
+    cleared the confidence floor, and the match-score row is its
+    output-of-record. Re-running would either fail on an install without
+    weights or discard the "nothing in your list fits" verdict on one
+    that has them (Codex P2 on 22cc0ac). Must skip inference.
+    """
+    from unittest.mock import MagicMock
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+
+    mock_clf = MagicMock()
+    mock_db = MagicMock()
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.get_photo_embedding.return_value = None
+    # The measured summary says the run happened and matched nothing.
+    mock_db.has_classifier_match_score.return_value = True
+
+    import os
+    img_path = os.path.join(str(tmp_path), "bird.jpg")
+    Image.new("RGB", (400, 400), color="green").save(img_path)
+
+    detection_map = {
+        1: [{"id": 101, "box_x": 0.1, "box_y": 0.1,
+             "box_w": 0.5, "box_h": 0.5, "confidence": 0.9,
+             "category": "animal"}],
+    }
+
+    _classify_photos(
+        photos=photos,
+        folders=folders,
+        detection_map=detection_map,
+        existing_preds=set(),
+        clf=mock_clf,
+        model_type="bioclip",
+        model_name="BioCLIP",
+        runner=runner,
+        job=job,
+        db=mock_db,
+        labels_fingerprint="fp-x",
+    )
+
+    assert not mock_clf.classify_batch_with_embedding.called, (
+        "The gate must skip inference when a measured match-score row "
+        "already records this run as a no-match."
+    )
+    assert not mock_clf.classify_with_embedding.called
 
 
 def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch):
@@ -1803,6 +1867,68 @@ def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     assert raw_results[0]["_existing"] is True
     assert raw_results[0]["prediction"] == "Robin"
     assert raw_results[0]["detection_id"] == 999
+    mock_clf.classify_with_embedding.assert_not_called()
+    mock_clf.classify_batch_with_embedding.assert_not_called()
+
+
+def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path):
+    """Mirror of the boxed-detection zero-candidate gate for full-image runs.
+
+    A full-image ``classifier_runs`` row with no prediction rows and a
+    measured ``classifier_match_scores`` summary is a completed no-match:
+    the classifier looked at the whole image, nothing cleared the confidence
+    floor, and the match-score row is its output-of-record. The boxed
+    branch already honors this; the full-image branch used to fall through
+    to re-inference, needlessly recomputing whenever another photo
+    prevented the all-covered shortcut from firing (Codex P2 on f074d0c).
+    """
+    from unittest.mock import MagicMock
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+
+    mock_clf = MagicMock()
+    mock_db = MagicMock()
+    # No real detections → full-image path. Existing full-image detection
+    # is reused; its (model, fingerprint) run key exists; no cached
+    # predictions; but a measured match-score row records the run as a
+    # zero-candidate no-match.
+    mock_db.get_detections.return_value = [{"id": 999}]
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.get_photo_embedding.return_value = None
+    mock_db.has_classifier_match_score.return_value = True
+
+    import os
+    img_path = os.path.join(str(tmp_path), "bird.jpg")
+    Image.new("RGB", (400, 400), color="green").save(img_path)
+
+    raw_results, failed, skipped = _classify_photos(
+        photos=photos,
+        folders=folders,
+        detection_map={},  # no real detections → full-image branch
+        existing_preds=set(),
+        clf=mock_clf,
+        model_type="bioclip",
+        model_name="BioCLIP",
+        runner=runner,
+        job=job,
+        db=mock_db,
+        labels_fingerprint="fp-x",
+    )
+
+    mock_db.has_classifier_match_score.assert_called_with(999, "BioCLIP", "fp-x")
+    assert skipped == 1, (
+        "the full-image gate must honor the measured no-match summary"
+    )
     mock_clf.classify_with_embedding.assert_not_called()
     mock_clf.classify_batch_with_embedding.assert_not_called()
 

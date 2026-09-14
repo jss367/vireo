@@ -1,0 +1,423 @@
+"""Absolute match strength for classifier output.
+
+Both classifiers finish with a softmax over whatever label list happened to be
+loaded, so the ``confidence`` we store is a *relative* number: it sums to 1
+across the list and therefore always names a winner, however badly every label
+actually fit. A Yellow-breasted Chat scored against a California list comes back
+at 0.999 for the chat; the same photo scored against a list with no chat in it
+comes back at ~0.99 for whatever is nearest. The two numbers are indis-
+tinguishable and mean opposite things.
+
+The raw pre-softmax score is the part that survives that normalization:
+
+* For BioCLIP (``cosine``) it is the cosine similarity between the image
+  embedding and the label's text embedding. Both embeddings are computed
+  independently of the list, so this number does not move when labels are added
+  or removed around it.
+* For a supervised closed-set model such as iNat21 (``logit``) it is the class
+  logit. Also absolute, also list-independent, but on an unrelated scale.
+
+The consequence that governs this whole module: raw scores are comparable
+*across label lists* but never *across models*. Every threshold is therefore
+keyed by model name, and carries the score kind it was calibrated against so a
+threshold can never be silently applied to the wrong scale.
+
+There are deliberately no default thresholds. An uncalibrated model reports
+``uncalibrated`` — "we recorded the number but are not judging it" — rather than
+inventing a cutoff. ``scripts/calibrate_match_threshold.py`` derives a real one
+from confirmed identifications in the catalog.
+"""
+
+import math
+
+COSINE = "cosine"
+LOGIT = "logit"
+SCORE_KINDS = (COSINE, LOGIT)
+
+#: Config key holding ``{model_name: {"threshold": float, "score_kind": str}}``.
+CONFIG_KEY = "match_thresholds"
+
+#: Assessment states, in the order the UI should prefer to explain them.
+LISTED = "listed"
+UNLISTED = "unlisted"
+UNCALIBRATED = "uncalibrated"
+UNAVAILABLE = "unavailable"
+
+
+def threshold_for(model, config=None):
+    """Return ``(threshold, score_kind)`` configured for ``model``.
+
+    Returns ``(None, None)`` when the model has no calibrated threshold, which
+    every caller must treat as "do not judge" rather than "passes". Non-finite
+    values (``nan``, ``inf``, ``-inf``) and unbounded JSON integers that
+    overflow to infinity when coerced to a double are treated as malformed for
+    the same reason a missing threshold is: a NaN threshold silently marks
+    every scored run ``listed`` (every comparison against NaN is false), a
+    ``+inf`` threshold marks every run ``unlisted``, and a huge integer would
+    otherwise leak ``OverflowError`` out of ``float()`` and turn a predictions
+    or pipeline request into a 500. A cosine floor outside ``[-1, 1]`` is
+    also refused — cosine similarity cannot escape that interval, so a value
+    beyond it cannot have been calibrated on real data.
+
+    A ``match_thresholds`` value that is not a mapping (e.g. a hand-edited
+    config carrying ``"match_thresholds": "bad"`` or a list) is treated as
+    "no thresholds configured" rather than raising ``AttributeError`` when
+    looking up the model: the per-photo predictions endpoint and the Pipeline
+    Inspector assess match states inside the request, and a truthy non-mapping
+    would otherwise turn every affected request into a 500.
+    """
+    thresholds = (config or {}).get(CONFIG_KEY)
+    if not isinstance(thresholds, dict):
+        return None, None
+    entry = thresholds.get(model)
+    if not isinstance(entry, dict):
+        return None, None
+    raw = entry.get("threshold")
+    if raw is None or isinstance(raw, bool):
+        return None, None
+    try:
+        threshold = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, None
+    if not math.isfinite(threshold):
+        return None, None
+    kind = entry.get("score_kind")
+    if kind not in SCORE_KINDS:
+        return None, None
+    if kind == COSINE and not -1.0 <= threshold <= 1.0:
+        return None, None
+    return threshold, kind
+
+
+def assess(model, score_kind, max_match_score, margin=None, config=None):
+    """Judge one classifier run's best raw score against its calibrated floor.
+
+    ``score_kind`` is the kind recorded *with the run*. It is compared against
+    the kind the threshold was calibrated on, and a mismatch degrades to
+    ``uncalibrated`` instead of comparing a cosine to a logit — that comparison
+    would silently mark every run unlisted (or every run listed) depending on
+    which way the scales happen to fall.
+
+    Returns a dict with ``state``, the inputs, and a sentence for the UI. The
+    sentence answers "does the best label in my list actually match this
+    image?", which is the question a confidence pill is read as and cannot
+    answer on its own.
+    """
+    result = {
+        "state": UNAVAILABLE,
+        "model": model,
+        "score_kind": score_kind,
+        "max_match_score": max_match_score,
+        "margin": margin,
+        "threshold": None,
+        "explanation": "Match strength was not recorded for this run.",
+    }
+    if max_match_score is None:
+        return result
+
+    threshold, calibrated_kind = threshold_for(model, config)
+    score_text = _format_score(max_match_score, score_kind)
+
+    if threshold is None or calibrated_kind != score_kind:
+        result["state"] = UNCALIBRATED
+        result["explanation"] = (
+            f"Best label matches at {score_text}. No threshold has been "
+            f"calibrated for {model}, so this is recorded but not judged."
+        )
+        return result
+
+    result["threshold"] = threshold
+    floor_text = _format_score(threshold, score_kind)
+    if max_match_score < threshold:
+        result["state"] = UNLISTED
+        result["explanation"] = (
+            f"No label in this list matches this image well — the best of them "
+            f"reaches only {score_text}, under the {floor_text} floor "
+            f"calibrated for {model}. The species shown is the closest "
+            f"available label, not a match."
+        )
+    else:
+        result["state"] = LISTED
+        result["explanation"] = (
+            f"Best label matches at {score_text}, above the {floor_text} floor "
+            f"calibrated for {model}."
+        )
+    return result
+
+
+def summarize(assessments):
+    """Collapse several runs' assessments into one *photo-level* verdict.
+
+    ``unlisted`` is returned only when at least one model was actually judged,
+    *every* judged model came back unlisted, and no model ran unjudged. One
+    model finding a good match is enough to make the photo a match, so a
+    single ``listed`` wins — a detector that found a bad crop for one model
+    should not be able to label the photo unidentifiable when another model
+    saw it clearly.
+
+    This aggregate is deliberately coarse, and on its own it is not enough to
+    render: a photo can hold two species, and two models can disagree, so
+    "some run passed" must never be allowed to silence a run that positively
+    failed. ``unlisted_models`` (and ``summarize_photo``'s ``runs`` /
+    ``unlisted_runs``) carry the per-run verdicts through so the UI can warn on
+    the predictions that actually failed instead of only on the all-fail case.
+
+    Runs that could not be judged (uncalibrated, or never recorded) do not vote
+    either way. They cannot: no threshold means no verdict, and treating a
+    missing verdict as a passing one is precisely how a "99%" comes to mean
+    "best of a bad list".
+
+    Not voting is not the same as not counting. A model that ran and was not
+    judged also *blocks* the photo-wide ``unlisted`` verdict: that verdict is
+    read as "nothing here matched anything in your list", and the UI renders
+    it as a banner over every prediction on the photo. With one calibrated
+    model below its floor and a second uncalibrated model on the same photo,
+    the honest statement is "the calibrated model matched nothing" — the
+    uncalibrated one may have identified the bird perfectly and nobody looked.
+    So ``unlisted`` requires that every run that reached a state at all was
+    judged and failed; a single ``uncalibrated`` run degrades the photo-level
+    verdict to ``uncalibrated`` while ``unlisted_models`` /
+    ``summarize_photo``'s ``unlisted_runs`` still carry the failure through,
+    so the UI drops the blanket banner and warns on the run that actually
+    failed instead.
+
+    A migrated catalog carries current predictions from models that ran before
+    match scoring existed; those runs surface as ``unavailable`` assessments
+    with ``blocks_unlisted=True`` (see ``summarize_photo``). They block the
+    blanket verdict for the same reason ``uncalibrated`` does — a banner that
+    reads "nothing here matches" must not be applied over predictions no
+    model actually judged. An ``unavailable`` run without the flag is
+    genuinely absent (no predictions displayed either) and does not block.
+    """
+    judged = [a for a in assessments if a.get("state") in (LISTED, UNLISTED)]
+    unjudged = [
+        a for a in assessments
+        if a.get("state") == UNCALIBRATED
+        or (a.get("state") == UNAVAILABLE and a.get("blocks_unlisted"))
+    ]
+    if not judged:
+        # With nothing judged, this state is rendered on its own as the
+        # headline pill, so it has to name the real reason. ``uncalibrated``
+        # reads "recorded, not judged" and invites the user to run the
+        # calibration script; that is only true when a run actually produced a
+        # score no floor could be applied to. A displayed run whose score was
+        # never recorded is ``unavailable`` — calibrating would not change it,
+        # re-classifying would.
+        state = (
+            UNCALIBRATED
+            if any(a.get("state") == UNCALIBRATED for a in unjudged)
+            else UNAVAILABLE
+        )
+        return {
+            "state": state,
+            "judged_models": 0,
+            "unlisted_models": 0,
+            "unjudged_models": len(unjudged),
+            "assessments": list(assessments),
+        }
+    unlisted = [a for a in judged if a["state"] == UNLISTED]
+    if len(unlisted) < len(judged):
+        state = LISTED
+    elif unjudged:
+        state = UNCALIBRATED
+    else:
+        state = UNLISTED
+    return {
+        "state": state,
+        "judged_models": len(judged),
+        "unlisted_models": len(unlisted),
+        "unjudged_models": len(unjudged),
+        "assessments": list(assessments),
+    }
+
+
+def is_current_row(row):
+    """Whether a match-score row belongs to the label list on screen.
+
+    ``Database.get_match_scores_for_photo`` stamps ``is_current`` by the same
+    latest-fingerprint-per-(detection, model) rule ``get_predictions`` pins to,
+    so a run against a label list the user has since replaced cannot vote on
+    the verdict that qualifies the predictions currently displayed. The
+    superseded rows are still returned — the Pipeline Inspector shows every run
+    on purpose — they simply do not get a say here.
+
+    Absent means current: a hand-built row (a test, a caller that has no
+    fingerprint context) keeps the plain "judge everything I gave you"
+    behaviour instead of silently summarizing nothing.
+    """
+    return bool(row.get("is_current", 1))
+
+
+def _unmeasured_assessment(model, explanation):
+    """An ``unavailable`` verdict for a displayed run that carries no score.
+
+    ``blocks_unlisted`` is what separates this from the plain ``unavailable``
+    ``assess`` returns: the run's predictions are on screen right now, so the
+    blanket "no label in this list matches" banner must not be painted over
+    them. There is exactly one way to build one of these, because every route
+    by which a displayed run can end up unmeasured — pre-migration rows, a
+    row materialized from an artifact with no measurement, a row present but
+    unscored — has to reach the rollup the same way.
+    """
+    return {
+        "state": UNAVAILABLE,
+        "model": model,
+        "score_kind": None,
+        "max_match_score": None,
+        "margin": None,
+        "threshold": None,
+        "explanation": explanation,
+        "blocks_unlisted": True,
+    }
+
+
+def summarize_photo(match_rows, config=None, unscored_current_runs=None):
+    """Assess ``classifier_match_scores`` rows for one photo and summarize.
+
+    Two things come back, and the difference between them is the whole point:
+
+    * ``runs`` — one verdict per (detection, model) run, carrying its
+      ``detection_id`` and ``classifier_model`` so the UI can attach a warning
+      to the prediction rows that run actually produced. A photo can hold two
+      species, and two models can disagree about one subject; neither case may
+      be collapsed into a single photo-level flag.
+    * the photo-level rollup from ``summarize`` — each model's BEST run only,
+      because the question it answers is "did this model ever get a good look
+      at this photo", and a detector that produced one poor crop should not be
+      able to report the photo as unidentifiable on that model's behalf.
+
+    Only current-fingerprint rows (see ``is_current_row``) feed either one, so
+    a strong match against a label list that has since been replaced cannot
+    mark the list on screen as matched. A current row with no score is never
+    scored as zero: it becomes a blocking ``unavailable`` run, exactly like an
+    ``unscored_current_runs`` pair. The run happened and its predictions are
+    on screen; all that is missing is the measurement, so it has no verdict to
+    contribute and must not let one be pronounced over it. Superseded rows
+    without a score are dropped outright — nothing they produced is displayed.
+
+    ``unscored_current_runs`` names ``(detection, model)`` pairs that have
+    current predictions on this photo but no ``classifier_match_scores`` row
+    for the current fingerprint — the state a migrated catalog leaves prior
+    predictions in. Each pair surfaces as an ``unavailable`` run that blocks
+    the blanket ``unlisted`` verdict: the panel is still showing those
+    predictions, and a "no label in this list matches" banner over them would
+    speak for a run that was never judged. When the pair already appears in
+    ``match_rows`` with a score under the same fingerprint it is treated as
+    scored — the caller can pass either the DB rows verbatim or a
+    pre-filtered list without changing the result.
+    """
+    best = {}
+    runs = []
+    seen_runs = set()
+    unscored_assessments = []
+    for row in match_rows or []:
+        if not is_current_row(row):
+            continue
+        score = row.get("max_match_score")
+        model = row.get("classifier_model")
+        detection_id = row.get("detection_id")
+        seen_runs.add((detection_id, model, row.get("labels_fingerprint")))
+        if score is None:
+            # A run whose row exists but carries no ``max_match_score``: a
+            # model that ran before match strength was recorded, a row
+            # materialized from an artifact published without a measurement,
+            # or a partially-written row. ``get_unscored_current_prediction_
+            # runs`` cannot see these — its NOT EXISTS is satisfied by the
+            # row's mere presence — so without this branch the run would
+            # vanish from the rollup entirely and a failing sibling could
+            # carry the photo to ``unlisted`` over predictions nobody judged
+            # (Codex P1 on ecb275c). Absence of a verdict is not a verdict,
+            # whichever shape the absence takes.
+            assessment = _unmeasured_assessment(
+                model,
+                "This run recorded no match strength, so it was never judged "
+                "against a floor.",
+            )
+            runs.append({
+                **assessment,
+                "detection_id": detection_id,
+                "classifier_model": model,
+                "labels_fingerprint": row.get("labels_fingerprint"),
+                "top_species": row.get("top_species"),
+                "detector_model": row.get("detector_model"),
+            })
+            unscored_assessments.append(assessment)
+            continue
+        assessment = assess(
+            model,
+            row.get("score_kind"),
+            score,
+            row.get("match_margin"),
+            config,
+        )
+        runs.append({
+            **assessment,
+            "detection_id": detection_id,
+            "classifier_model": model,
+            "labels_fingerprint": row.get("labels_fingerprint"),
+            "top_species": row.get("top_species"),
+            "detector_model": row.get("detector_model"),
+        })
+        if model not in best or score > best[model][0]:
+            best[model] = (score, assessment)
+    for row in unscored_current_runs or []:
+        model = row.get("classifier_model")
+        detection_id = row.get("detection_id")
+        fingerprint = row.get("labels_fingerprint")
+        # De-dupe against scored rows in the same call. Some callers hand us
+        # the DB row list plus this parallel set; a pair that already has a
+        # scored row must not also generate a blocking unavailable one.
+        if (detection_id, model, fingerprint) in seen_runs:
+            continue
+        assessment = _unmeasured_assessment(
+            model,
+            "Predictions from this model were carried over from before "
+            "match scoring existed; the run was never judged against a "
+            "floor.",
+        )
+        runs.append({
+            **assessment,
+            "detection_id": detection_id,
+            "classifier_model": model,
+            "labels_fingerprint": fingerprint,
+            "top_species": row.get("top_species"),
+            "detector_model": row.get("detector_model"),
+        })
+        # Every unscored run must feed the rollup, not just those whose model
+        # has no scored run: a scored failing run on one detection and an
+        # unscored run on a different detection of the same model are two
+        # separate pieces of evidence. The scored one may say "no label
+        # matches", but the unscored one was never judged — the blanket
+        # verdict must stay blocked over the panel that still displays it
+        # (Codex P1 on f074d0c).
+        unscored_assessments.append(assessment)
+    summary = summarize(
+        [assessment for _score, assessment in best.values()]
+        + unscored_assessments
+    )
+    summary["runs"] = runs
+    # The failures that the photo-level rollup is allowed to outvote but the
+    # UI is not allowed to drop. Empty unless a run was positively judged
+    # unlisted — uncalibrated and unavailable runs never appear here, because
+    # absence of a verdict is not a verdict.
+    summary["unlisted_runs"] = [r for r in runs if r["state"] == UNLISTED]
+    return summary
+
+
+def is_unlisted(assessment):
+    """True only for a run positively judged as matching nothing in its list.
+
+    Uncalibrated and unavailable runs are *not* unlisted — absence of a verdict
+    is not a verdict, and rendering it as one would recreate the overconfidence
+    this module exists to remove.
+    """
+    return bool(assessment) and assessment.get("state") == UNLISTED
+
+
+def _format_score(value, score_kind):
+    """Render a raw score in the precision its scale deserves."""
+    if value is None:
+        return "n/a"
+    if score_kind == COSINE:
+        return f"{value:.3f}"
+    return f"{value:.1f}"

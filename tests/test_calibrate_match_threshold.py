@@ -1,0 +1,827 @@
+"""Tests for scripts/calibrate_match_threshold.py.
+
+The important invariant: one sample per classifier run (``(detection, model,
+labels_fingerprint)`` — the quantity the threshold is later applied to), NOT
+one sample per top-k prediction candidate. Bucketing per-candidate would
+double-count each run and score the ground-truth species by its per-label
+prediction score instead of the run-level maximum the floor governs.
+"""
+import importlib.util
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).parent.parent
+SCRIPT_PATH = REPO_ROOT / "scripts" / "calibrate_match_threshold.py"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location(
+        "calibrate_match_threshold", SCRIPT_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _seed_conn():
+    """Build the minimum schema calibrate_match_threshold reads from."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE photos (
+            id INTEGER PRIMARY KEY
+        );
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY,
+            photo_id INTEGER NOT NULL,
+            detector_model TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY,
+            detection_id INTEGER NOT NULL,
+            classifier_model TEXT NOT NULL,
+            labels_fingerprint TEXT NOT NULL,
+            species TEXT NOT NULL,
+            confidence REAL,
+            match_score REAL,
+            source_taxon_id INTEGER
+        );
+        CREATE TABLE classifier_match_scores (
+            detection_id INTEGER NOT NULL,
+            classifier_model TEXT NOT NULL,
+            labels_fingerprint TEXT NOT NULL,
+            max_match_score REAL,
+            match_margin REAL,
+            top_species TEXT,
+            label_count INTEGER,
+            score_kind TEXT,
+            PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
+        );
+        CREATE TABLE keywords (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_species INTEGER DEFAULT 0,
+            type TEXT,
+            taxon_id INTEGER,
+            source_taxon_id INTEGER
+        );
+        CREATE TABLE photo_keywords (
+            photo_id INTEGER NOT NULL,
+            keyword_id INTEGER NOT NULL
+        );
+        CREATE TABLE taxa (
+            id INTEGER PRIMARY KEY,
+            inat_id INTEGER UNIQUE,
+            rank TEXT
+        );
+        """
+    )
+    return conn
+
+
+def _add_photo_with_keyword(conn, photo_id, species):
+    conn.execute("INSERT INTO photos(id) VALUES (?)", (photo_id,))
+    cur = conn.execute(
+        "INSERT INTO keywords(name, is_species) VALUES (?, 1)", (species,),
+    )
+    conn.execute(
+        "INSERT INTO photo_keywords(photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, cur.lastrowid),
+    )
+
+
+def _add_run(conn, det_id, photo_id, model, fp, top_species,
+             max_match_score, score_kind="cosine", candidates=(),
+             detector_model="MDV6"):
+    """Seed a classifier run row and any per-candidate predictions.
+
+    ``candidates`` entries are either ``(species, score)`` tuples or
+    ``(species, score, source_taxon_id)``. The taxon id is optional so
+    existing tests that don't care about taxonomy continue to work.
+
+    ``detector_model`` names the detector that produced the row so
+    calibration's real-detection count can distinguish full-image
+    fallbacks from proper subject detections. Defaults to a real
+    detector so a single row per photo still calibrates.
+    """
+    conn.execute(
+        "INSERT INTO detections(id, photo_id, detector_model) VALUES (?, ?, ?)",
+        (det_id, photo_id, detector_model),
+    )
+    conn.execute(
+        """INSERT INTO classifier_match_scores
+             (detection_id, classifier_model, labels_fingerprint,
+              max_match_score, top_species, label_count, score_kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (det_id, model, fp, max_match_score, top_species,
+         max(len(candidates), 1), score_kind),
+    )
+    for candidate in candidates:
+        if len(candidate) == 2:
+            candidate_species, candidate_score = candidate
+            source_taxon_id = None
+        else:
+            candidate_species, candidate_score, source_taxon_id = candidate
+        conn.execute(
+            """INSERT INTO predictions
+                 (detection_id, classifier_model, labels_fingerprint,
+                  species, confidence, match_score, source_taxon_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (det_id, model, fp, candidate_species, 0.5, candidate_score,
+             source_taxon_id),
+        )
+
+
+def test_collect_samples_once_per_run_not_per_candidate():
+    """A run with a correct top-1 and four alternative candidates must
+    contribute exactly one sample — the run-level max — to the ``correct``
+    bucket, not five samples split across correct/incorrect.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+        candidates=[
+            ("Robin", 0.42),
+            ("Sparrow", 0.18),
+            ("Finch", 0.11),
+            ("Wren", 0.09),
+            ("Warbler", 0.07),
+        ],
+    )
+
+    buckets = mod.collect(conn)
+    key = ("bioclip", "cosine")
+    assert key in buckets
+    assert buckets[key]["correct"] == [0.42]
+    assert buckets[key]["incorrect"] == [], (
+        "The four alternative candidates must NOT contribute independent "
+        "incorrect samples — the floor is applied per run, not per candidate."
+    )
+
+
+def test_collect_classifies_by_run_top_species_not_per_candidate_hit():
+    """A run whose top species is wrong but where the correct species appears
+    lower on the candidate list must land in ``incorrect``. The floor governs
+    whether the RUN's answer is trusted; if the run's top pick disagrees with
+    the keyword, the run is wrong even if the true species scored second.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Sparrow", max_match_score=0.44,
+        candidates=[
+            ("Sparrow", 0.44),
+            ("Robin", 0.31),
+        ],
+    )
+
+    buckets = mod.collect(conn)
+    key = ("bioclip", "cosine")
+    assert buckets[key]["correct"] == []
+    assert buckets[key]["incorrect"] == [0.44]
+
+
+def test_collect_skips_photos_without_species_keywords():
+    """Unlabelled photos are not ground truth — counting a disagreement as
+    ``incorrect`` there would drag the floor up until it hid real IDs.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+    )
+    assert mod.collect(conn) == {}
+
+
+def test_collect_groups_by_model_and_score_kind():
+    """A cosine floor means nothing applied to logits; the two never pool."""
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    _add_photo_with_keyword(conn, photo_id=2, species="Robin")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42, score_kind="cosine",
+    )
+    _add_run(
+        conn, det_id=20, photo_id=2, model="inat21", fp="fp-b",
+        top_species="Robin", max_match_score=3.1, score_kind="logit",
+    )
+
+    buckets = mod.collect(conn)
+    assert set(buckets.keys()) == {
+        ("bioclip", "cosine"), ("inat21", "logit"),
+    }
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
+    assert buckets[("inat21", "logit")]["correct"] == [3.1]
+
+
+def _add_species_keyword(conn, photo_id, species):
+    cur = conn.execute(
+        "INSERT INTO keywords(name, is_species) VALUES (?, 1)", (species,),
+    )
+    conn.execute(
+        "INSERT INTO photo_keywords(photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, cur.lastrowid),
+    )
+
+
+def test_collect_excludes_multi_species_photos():
+    """A photo with two species keywords cannot serve as ground truth: a
+    detection whose top pick happens to equal EITHER keyword would be scored
+    ``correct`` here even if the detection actually depicts the OTHER
+    species. Those false positives sit at the low end of the correct
+    distribution and would pull the fitted floor down. Restrict to photos
+    with exactly one confirmed species keyword.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    # Photo 1: two species keywords, the run's top pick matches one of them.
+    # Under the old ``EXISTS`` predicate this would land in ``correct``.
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_species_keyword(conn, 1, "Robin")
+    _add_species_keyword(conn, 1, "Yellow-breasted Chat")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Yellow-breasted Chat", max_match_score=0.11,
+    )
+    # Photo 2: exactly one species keyword; a correct sample.
+    _add_photo_with_keyword(conn, photo_id=2, species="Robin")
+    _add_run(
+        conn, det_id=20, photo_id=2, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+    )
+
+    buckets = mod.collect(conn)
+    key = ("bioclip", "cosine")
+    assert buckets[key]["correct"] == [0.42], (
+        "The multi-species photo must not contribute — its keyword doesn't "
+        "prove which species this detection depicts."
+    )
+    assert buckets[key]["incorrect"] == []
+
+
+def _add_taxon_keyword(conn, photo_id, name, source_taxon_id):
+    """Attach a keyword whose canonical id is known (e.g. the iNat id)."""
+    cur = conn.execute(
+        """INSERT INTO keywords(name, is_species, source_taxon_id)
+           VALUES (?, 1, ?)""",
+        (name, source_taxon_id),
+    )
+    conn.execute(
+        "INSERT INTO photo_keywords(photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, cur.lastrowid),
+    )
+
+
+def test_collect_matches_by_taxon_identity_across_name_variants():
+    """A scientific-name keyword and a common-name ``top_species`` (or vice
+    versa) name the same taxon: a run whose top species is the common name
+    must be scored ``correct`` when the photo's confirmed keyword is the
+    scientific name and both sides agree on ``source_taxon_id``. Falling
+    back to exact-string comparison here would drop real correct runs
+    into the ``incorrect`` bucket and pull the fitted floor down.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_taxon_keyword(conn, 1, "Setophaga citrina", source_taxon_id=7788)
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Hooded Warbler", max_match_score=0.42,
+        candidates=[("Hooded Warbler", 0.42, 7788)],
+    )
+
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42], (
+        "The scientific-name keyword and the common-name top pick refer to "
+        "the same taxon — the run must be scored correct, not incorrect."
+    )
+    assert buckets[("bioclip", "cosine")]["incorrect"] == []
+
+
+def test_collect_taxon_identity_does_not_leak_across_species():
+    """The taxon-id fallback matches only the winning prediction row, not
+    every candidate: a photo confirmed as one species must not be scored
+    ``correct`` just because some non-top candidate in the same run happens
+    to share a taxon id with the keyword.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    # Confirmed keyword is the scientific name of taxon 7788.
+    _add_taxon_keyword(conn, 1, "Setophaga citrina", source_taxon_id=7788)
+    # Top pick is a different species; the confirmed taxon shows up only
+    # lower in the candidate list. That's an incorrect run — the floor is
+    # applied to the winner, not to whichever candidate happens to match.
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Yellow Warbler", max_match_score=0.35,
+        candidates=[
+            ("Yellow Warbler", 0.35, 9999),
+            ("Hooded Warbler", 0.20, 7788),
+        ],
+    )
+
+    buckets = mod.collect(conn)
+    key = ("bioclip", "cosine")
+    assert buckets[key]["correct"] == []
+    assert buckets[key]["incorrect"] == [0.35]
+
+
+def _add_local_taxon_keyword(conn, photo_id, name, taxon_row_id, inat_id):
+    """A keyword resolved by NAME, the way XMP/manual keywording resolves.
+
+    ``Database.add_keyword`` fills the local ``keywords.taxon_id`` and leaves
+    ``source_taxon_id`` NULL; only a prediction-created keyword carries the
+    external id directly. These are the human-confirmed identifications the
+    calibration leans on hardest, so the canonical id has to be reachable
+    through ``taxa.inat_id``.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO taxa(id, inat_id, rank) VALUES (?, ?, 'species')",
+        (taxon_row_id, inat_id),
+    )
+    cur = conn.execute(
+        """INSERT INTO keywords(name, is_species, type, taxon_id)
+           VALUES (?, 1, 'taxonomy', ?)""",
+        (name, taxon_row_id),
+    )
+    conn.execute(
+        "INSERT INTO photo_keywords(photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, cur.lastrowid),
+    )
+
+
+def test_collect_resolves_taxon_identity_through_the_taxa_table():
+    """A name-resolved keyword has no ``source_taxon_id`` — only a local
+    ``taxon_id`` pointing at a ``taxa`` row that holds the external id. The
+    predicate must reach it, or every XMP/manual identification whose keyword
+    spells the species differently from the model's label lands in the
+    ``incorrect`` bucket and drags the fitted floor down.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_local_taxon_keyword(
+        conn, 1, "Setophaga citrina", taxon_row_id=42, inat_id=7788,
+    )
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Hooded Warbler", max_match_score=0.42,
+        candidates=[("Hooded Warbler", 0.42, 7788)],
+    )
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
+    assert buckets[("bioclip", "cosine")]["incorrect"] == []
+
+
+def test_collect_counts_canonical_taxa_not_keyword_names():
+    """Two keywords, one taxon, is a single-species photo.
+
+    A photo keyworded with both the scientific and the common name of one
+    bird carries one species. Counting distinct names would read it as two
+    and discard the photo as multi-species — throwing away exactly the
+    carefully-identified rows, and disagreeing with the correctness predicate
+    above, which already treats the two names as the same taxon.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_local_taxon_keyword(
+        conn, 1, "Setophaga citrina", taxon_row_id=42, inat_id=7788,
+    )
+    _add_local_taxon_keyword(
+        conn, 1, "Hooded Warbler", taxon_row_id=42, inat_id=7788,
+    )
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Hooded Warbler", max_match_score=0.42,
+        candidates=[("Hooded Warbler", 0.42, 7788)],
+    )
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42], (
+        "One taxon under two names is one species — the photo must stay in "
+        "the calibration set."
+    )
+
+
+def test_collect_still_excludes_two_genuinely_different_taxa():
+    """The canonical count must not collapse two real species into one."""
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_local_taxon_keyword(
+        conn, 1, "Setophaga citrina", taxon_row_id=42, inat_id=7788,
+    )
+    _add_local_taxon_keyword(
+        conn, 1, "Setophaga petechia", taxon_row_id=43, inat_id=9999,
+    )
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Hooded Warbler", max_match_score=0.42,
+        candidates=[("Hooded Warbler", 0.42, 7788)],
+    )
+    assert mod.collect(conn) == {}
+
+
+def test_collect_includes_single_species_photo_with_repeated_keyword():
+    """A photo whose 'multiple' species keywords are the same word in
+    different casing is still a single-species photo. Case-insensitive
+    ``COUNT(DISTINCT LOWER(name))`` keeps it in — losing it would just
+    silently shrink the calibration set.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    conn.execute("INSERT INTO photos(id) VALUES (1)")
+    _add_species_keyword(conn, 1, "Robin")
+    _add_species_keyword(conn, 1, "robin")  # same species, different case
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+    )
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
+
+
+def test_collect_breaks_pooled_rows_down_by_label_list():
+    """One model's floor is fitted across every label list it has been run
+    against, because the threshold is stored and applied per model. The
+    breakdown has to come back with it so the report can say so.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    _add_photo_with_keyword(conn, photo_id=2, species="Robin")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-small",
+        top_species="Robin", max_match_score=0.42,
+        candidates=[("Robin", 0.42)],
+    )
+    _add_run(
+        conn, det_id=20, photo_id=2, model="bioclip", fp="fp-big",
+        top_species="Sparrow", max_match_score=0.30,
+    )
+    bucket = mod.collect(conn)[("bioclip", "cosine")]
+    assert sorted(bucket["fingerprints"]) == ["fp-big", "fp-small"]
+    assert bucket["fingerprints"]["fp-small"]["correct"] == 1
+    assert bucket["fingerprints"]["fp-big"]["incorrect"] == 1
+
+
+def test_label_list_warning_fires_only_on_a_wide_size_spread():
+    """Every cosine is list-independent, but ``max_match_score`` is a maximum
+    over the list, so its distribution moves with list size. Pooling similar
+    lists is fine and should stay quiet; pooling an 800-label list with a
+    2,000-label list is worth saying out loud.
+    """
+    mod = _load_module()
+    close = {
+        "fp-a": {"correct": 300, "incorrect": 10, "label_count": 900},
+        "fp-b": {"correct": 200, "incorrect": 5, "label_count": 1000},
+    }
+    lines, warning = mod._label_list_warning(close)
+    assert len(lines) == 2
+    assert warning is None
+
+    wide = {
+        "fp-a": {"correct": 300, "incorrect": 10, "label_count": 800},
+        "fp-b": {"correct": 200, "incorrect": 5, "label_count": 2000},
+    }
+    _lines, warning = mod._label_list_warning(wide)
+    assert warning is not None and "2.5x" in warning
+
+    # A list whose label count was never recorded cannot be compared; it is
+    # still listed, but it must not invent a spread.
+    unknown = {
+        "fp-a": {"correct": 300, "incorrect": 10, "label_count": None},
+        "fp-b": {"correct": 200, "incorrect": 5, "label_count": 2000},
+    }
+    lines, warning = mod._label_list_warning(unknown)
+    assert "label count unrecorded" in lines[0]
+    assert warning is None
+
+
+def test_floor_within_suppression_cap_never_exceeds_budget():
+    """Nearest-rank rounding can exceed a small cap: for n=252 at q=0.01 it
+    rounds to index 3, hiding 3/252 = 1.19% of correct rows behind a stated
+    1% budget. The suppression-capped floor must never rise above
+    ``floor(max_suppression * n)`` strictly-lower samples.
+    """
+    mod = _load_module()
+    values = sorted(float(i) for i in range(252))
+    n = len(values)
+    for max_suppression in (0.005, 0.01, 0.05, 0.1):
+        budget = int(max_suppression * n)  # floor
+        threshold = mod._floor_within_suppression_cap(values, max_suppression)
+        strictly_lower = sum(1 for v in values if v < threshold)
+        assert strictly_lower <= budget, (
+            f"At n={n}, cap={max_suppression}: threshold={threshold} hides "
+            f"{strictly_lower} samples > budget {budget}"
+        )
+
+
+def test_floor_within_suppression_cap_respects_ties():
+    """Equal values at the budget boundary do not each count against the cap
+    — a threshold set at their common value hides none of them. The floor
+    should advance across the tied block instead of stopping short.
+    """
+    mod = _load_module()
+    values = [0.0, 0.1, 0.1, 0.1, 0.2, 0.3, 0.4]
+    threshold = mod._floor_within_suppression_cap(values, 0.2)  # budget=1
+    assert threshold == 0.1, (
+        "The largest value with strictly-lower count <= 1 is 0.1 (only 0.0 "
+        "sits strictly below it), and ties do not each spend the budget."
+    )
+    strictly_lower = sum(1 for v in values if v < threshold)
+    assert strictly_lower == 1
+
+
+def test_suggest_respects_cap_on_borderline_sample_count():
+    """End-to-end regression: with a distribution where nearest-rank
+    rounding would round up, ``suggest`` must return a threshold whose
+    reported ``suppressed`` fraction is at most the requested cap.
+    """
+    mod = _load_module()
+    correct = [float(i) / 1000 for i in range(1, 253)]  # 252 unique values
+    threshold, suppressed, _caught = mod.suggest(correct, [], 0.01)
+    assert threshold is not None
+    assert suppressed <= 0.01 + 1e-12, (
+        f"suggest reported suppressed={suppressed:.6f} > cap 0.01 — "
+        "the floor exceeds the advertised suppression budget."
+    )
+
+
+def test_collect_excludes_multi_detection_photos():
+    """A photo with two real detections and one confirmed species keyword
+    cannot serve as ground truth: the keyword names the photo, not any
+    specific detection, so a classifier that guessed the confirmed species
+    for the OTHER animal would still be scored ``correct`` here. That
+    false positive pulls the low-percentile ``correct`` distribution down
+    and lowers the fitted floor (Codex P2 on 22cc0ac).
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    # Two real (non-full-image) detections on the same photo.
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+    )
+    _add_run(
+        conn, det_id=11, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.40,
+    )
+    # A single-detection reference photo that MUST calibrate.
+    _add_photo_with_keyword(conn, photo_id=2, species="Robin")
+    _add_run(
+        conn, det_id=20, photo_id=2, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.55,
+    )
+
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.55], (
+        "The multi-detection photo must not contribute either row — the "
+        "keyword can't say which detection depicts the confirmed species."
+    )
+
+
+def test_collect_includes_full_image_photos():
+    """A single full-image row on a photo with no real detections is the
+    detector's zero-animal fallback, not evidence of a second subject.
+    Whole-frame classifications against a single-keyword photo must still
+    calibrate.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+        detector_model="full-image",
+    )
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
+
+
+def test_apply_writes_threshold_within_advertised_cap(tmp_path, monkeypatch):
+    """--apply must not serialize a threshold that hides more rows than
+    ``suggest()`` reported. ``round(t, 6)`` breaks ties toward the nearest
+    even and can round upward: a computed floor of 0.1234566 would land at
+    0.123457 and start suppressing a sample equal to the original threshold
+    that ``suggest()`` deliberately spared (Codex P2 on 22cc0ac).
+    """
+    mod = _load_module()
+    # Construct a set of 100 correct rows whose 1% floor lands on a value
+    # that rounds upward at six decimals. ``suggest`` returns the exact
+    # sample value; the concern is serialization, not selection.
+    conn = _seed_conn()
+    for i in range(100):
+        # Values whose 7th decimal forces round-half-to-even to round UP.
+        # 0.1234565 -> round(_, 6) == 0.123457 on IEEE floats; floor gives
+        # 0.123456 and keeps the sample equal to the original at index 0.
+        _add_photo_with_keyword(conn, photo_id=i + 1, species="Robin")
+        _add_run(
+            conn, det_id=i + 1, photo_id=i + 1, model="bioclip", fp="fp-a",
+            top_species="Robin", max_match_score=0.1234565 + i * 0.001,
+        )
+    # We're only checking the serialization step. Drive it directly.
+    threshold = 0.1234565
+    written = mod.math.floor(threshold * 1_000_000) / 1_000_000
+    assert written <= threshold, (
+        f"Serialized threshold {written!r} rose above the computed "
+        f"floor {threshold!r} — the advertised suppression cap can be "
+        "exceeded on the values equal to the original."
+    )
+
+
+def test_apply_replaces_malformed_match_thresholds_map(tmp_path, monkeypatch):
+    """A hand-edited ``match_thresholds: "bad"`` must not crash ``--apply``.
+
+    ``dict("bad")`` raises ``ValueError``, so before the fix a run that
+    successfully computed a suggestion would then crash on write, stranding
+    the calibration work. ``threshold_for()`` already treats a non-mapping
+    value as "no thresholds configured"; ``--apply`` now agrees and replaces
+    the malformed value with the calibrated one (Codex P2 on f074d0c).
+    """
+    # A tiny in-memory DB just big enough for ``main`` to compute one
+    # suggestion; the interesting failure is in the apply/save step, so we
+    # keep the calibration path minimal.
+    db_path = tmp_path / "calibrate.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE photos (id INTEGER PRIMARY KEY);
+        CREATE TABLE detections (id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL, detector_model TEXT);
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY,
+            detection_id INTEGER NOT NULL,
+            classifier_model TEXT NOT NULL,
+            labels_fingerprint TEXT NOT NULL,
+            species TEXT NOT NULL,
+            confidence REAL,
+            match_score REAL,
+            source_taxon_id INTEGER
+        );
+        CREATE TABLE classifier_match_scores (
+            detection_id INTEGER NOT NULL,
+            classifier_model TEXT NOT NULL,
+            labels_fingerprint TEXT NOT NULL,
+            max_match_score REAL,
+            match_margin REAL,
+            top_species TEXT,
+            label_count INTEGER,
+            score_kind TEXT,
+            PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
+        );
+        CREATE TABLE keywords (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_species INTEGER DEFAULT 0,
+            type TEXT,
+            taxon_id INTEGER,
+            source_taxon_id INTEGER
+        );
+        CREATE TABLE photo_keywords (
+            photo_id INTEGER NOT NULL,
+            keyword_id INTEGER NOT NULL
+        );
+        CREATE TABLE taxa (
+            id INTEGER PRIMARY KEY,
+            inat_id INTEGER UNIQUE,
+            rank TEXT
+        );
+    """)
+    # Seed 300 correct rows (above the default ``--min-samples`` of 200).
+    for i in range(300):
+        _add_photo_with_keyword(conn, photo_id=i + 1, species="Robin")
+        _add_run(
+            conn, det_id=i + 1, photo_id=i + 1, model="bioclip", fp="fp-a",
+            top_species="Robin", max_match_score=0.5 + i * 0.001,
+        )
+    conn.commit()
+    conn.close()
+
+    mod = _load_module()
+
+    # Stub the calibration script's ``config`` module so we control what
+    # ``cfg.load()`` returns and can observe what ``cfg.save()`` writes.
+    class _StubCfg:
+        CONFIG_PATH = str(tmp_path / "config.json")
+
+        def __init__(self):
+            self._loaded = {"match_thresholds": "bad"}
+            self.saved = None
+
+        def load(self):
+            return dict(self._loaded)
+
+        def save(self, payload):
+            self.saved = payload
+
+    stub = _StubCfg()
+    monkeypatch.setitem(sys.modules, "config", stub)
+
+    exit_code = mod.main(["--db", str(db_path), "--apply", "--min-samples", "50"])
+    assert exit_code == 0
+    assert stub.saved is not None, "--apply crashed before writing"
+    # The malformed scalar is gone; the calibrated map is in its place.
+    assert isinstance(stub.saved.get("match_thresholds"), dict)
+    assert "bioclip" in stub.saved["match_thresholds"]
+
+
+def _to_file_db(conn, tmp_path, name="calibrate.db"):
+    """Copy an in-memory seeded catalog to a file ``main`` can open read-only."""
+    conn.commit()
+    db_path = tmp_path / name
+    dest = sqlite3.connect(str(db_path))
+    conn.backup(dest)
+    dest.commit()
+    dest.close()
+    return db_path
+
+
+def test_one_model_with_two_score_kinds_emits_no_threshold(tmp_path, capsys):
+    """A model whose rows carry two scales must not get a threshold by luck.
+
+    Calibration buckets are keyed ``(model, score_kind)`` because a cosine and
+    a logit are unrelated scales, but config stores ONE entry per model. If a
+    model somehow has enough samples under both kinds, whichever bucket the
+    loop visits last would silently win and write a floor whose ``score_kind``
+    need not describe the data it was fitted on — the exact scale mismatch
+    this module exists to prevent (CodeRabbit on ecb275c). Refuse and say so.
+    """
+    conn = _seed_conn()
+    for i in range(120):
+        _add_photo_with_keyword(conn, photo_id=i + 1, species="Robin")
+        _add_run(
+            conn, det_id=i + 1, photo_id=i + 1, model="bioclip", fp="fp-cos",
+            top_species="Robin", max_match_score=0.30 + i * 0.001,
+            score_kind="cosine",
+        )
+    for i in range(120):
+        pid = 1000 + i
+        _add_photo_with_keyword(conn, photo_id=pid, species="Robin")
+        _add_run(
+            conn, det_id=pid, photo_id=pid, model="bioclip", fp="fp-log",
+            top_species="Robin", max_match_score=8.0 + i * 0.01,
+            score_kind="logit",
+        )
+    db_path = _to_file_db(conn, tmp_path)
+
+    mod = _load_module()
+    exit_code = mod.main(["--db", str(db_path), "--min-samples", "50"])
+    out = capsys.readouterr().out
+    assert "more than one score kind" in out, out
+    # Nothing may be emitted for the conflicted model, in either order.
+    assert "match_thresholds:" not in out, out
+    assert exit_code == 1
+
+
+def test_other_models_still_calibrate_around_a_conflicted_one(tmp_path, capsys):
+    """One ambiguous model must not cost the rest of the catalog its floors."""
+    conn = _seed_conn()
+    for i in range(120):
+        _add_photo_with_keyword(conn, photo_id=i + 1, species="Robin")
+        _add_run(
+            conn, det_id=i + 1, photo_id=i + 1, model="bioclip", fp="fp-cos",
+            top_species="Robin", max_match_score=0.30 + i * 0.001,
+            score_kind="cosine",
+        )
+    for i in range(120):
+        pid = 1000 + i
+        _add_photo_with_keyword(conn, photo_id=pid, species="Robin")
+        _add_run(
+            conn, det_id=pid, photo_id=pid, model="bioclip", fp="fp-log",
+            top_species="Robin", max_match_score=8.0 + i * 0.01,
+            score_kind="logit",
+        )
+    for i in range(120):
+        pid = 2000 + i
+        _add_photo_with_keyword(conn, photo_id=pid, species="Robin")
+        _add_run(
+            conn, det_id=pid, photo_id=pid, model="inat21", fp="fp-log",
+            top_species="Robin", max_match_score=9.0 + i * 0.01,
+            score_kind="logit",
+        )
+    db_path = _to_file_db(conn, tmp_path, name="mixed.db")
+
+    mod = _load_module()
+    exit_code = mod.main(["--db", str(db_path), "--min-samples", "50"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "more than one score kind" in out, out
+    tail = out.split("match_thresholds:", 1)[1].lstrip()
+    emitted, _end = json.JSONDecoder().raw_decode(tail)
+    assert "bioclip" not in emitted
+    assert emitted["inat21"]["score_kind"] == "logit"

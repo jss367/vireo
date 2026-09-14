@@ -497,6 +497,35 @@ def publish_detection_artifact(
     return digest
 
 
+def _match_summary_row(db, detection_id, classifier_model, labels_fingerprint):
+    """The portable half of one ``classifier_match_scores`` row, or None.
+
+    None when the run predates match-strength recording or was materialized
+    from an older artifact. Callers omit the key entirely in that case, which
+    is what keeps "never measured" distinguishable from "measured as zero" on
+    the far side of the cache.
+
+    ``run_at`` is deliberately not carried: it is local bookkeeping, and
+    including a wall-clock timestamp would change the content-addressed digest
+    of an otherwise identical run.
+    """
+    row = db.conn.execute(
+        """SELECT max_match_score, match_margin, top_species,
+                  label_count, score_kind
+           FROM classifier_match_scores
+           WHERE detection_id = ? AND classifier_model = ?
+             AND labels_fingerprint = ?""",
+        (detection_id, classifier_model, labels_fingerprint),
+    ).fetchone()
+    if row is None or row["max_match_score"] is None:
+        return None
+    match = {"max_match_score": row["max_match_score"]}
+    for field in ("match_margin", "top_species", "label_count", "score_kind"):
+        if row[field] is not None:
+            match[field] = row[field]
+    return match
+
+
 def promote_and_publish_classifier_run(
     db,
     detection_id,
@@ -561,14 +590,33 @@ def promote_and_publish_classifier_run(
     predictions = db.conn.execute(
         """SELECT species, confidence, scientific_name, source_taxon_id,
                   taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                  taxonomy_order, taxonomy_family, taxonomy_genus
+                  taxonomy_order, taxonomy_family, taxonomy_genus,
+                  match_score
            FROM predictions
            WHERE detection_id = ? AND classifier_model = ?
              AND labels_fingerprint = ?
            ORDER BY confidence DESC, species COLLATE NOCASE""",
         (detection_id, classifier_model, labels_fingerprint),
     ).fetchall()
-    if not predictions:
+    # The run-level summary: best raw score over the WHOLE label list, which
+    # no per-candidate row can reconstruct because the labels that lost never
+    # became prediction rows. Without it a cache-materialized detection is
+    # permanently blank — ``classifier_runs`` gates re-classification, so it
+    # would never be recomputed — and the calibration script loses exactly the
+    # rows it derives a threshold from.
+    #
+    # Computed BEFORE the empty-predictions bail-out on purpose. A completed
+    # run whose every label fell under the confidence floor produces no
+    # prediction rows at all, and that run is the single most informative
+    # thing this feature records: "nothing in your list fits this image". If
+    # a zero-candidate run were unpublishable, the verdict would survive
+    # locally and vanish on export — losing the one case the feature exists
+    # for. A run with neither predictions nor a summary carries no output
+    # whatsoever and is still not worth an artifact.
+    match = _match_summary_row(
+        db, detection_id, classifier_model, labels_fingerprint,
+    )
+    if not predictions and match is None:
         return None
     candidates = []
     for prediction in predictions:
@@ -576,6 +624,12 @@ def promote_and_publish_classifier_run(
             "species": prediction["species"],
             "confidence": prediction["confidence"],
         }
+        # Omitted rather than serialized as null when absent: an artifact
+        # published from rows written before the column existed must
+        # materialize as "not recorded", and a key that is simply not there
+        # cannot be mistaken for a measured zero.
+        if prediction["match_score"] is not None:
+            candidate["match_score"] = prediction["match_score"]
         taxonomy = {
             "taxon_id": prediction["source_taxon_id"],
             "scientific_name": prediction["scientific_name"],
@@ -591,6 +645,8 @@ def promote_and_publish_classifier_run(
             candidate["taxonomy"] = taxonomy
         candidates.append(candidate)
     subject["candidates"] = candidates
+    if match is not None:
+        subject["match"] = match
     label_meta = db.conn.execute(
         """SELECT display_name, label_count FROM labels_fingerprints
            WHERE fingerprint = ?""",
@@ -752,6 +808,77 @@ def _validate_candidate_taxonomy(taxonomy):
             )
 
 
+_MATCH_SCALAR_FIELDS = ("max_match_score", "match_margin")
+
+
+def _validate_match_number(value, label):
+    """A raw match score is unbounded on both sides — a logit can be negative
+    and is routinely well above 1 — so it cannot reuse ``_validate_confidence``.
+    Only finiteness and numeric type are checkable; the scale is named by
+    ``score_kind`` and owned by the model that produced it.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CacheFormatError(f"{label} must be numeric")
+    try:
+        finite = math.isfinite(value)
+    except (OverflowError, ValueError) as exc:
+        raise CacheFormatError(f"{label} must be finite") from exc
+    if not finite:
+        raise CacheFormatError(f"{label} must be finite")
+
+
+def _validate_subject_match(match):
+    """Validate the optional run-level match summary on a classification subject.
+
+    Optional throughout, and absent must stay distinguishable from zero all the
+    way down: an artifact written before this block existed materializes with no
+    ``classifier_match_scores`` row at all, which reads as "not recorded". A
+    zero would read as "matched nothing", which is a measurement nobody took.
+    """
+    if match is None:
+        return
+    if not isinstance(match, dict):
+        raise CacheFormatError("subject match must be an object")
+    for field in _MATCH_SCALAR_FIELDS:
+        _validate_match_number(match.get(field), f"match.{field}")
+    top_species = match.get("top_species")
+    if top_species is not None and (
+        not isinstance(top_species, str) or len(top_species) > 500
+    ):
+        raise CacheFormatError("match.top_species must be a string")
+    score_kind = match.get("score_kind")
+    if score_kind is not None and (
+        not isinstance(score_kind, str) or len(score_kind) > 32
+    ):
+        raise CacheFormatError("match.score_kind must be a short string")
+    label_count = match.get("label_count")
+    if label_count is not None and (
+        isinstance(label_count, bool)
+        or not isinstance(label_count, int)
+        or label_count < 0
+        or label_count > _SQLITE_INT64_MAX
+    ):
+        raise CacheFormatError(
+            "match.label_count must be a non-negative integer within SQLite's "
+            "64-bit range"
+        )
+
+
+def _has_measured_match(subject):
+    """Whether a classification subject carries a real run-level match score.
+
+    "Real" means a numeric ``max_match_score``: the shape check in
+    ``_validate_subject_match`` accepts a ``match`` block with every field
+    absent, and an empty block is exactly as contentless as no block at all.
+    """
+    match = subject.get("match")
+    return isinstance(match, dict) and isinstance(
+        match.get("max_match_score"), (int, float)
+    ) and not isinstance(match.get("max_match_score"), bool)
+
+
 def validate_artifact(artifact):
     """Validate one artifact and return its normalized data-only form."""
     artifact = _normalize_json(artifact)
@@ -827,16 +954,33 @@ def validate_artifact(artifact):
                 raise CacheFormatError("detection category must be a string")
         else:
             candidates = subject.get("candidates")
-            # Reject empty candidate lists — a completed classification
-            # subject with no predictions still writes a classifier_runs
-            # marker on materialize, which _all_photos_cache_satisfied
-            # counts as covered.  That would let a bundle containing
-            # empty subjects short-circuit an entire Classify job and
-            # leave the photo permanently unclassified until a forced
-            # reclassify.
-            if not isinstance(candidates, list) or not candidates:
+            if not isinstance(candidates, list):
                 raise CacheFormatError(
                     "classification subject needs at least one candidate"
+                )
+            # An empty candidate list is allowed ONLY when the subject also
+            # carries a measured run-level ``match`` block.
+            #
+            # The bare empty list stays rejected because a completed
+            # classification subject with no predictions still writes a
+            # classifier_runs marker on materialize, which
+            # _all_photos_cache_satisfied counts as covered: a bundle of
+            # contentless subjects could short-circuit an entire Classify job
+            # and leave the photos permanently unclassified until a forced
+            # reclassify.
+            #
+            # A ``match`` block is what distinguishes the real thing from
+            # that. A run whose every label fell under the confidence floor
+            # produces no prediction rows but does produce a maximum raw score
+            # over the full list, and "nothing in this list matched" is the
+            # verdict this whole feature exists to record. Requiring the
+            # measurement means an empty subject has to carry evidence that
+            # inference actually happened, rather than asserting coverage it
+            # never earned.
+            if not candidates and not _has_measured_match(subject):
+                raise CacheFormatError(
+                    "classification subject needs at least one candidate or a "
+                    "measured match summary"
                 )
             for candidate in candidates:
                 if not isinstance(candidate, dict):
@@ -846,6 +990,10 @@ def validate_artifact(artifact):
                     raise CacheFormatError("candidate species must be a non-empty string")
                 _validate_confidence(candidate.get("confidence"))
                 _validate_candidate_taxonomy(candidate.get("taxonomy"))
+                _validate_match_number(
+                    candidate.get("match_score"), "candidate match_score",
+                )
+            _validate_subject_match(subject.get("match"))
 
     if artifact["type"] == "classification":
         if not isinstance(artifact.get("classifier_model"), str):
@@ -1513,7 +1661,8 @@ def exportable_artifacts(db, artifact_types=None):
                     """SELECT species, confidence, scientific_name, source_taxon_id,
                               taxonomy_kingdom, taxonomy_phylum,
                               taxonomy_class, taxonomy_order,
-                              taxonomy_family, taxonomy_genus
+                              taxonomy_family, taxonomy_genus,
+                              match_score
                        FROM predictions
                        WHERE detection_id = ? AND classifier_model = ?
                          AND labels_fingerprint = ?
@@ -1527,6 +1676,8 @@ def exportable_artifacts(db, artifact_types=None):
                         "species": prediction["species"],
                         "confidence": prediction["confidence"],
                     }
+                    if prediction["match_score"] is not None:
+                        candidate["match_score"] = prediction["match_score"]
                     taxonomy = {
                         "taxon_id": prediction["source_taxon_id"],
                         "scientific_name": prediction["scientific_name"],
@@ -1542,6 +1693,12 @@ def exportable_artifacts(db, artifact_types=None):
                         candidate["taxonomy"] = taxonomy
                     candidates.append(candidate)
                 subject["candidates"] = candidates
+                match = _match_summary_row(
+                    db, detection["id"], row["classifier_model"],
+                    row["labels_fingerprint"],
+                )
+                if match is not None:
+                    subject["match"] = match
                 subjects.append(subject)
             input_block, expected_input = classification_input(
                 row["file_hash"], row["detector_runtime"], subjects,
@@ -1765,6 +1922,77 @@ def _is_recognized_classifier_runtime(
     return False
 
 
+def _backfill_classification_enrichment(
+    conn, detection_id, classifier_model, labels_short, subject,
+):
+    """Fill in match-strength enrichment missing from an already-materialized run.
+
+    Called from the ``already_materialized`` short-circuit below: the incoming
+    artifact matches the DB's existing (photo, model, labels, runtime, input)
+    identity, so the predictions and classifier_runs marker are already
+    there. But that identity does NOT include the enrichment fields — a
+    pre-feature artifact and an enriched one for the same run share every
+    identity component, and the ``_classification_enrichment_rank`` preference
+    only wins the tiebreaker *within a single materialize call*. When the
+    pre-feature artifact was applied by an earlier import and the enriched
+    version arrives later, the short-circuit fires and (before this helper)
+    silently dropped the enrichment, permanently locking "not recorded" in
+    behind the ``classifier_runs`` gate.
+
+    Never overwrites values already recorded — a real measurement wins over a
+    later import every time. Returns True when any row was actually filled in
+    so the caller can distinguish "matched but nothing to do" from "matched
+    and backfilled" for reporting.
+    """
+    from keyword_normalization import normalize_keyword_display
+
+    filled = False
+    for candidate in subject.get("candidates", ()):
+        raw_score = candidate.get("match_score")
+        if raw_score is None:
+            continue
+        species = normalize_keyword_display(candidate.get("species", ""))
+        if not species:
+            continue
+        cursor = conn.execute(
+            """UPDATE predictions
+                 SET match_score = ?
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ? AND species = ?
+                 AND match_score IS NULL""",
+            (
+                raw_score, detection_id, classifier_model,
+                labels_short, species,
+            ),
+        )
+        if cursor.rowcount:
+            filled = True
+    match = subject.get("match")
+    if match and match.get("max_match_score") is not None:
+        existing = conn.execute(
+            """SELECT 1 FROM classifier_match_scores
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?""",
+            (detection_id, classifier_model, labels_short),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """INSERT INTO classifier_match_scores
+                     (detection_id, classifier_model, labels_fingerprint,
+                      max_match_score, match_margin, top_species,
+                      label_count, score_kind)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    detection_id, classifier_model, labels_short,
+                    match["max_match_score"], match.get("match_margin"),
+                    match.get("top_species"), match.get("label_count"),
+                    match.get("score_kind"),
+                ),
+            )
+            filled = True
+    return filled
+
+
 def materialize_artifacts(
     db, artifacts, known_runtimes=None, known_classifier_runtimes=None,
 ):
@@ -1789,15 +2017,45 @@ def materialize_artifacts(
     # and different installs would surface different boxes/species solely
     # because of manifest ordering.  Digest is canonical-bytes-derived so
     # the winner is content-defined and identical across installs.
-    def _dedup_by_lookup_identity(items, key_fn):
+    #
+    # A caller-supplied ``prefer`` returns a small integer *rank* (lower
+    # wins) that jumps ahead of the digest tiebreaker. Classification uses
+    # it to prefer artifacts carrying a ``match`` block over pre-feature
+    # artifacts for the same lookup identity — adding the block only
+    # changes the digest, so without a preference the enriched artifact
+    # loses roughly half the time and the "not recorded" state gets
+    # permanently locked in behind the ``classifier_runs`` gate.
+    def _dedup_by_lookup_identity(items, key_fn, prefer=None):
         best = {}
         for item in items:
             key = key_fn(item)
+            rank = prefer(item) if prefer is not None else 0
             digest = artifact_digest(item)
             prior = best.get(key)
-            if prior is None or digest < prior[0]:
-                best[key] = (digest, item)
-        return [entry[1] for entry in best.values()]
+            if prior is None or (rank, digest) < (prior[0], prior[1]):
+                best[key] = (rank, digest, item)
+        return [entry[2] for entry in best.values()]
+
+    def _classification_enrichment_rank(artifact):
+        # Rank by the number of subjects missing a ``match`` block (lower
+        # wins). 0 = every subject enriched; a positive count = partial
+        # enrichment; equal to ``len(subjects)`` = pre-feature, no
+        # subject enriched at all.
+        #
+        # A boolean "has at least one enriched subject" tiebreaker is not
+        # enough for multi-detection artifacts: an interrupted enrichment
+        # pass can leave one subject's ``match`` block behind, and a
+        # later complete artifact carrying blocks for every subject then
+        # ties on rank 0 and falls back to the digest sort. If the
+        # partial digest wins, ``materialize_artifacts`` writes the
+        # classifier-run marker but the un-enriched detections
+        # permanently land with ``match_score`` NULL and no
+        # ``classifier_match_scores`` row — the very "not recorded"
+        # state this feature exists to close (Codex P2 on a1be510).
+        return sum(
+            1 for subject in artifact.get("subjects", ())
+            if "match" not in subject
+        )
 
     detection_items = [a for a in normalized if a["type"] == "detection"]
     classification_items = [a for a in normalized if a["type"] == "classification"]
@@ -1816,6 +2074,7 @@ def materialize_artifacts(
             a["detector_runtime_fingerprint"],
             a["runtime_fingerprint"], a["input_fingerprint"],
         ),
+        prefer=_classification_enrichment_rank,
     )
 
     # Trusted detection artifacts for the same (photo, detector_model)
@@ -1877,6 +2136,7 @@ def materialize_artifacts(
         "detector_runs_applied": 0,
         "classifier_runs_applied": 0,
         "already_materialized": 0,
+        "enrichment_backfilled": 0,
         "stored_unmatched": 0,
         "pinned_older_runtime": 0,
         "label_collisions": 0,
@@ -2070,6 +2330,17 @@ def materialize_artifacts(
                         prior["runtime_fingerprint"] == artifact["runtime_fingerprint"]
                         and prior["input_fingerprint"] == artifact["input_fingerprint"]
                     ):
+                        # Same identity, but the artifact may carry match-
+                        # strength fields that were not part of the identity
+                        # and were dropped when the pre-feature version of
+                        # this same run was applied by an earlier import.
+                        # See ``_backfill_classification_enrichment``.
+                        if _backfill_classification_enrichment(
+                            db.conn, detection_id,
+                            artifact["classifier_model"],
+                            labels["short_fingerprint"], subject,
+                        ):
+                            result["enrichment_backfilled"] += 1
                         result["already_materialized"] += 1
                         continue
                     if _manual_review_exists(
@@ -2099,8 +2370,9 @@ def materialize_artifacts(
                                   species, confidence, category, scientific_name,
                                   taxonomy_kingdom, taxonomy_phylum,
                                   taxonomy_class, taxonomy_order,
-                                  taxonomy_family, taxonomy_genus, source_taxon_id)
-                               VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  taxonomy_family, taxonomy_genus, source_taxon_id,
+                                  match_score)
+                               VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 detection_id, artifact["classifier_model"],
                                 labels["short_fingerprint"], labels["fingerprint"],
@@ -2110,6 +2382,55 @@ def materialize_artifacts(
                                 taxonomy.get("class"), taxonomy.get("order"),
                                 taxonomy.get("family"), taxonomy.get("genus"),
                                 taxonomy.get("taxon_id"),
+                                # Absent on artifacts published before the
+                                # field existed; NULL there means "not
+                                # recorded", never "matched badly".
+                                candidate.get("match_score"),
+                            ),
+                        )
+                    # Written alongside the classifier_runs marker below, and
+                    # for the same reason it has to be written here at all:
+                    # that marker is the re-classification gate, so a
+                    # detection materialized from cache is never inferred
+                    # again and would otherwise report "match strength not
+                    # recorded" forever despite originating from real
+                    # inference. Omitted from the artifact => no row, which is
+                    # the honest state for a pre-feature bundle.
+                    #
+                    # Delete the existing summary as part of the replacement
+                    # BEFORE the conditional insert: materializing an older
+                    # artifact (no ``match`` block) over a catalog that
+                    # already carries a score for the same
+                    # (detection, model, fingerprint) would otherwise leave
+                    # the previous runtime's score attached to the fresh
+                    # prediction rows, contradicting the "not recorded" state
+                    # the missing block is meant to express.
+                    db.conn.execute(
+                        """DELETE FROM classifier_match_scores
+                           WHERE detection_id = ? AND classifier_model = ?
+                             AND labels_fingerprint = ?""",
+                        (
+                            detection_id, artifact["classifier_model"],
+                            labels["short_fingerprint"],
+                        ),
+                    )
+                    match = subject.get("match")
+                    if match and match.get("max_match_score") is not None:
+                        db.conn.execute(
+                            """INSERT INTO classifier_match_scores
+                                 (detection_id, classifier_model,
+                                  labels_fingerprint, max_match_score,
+                                  match_margin, top_species, label_count,
+                                  score_kind)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                detection_id, artifact["classifier_model"],
+                                labels["short_fingerprint"],
+                                match["max_match_score"],
+                                match.get("match_margin"),
+                                match.get("top_species"),
+                                match.get("label_count"),
+                                match.get("score_kind"),
                             ),
                         )
                     db.conn.execute(

@@ -10,8 +10,17 @@ import os
 
 import numpy as np
 import onnx_runtime
+from match_confidence import COSINE
 
 log = logging.getLogger(__name__)
+
+#: Kind of raw, pre-softmax score this classifier reports as ``raw_score``.
+#: BioCLIP scores an image against text embeddings, so the raw number is a
+#: cosine similarity — bounded, and unchanged by which other labels happen to
+#: be in the list. The ``score`` beside it is that value after a softmax over
+#: the loaded list, which is why ``score`` cannot tell "this is a chat" from
+#: "nothing here is a chat but this is closest". See ``match_confidence``.
+SCORE_KIND = COSINE
 
 
 class ClassificationCancelled(RuntimeError):
@@ -902,13 +911,20 @@ class Classifier:
         features = features.astype(np.float32)
         return _normalize(features)
 
-    def _build_custom_results(self, probs, threshold):
-        """Build sorted prediction dicts from a probability array (custom labels mode)."""
+    def _build_custom_results(self, probs, threshold, raw_scores=None):
+        """Build sorted prediction dicts from a probability array (custom labels mode).
+
+        ``raw_scores`` is the pre-softmax cosine similarity per label, aligned
+        with ``probs``. It rides along on each result as ``raw_score`` so
+        callers can tell a genuine match from the best of a bad list; ``None``
+        when the caller did not supply it.
+        """
         ranked = sorted(
-            zip(self._classes, probs), key=lambda x: x[1], reverse=True
+            enumerate(probs), key=lambda x: x[1], reverse=True
         )
         results = []
-        for species, score in ranked:
+        for idx, score in ranked:
+            species = self._classes[idx]
             score = float(score)
             if score < threshold:
                 continue
@@ -916,6 +932,9 @@ class Classifier:
                 {
                     "species": species,
                     "score": score,
+                    "raw_score": (
+                        None if raw_scores is None else float(raw_scores[idx])
+                    ),
                     "auto_tag": f"auto:{species}",
                     "confidence_tag": f"auto:confidence:{score:.2f}",
                 }
@@ -933,10 +952,12 @@ class Classifier:
                 )
         return results
 
-    def _build_tol_results(self, probs, threshold):
+    def _build_tol_results(self, probs, threshold, raw_scores=None):
         """Build sorted prediction dicts from a probability array (Tree of Life mode).
 
         Each entry in tol_classes is a dict with taxonomy fields.
+        ``raw_scores`` carries the pre-softmax cosine similarity per label; see
+        ``_build_custom_results``.
         """
         indexed = sorted(enumerate(probs), key=lambda x: x[1], reverse=True)
         results = []
@@ -950,6 +971,9 @@ class Classifier:
             result = {
                 "species": species,
                 "score": score,
+                "raw_score": (
+                    None if raw_scores is None else float(raw_scores[idx])
+                ),
                 "auto_tag": f"auto:{species}",
                 "confidence_tag": f"auto:confidence:{score:.2f}",
             }
@@ -1004,11 +1028,20 @@ class Classifier:
         # img_features: (1, D), txt_embeddings: (D, num_labels)
         logits = 100.0 * (img_features @ self._txt_embeddings)  # (1, num_labels)
         probs = onnx_runtime.softmax(logits, axis=-1).flatten()
+        # Undo the 100x logit scale to recover the cosine similarity itself.
+        # The softmax below normalizes these away; kept here because the
+        # un-normalized value is the only evidence about whether ANY label
+        # fits, as opposed to which one fits least badly.
+        raw_scores = logits.flatten() / 100.0
 
         if self._mode == "custom":
-            return self._build_custom_results(probs, threshold), embedding
+            return self._build_custom_results(
+                probs, threshold, raw_scores
+            ), embedding
         else:
-            return self._build_tol_results(probs, threshold), embedding
+            return self._build_tol_results(
+                probs, threshold, raw_scores
+            ), embedding
 
     def classify_batch_with_embedding(self, images, threshold=0.4):
         """Classify multiple PIL images.
@@ -1031,10 +1064,11 @@ class Classifier:
 
             logits = 100.0 * (img_features @ self._txt_embeddings)
             probs = onnx_runtime.softmax(logits, axis=-1).flatten()
+            raw_scores = logits.flatten() / 100.0
 
             if self._mode == "custom":
-                preds = self._build_custom_results(probs, threshold)
+                preds = self._build_custom_results(probs, threshold, raw_scores)
             else:
-                preds = self._build_tol_results(probs, threshold)
+                preds = self._build_tol_results(probs, threshold, raw_scores)
             results.append((preds, embedding))
         return results

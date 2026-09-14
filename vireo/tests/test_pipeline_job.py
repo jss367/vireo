@@ -3431,6 +3431,145 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
     assert pred_after_reclassify[0]["species"] == "Full-image Robin"
 
 
+def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
+    tmp_path, monkeypatch,
+):
+    """The combined pipeline's classify gate must honor a measured no-match
+    outcome just like the standalone classify job does.
+
+    A completed classifier run whose every label fell under the confidence
+    floor writes a ``classifier_runs`` marker and a ``classifier_match_scores``
+    row but no ``predictions`` rows. ``classify_job.py`` treats that as a
+    cache hit; ``pipeline_job.py`` used to fall through to re-inference —
+    which on a partially cached run silently replaces the authoritative
+    "nothing in this list fits" verdict with fresh predictions, and on an
+    install without model weights fails the whole stage (Codex P2 on
+    a1be510).
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(
+        folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0,
+    )
+    _drop_jpeg(folder_path, "empty.jpg")
+    collection_id = db.add_collection(
+        "No detections",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    import detector
+    monkeypatch.setattr(detector, "ensure_megadetector_weights", lambda **_k: None)
+    monkeypatch.setattr(classify_job, "detect_animals", lambda _path: [])
+    monkeypatch.setattr(classify_job, "get_primary_detection", lambda _dets: None)
+
+    classify_calls = []
+
+    class RecordingClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+
+            classify_calls.append(len(images))
+            return [
+                (
+                    [{"species": "Full-image Robin", "score": 0.91}],
+                    np.zeros(512, dtype=np.float32),
+                )
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", RecordingClassifier)
+
+    params = PipelineParams(
+        collection_id=collection_id,
+        model_id=model_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    # First run: creates the full-image detection and its classifier_runs
+    # marker with the pipeline's real runtime fingerprint.
+    first = run_pipeline_job(
+        _make_job(), FakeRunner(), db_path, ws_id, params,
+    )
+    assert first["stages"]["classify"]["full_image_fallbacks"] == 1
+    assert classify_calls == [1]
+
+    # Simulate a measured no-match: delete the prediction row (which was
+    # only stored because our fake classifier claimed one) and record a
+    # zero-candidate ``classifier_match_scores`` summary against the same
+    # (detection, model, labels_fingerprint) triple. The classifier_runs
+    # marker stays.
+    check = Database(db_path)
+    check.set_active_workspace(ws_id)
+    full = check.get_detections(photo_id, detector_model="full-image", min_conf=0)
+    assert len(full) == 1
+    full_det_id = full[0]["id"]
+    run_key = check.conn.execute(
+        """SELECT classifier_model, labels_fingerprint
+             FROM classifier_runs
+            WHERE detection_id = ?""",
+        (full_det_id,),
+    ).fetchone()
+    assert run_key is not None
+    check.conn.execute(
+        "DELETE FROM predictions WHERE detection_id = ?",
+        (full_det_id,),
+    )
+    check.conn.commit()
+    check.record_classifier_match_score(
+        full_det_id,
+        run_key["classifier_model"],
+        run_key["labels_fingerprint"],
+        max_match_score=0.11,
+        match_margin=0.02,
+        top_species=None,
+        label_count=1255,
+        score_kind="cosine",
+    )
+    check.close()
+
+    # Second run: no cached predictions, but the measured match-score row
+    # records this run as a zero-candidate no-match. The combined pipeline
+    # must skip inference — otherwise it would replace the recorded
+    # no-match verdict with a fresh RecordingClassifier prediction.
+    second = run_pipeline_job(
+        _make_job(), FakeRunner(), db_path, ws_id, params,
+    )
+    assert classify_calls == [1], (
+        "the combined-pipeline gate must honor the measured no-match "
+        "summary and not re-invoke the model on the second run"
+    )
+    assert second["stages"]["classify"]["already_classified"] >= 1
+    # No predictions materialized behind the measured no-match.
+    verify = Database(db_path)
+    verify.set_active_workspace(ws_id)
+    preds_after = verify.get_predictions_for_detection(
+        full_det_id,
+        classifier_model=run_key["classifier_model"],
+        min_classifier_conf=0,
+    )
+    assert preds_after == [], (
+        "no-match should stay a no-match; a preserved match-score row "
+        "must not be overwritten by fresh predictions"
+    )
+
+
 def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
     tmp_path, monkeypatch,
 ):

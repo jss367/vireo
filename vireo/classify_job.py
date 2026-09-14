@@ -356,8 +356,9 @@ def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
                 (detection_id, classifier_model, labels_fingerprint, species,
                  confidence, category, scientific_name,
                  taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                 taxonomy_order, taxonomy_family, taxonomy_genus, source_taxon_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 taxonomy_order, taxonomy_family, taxonomy_genus, source_taxon_id,
+                 match_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 detection_id,
                 classifier_model,
@@ -373,6 +374,14 @@ def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
                 tax.get("family"),
                 tax.get("genus"),
                 tax.get("taxon_id"),
+                # Carried through so this seam does not silently drop the one
+                # signal that distinguishes a match from the closest label in
+                # a list that had nothing right in it. The run-level summary
+                # is not written here: classify_fn returns whatever it chooses
+                # to return, so this path cannot know it saw the whole label
+                # list, and guessing would put a fabricated "best over all
+                # labels" into the table calibration reads.
+                pred.get("raw_score"),
             ),
         )
     commit_with_retry(db.conn)
@@ -566,15 +575,27 @@ def _all_photos_cache_satisfied(
         )
         runtime_args = list(expected_runtimes) + [AUTO_MATCH_REVIEW_MARKER]
 
-    # Only classifier_runs backed by at least one predictions row count as
-    # cache-satisfying.  See docstring — a classifier_run without matching
-    # predictions is a torn write from a crashed local job, not a
-    # reusable cache row.
+    # Only classifier_runs backed by at least one predictions row — or by a
+    # measured ``classifier_match_scores`` summary — count as cache-satisfying.
+    # See docstring: a classifier_run without matching predictions is
+    # ordinarily a torn write from a crashed local job. But a completed run
+    # that matched nothing legitimately publishes a zero-candidate artifact
+    # (see ``computation_cache._match_summary_row`` and the note there), and
+    # its output-of-record is the ``classifier_match_scores`` row rather than
+    # any predictions. Ignoring it would (a) fail cache-only classification
+    # on an install without model weights and (b) needlessly re-run inference
+    # on an install that has them, discarding exactly the "nothing in your
+    # list fits" verdict this feature exists to preserve (Codex P2 on
+    # 22cc0ac).
     predictions_exists = (
-        "EXISTS (SELECT 1 FROM predictions pr "
+        "(EXISTS (SELECT 1 FROM predictions pr "
         "WHERE pr.detection_id = cr.detection_id "
         "AND pr.classifier_model = cr.classifier_model "
         "AND pr.labels_fingerprint = cr.labels_fingerprint)"
+        " OR EXISTS (SELECT 1 FROM classifier_match_scores cms "
+        "WHERE cms.detection_id = cr.detection_id "
+        "AND cms.classifier_model = cr.classifier_model "
+        "AND cms.labels_fingerprint = cr.labels_fingerprint))"
     )
     classifiable_detection = (
         "(d.detector_model = 'full-image' OR "
@@ -1561,6 +1582,90 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
     return img, folder_path, image_path
 
 
+def _match_stats(all_preds, model_type):
+    """Summarize how well the best label in the list actually matched.
+
+    Every caller here classifies with ``threshold=0``, so ``all_preds`` is the
+    complete ranked list and ``all_preds[0]`` is the argmax over every label —
+    including the ones that will never clear the confidence threshold and so
+    never become prediction rows. That is exactly the point: whether *anything*
+    in the list fit can only be answered by looking at the labels that lost,
+    and the softmax'd ``score`` cannot answer it at all because it renormalizes
+    to 1 over whichever labels happen to be loaded.
+
+    Returns None when the classifier did not report raw scores (an older or
+    stubbed classifier), which downstream must treat as "not recorded" rather
+    than as a low score.
+    """
+    if not all_preds:
+        return None
+    top_raw = all_preds[0].get("raw_score")
+    if top_raw is None:
+        return None
+    # Imported here rather than at module scope so the score kind stays owned
+    # by the classifier that produces it (no second copy of the mapping to
+    # drift), without pulling the ONNX-heavy modules in at import time. Both
+    # are already loaded by the time any batch is flushed.
+    if model_type == "timm":
+        from timm_classifier import SCORE_KIND as score_kind
+    else:
+        from classifier import SCORE_KIND as score_kind
+    margin = None
+    if len(all_preds) > 1:
+        second_raw = all_preds[1].get("raw_score")
+        if second_raw is not None:
+            margin = float(top_raw) - float(second_raw)
+    # Fold ``top_species`` through the same normalization ``add_prediction``
+    # applies to its ``species`` column. The calibration query in
+    # ``scripts/calibrate_match_threshold.py`` joins this summary against the
+    # normalized keyword and the normalized prediction row, so a bundled label
+    # with a curly apostrophe (``Swinhoe’s White-eye``) would otherwise be
+    # recorded here in the un-normalized form and miss both sides of the join,
+    # dropping the confirmed-correct row into the ``incorrect`` bucket and
+    # biasing the fitted floor.
+    return {
+        "max_match_score": float(top_raw),
+        "match_margin": margin,
+        "top_species": _folded_species_key(all_preds[0].get("species")),
+        "label_count": len(all_preds),
+        "score_kind": score_kind,
+    }
+
+
+def _record_match_scores(db, raw_results, model_name, labels_fingerprint):
+    """Persist the per-run match summaries collected during classification.
+
+    Runs before the grouping/consensus pass stores predictions, and covers
+    every raw result — including ones that pass will discard as already
+    labeled. The match score describes the classifier run, not the review
+    outcome, so it should not inherit review-side filtering.
+    """
+    seen = set()
+    for result in raw_results:
+        det_id = result.get("detection_id")
+        match = result.get("match")
+        if det_id is None or not match or det_id in seen:
+            continue
+        seen.add(det_id)
+        try:
+            db.record_classifier_match_score(
+                det_id,
+                model_name,
+                labels_fingerprint,
+                max_match_score=match["max_match_score"],
+                match_margin=match.get("match_margin"),
+                top_species=match.get("top_species"),
+                label_count=match.get("label_count"),
+                score_kind=match.get("score_kind"),
+            )
+        except Exception:
+            # Diagnostic data must never fail a classification run.
+            log.warning(
+                "Failed to record match score for detection %s", det_id,
+                exc_info=True,
+            )
+
+
 def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
     """Classify a batch of prepared images and append results.
 
@@ -1626,6 +1731,10 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
             if not all_preds:
                 continue
 
+            # Computed from the unfiltered list, before anything below is
+            # allowed to drop labels.
+            match = _match_stats(all_preds, model_type)
+
             top = all_preds[0]
             log.info(
                 '%s: "%s" at %.0f%%',
@@ -1647,6 +1756,7 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
                 alternatives.append({
                     "species": alt_pred["species"],
                     "confidence": alt_pred["score"],
+                    "raw_score": alt_pred.get("raw_score"),
                     "taxonomy": alt_pred.get("taxonomy"),
                 })
 
@@ -1657,6 +1767,8 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
                 "image_path": entry["image_path"],
                 "prediction": top["species"],
                 "confidence": top["score"],
+                "raw_score": top.get("raw_score"),
+                "match": match,
                 "timestamp": timestamp,
                 "filename": entry["photo"]["filename"],
                 "embedding": embedding,
@@ -1868,6 +1980,17 @@ def _classify_photos(
                 # _store_grouped_predictions), DON'T short-circuit —
                 # otherwise the photo is stranded until the user forces
                 # --reclassify. Fall through to re-classify instead.
+                #
+                # Exception: a run key with a measured
+                # ``classifier_match_scores`` summary is a completed
+                # zero-candidate run — the classifier looked at this
+                # detection, nothing cleared the confidence floor, and the
+                # match-score row is its output-of-record. Re-running would
+                # discard the "nothing in your list fits" verdict this
+                # feature exists to preserve, and on an install without
+                # weights it would fail model loading instead of reusing
+                # the cache (Codex P2 on 22cc0ac). No top-1 to surface —
+                # just skip inference for this detection.
                 if not reclassify:
                     run_keys = _runtime_aware_run_keys(detection["id"])
                     if (model_name, fp) in run_keys:
@@ -1920,8 +2043,18 @@ def _classify_photos(
                                 "_existing": True,
                             })
                             continue
-                        # Run key without cached rows → fall through to
-                        # classify this detection.
+                        # Run key without cached rows: if a measured
+                        # match-score summary exists for the same triple
+                        # the run legitimately produced zero candidates —
+                        # honor that outcome instead of re-running.
+                        if db.has_classifier_match_score(
+                            detection["id"], model_name, fp,
+                        ):
+                            skipped_existing += 1
+                            continue
+                        # Otherwise the run key is a torn write or a
+                        # deliberately-hidden ``match`` row — fall through
+                        # to classify this detection.
 
                 img, det_folder_path, det_image_path = _prepare_image(
                     photo, folders, detection, vireo_dir=vireo_dir
@@ -2052,7 +2185,20 @@ def _classify_photos(
                             "_existing": True,
                         })
                         continue
-                    # Run key without cached rows → fall through to
+                    # Run key without cached rows: mirror the boxed-detection
+                    # gate above. A measured ``classifier_match_scores`` row
+                    # for the same triple is a completed zero-candidate run —
+                    # re-running would discard the "nothing in your list
+                    # fits" verdict this feature exists to preserve, and on
+                    # an install without weights it would fail model loading
+                    # instead of reusing the cache (Codex P2 on f074d0c).
+                    if db.has_classifier_match_score(
+                        full_det_id, model_name, fp,
+                    ):
+                        skipped_existing += 1
+                        continue
+                    # Otherwise the run key is a torn write or a
+                    # deliberately-hidden ``match`` row → fall through to
                     # re-classify this full-image detection.
             img, folder_path, image_path = _prepare_image(photo, folders, None, vireo_dir=vireo_dir)
             if img is None:
@@ -2250,6 +2396,24 @@ def _prediction_taxonomy(tax, species, supplied=None):
     return {**hierarchy, **supplied}
 
 
+def _row_match_score(item, species):
+    """This frame's raw match score for ``species``, or None if it has none.
+
+    Burst consensus can hand these storage helpers a species that is not this
+    frame's own top-1. The frame's raw score belongs to the label the model
+    actually picked here, so attaching it to a substituted species would
+    record a measurement that was never taken — the alternatives are searched
+    instead, and a miss yields None. None means "not recorded" everywhere
+    downstream, never "matched poorly".
+    """
+    if species is not None and species == item.get("prediction"):
+        return item.get("raw_score")
+    for alt in item.get("alternatives") or []:
+        if alt.get("species") == species:
+            return alt.get("raw_score")
+    return None
+
+
 def _store_match_prediction(
     db, item, model_name, labels_fingerprint, tax=None,
     species=None, confidence=None, taxonomy=None,
@@ -2261,7 +2425,9 @@ def _store_match_prediction(
     it should not re-enter the pending review queue.  The raw classifier output
     still needs a prediction row, though; otherwise the next non-reclassify run
     sees a classifier_runs key with no cached prediction to surface and pays for
-    inference again.
+    inference again.  Despite the "cache row" framing, ``item`` is this run's
+    own inference output, so the scores go in with
+    ``from_fresh_inference=True`` and supersede any earlier runtime's.
 
     ``store_alternatives`` must be False when ``species``/``confidence`` are a
     consensus override (burst groups): the per-frame ``item["alternatives"]``
@@ -2285,6 +2451,8 @@ def _store_match_prediction(
         taxonomy=tax_hierarchy,
         labels_fingerprint=labels_fingerprint,
         preserve_manual_review=True,
+        match_score=_row_match_score(item, species),
+        from_fresh_inference=True,
     )
     if store_alternatives:
         # Skip alternatives whose normalized species collides with the primary
@@ -2327,6 +2495,8 @@ def _store_match_prediction(
                 taxonomy=alt_tax,
                 labels_fingerprint=labels_fingerprint,
                 preserve_manual_review=True,
+                match_score=alt.get("raw_score"),
+                from_fresh_inference=True,
             )
     # add_prediction is INSERT-OR-IGNORE: a row cached as non-match on an
     # earlier pass keeps its stale category here. Re-stamp it 'match' so the
@@ -2474,6 +2644,8 @@ def _store_pending_detection_prediction(
         individual=individual,
         taxonomy=tax_hierarchy,
         labels_fingerprint=labels_fingerprint,
+        match_score=_row_match_score(item, item["prediction"]),
+        from_fresh_inference=True,
     )
     db.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
@@ -2504,6 +2676,8 @@ def _store_pending_detection_prediction(
             status="alternative",
             taxonomy=alt_tax,
             labels_fingerprint=labels_fingerprint,
+            match_score=alt.get("raw_score"),
+            from_fresh_inference=True,
         )
 
 
@@ -2531,6 +2705,12 @@ def _store_grouped_predictions(
     from xmp import read_keywords
 
     resolver = SpeciesResolver(taxonomy=tax)
+
+    # Before grouping: consensus can replace an item's species with the burst's
+    # winner, and the already-labeled check can drop items entirely, but the
+    # match score describes what the classifier saw on this frame. Record it
+    # while it still refers to this frame's own run.
+    _record_match_scores(db, raw_results, model_name, labels_fingerprint)
 
     def identity_for(item):
         supplied = item.get("taxonomy") or {}

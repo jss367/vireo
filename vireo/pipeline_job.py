@@ -6220,6 +6220,36 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                                 "_existing": True,
                                             })
                                             continue
+                                        # No cached prediction rows: honor a
+                                        # measured ``classifier_match_scores``
+                                        # summary for the same triple as a
+                                        # completed zero-candidate run,
+                                        # mirroring the boxed and full-image
+                                        # gates in ``classify_job.py``.
+                                        # Without this, a partially cached
+                                        # combined-pipeline run re-classifies
+                                        # detections whose no-match verdict
+                                        # was already recorded and can
+                                        # replace an authoritative "nothing
+                                        # in this list fits" outcome with a
+                                        # fresh inference (Codex P2 on
+                                        # a1be510). The preflight already
+                                        # counted this photo as cached
+                                        # because the classifier-run key
+                                        # exists, so no overcount to
+                                        # reconcile.
+                                        if thread_db.has_classifier_match_score(
+                                            detection["id"], model_name, spec_fp,
+                                        ):
+                                            skipped_existing += 1
+                                            if _record_unattempted_cache_hit(
+                                                photo["id"],
+                                                photos_inferred_in_spec,
+                                                photos_attempted_in_spec,
+                                                photos_cached_in_spec,
+                                            ):
+                                                stages["classify"]["cached"] += 1
+                                            continue
                                         # Run key with no cached rows (e.g.
                                         # prior pass stored `category == 'match'`
                                         # so the prediction was intentionally not

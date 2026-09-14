@@ -15830,6 +15830,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 str(pid): state
                 for pid, state in db.get_prediction_states(explicit_photo_ids).items()
             }
+            # Whether the best label in the list actually matched, per photo.
+            # A prediction row carries a softmax confidence, which is a
+            # ranking within the list and cannot distinguish "this is a chat"
+            # from "nothing here is a chat, but this is closest". Sent with the
+            # same per-photo gating as photo_states: Browse's panel shows one
+            # photo, Review asks for the entire queue and must not pay for it.
+            import config as cfg
+            import match_confidence
+            effective_cfg = db.get_effective_config(cfg.load())
+            response["match_states"] = {
+                str(pid): match_confidence.summarize_photo(
+                    db.get_match_scores_for_photo(pid),
+                    effective_cfg,
+                    unscored_current_runs=(
+                        db.get_unscored_current_prediction_runs(pid)
+                    ),
+                )
+                for pid in explicit_photo_ids
+            }
         return jsonify(response)
 
     _COMPARE_MAX_PER_PAGE = 200
