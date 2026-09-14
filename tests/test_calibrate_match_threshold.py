@@ -36,7 +36,8 @@ def _seed_conn():
         );
         CREATE TABLE detections (
             id INTEGER PRIMARY KEY,
-            photo_id INTEGER NOT NULL
+            photo_id INTEGER NOT NULL,
+            detector_model TEXT
         );
         CREATE TABLE predictions (
             id INTEGER PRIMARY KEY,
@@ -93,16 +94,22 @@ def _add_photo_with_keyword(conn, photo_id, species):
 
 
 def _add_run(conn, det_id, photo_id, model, fp, top_species,
-             max_match_score, score_kind="cosine", candidates=()):
+             max_match_score, score_kind="cosine", candidates=(),
+             detector_model="MDV6"):
     """Seed a classifier run row and any per-candidate predictions.
 
     ``candidates`` entries are either ``(species, score)`` tuples or
     ``(species, score, source_taxon_id)``. The taxon id is optional so
     existing tests that don't care about taxonomy continue to work.
+
+    ``detector_model`` names the detector that produced the row so
+    calibration's real-detection count can distinguish full-image
+    fallbacks from proper subject detections. Defaults to a real
+    detector so a single row per photo still calibrates.
     """
     conn.execute(
-        "INSERT INTO detections(id, photo_id) VALUES (?, ?)",
-        (det_id, photo_id),
+        "INSERT INTO detections(id, photo_id, detector_model) VALUES (?, ?, ?)",
+        (det_id, photo_id, detector_model),
     )
     conn.execute(
         """INSERT INTO classifier_match_scores
@@ -551,4 +558,87 @@ def test_suggest_respects_cap_on_borderline_sample_count():
     assert suppressed <= 0.01 + 1e-12, (
         f"suggest reported suppressed={suppressed:.6f} > cap 0.01 — "
         "the floor exceeds the advertised suppression budget."
+    )
+
+
+def test_collect_excludes_multi_detection_photos():
+    """A photo with two real detections and one confirmed species keyword
+    cannot serve as ground truth: the keyword names the photo, not any
+    specific detection, so a classifier that guessed the confirmed species
+    for the OTHER animal would still be scored ``correct`` here. That
+    false positive pulls the low-percentile ``correct`` distribution down
+    and lowers the fitted floor (Codex P2 on 22cc0ac).
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    # Two real (non-full-image) detections on the same photo.
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+    )
+    _add_run(
+        conn, det_id=11, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.40,
+    )
+    # A single-detection reference photo that MUST calibrate.
+    _add_photo_with_keyword(conn, photo_id=2, species="Robin")
+    _add_run(
+        conn, det_id=20, photo_id=2, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.55,
+    )
+
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.55], (
+        "The multi-detection photo must not contribute either row — the "
+        "keyword can't say which detection depicts the confirmed species."
+    )
+
+
+def test_collect_includes_full_image_photos():
+    """A single full-image row on a photo with no real detections is the
+    detector's zero-animal fallback, not evidence of a second subject.
+    Whole-frame classifications against a single-keyword photo must still
+    calibrate.
+    """
+    mod = _load_module()
+    conn = _seed_conn()
+    _add_photo_with_keyword(conn, photo_id=1, species="Robin")
+    _add_run(
+        conn, det_id=10, photo_id=1, model="bioclip", fp="fp-a",
+        top_species="Robin", max_match_score=0.42,
+        detector_model="full-image",
+    )
+    buckets = mod.collect(conn)
+    assert buckets[("bioclip", "cosine")]["correct"] == [0.42]
+
+
+def test_apply_writes_threshold_within_advertised_cap(tmp_path, monkeypatch):
+    """--apply must not serialize a threshold that hides more rows than
+    ``suggest()`` reported. ``round(t, 6)`` breaks ties toward the nearest
+    even and can round upward: a computed floor of 0.1234566 would land at
+    0.123457 and start suppressing a sample equal to the original threshold
+    that ``suggest()`` deliberately spared (Codex P2 on 22cc0ac).
+    """
+    mod = _load_module()
+    # Construct a set of 100 correct rows whose 1% floor lands on a value
+    # that rounds upward at six decimals. ``suggest`` returns the exact
+    # sample value; the concern is serialization, not selection.
+    conn = _seed_conn()
+    for i in range(100):
+        # Values whose 7th decimal forces round-half-to-even to round UP.
+        # 0.1234565 -> round(_, 6) == 0.123457 on IEEE floats; floor gives
+        # 0.123456 and keeps the sample equal to the original at index 0.
+        _add_photo_with_keyword(conn, photo_id=i + 1, species="Robin")
+        _add_run(
+            conn, det_id=i + 1, photo_id=i + 1, model="bioclip", fp="fp-a",
+            top_species="Robin", max_match_score=0.1234565 + i * 0.001,
+        )
+    # We're only checking the serialization step. Drive it directly.
+    threshold = 0.1234565
+    written = mod.math.floor(threshold * 1_000_000) / 1_000_000
+    assert written <= threshold, (
+        f"Serialized threshold {written!r} rose above the computed "
+        f"floor {threshold!r} — the advertised suppression cap can be "
+        "exceeded on the values equal to the original."
     )

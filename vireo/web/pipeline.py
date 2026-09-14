@@ -2483,7 +2483,11 @@ def create_pipeline_blueprint(
             )
         result["match_scores"] = match_rows
         result["match_summary"] = match_confidence.summarize_photo(
-            match_rows, effective_cfg,
+            match_rows,
+            effective_cfg,
+            unscored_current_runs=(
+                db.get_unscored_current_prediction_runs(photo_id)
+            ),
         )
 
         current_pred_rows = db.conn.execute(

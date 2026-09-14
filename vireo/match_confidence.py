@@ -179,11 +179,22 @@ def summarize(assessments):
     verdict to ``uncalibrated`` while ``unlisted_models`` /
     ``summarize_photo``'s ``unlisted_runs`` still carry the failure through,
     so the UI drops the blanket banner and warns on the run that actually
-    failed instead. ``unavailable`` runs (no score recorded at all) do not
-    block: they are genuinely absent rather than deliberately unjudged.
+    failed instead.
+
+    A migrated catalog carries current predictions from models that ran before
+    match scoring existed; those runs surface as ``unavailable`` assessments
+    with ``blocks_unlisted=True`` (see ``summarize_photo``). They block the
+    blanket verdict for the same reason ``uncalibrated`` does — a banner that
+    reads "nothing here matches" must not be applied over predictions no
+    model actually judged. An ``unavailable`` run without the flag is
+    genuinely absent (no predictions displayed either) and does not block.
     """
     judged = [a for a in assessments if a.get("state") in (LISTED, UNLISTED)]
-    unjudged = [a for a in assessments if a.get("state") == UNCALIBRATED]
+    unjudged = [
+        a for a in assessments
+        if a.get("state") == UNCALIBRATED
+        or (a.get("state") == UNAVAILABLE and a.get("blocks_unlisted"))
+    ]
     if not judged:
         state = UNCALIBRATED if unjudged else UNAVAILABLE
         return {
@@ -226,7 +237,7 @@ def is_current_row(row):
     return bool(row.get("is_current", 1))
 
 
-def summarize_photo(match_rows, config=None):
+def summarize_photo(match_rows, config=None, unscored_current_runs=None):
     """Assess ``classifier_match_scores`` rows for one photo and summarize.
 
     Two things come back, and the difference between them is the whole point:
@@ -245,14 +256,28 @@ def summarize_photo(match_rows, config=None):
     a strong match against a label list that has since been replaced cannot
     mark the list on screen as matched. Rows without a score are skipped
     rather than scored as zero.
+
+    ``unscored_current_runs`` names ``(detection, model)`` pairs that have
+    current predictions on this photo but no ``classifier_match_scores`` row
+    for the current fingerprint — the state a migrated catalog leaves prior
+    predictions in. Each pair surfaces as an ``unavailable`` run that blocks
+    the blanket ``unlisted`` verdict: the panel is still showing those
+    predictions, and a "no label in this list matches" banner over them would
+    speak for a run that was never judged. When the pair already appears in
+    ``match_rows`` with a score under the same fingerprint it is treated as
+    scored — the caller can pass either the DB rows verbatim or a
+    pre-filtered list without changing the result.
     """
     best = {}
     runs = []
+    seen_scored = set()
     for row in match_rows or []:
         score = row.get("max_match_score")
         if score is None or not is_current_row(row):
             continue
         model = row.get("classifier_model")
+        detection_id = row.get("detection_id")
+        seen_scored.add((detection_id, model, row.get("labels_fingerprint")))
         assessment = assess(
             model,
             row.get("score_kind"),
@@ -262,7 +287,7 @@ def summarize_photo(match_rows, config=None):
         )
         runs.append({
             **assessment,
-            "detection_id": row.get("detection_id"),
+            "detection_id": detection_id,
             "classifier_model": model,
             "labels_fingerprint": row.get("labels_fingerprint"),
             "top_species": row.get("top_species"),
@@ -270,6 +295,42 @@ def summarize_photo(match_rows, config=None):
         })
         if model not in best or score > best[model][0]:
             best[model] = (score, assessment)
+    for row in unscored_current_runs or []:
+        model = row.get("classifier_model")
+        detection_id = row.get("detection_id")
+        fingerprint = row.get("labels_fingerprint")
+        # De-dupe against scored rows in the same call. Some callers hand us
+        # the DB row list plus this parallel set; a pair that already has a
+        # scored row must not also generate a blocking unavailable one.
+        if (detection_id, model, fingerprint) in seen_scored:
+            continue
+        assessment = {
+            "state": UNAVAILABLE,
+            "model": model,
+            "score_kind": None,
+            "max_match_score": None,
+            "margin": None,
+            "threshold": None,
+            "explanation": (
+                "Predictions from this model were carried over from before "
+                "match scoring existed; the run was never judged against a "
+                "floor."
+            ),
+            "blocks_unlisted": True,
+        }
+        runs.append({
+            **assessment,
+            "detection_id": detection_id,
+            "classifier_model": model,
+            "labels_fingerprint": fingerprint,
+            "top_species": row.get("top_species"),
+            "detector_model": row.get("detector_model"),
+        })
+        # An unscored pair contributes to the photo-level rollup only when the
+        # model has no scored run at all; a model with a scored (listed or
+        # unlisted) run has already had its say for this photo.
+        if model not in best:
+            best[model] = (None, assessment)
     summary = summarize([assessment for _score, assessment in best.values()])
     summary["runs"] = runs
     # The failures that the photo-level rollup is allowed to outvote but the

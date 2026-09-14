@@ -529,15 +529,27 @@ def _all_photos_cache_satisfied(
         )
         runtime_args = list(expected_runtimes) + [AUTO_MATCH_REVIEW_MARKER]
 
-    # Only classifier_runs backed by at least one predictions row count as
-    # cache-satisfying.  See docstring — a classifier_run without matching
-    # predictions is a torn write from a crashed local job, not a
-    # reusable cache row.
+    # Only classifier_runs backed by at least one predictions row — or by a
+    # measured ``classifier_match_scores`` summary — count as cache-satisfying.
+    # See docstring: a classifier_run without matching predictions is
+    # ordinarily a torn write from a crashed local job. But a completed run
+    # that matched nothing legitimately publishes a zero-candidate artifact
+    # (see ``computation_cache._match_summary_row`` and the note there), and
+    # its output-of-record is the ``classifier_match_scores`` row rather than
+    # any predictions. Ignoring it would (a) fail cache-only classification
+    # on an install without model weights and (b) needlessly re-run inference
+    # on an install that has them, discarding exactly the "nothing in your
+    # list fits" verdict this feature exists to preserve (Codex P2 on
+    # 22cc0ac).
     predictions_exists = (
-        "EXISTS (SELECT 1 FROM predictions pr "
+        "(EXISTS (SELECT 1 FROM predictions pr "
         "WHERE pr.detection_id = cr.detection_id "
         "AND pr.classifier_model = cr.classifier_model "
         "AND pr.labels_fingerprint = cr.labels_fingerprint)"
+        " OR EXISTS (SELECT 1 FROM classifier_match_scores cms "
+        "WHERE cms.detection_id = cr.detection_id "
+        "AND cms.classifier_model = cr.classifier_model "
+        "AND cms.labels_fingerprint = cr.labels_fingerprint))"
     )
     classifiable_detection = (
         "(d.detector_model = 'full-image' OR "
@@ -1710,6 +1722,17 @@ def _classify_photos(
                 # _store_grouped_predictions), DON'T short-circuit —
                 # otherwise the photo is stranded until the user forces
                 # --reclassify. Fall through to re-classify instead.
+                #
+                # Exception: a run key with a measured
+                # ``classifier_match_scores`` summary is a completed
+                # zero-candidate run — the classifier looked at this
+                # detection, nothing cleared the confidence floor, and the
+                # match-score row is its output-of-record. Re-running would
+                # discard the "nothing in your list fits" verdict this
+                # feature exists to preserve, and on an install without
+                # weights it would fail model loading instead of reusing
+                # the cache (Codex P2 on 22cc0ac). No top-1 to surface —
+                # just skip inference for this detection.
                 if not reclassify:
                     run_keys = _runtime_aware_run_keys(detection["id"])
                     if (model_name, fp) in run_keys:
@@ -1762,8 +1785,18 @@ def _classify_photos(
                                 "_existing": True,
                             })
                             continue
-                        # Run key without cached rows → fall through to
-                        # classify this detection.
+                        # Run key without cached rows: if a measured
+                        # match-score summary exists for the same triple
+                        # the run legitimately produced zero candidates —
+                        # honor that outcome instead of re-running.
+                        if db.has_classifier_match_score(
+                            detection["id"], model_name, fp,
+                        ):
+                            skipped_existing += 1
+                            continue
+                        # Otherwise the run key is a torn write or a
+                        # deliberately-hidden ``match`` row — fall through
+                        # to classify this detection.
 
                 img, det_folder_path, det_image_path = _prepare_image(
                     photo, folders, detection, vireo_dir=vireo_dir

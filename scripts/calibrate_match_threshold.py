@@ -53,6 +53,7 @@ Caveats worth reading before trusting the number:
 import argparse
 import bisect
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -247,6 +248,28 @@ def collect(conn):
                   AND (k2.is_species = 1 OR k2.type = 'taxonomy')
                   AND (t2.rank IS NULL OR t2.rank = 'species')
           ) = 1
+          -- Only photos with AT MOST ONE real detection can serve as
+          -- ground truth for a photo-level keyword. A single confirmed
+          -- keyword is a fact about the photo, not per-detection: if the
+          -- frame holds two animals and only one has been identified,
+          -- both detections are still evaluated against that one species
+          -- above. A classifier that guessed the confirmed species for the
+          -- OTHER animal is then wrongly filed as ``correct`` and pulls
+          -- the low-percentile "correct" distribution down, lowering the
+          -- fitted floor (Codex P2 on 22cc0ac). "Real" excludes the
+          -- synthetic full-image anchor — it is the detector's zero-animal
+          -- placeholder, not evidence of a second subject — so a full-image
+          -- classification on a whole-frame photo still calibrates.
+          -- ``IS NOT`` (rather than ``!=``) so a detection row with a NULL
+          -- detector_model still counts as real: production rows always
+          -- carry the detector name, and treating a missing value as
+          -- "unknown, so ignore" would silently readmit multi-detection
+          -- photos in exactly the case a legacy import might create.
+          AND (
+                SELECT COUNT(*) FROM detections d2
+                WHERE d2.photo_id = d.photo_id
+                  AND d2.detector_model IS NOT 'full-image'
+          ) <= 1
         """
     ).fetchall()
 
@@ -467,8 +490,16 @@ def main(argv=None):
                     "overlap heavily — this model's raw score may not separate "
                     "in-list from out-of-list well on your catalog."
                 )
+        # Serialize with ``math.floor`` at six decimals rather than ``round``.
+        # ``round`` breaks ties toward the nearest-even and can round upward:
+        # a computed floor of 0.1234566 would serialize as 0.123457, which
+        # is strictly greater than the value ``suggest()`` returned and
+        # can hide the very row the cap was chosen to spare (Codex P2 on
+        # 22cc0ac). ``math.floor(t * 1e6) / 1e6`` returns a value ≤ t, so
+        # the count of strictly-lower samples never grows; the advertised
+        # ``--max-suppression`` cap survives serialization intact.
         suggested[model] = {
-            "threshold": round(threshold, 6),
+            "threshold": math.floor(threshold * 1_000_000) / 1_000_000,
             "score_kind": score_kind,
         }
 

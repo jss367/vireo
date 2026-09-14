@@ -19553,6 +19553,72 @@ class Database:
         )
         commit_with_retry(self.conn)
 
+    def has_classifier_match_score(
+        self, detection_id, classifier_model, labels_fingerprint,
+    ):
+        """True when ``classifier_match_scores`` records this exact run.
+
+        A completed classifier run whose every label fell under the
+        confidence floor writes a match-score row but no prediction rows —
+        that outcome ("nothing in your list fits") is exactly what the
+        feature exists to record, and the per-detection cache gate in
+        ``classify_job._classify_photos`` uses this to honor it instead of
+        re-running the model on a stored no-match.
+        """
+        return self.conn.execute(
+            """SELECT 1 FROM classifier_match_scores
+               WHERE detection_id = ?
+                 AND classifier_model = ?
+                 AND labels_fingerprint = ?
+               LIMIT 1""",
+            (detection_id, classifier_model, labels_fingerprint),
+        ).fetchone() is not None
+
+    def get_unscored_current_prediction_runs(self, photo_id):
+        """Return ``(detection_id, classifier_model)`` pairs displayed without a score.
+
+        A migrated catalog carries predictions from models that ran before
+        ``classifier_match_scores`` existed: those predictions still surface in
+        the panel because ``get_predictions`` pins to their (still latest)
+        ``labels_fingerprint``, but the score table is empty for them. The
+        blanket "no label in this list matches" verdict must not be applied
+        over those rows — the legacy model was never judged.
+
+        Returns one entry per current-fingerprint ``(detection, model)`` pair
+        that has at least one prediction row on the photo but no row in
+        ``classifier_match_scores`` under the same fingerprint. Callers hand
+        these to ``match_confidence.summarize_photo`` so the photo-level
+        rollup can degrade to ``uncalibrated`` rather than declaring every
+        displayed prediction unlisted.
+
+        Not workspace-scoped — ``photo_id`` is assumed already verified by the
+        caller, as the existing per-photo routes do before reaching here.
+        """
+        rows = self.conn.execute(
+            """SELECT DISTINCT pr.detection_id AS detection_id,
+                      pr.classifier_model AS classifier_model,
+                      d.detector_model AS detector_model,
+                      pr.labels_fingerprint AS labels_fingerprint
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
+                 AND NOT EXISTS (
+                    SELECT 1 FROM classifier_match_scores cms
+                    WHERE cms.detection_id = pr.detection_id
+                      AND cms.classifier_model = pr.classifier_model
+                      AND cms.labels_fingerprint = pr.labels_fingerprint
+                 )""",
+            (photo_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_match_scores_for_photo(self, photo_id):
         """Return match-score rows for every detection on one photo.
 

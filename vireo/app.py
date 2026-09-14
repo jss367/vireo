@@ -15837,7 +15837,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             effective_cfg = db.get_effective_config(cfg.load())
             response["match_states"] = {
                 str(pid): match_confidence.summarize_photo(
-                    db.get_match_scores_for_photo(pid), effective_cfg,
+                    db.get_match_scores_for_photo(pid),
+                    effective_cfg,
+                    unscored_current_runs=(
+                        db.get_unscored_current_prediction_runs(pid)
+                    ),
                 )
                 for pid in explicit_photo_ids
             }

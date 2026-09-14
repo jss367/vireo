@@ -665,3 +665,94 @@ def test_pipeline_reports_superseded_runs_with_the_current_verdict(app_and_db):
     assert [(f["detection_id"], f["classifier_model"]) for f in failures] == [
         (det, "BioCLIP-2.5")
     ]
+
+
+def test_current_prediction_without_score_blocks_blanket_unlisted():
+    """A prediction from a model with no match score must not be silenced.
+
+    A migrated catalog carries current predictions from models that ran
+    before ``classifier_match_scores`` existed. The panel still shows those
+    predictions, so a "no label in this list matches" banner rendered over
+    them would speak for a run that was never judged. The unscored current
+    pair blocks the blanket ``unlisted`` verdict the same way an
+    ``uncalibrated`` run does.
+    """
+    scored_rows = [
+        {"detection_id": 7, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.11,
+         "labels_fingerprint": "california"},
+    ]
+    unscored = [
+        {"detection_id": 7, "classifier_model": "iNat21-legacy",
+         "labels_fingerprint": "unknown"},
+    ]
+    summary = mc.summarize_photo(
+        scored_rows, _COSINE_CFG, unscored_current_runs=unscored,
+    )
+    assert summary["state"] == mc.UNCALIBRATED
+    # The failing run is still on the record for the UI to warn on
+    assert [r["classifier_model"] for r in summary["runs"]] == [
+        "BioCLIP-2.5", "iNat21-legacy",
+    ]
+
+
+def test_unscored_current_pair_alone_summarizes_as_uncalibrated():
+    """A photo whose only run is a pre-migration prediction is uncalibrated.
+
+    No scored run has said "unlisted" — the panel just shows predictions
+    from a model that was never judged.
+    """
+    unscored = [
+        {"detection_id": 7, "classifier_model": "iNat21-legacy",
+         "labels_fingerprint": "unknown"},
+    ]
+    summary = mc.summarize_photo([], _COSINE_CFG, unscored_current_runs=unscored)
+    assert summary["state"] == mc.UNCALIBRATED
+
+
+def test_unscored_pair_ignored_when_it_duplicates_a_scored_row():
+    """An overzealous caller that hands us both must not double-count."""
+    scored = [
+        {"detection_id": 7, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.40,
+         "labels_fingerprint": "california"},
+    ]
+    unscored = [
+        {"detection_id": 7, "classifier_model": "BioCLIP-2.5",
+         "labels_fingerprint": "california"},
+    ]
+    summary = mc.summarize_photo(
+        scored, _COSINE_CFG, unscored_current_runs=unscored,
+    )
+    assert summary["state"] == mc.LISTED
+    assert [r["classifier_model"] for r in summary["runs"]] == [
+        "BioCLIP-2.5",
+    ]
+
+
+def test_get_unscored_current_prediction_runs_matches_migrated_shape(db):
+    """The DB helper names exactly the pairs summarize_photo must be told about.
+
+    A migrated catalog leaves prior predictions in the table with no matching
+    ``classifier_match_scores`` row. That is the query this helper answers.
+    """
+    photo_id, det = _photo(db)
+    db.add_prediction(
+        detection_id=det, species="Rufous-winged Sparrow",
+        confidence=0.99, model="Legacy-Model",
+        labels_fingerprint="pre-migration",
+    )
+    # A scored row on a different model / detection must not appear.
+    db.add_prediction(
+        detection_id=det, species="Yellow-breasted Chat",
+        confidence=0.99, model="BioCLIP-2.5",
+        labels_fingerprint="california", match_score=0.40,
+    )
+    db.record_classifier_match_score(
+        det, "BioCLIP-2.5", "california", max_match_score=0.40,
+        top_species="Yellow-breasted Chat", score_kind="cosine",
+    )
+    pairs = db.get_unscored_current_prediction_runs(photo_id)
+    assert [(p["detection_id"], p["classifier_model"]) for p in pairs] == [
+        (det, "Legacy-Model")
+    ]
