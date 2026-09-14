@@ -3386,7 +3386,6 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
     import classify_job
     import config as cfg
     from db import Database
-    from PIL import Image
 
     monkeypatch.setenv("HOME", str(tmp_path))
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
