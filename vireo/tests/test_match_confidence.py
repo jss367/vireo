@@ -696,18 +696,21 @@ def test_current_prediction_without_score_blocks_blanket_unlisted():
     ]
 
 
-def test_unscored_current_pair_alone_summarizes_as_uncalibrated():
-    """A photo whose only run is a pre-migration prediction is uncalibrated.
+def test_unscored_current_pair_alone_summarizes_as_unavailable():
+    """A photo whose only run is a pre-migration prediction is not judged.
 
-    No scored run has said "unlisted" — the panel just shows predictions
-    from a model that was never judged.
+    No scored run has said "unlisted" — the panel just shows predictions from
+    a model that was never judged. The state is ``unavailable`` rather than
+    ``uncalibrated`` because nothing was measured: the pill for this photo has
+    to say "match strength not recorded", not "recorded, not judged".
     """
     unscored = [
         {"detection_id": 7, "classifier_model": "iNat21-legacy",
          "labels_fingerprint": "unknown"},
     ]
     summary = mc.summarize_photo([], _COSINE_CFG, unscored_current_runs=unscored)
-    assert summary["state"] == mc.UNCALIBRATED
+    assert summary["state"] == mc.UNAVAILABLE
+    assert summary["unjudged_models"] == 1
 
 
 def test_unscored_pair_ignored_when_it_duplicates_a_scored_row():
@@ -789,3 +792,180 @@ def test_get_unscored_current_prediction_runs_matches_migrated_shape(db):
     assert [(p["detection_id"], p["classifier_model"]) for p in pairs] == [
         (det, "Legacy-Model")
     ]
+
+
+# --------------------------------------------------------------------------
+# The invariant itself, rather than one more face of it
+# --------------------------------------------------------------------------
+
+# Every distinguishable shape a match-score row can take. Each gets its own
+# detection so no entry de-dupes against another.
+_ROW_SHAPES = [
+    # Current, scored, failing — the only shape that may vote ``unlisted``.
+    ("scored_fail", {
+        "detection_id": 1, "classifier_model": "BioCLIP-2.5",
+        "score_kind": "cosine", "max_match_score": 0.11,
+        "labels_fingerprint": "california",
+    }),
+    # Current, scored, passing.
+    ("scored_pass", {
+        "detection_id": 2, "classifier_model": "BioCLIP-2.5",
+        "score_kind": "cosine", "max_match_score": 0.40,
+        "labels_fingerprint": "california",
+    }),
+    # Current and measured, but with no floor to judge the scale against.
+    ("uncalibrated", {
+        "detection_id": 3, "classifier_model": "iNat21",
+        "score_kind": "logit", "max_match_score": 12.0,
+        "labels_fingerprint": "california",
+    }),
+    # Current, displayed, and never measured: the row exists but carries no
+    # ``max_match_score``.
+    ("row_without_score", {
+        "detection_id": 4, "classifier_model": "BioCLIP-2.5",
+        "score_kind": "cosine", "max_match_score": None,
+        "labels_fingerprint": "california",
+    }),
+    # Superseded: the label list these ran against is gone from the panel, so
+    # neither shape may vote or block.
+    ("superseded_fail", {
+        "detection_id": 5, "classifier_model": "BioCLIP-2.5",
+        "score_kind": "cosine", "max_match_score": 0.11,
+        "labels_fingerprint": "arizona", "is_current": 0,
+    }),
+    ("superseded_without_score", {
+        "detection_id": 6, "classifier_model": "BioCLIP-2.5",
+        "score_kind": "cosine", "max_match_score": None,
+        "labels_fingerprint": "arizona", "is_current": 0,
+    }),
+]
+
+# A displayed run with no ``classifier_match_scores`` row at all.
+_UNSCORED_PAIR = {
+    "detection_id": 7, "classifier_model": "Legacy-Model",
+    "labels_fingerprint": "pre-migration",
+}
+
+
+def test_unlisted_requires_every_displayed_run_to_be_scored_and_failed():
+    """The invariant, over every mix — not one more case for one more face.
+
+    "No label in this list matches this photo" is painted as a banner across
+    every prediction on screen, so it is honest only when every run whose
+    predictions are on screen was measured, judged, and failed. Three rounds
+    of review have each found a different way for an unjudged run to go
+    missing from the rollup: uncalibrated runs, unscored siblings on another
+    detection, and rows that exist with a NULL score. All three are the same
+    bug — absence of a verdict rendering as a verdict. Asserting the property
+    over the whole cross-product of row shapes, rather than enumerating
+    faces, is what makes face number four fail here instead of shipping.
+    """
+    import itertools
+
+    for mask in itertools.product((False, True), repeat=len(_ROW_SHAPES)):
+        for with_unscored_pair in (False, True):
+            rows = [
+                dict(row)
+                for (_name, row), keep in zip(_ROW_SHAPES, mask, strict=True) if keep
+            ]
+            unscored = [dict(_UNSCORED_PAIR)] if with_unscored_pair else []
+            summary = mc.summarize_photo(
+                rows, _COSINE_CFG, unscored_current_runs=unscored,
+            )
+            # ``runs`` is exactly what the panel is displaying: current rows
+            # plus current predictions that have no row.
+            displayed = summary["runs"]
+            selected = [
+                name for (name, _row), keep in zip(_ROW_SHAPES, mask, strict=True) if keep
+            ]
+            context = f"rows={selected} unscored_pair={with_unscored_pair}"
+
+            if summary["state"] == mc.UNLISTED:
+                assert displayed, f"unlisted with nothing displayed ({context})"
+                for run in displayed:
+                    assert run["max_match_score"] is not None, (
+                        f"blanket unlisted over an unmeasured run ({context})"
+                    )
+                    assert run["state"] == mc.UNLISTED, (
+                        f"blanket unlisted over a {run['state']} run ({context})"
+                    )
+
+            # The other half. Blocking correctly is only part of the job:
+            # refusing to speak when every displayed run was measured, judged
+            # and failed would be its own kind of dishonesty.
+            if displayed and all(r["state"] == mc.UNLISTED for r in displayed):
+                assert summary["state"] == mc.UNLISTED, (
+                    f"every displayed run failed but the photo is "
+                    f"{summary['state']} ({context})"
+                )
+
+
+def test_row_present_without_a_score_blocks_the_blanket_verdict():
+    """The face of the invariant found in round 8.
+
+    ``get_unscored_current_prediction_runs`` finds displayed runs with NO
+    ``classifier_match_scores`` row. A row that exists but carries a NULL
+    ``max_match_score`` — an older model given a row later, or a run
+    materialized from an artifact published without a measurement — satisfies
+    that query's ``NOT EXISTS`` and is invisible to it. ``summarize_photo``
+    used to skip the row outright, so a failing sibling carried the photo to
+    ``unlisted`` and Browse painted "no label matches" over a prediction
+    nobody had judged (Codex P1 on ecb275c).
+    """
+    rows = [
+        {"detection_id": 1, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.11,
+         "labels_fingerprint": "california"},
+        {"detection_id": 2, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": None,
+         "labels_fingerprint": "california"},
+    ]
+    summary = mc.summarize_photo(rows, _COSINE_CFG)
+    assert summary["state"] != mc.UNLISTED
+    assert summary["unjudged_models"] == 1
+    # The measured failure is still carried through for the UI to warn on.
+    assert [r["detection_id"] for r in summary["unlisted_runs"]] == [1]
+
+
+def test_superseded_row_without_a_score_does_not_block():
+    """Blocking is for displayed runs only.
+
+    A row from a label list the user has replaced produced nothing that is on
+    screen, so its missing score is not evidence about the list that is.
+    Treating it as a blocker would mute the blanket verdict permanently on
+    any detection that has ever been re-classified.
+    """
+    rows = [
+        {"detection_id": 1, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": 0.11,
+         "labels_fingerprint": "california"},
+        {"detection_id": 1, "classifier_model": "BioCLIP-2.5",
+         "score_kind": "cosine", "max_match_score": None,
+         "labels_fingerprint": "arizona", "is_current": 0},
+    ]
+    assert mc.summarize_photo(rows, _COSINE_CFG)["state"] == mc.UNLISTED
+
+
+def test_unmeasured_only_photo_says_not_recorded_not_uncalibrated():
+    """The two "unjudged" pills are different claims and must not be swapped.
+
+    ``uncalibrated`` renders as "match strength recorded, not judged" and
+    offers the calibration script. For a run whose strength was never
+    recorded both halves are false: calibrating changes nothing, and the
+    honest statement is that nothing was measured.
+    """
+    unscored = [
+        {"detection_id": 7, "classifier_model": "Legacy-Model",
+         "labels_fingerprint": "pre-migration"},
+    ]
+    assert mc.summarize_photo(
+        [], _COSINE_CFG, unscored_current_runs=unscored,
+    )["state"] == mc.UNAVAILABLE
+    # A run that WAS measured but has no floor is the other claim, and keeps
+    # the uncalibrated pill that points at the calibration script.
+    rows = [
+        {"detection_id": 3, "classifier_model": "iNat21",
+         "score_kind": "logit", "max_match_score": 12.0,
+         "labels_fingerprint": "california"},
+    ]
+    assert mc.summarize_photo(rows, _COSINE_CFG)["state"] == mc.UNCALIBRATED

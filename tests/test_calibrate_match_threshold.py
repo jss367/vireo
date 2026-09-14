@@ -7,6 +7,7 @@ double-count each run and score the ground-truth species by its per-label
 prediction score instead of the run-level maximum the floor governs.
 """
 import importlib.util
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -737,3 +738,90 @@ def test_apply_replaces_malformed_match_thresholds_map(tmp_path, monkeypatch):
     # The malformed scalar is gone; the calibrated map is in its place.
     assert isinstance(stub.saved.get("match_thresholds"), dict)
     assert "bioclip" in stub.saved["match_thresholds"]
+
+
+def _to_file_db(conn, tmp_path, name="calibrate.db"):
+    """Copy an in-memory seeded catalog to a file ``main`` can open read-only."""
+    conn.commit()
+    db_path = tmp_path / name
+    dest = sqlite3.connect(str(db_path))
+    conn.backup(dest)
+    dest.commit()
+    dest.close()
+    return db_path
+
+
+def test_one_model_with_two_score_kinds_emits_no_threshold(tmp_path, capsys):
+    """A model whose rows carry two scales must not get a threshold by luck.
+
+    Calibration buckets are keyed ``(model, score_kind)`` because a cosine and
+    a logit are unrelated scales, but config stores ONE entry per model. If a
+    model somehow has enough samples under both kinds, whichever bucket the
+    loop visits last would silently win and write a floor whose ``score_kind``
+    need not describe the data it was fitted on — the exact scale mismatch
+    this module exists to prevent (CodeRabbit on ecb275c). Refuse and say so.
+    """
+    conn = _seed_conn()
+    for i in range(120):
+        _add_photo_with_keyword(conn, photo_id=i + 1, species="Robin")
+        _add_run(
+            conn, det_id=i + 1, photo_id=i + 1, model="bioclip", fp="fp-cos",
+            top_species="Robin", max_match_score=0.30 + i * 0.001,
+            score_kind="cosine",
+        )
+    for i in range(120):
+        pid = 1000 + i
+        _add_photo_with_keyword(conn, photo_id=pid, species="Robin")
+        _add_run(
+            conn, det_id=pid, photo_id=pid, model="bioclip", fp="fp-log",
+            top_species="Robin", max_match_score=8.0 + i * 0.01,
+            score_kind="logit",
+        )
+    db_path = _to_file_db(conn, tmp_path)
+
+    mod = _load_module()
+    exit_code = mod.main(["--db", str(db_path), "--min-samples", "50"])
+    out = capsys.readouterr().out
+    assert "more than one score kind" in out, out
+    # Nothing may be emitted for the conflicted model, in either order.
+    assert "match_thresholds:" not in out, out
+    assert exit_code == 1
+
+
+def test_other_models_still_calibrate_around_a_conflicted_one(tmp_path, capsys):
+    """One ambiguous model must not cost the rest of the catalog its floors."""
+    conn = _seed_conn()
+    for i in range(120):
+        _add_photo_with_keyword(conn, photo_id=i + 1, species="Robin")
+        _add_run(
+            conn, det_id=i + 1, photo_id=i + 1, model="bioclip", fp="fp-cos",
+            top_species="Robin", max_match_score=0.30 + i * 0.001,
+            score_kind="cosine",
+        )
+    for i in range(120):
+        pid = 1000 + i
+        _add_photo_with_keyword(conn, photo_id=pid, species="Robin")
+        _add_run(
+            conn, det_id=pid, photo_id=pid, model="bioclip", fp="fp-log",
+            top_species="Robin", max_match_score=8.0 + i * 0.01,
+            score_kind="logit",
+        )
+    for i in range(120):
+        pid = 2000 + i
+        _add_photo_with_keyword(conn, photo_id=pid, species="Robin")
+        _add_run(
+            conn, det_id=pid, photo_id=pid, model="inat21", fp="fp-log",
+            top_species="Robin", max_match_score=9.0 + i * 0.01,
+            score_kind="logit",
+        )
+    db_path = _to_file_db(conn, tmp_path, name="mixed.db")
+
+    mod = _load_module()
+    exit_code = mod.main(["--db", str(db_path), "--min-samples", "50"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "more than one score kind" in out, out
+    tail = out.split("match_thresholds:", 1)[1].lstrip()
+    emitted, _end = json.JSONDecoder().raw_decode(tail)
+    assert "bioclip" not in emitted
+    assert emitted["inat21"]["score_kind"] == "logit"

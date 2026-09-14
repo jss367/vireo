@@ -196,7 +196,18 @@ def summarize(assessments):
         or (a.get("state") == UNAVAILABLE and a.get("blocks_unlisted"))
     ]
     if not judged:
-        state = UNCALIBRATED if unjudged else UNAVAILABLE
+        # With nothing judged, this state is rendered on its own as the
+        # headline pill, so it has to name the real reason. ``uncalibrated``
+        # reads "recorded, not judged" and invites the user to run the
+        # calibration script; that is only true when a run actually produced a
+        # score no floor could be applied to. A displayed run whose score was
+        # never recorded is ``unavailable`` — calibrating would not change it,
+        # re-classifying would.
+        state = (
+            UNCALIBRATED
+            if any(a.get("state") == UNCALIBRATED for a in unjudged)
+            else UNAVAILABLE
+        )
         return {
             "state": state,
             "judged_models": 0,
@@ -237,6 +248,29 @@ def is_current_row(row):
     return bool(row.get("is_current", 1))
 
 
+def _unmeasured_assessment(model, explanation):
+    """An ``unavailable`` verdict for a displayed run that carries no score.
+
+    ``blocks_unlisted`` is what separates this from the plain ``unavailable``
+    ``assess`` returns: the run's predictions are on screen right now, so the
+    blanket "no label in this list matches" banner must not be painted over
+    them. There is exactly one way to build one of these, because every route
+    by which a displayed run can end up unmeasured — pre-migration rows, a
+    row materialized from an artifact with no measurement, a row present but
+    unscored — has to reach the rollup the same way.
+    """
+    return {
+        "state": UNAVAILABLE,
+        "model": model,
+        "score_kind": None,
+        "max_match_score": None,
+        "margin": None,
+        "threshold": None,
+        "explanation": explanation,
+        "blocks_unlisted": True,
+    }
+
+
 def summarize_photo(match_rows, config=None, unscored_current_runs=None):
     """Assess ``classifier_match_scores`` rows for one photo and summarize.
 
@@ -254,8 +288,12 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
 
     Only current-fingerprint rows (see ``is_current_row``) feed either one, so
     a strong match against a label list that has since been replaced cannot
-    mark the list on screen as matched. Rows without a score are skipped
-    rather than scored as zero.
+    mark the list on screen as matched. A current row with no score is never
+    scored as zero: it becomes a blocking ``unavailable`` run, exactly like an
+    ``unscored_current_runs`` pair. The run happened and its predictions are
+    on screen; all that is missing is the measurement, so it has no verdict to
+    contribute and must not let one be pronounced over it. Superseded rows
+    without a score are dropped outright — nothing they produced is displayed.
 
     ``unscored_current_runs`` names ``(detection, model)`` pairs that have
     current predictions on this photo but no ``classifier_match_scores`` row
@@ -270,15 +308,41 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
     """
     best = {}
     runs = []
-    seen_scored = set()
+    seen_runs = set()
     unscored_assessments = []
     for row in match_rows or []:
-        score = row.get("max_match_score")
-        if score is None or not is_current_row(row):
+        if not is_current_row(row):
             continue
+        score = row.get("max_match_score")
         model = row.get("classifier_model")
         detection_id = row.get("detection_id")
-        seen_scored.add((detection_id, model, row.get("labels_fingerprint")))
+        seen_runs.add((detection_id, model, row.get("labels_fingerprint")))
+        if score is None:
+            # A run whose row exists but carries no ``max_match_score``: a
+            # model that ran before match strength was recorded, a row
+            # materialized from an artifact published without a measurement,
+            # or a partially-written row. ``get_unscored_current_prediction_
+            # runs`` cannot see these — its NOT EXISTS is satisfied by the
+            # row's mere presence — so without this branch the run would
+            # vanish from the rollup entirely and a failing sibling could
+            # carry the photo to ``unlisted`` over predictions nobody judged
+            # (Codex P1 on ecb275c). Absence of a verdict is not a verdict,
+            # whichever shape the absence takes.
+            assessment = _unmeasured_assessment(
+                model,
+                "This run recorded no match strength, so it was never judged "
+                "against a floor.",
+            )
+            runs.append({
+                **assessment,
+                "detection_id": detection_id,
+                "classifier_model": model,
+                "labels_fingerprint": row.get("labels_fingerprint"),
+                "top_species": row.get("top_species"),
+                "detector_model": row.get("detector_model"),
+            })
+            unscored_assessments.append(assessment)
+            continue
         assessment = assess(
             model,
             row.get("score_kind"),
@@ -303,22 +367,14 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
         # De-dupe against scored rows in the same call. Some callers hand us
         # the DB row list plus this parallel set; a pair that already has a
         # scored row must not also generate a blocking unavailable one.
-        if (detection_id, model, fingerprint) in seen_scored:
+        if (detection_id, model, fingerprint) in seen_runs:
             continue
-        assessment = {
-            "state": UNAVAILABLE,
-            "model": model,
-            "score_kind": None,
-            "max_match_score": None,
-            "margin": None,
-            "threshold": None,
-            "explanation": (
-                "Predictions from this model were carried over from before "
-                "match scoring existed; the run was never judged against a "
-                "floor."
-            ),
-            "blocks_unlisted": True,
-        }
+        assessment = _unmeasured_assessment(
+            model,
+            "Predictions from this model were carried over from before "
+            "match scoring existed; the run was never judged against a "
+            "floor.",
+        )
         runs.append({
             **assessment,
             "detection_id": detection_id,

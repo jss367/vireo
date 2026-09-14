@@ -429,6 +429,9 @@ def main(argv=None):
         return 1
 
     suggested = {}
+    # Models that produced a threshold under more than one score kind. They
+    # are removed from ``suggested`` rather than resolved: see below.
+    conflicted = set()
     for (model, score_kind), bucket in sorted(buckets.items()):
         correct = bucket["correct"]
         incorrect = bucket["incorrect"]
@@ -498,6 +501,30 @@ def main(argv=None):
         # 22cc0ac). ``math.floor(t * 1e6) / 1e6`` returns a value ≤ t, so
         # the count of strictly-lower samples never grows; the advertised
         # ``--max-suppression`` cap survives serialization intact.
+        # Buckets are keyed by (model, score_kind) because a cosine and a
+        # logit are different scales that must never be compared; config
+        # stores ONE entry per model. A model whose rows carry two score
+        # kinds — the same name reused across a rebuild, or a renamed model
+        # inheriting old rows — therefore has no single right answer here,
+        # and writing whichever bucket happens to come last would emit a
+        # floor whose ``score_kind`` may not describe the data it was fitted
+        # on. That is precisely the scale mismatch this whole module exists
+        # to prevent, so the model is dropped with a diagnostic and nothing
+        # is written for it (CodeRabbit on ecb275c). Order-independent: once
+        # conflicted, a model stays conflicted however many buckets follow.
+        prior = suggested.get(model)
+        if model in conflicted or (prior and prior["score_kind"] != score_kind):
+            conflicted.add(model)
+            dropped = suggested.pop(model, None)
+            other = dropped["score_kind"] if dropped else "another score kind"
+            print(
+                f"  -> skipped: {model} has calibration rows under more than "
+                f"one score kind ({other} and {score_kind}). Thresholds are "
+                "stored per model and carry one scale, so no threshold can "
+                "describe both. Re-classify under a single model identity, "
+                "or set match_thresholds[\"" + model + "\"] by hand."
+            )
+            continue
         suggested[model] = {
             "threshold": math.floor(threshold * 1_000_000) / 1_000_000,
             "score_kind": score_kind,

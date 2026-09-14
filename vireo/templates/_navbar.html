@@ -11103,18 +11103,40 @@ function renderMatchSummary(summary) {
         ' on detection ' + escapeHtml(String(run.detection_id)) + ': ' +
         escapeHtml(run.explanation || '') + '</div>';
     });
-    // Why the photo is not being called unidentifiable has two different
+    // Why the photo is not being called unidentifiable has three different
     // answers, and saying the wrong one would invent a passing grade nobody
-    // gave. `listed` means another run genuinely cleared its floor.
-    // `uncalibrated`/`unavailable` mean another run was never judged at all —
-    // which blocks the photo-wide verdict without vouching for anything.
-    var mixedReason = summary.state === 'listed'
-      ? 'Another run on this photo did clear its floor, so the photo is not ' +
-        'unidentifiable — but the predictions from the runs above are the ' +
-        'closest available labels, not matches.'
-      : 'Another model ran on this photo with no calibrated floor, so it was ' +
-        'recorded but not judged — the photo is not being called unmatched on ' +
-        'the strength of the runs above, but nothing has vouched for it either.';
+    // gave. `listed` means another run genuinely cleared its floor. Otherwise
+    // a run was never judged — but "no floor was calibrated for it" and "it
+    // recorded no match strength at all" are different facts with different
+    // fixes (calibrate vs. re-classify), so the blocking runs are read back
+    // rather than assumed (CodeRabbit on ecb275c).
+    var blockers = (summary.runs || []).filter(function(r) {
+      return r && (r.state === 'uncalibrated' ||
+                   (r.state === 'unavailable' && r.blocks_unlisted));
+    });
+    var blockedByUncalibrated = blockers.some(function(r) {
+      return r.state === 'uncalibrated';
+    });
+    var blockedByUnrecorded = blockers.some(function(r) {
+      return r.state === 'unavailable';
+    });
+    var mixedReason;
+    if (summary.state === 'listed') {
+      mixedReason = 'Another run on this photo did clear its floor, so the ' +
+        'photo is not unidentifiable — but the predictions from the runs ' +
+        'above are the closest available labels, not matches.';
+    } else {
+      var unjudgedBecause = blockedByUncalibrated && blockedByUnrecorded
+        ? 'one with no calibrated floor for its score, another with no ' +
+          'recorded match strength at all'
+        : blockedByUnrecorded
+          ? 'with no recorded match strength'
+          : 'with no calibrated floor for its score';
+      mixedReason = 'Another run on this photo went unjudged (' +
+        unjudgedBecause + '), so the photo is not being called unmatched on ' +
+        'the strength of the runs above — but nothing has vouched for it ' +
+        'either.';
+    }
     html += '<div style="color:var(--text-muted);font-size:11px;margin-top:6px;">' +
       escapeHtml(mixedReason) + '</div>';
   } else {
@@ -11124,7 +11146,15 @@ function renderMatchSummary(summary) {
         escapeHtml(a.model) + ': ' + escapeHtml(a.explanation) + '</div>';
     });
   }
-  if (summary.state === 'uncalibrated') {
+  // Only offer calibration when calibration is actually the missing piece. A
+  // run that recorded no match strength has nothing for a floor to judge, so
+  // pointing the user at the calibration script would send them to fix
+  // something that is not broken.
+  var suggestCalibration = summary.state === 'uncalibrated' && (
+    !summary.runs ||
+    summary.runs.some(function(r) { return r && r.state === 'uncalibrated'; })
+  );
+  if (suggestCalibration) {
     html += '<div style="color:var(--text-muted);font-size:11px;margin-top:6px;">' +
       'Run scripts/calibrate_match_threshold.py to derive a floor from your own confirmed IDs.</div>';
   }
