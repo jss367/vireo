@@ -258,7 +258,12 @@ def test_match_score_defaults_to_null_not_zero(db):
     assert row["match_score"] is None
 
 
-def test_rerun_backfills_null_but_never_overwrites(db):
+def test_replay_backfills_null_but_never_overwrites(db):
+    """A replayed score (cache materialization, backfill) fills gaps only.
+
+    The stored value is a real measurement this install already recorded; a
+    later import re-stating it must not churn it.
+    """
     _, det = _photo(db)
     kwargs = dict(detection_id=det, species="House Sparrow", confidence=0.8,
                   model="BioCLIP-2.5")
@@ -274,6 +279,33 @@ def test_rerun_backfills_null_but_never_overwrites(db):
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
     assert score == 0.30
+
+
+def test_fresh_inference_overwrites_a_prior_runtimes_score(db):
+    """New weights under the same model name must not leave a stale score.
+
+    The unique key is (detection, model, label list, species) — it does NOT
+    include the runtime fingerprint, so a non-reclassify pass that re-infers
+    because the runtime changed lands on the existing row. Keeping the old
+    per-candidate score would contradict the run-level summary written by the
+    new run.
+    """
+    _, det = _photo(db)
+    kwargs = dict(detection_id=det, species="House Sparrow", confidence=0.8,
+                  model="BioCLIP-2.5")
+    db.add_prediction(**kwargs, match_score=0.30, from_fresh_inference=True)
+    db.add_prediction(**kwargs, match_score=0.61, from_fresh_inference=True)
+    score = db.conn.execute(
+        "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
+    ).fetchone()["match_score"]
+    assert score == 0.61
+
+    # ...and a replay afterwards still does not undo the fresh measurement.
+    db.add_prediction(**kwargs, match_score=0.30)
+    score = db.conn.execute(
+        "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
+    ).fetchone()["match_score"]
+    assert score == 0.61
 
 
 def test_match_score_recorded_for_a_run_with_no_predictions(db):

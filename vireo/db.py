@@ -17088,6 +17088,7 @@ class Database:
         labels_fingerprint_full=None,
         preserve_manual_review=False,
         match_score=None,
+        from_fresh_inference=False,
     ):
         """Store a classification prediction for a detection.
 
@@ -17114,6 +17115,12 @@ class Database:
                 per the model). Optional; ``confidence`` alone cannot say
                 whether the label fits, only that it fit better than the rest
                 of the list.
+            from_fresh_inference: True when ``match_score`` comes from a model
+                that just ran on this detection, so it supersedes whatever is
+                stored. False (the default) when the caller is replaying a
+                value it read back from somewhere else — cache
+                materialization, a backfill — in which case an existing score
+                is left alone and only a NULL is filled.
         """
         if detection_id is None:
             raise ValueError(
@@ -17185,21 +17192,41 @@ class Database:
                        WHERE id = ? AND labels_fingerprint_full IS NULL""",
                     (labels_fingerprint_full, pred_id),
                 )
-            # Same fill-the-gap-only rule as the fingerprint above: a row
-            # first written before this column existed can gain its score
-            # from a later identical run, but a re-run never overwrites a
-            # score that is already there. The (detection, model, list, species)
-            # key pins all four inputs to the score, so a present value and an
-            # incoming one can only differ by float noise — and preferring the
-            # stored one keeps the column stable for a calibration pass that
-            # may already have read it.
+            # Who wins depends on where the incoming score came from, so the
+            # caller has to say (``from_fresh_inference``):
+            #
+            #   fresh inference  -> overwrite. The model just ran on this
+            #     detection and this is what it measured.
+            #   anything else    -> fill the gap only, like the fingerprint
+            #     above. Cache materialization and enrichment backfills are
+            #     replaying a recorded value, and a real local measurement
+            #     should not be churned by a later import; it also keeps the
+            #     column stable for a calibration pass that already read it.
+            #
+            # The unique key is NOT grounds to keep the stored value. A
+            # non-reclassify pass re-runs inference whenever the existing
+            # ``classifier_runs`` row has a different runtime fingerprint
+            # (new weights under the same model name, different runtime), and
+            # the runtime fingerprint is not part of
+            # (detection, model, list, species). So the same key genuinely can
+            # produce a materially different score, and keeping the old one
+            # would leave the Pipeline Inspector showing a per-candidate score
+            # from the previous runtime next to the run-level summary
+            # ``record_classifier_match_score`` just wrote for the new one —
+            # two contradictory facts on one surface.
             if pred_id is not None and match_score is not None:
-                self.conn.execute(
-                    """UPDATE predictions
-                       SET match_score = ?
-                       WHERE id = ? AND match_score IS NULL""",
-                    (match_score, pred_id),
-                )
+                if from_fresh_inference:
+                    self.conn.execute(
+                        "UPDATE predictions SET match_score = ? WHERE id = ?",
+                        (match_score, pred_id),
+                    )
+                else:
+                    self.conn.execute(
+                        """UPDATE predictions
+                           SET match_score = ?
+                           WHERE id = ? AND match_score IS NULL""",
+                        (match_score, pred_id),
+                    )
         # Write workspace-scoped review state only when the caller actually
         # supplied something beyond the defaults. Keeping pending rows out of
         # prediction_review is intentional: absence == pending.

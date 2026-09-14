@@ -2167,7 +2167,9 @@ def _store_match_prediction(
     it should not re-enter the pending review queue.  The raw classifier output
     still needs a prediction row, though; otherwise the next non-reclassify run
     sees a classifier_runs key with no cached prediction to surface and pays for
-    inference again.
+    inference again.  Despite the "cache row" framing, ``item`` is this run's
+    own inference output, so the scores go in with
+    ``from_fresh_inference=True`` and supersede any earlier runtime's.
 
     ``store_alternatives`` must be False when ``species``/``confidence`` are a
     consensus override (burst groups): the per-frame ``item["alternatives"]``
@@ -2192,6 +2194,7 @@ def _store_match_prediction(
         labels_fingerprint=labels_fingerprint,
         preserve_manual_review=True,
         match_score=_row_match_score(item, species),
+        from_fresh_inference=True,
     )
     if store_alternatives:
         # Skip alternatives whose normalized species collides with the primary
@@ -2235,6 +2238,7 @@ def _store_match_prediction(
                 labels_fingerprint=labels_fingerprint,
                 preserve_manual_review=True,
                 match_score=alt.get("raw_score"),
+                from_fresh_inference=True,
             )
     # add_prediction is INSERT-OR-IGNORE: a row cached as non-match on an
     # earlier pass keeps its stale category here. Re-stamp it 'match' so the
@@ -2383,6 +2387,7 @@ def _store_pending_detection_prediction(
         taxonomy=tax_hierarchy,
         labels_fingerprint=labels_fingerprint,
         match_score=_row_match_score(item, item["prediction"]),
+        from_fresh_inference=True,
     )
     db.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
@@ -2414,6 +2419,7 @@ def _store_pending_detection_prediction(
             taxonomy=alt_tax,
             labels_fingerprint=labels_fingerprint,
             match_score=alt.get("raw_score"),
+            from_fresh_inference=True,
         )
 
 
