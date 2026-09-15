@@ -178,6 +178,53 @@ def _folder_ids_under(folders, staging_destination):
     return ids
 
 
+def _staging_folder_ids(db, staging_destination):
+    """``_folder_ids_under`` for one archive, reading the folder list itself.
+
+    The listing route hoists the workspace folder read across every pending
+    row; a job thread has exactly one archive and its own db, so it asks
+    directly rather than carrying the hoisted list across threads.
+    """
+    ws_folders = db.conn.execute(
+        "SELECT f.id, f.path FROM folders f "
+        "JOIN workspace_folders wf ON wf.folder_id = f.id "
+        "WHERE wf.workspace_id = ?",
+        (db._ws_id(),),
+    ).fetchall()
+    return _folder_ids_under(ws_folders, staging_destination)
+
+
+def _sync_staged_metadata(db, archive, progress):
+    """Write the staged import's queued sidecar edits, before it leaves.
+
+    Runs against the local staging copy on purpose. A verified transfer
+    deletes the originals, so from then on the same sync has to write over
+    the NAS connection -- and only while that mount is up. Returns the number
+    of sidecar writes, or raises so the caller abandons the transfer: the
+    user asked for both halves, and silently sending stale sidecars to the
+    NAS is the outcome they were trying to avoid.
+    """
+    import sync as sync_mod
+
+    change_ids = db.pending_change_ids_in_folders(
+        _staging_folder_ids(db, archive["staging_destination"]))
+    if not change_ids:
+        return 0
+
+    def sync_progress(current, total):
+        progress(current, total, "", "Writing metadata to sidecars")
+
+    result = sync_mod.sync_to_xmp(db, progress_callback=sync_progress, change_ids=change_ids)
+    if not result["ok"]:
+        raise ValueError(
+            "Metadata sync failed, so nothing was sent: "
+            + "; ".join(result["errors"])
+            + ". The local originals are untouched. Fix the sidecars and try "
+            "again, or use Send to NAS to transfer without syncing first."
+        )
+    return result["synced"]
+
+
 def create_imports_blueprint(
     get_db,
     json_error,
@@ -229,9 +276,14 @@ def create_imports_blueprint(
         for row in rows:
             sending = any(j.get("type") == "send-to-nas"
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
+            folder_ids = _folder_ids_under(ws_folders, row["staging_destination"])
             items.append({
                 "id": row["id"], "destination": row["destination"],
-                "folder_ids": _folder_ids_under(ws_folders, row["staging_destination"]),
+                "folder_ids": folder_ids,
+                # Scoped to this archive's staging tree, not the workspace-wide
+                # sync queue: the banner offers to sync *these* photos, so the
+                # number has to be the ones the transfer would leave stale.
+                "unsynced_photos": db.count_photos_with_pending_changes_in_folders(folder_ids),
                 "source_available": os.path.isdir(row["staging_destination"]),
                 "collection_id": row["review_collection_id"], "name": row["collection_name"] or "Imported photos",
                 "state": "sending" if sending else "waiting" if jobs else "ready",
@@ -271,6 +323,8 @@ def create_imports_blueprint(
         db = get_db()
         runner = get_runner()
         workspace_id = db._ws_id()
+        body = request.get_json(silent=True) or {}
+        sync_first = bool(isinstance(body, dict) and body.get("sync_first"))
         with archive_dispatch_lock:
             archive = get_pending_archive(db, archive_id)
             if archive is None:
@@ -303,10 +357,24 @@ def create_imports_blueprint(
                                 "current": current, "total": total, "current_file": filename, "phase": phase,
                             })
 
+                        # Before the move, while the sidecars are still on
+                        # local disk. Recomputed here rather than trusting the
+                        # count the banner showed, so edits queued between the
+                        # click and the job travel with the transfer too.
+                        sidecars = _sync_staged_metadata(thread_db, archive, progress) if sync_first else 0
+
                         result = send_pending_archive(
                             thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
                             guard_folder=guard_move_folder, progress_cb=progress,
                         )
+                        if sidecars:
+                            result = {
+                                **result, "sidecars_synced": sidecars,
+                                "summary": (
+                                    f"Wrote metadata to {sidecars} sidecar"
+                                    f"{'' if sidecars == 1 else 's'}. {result['summary']}"
+                                ),
+                            }
                         thread_db.conn.execute(
                             "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
                         )
@@ -326,7 +394,8 @@ def create_imports_blueprint(
                 "send-to-nas", work, singleton_key=archive_id,
                 workspace_id=workspace_id,
                 exclusive_workspace=True,
-                config={"pending_archive_id": archive_id, "destination": archive["destination"]},
+                config={"pending_archive_id": archive_id, "destination": archive["destination"],
+                        "sync_first": sync_first},
             )
         return jsonify({"job_id": job_id})
     # Import workers run on separate threads. Serialize execution of the same

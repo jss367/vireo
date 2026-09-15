@@ -6833,6 +6833,45 @@ class Database:
             (self._ws_id(),),
         ).fetchone()[0]
 
+    def count_photos_with_pending_changes_in_folders(self, folder_ids):
+        """Return how many photos in ``folder_ids`` have unwritten sidecar edits.
+
+        Deliberately scoped rather than reusing ``count_pending_changes``: the
+        "Photos kept locally" banner offers to sync before a NAS transfer, and
+        a workspace-wide number there would claim edits the transfer never
+        touches. Counts photos, not rows, because that is the unit the banner
+        names. Summing per chunk is exact -- ``photos.folder_id`` is a single
+        column, so no photo can appear under two chunks.
+        """
+        total = 0
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" * len(chunk))
+            total += self.conn.execute(
+                f"SELECT COUNT(DISTINCT p.id) FROM pending_changes pc "
+                f"JOIN photos p ON p.id = pc.photo_id "
+                f"WHERE pc.workspace_id = ? AND p.folder_id IN ({placeholders})",
+                (self._ws_id(), *chunk),
+            ).fetchone()[0]
+        return total
+
+    def pending_change_ids_in_folders(self, folder_ids):
+        """Return the queued change ids for photos in ``folder_ids``.
+
+        The id list feeds ``sync.sync_to_xmp(change_ids=...)`` so a pre-transfer
+        sync writes only the staged import's sidecars and leaves every other
+        queued edit pending.
+        """
+        ids = []
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" * len(chunk))
+            ids.extend(row[0] for row in self.conn.execute(
+                f"SELECT pc.id FROM pending_changes pc "
+                f"JOIN photos p ON p.id = pc.photo_id "
+                f"WHERE pc.workspace_id = ? AND p.folder_id IN ({placeholders})",
+                (self._ws_id(), *chunk),
+            ))
+        return ids
+
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
     # returns 1 when that pipeline stage has run for the row. Detection and

@@ -5173,6 +5173,116 @@ def test_pending_archive_reports_its_staging_folders(app_and_db, tmp_path, monke
     assert near_miss not in refreshed["items"][0]["folder_ids"]
 
 
+def test_pending_archive_reports_unsynced_metadata_for_its_own_photos_only(app_and_db, tmp_path, monkeypatch):
+    """The banner offers to sync *these* photos, so the count must be theirs."""
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 0
+
+    # Queued on a photo that already lives on the NAS: this transfer would
+    # not leave its sidecar stale, so it must not inflate the banner.
+    elsewhere = tmp_path / "already-on-nas"
+    elsewhere.mkdir()
+    outside = db.add_photo(db.add_folder(str(elsewhere), name="already-on-nas"),
+                           "elsewhere.jpg", ".jpg", 10, 0)
+    db.queue_change(outside, "keyword_add", "Elsewhere")
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 0
+
+    staged = imported["result"]["photo_ids"]
+    # Two changes on one photo are one photo's worth of stale sidecar.
+    db.queue_change(staged[0], "keyword_add", "Osprey")
+    db.queue_change(staged[0], "rating", "3")
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 1
+    db.queue_change(staged[1], "keyword_add", "Osprey")
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 2
+
+
+def test_pending_archive_sync_first_writes_sidecars_before_the_transfer(app_and_db, tmp_path, monkeypatch):
+    """Sidecars must be written on local disk, then travel with the move."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    assert not list((tmp_path / "staging").rglob("*.xmp"))
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": True})
+    assert response.status_code == 200, response.get_json()
+    sent = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert sent["result"]["sidecars_synced"] == 1
+    assert sent["summary"].startswith("Wrote metadata to 1 sidecar.")
+
+    # The originals are gone from local disk, so a sidecar holding the keyword
+    # on the NAS can only have been written before the move.
+    assert not os.path.exists(staging)
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "Osprey" in sidecars[0].read_text()
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_send_leaves_sidecars_alone_without_sync_first(app_and_db, tmp_path, monkeypatch):
+    """Plain Send stays a pure transfer; the queued edit survives it."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(
+        client, client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert "sidecars_synced" not in sent["result"]
+    assert not list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    # Still queued, so it can be synced later over the mount.
+    assert db.count_pending_changes() == 1
+
+
+def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
+    """A half-done sync must not send stale sidecars to the NAS anyway."""
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def failing_sync(*a, **kw):
+        return {"synced": 0, "failed": 1, "failures": [], "ok": False,
+                "errors": ["folder not accessible (1 photo)"]}
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", failing_sync)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": True})
+    assert response.status_code == 200, response.get_json()
+    failed = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert failed["status"] == "failed", failed
+
+    # Nothing moved, and the banner says so and stays retryable.
+    assert not (tmp_path / "NAS").exists()
+    assert len(list((tmp_path / "staging").rglob("*.jpg"))) == 2
+    item = client.get("/api/import/pending-archives").get_json()["items"][0]
+    assert item["state"] == "ready"
+    assert "folder not accessible" in item["error"]
+    assert "without syncing" in item["error"]
+    assert item["unsynced_photos"] == 1
+
+
 @pytest.mark.parametrize("state", ["pending", "sending"])
 def test_pending_archive_missing_transfer_can_be_forgotten(app_and_db, tmp_path, monkeypatch, state):
     app, db = app_and_db

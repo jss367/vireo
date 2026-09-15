@@ -61,19 +61,17 @@
           review.textContent = 'Review photos';
           actions.appendChild(review);
         }
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'btn';
-        button.textContent = item.state === 'sending' ? 'Sending to NAS…' : 'Send to NAS';
-        button.disabled = item.state !== 'ready';
-        button.addEventListener('click', async () => {
+        const sendButtons = [];
+        async function startSend(syncFirst) {
           if (sending) return;
           sending = true;
-          button.disabled = true;
+          sendButtons.forEach(b => { b.disabled = true; });
           error.textContent = '';
           actionError = '';
           try {
-            const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(item.id) + '/send', {method: 'POST'});
+            const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(item.id) + '/send', {
+              method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sync_first: syncFirst}),
+            });
             const result = await response.json();
             if (!response.ok) throw new Error(result.error || 'Could not start the NAS transfer.');
           } catch (e) {
@@ -84,8 +82,38 @@
             signature = '';
             refresh();
           }
-        });
+        }
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn';
+        button.textContent = item.state === 'sending' ? 'Sending to NAS…' : 'Send to NAS';
+        button.disabled = item.state !== 'ready';
+        button.addEventListener('click', () => startSend(false));
+        sendButtons.push(button);
+        if (item.unsynced_photos) {
+          // Offered ahead of the plain send because the cheap moment to write
+          // these sidecars is now, on local disk: a verified transfer deletes
+          // the originals, and every later sync goes over the NAS connection.
+          const syncSend = document.createElement('button');
+          syncSend.type = 'button';
+          syncSend.className = 'btn';
+          syncSend.textContent = 'Sync metadata and send to NAS';
+          syncSend.disabled = item.state !== 'ready';
+          syncSend.addEventListener('click', () => startSend(true));
+          sendButtons.push(syncSend);
+          actions.appendChild(syncSend);
+        }
         actions.appendChild(button);
+        if (item.unsynced_photos) {
+          const unsynced = document.createElement('div');
+          unsynced.className = 'pending-archive-note';
+          unsynced.textContent = item.unsynced_photos === 1
+            ? '1 photo here has metadata changes that are not written to its sidecar yet. '
+              + 'Writing it now is a local disk write; after the transfer the same sync has to run over the NAS connection.'
+            : item.unsynced_photos + ' photos here have metadata changes that are not written to their sidecars yet. '
+              + 'Writing them now is a local disk write; after the transfer the same sync has to run over the NAS connection.';
+          row.appendChild(unsynced);
+        }
         if (item.source_available === false) {
           const missing = document.createElement('div');
           missing.className = 'pending-archive-note';
