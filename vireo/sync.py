@@ -117,7 +117,11 @@ class _PhotoSyncPlan:
     edit_recipe_json: str | None = None
     sync_location: bool = False
     cleanup_location: bool = False
-    supported_tokens: list = field(default_factory=list)
+    # (change_id, change_token) per supported change. The token is what the
+    # clear keys on -- see clear_pending_by_token -- but change_token is a
+    # nullable column with no backfill, and rows that predate it still need
+    # clearing by id.
+    supported_changes: list = field(default_factory=list)
     unsupported_changes: list = field(default_factory=list)
 
 
@@ -155,7 +159,7 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
             plan.edit_recipe_json = c["value"] or ""
         else:
             continue
-        plan.supported_tokens.append(c["change_token"])
+        plan.supported_changes.append((c["id"], c["change_token"]))
     return plan
 
 
@@ -544,6 +548,11 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
     synced = 0
     failures = []
     synced_tokens = []
+    # Rows predating the change_token column carry NULL, and `IN (NULL)`
+    # matches nothing -- clearing those by token would leave them queued
+    # forever, to be rewritten by every later sync. They fall back to the id,
+    # which is exactly the behaviour they have always had.
+    synced_legacy_ids = []
     for photo_id in by_photo:
         if photo_id in prepare_failures:
             failures.append(prepare_failures[photo_id])
@@ -559,9 +568,13 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
             })
             log.warning("Failed to sync photo %d: %s", photo_id, error)
             continue
-        if plan.supported_tokens:
+        if plan.supported_changes:
             synced += 1
-            synced_tokens.extend(plan.supported_tokens)
+            for change_id, token in plan.supported_changes:
+                if token:
+                    synced_tokens.append(token)
+                else:
+                    synced_legacy_ids.append(change_id)
         for c in plan.unsupported_changes:
             failures.append({
                 "photo_id": photo_id,
@@ -577,6 +590,10 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
     if synced_tokens:
         db.clear_pending_by_token(
             synced_tokens, clear_equivalent_flat_removals=True,
+        )
+    if synced_legacy_ids:
+        db.clear_pending(
+            synced_legacy_ids, clear_equivalent_flat_removals=True,
         )
 
     log.info("Sync complete: %d synced, %d failed", synced, len(failures))

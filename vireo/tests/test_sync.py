@@ -1689,3 +1689,30 @@ def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
     assert len(set(threads)) == 1, threads
     assert "Osprey" in read_keywords(xmp_a)
     assert "Kestrel" in read_keywords(xmp_b)
+
+
+def test_sync_clears_rows_that_predate_the_change_token_column(tmp_path):
+    """`IN (NULL)` matches nothing, so a token-only clear would never clear them.
+
+    change_token is a nullable TEXT column with no backfill, and a real
+    catalog still holds rows queued before it existed. Clearing those by
+    token would leave them queued forever, rewritten by every later sync.
+    """
+    import sync
+    from db import Database
+
+    db = Database(str(tmp_path / "t.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    photo, _xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', 'Osprey', NULL, ?)",
+        (photo, db._ws_id()),
+    )
+    db.conn.commit()
+
+    result = sync.sync_to_xmp(db)
+    assert result["ok"], result
+    assert result["synced"] == 1, result
+    assert db.count_pending_changes() == 0, "a NULL-token row was left queued"
+    db.close()
