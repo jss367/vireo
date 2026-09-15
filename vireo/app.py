@@ -6915,6 +6915,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sort and paging. Response shape matches /api/photos so pages can
         switch fetch paths without re-plumbing their renderers.
 
+        ``focus_photo_id`` (optional) serves the page holding that photo
+        rather than the requested one and adds ``focus_index`` /
+        ``focus_page`` to the response — what Browse re-sorts around so a
+        change of sort order keeps the user's selected photo on screen
+        without paging forward until it appears. ``page`` reports the page
+        actually served, so it equals ``focus_page`` whenever the photo was
+        found. A photo the query does not match reports ``focus_index:
+        null`` and leaves the requested page alone.
+
         Design: docs/plans/2026-07-19-universal-filters-design.md.
         """
         db = _get_db()
@@ -6962,6 +6971,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             not isinstance(folder_id, int) or isinstance(folder_id, bool)
         ):
             return json_error("folder_id must be an integer", 400)
+        # Browse sends ``focus_photo_id`` when a re-sort has to stay with the
+        # photo the user has selected: serve the page that photo landed on
+        # instead of page 1, and report where it is so the caller can anchor
+        # its loaded window there. A photo that no longer matches reports
+        # ``focus_index: null`` and the requested page — never a silent
+        # substitution the grid would have no way to notice.
+        focus_photo_id = payload.get("focus_photo_id")
+        if focus_photo_id is not None and (
+            not isinstance(focus_photo_id, int) or isinstance(focus_photo_id, bool)
+        ):
+            return json_error("focus_photo_id must be an integer", 400)
         rules = _inject_active_visual_model(rules)
         try:
             visual = _validate_visual_arg(payload.get("visual"))
@@ -7061,6 +7081,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     [item["cover_id"] for item in stack_items]
                     if stack_items is not None else ordered_ids
                 )
+                # A healthy visual clause has every matching id in memory
+                # already, so the focused page is a list index rather than
+                # another query.
+                focus_index = None
+                if focus_photo_id is not None:
+                    if stack_items is not None:
+                        for item_index, item in enumerate(stack_items):
+                            if (item["cover_id"] == focus_photo_id
+                                    or focus_photo_id in item["member_ids"]):
+                                focus_index = item_index
+                                break
+                    elif focus_photo_id in logical_ids:
+                        focus_index = logical_ids.index(focus_photo_id)
+                    if focus_index is not None:
+                        page = focus_index // per_page + 1
                 start = (page - 1) * per_page
                 page_ids = logical_ids[start:start + per_page]
                 photos_map = db.get_photos_by_ids(page_ids)
@@ -7097,6 +7132,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "per_page": per_page,
                     "visual": visual_info,
                 }
+                if focus_photo_id is not None:
+                    response["focus_index"] = focus_index
+                    response["focus_page"] = page
                 if stacks:
                     # Availability totals below are photo counts, so the
                     # underlying (unstacked) total is what they must agree
@@ -7132,7 +7170,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if visual_info is not None:
                 payload_out["visual"] = visual_info
             return jsonify(payload_out)
+        focus_index = None
         try:
+            if focus_photo_id is not None:
+                # Stacked Browse pages logical items, so a hidden burst frame
+                # resolves to the page its cover sits on.
+                focus_index = (
+                    db.query_browse_stack_position(
+                        rules, focus_photo_id, sort=sort,
+                        collection_id=collection_id, folder_id=folder_id,
+                        include_offline_folders=include_offline,
+                    )
+                    if stacks
+                    else db.query_photo_position(
+                        rules, focus_photo_id, sort=sort,
+                        collection_id=collection_id, folder_id=folder_id,
+                        include_offline_folders=include_offline,
+                    )
+                )
+                if focus_index is not None:
+                    page = focus_index // per_page + 1
             underlying_total = db.count_photos_for_rules(
                 rules,
                 collection_id=collection_id,
@@ -7167,6 +7224,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "page": page,
             "per_page": per_page,
         }
+        if focus_photo_id is not None:
+            response["focus_index"] = focus_index
+            response["focus_page"] = page
         if stacks:
             response["underlying_total"] = underlying_total
         if include_offline or include_availability:

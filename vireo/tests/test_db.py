@@ -1076,6 +1076,144 @@ def test_query_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path):
         assert set(row['id'] for row in grid) <= set(stacked)
 
 
+_BROWSE_SORTS = (
+    'date', 'date_desc', 'name', 'name_desc',
+    'rating', 'sharpness', 'sharpness_asc', 'quality',
+)
+
+
+def _seed_position_photos(db, folder_id, count=9):
+    """Photos whose name, date, rating, sharpness and quality orders all
+    disagree, so a position that silently used the wrong ORDER BY cannot
+    coincidentally match the right one."""
+    ids = []
+    for index in range(count):
+        photo_id = db.add_photo(
+            folder_id=folder_id,
+            filename=f'p-{index:02d}.jpg',
+            extension='.jpg',
+            file_size=100 + index,
+            file_mtime=1.0,
+            timestamp=f'2024-0{(count - index) % 9 + 1}-01T00:00:00',
+        )
+        db.conn.execute(
+            "UPDATE photos SET rating = ?, sharpness = ?, quality_score = ? "
+            "WHERE id = ?",
+            (index % 5, (index * 5 % count) * 1.5, (index * 7 % count) / 10.0,
+             photo_id),
+        )
+        ids.append(photo_id)
+    db.conn.commit()
+    return ids
+
+
+def test_query_photo_position_agrees_with_the_paged_order(tmp_path):
+    """The position Browse re-sorts around must be the position the grid
+    actually pages to.
+
+    ``query_photo_position`` carries its own copy of the sort map — the same
+    duplication ``query_photos``, ``query_photo_ids`` and
+    ``query_photos_for_rules`` already live with. If the two ever drift,
+    Browse silently scrolls a re-sort to the wrong page, which looks like the
+    photo vanished. Pin them to each other for every sort the UI offers.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    fid = db.add_folder('/photos', name='photos')
+    ids = _seed_position_photos(db, fid)
+
+    for sort in _BROWSE_SORTS:
+        ordered = [
+            row['id']
+            for row in db.query_photos([], sort=sort, per_page=len(ids) * 2)
+        ]
+        assert sorted(ordered) == sorted(ids)
+        for expected, photo_id in enumerate(ordered):
+            assert db.query_photo_position([], photo_id, sort=sort) == expected, (
+                f"sort={sort}: position disagrees with the paged order"
+            )
+
+
+def test_query_photo_position_is_scoped_like_the_grid(tmp_path):
+    """Position answers "where is this in *these* results" — a photo outside
+    the filter or folder scope has no position, rather than borrowing one."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    fid = db.add_folder('/photos', name='photos')
+    other = db.add_folder('/elsewhere', name='elsewhere')
+    ids = _seed_position_photos(db, fid)
+    outsider = db.add_photo(
+        folder_id=other, filename='outsider.jpg', extension='.jpg',
+        file_size=1, file_mtime=1.0, timestamp='2024-01-01T00:00:00',
+    )
+
+    assert db.query_photo_position([], outsider, folder_id=fid) is None
+    assert db.query_photo_position([], ids[0], folder_id=fid) is not None
+
+    rules = [{"field": "rating", "op": ">=", "value": 4}]
+    matching = [row['id'] for row in db.query_photos(rules, sort='name')]
+    assert matching, "fixture must leave some 4+ star photos"
+    excluded = next(pid for pid in ids if pid not in matching)
+    assert db.query_photo_position(rules, excluded, sort='name') is None
+    assert db.query_photo_position(rules, matching[-1], sort='name') == (
+        len(matching) - 1
+    )
+
+
+def test_query_browse_stack_position_agrees_with_the_stacked_grid(tmp_path):
+    """Under Stacks a hidden member has no page of its own, so its position
+    is its cover's — otherwise a re-sort would page to where the photo would
+    have been if stacking were off and land on the wrong screen."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    fid = db.add_folder('/photos', name='photos')
+    ids = _seed_position_photos(db, fid)
+    hidden, cover = ids[3], ids[4]
+    db.conn.execute(
+        "UPDATE photos SET burst_id='b1', quality_score=0.01 WHERE id=?",
+        (hidden,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET burst_id='b1', quality_score=0.99 WHERE id=?",
+        (cover,),
+    )
+    db.conn.commit()
+
+    for sort in _BROWSE_SORTS:
+        grid = [
+            row['id']
+            for row in db.query_browse_stacks([], sort=sort, per_page=len(ids) * 2)
+        ]
+        assert len(grid) == len(ids) - 1, f"sort={sort}: burst did not collapse"
+        for expected, photo_id in enumerate(grid):
+            assert db.query_browse_stack_position(
+                [], photo_id, sort=sort,
+            ) == expected, f"sort={sort}: cover position disagrees with the grid"
+        # The hidden member resolves to the same item as its cover.
+        assert db.query_browse_stack_position([], hidden, sort=sort) == (
+            grid.index(cover)
+        ), f"sort={sort}: hidden member did not resolve to its cover's item"
+
+
+def test_query_browse_stack_position_is_none_for_non_matching_photo(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    fid = db.add_folder('/photos', name='photos')
+    ids = _seed_position_photos(db, fid)
+    rules = [{"field": "rating", "op": ">=", "value": 4}]
+    matching = [row['id'] for row in db.query_browse_stacks(rules, sort='name')]
+    excluded = next(pid for pid in ids if pid not in matching)
+
+    assert db.query_browse_stack_position(rules, excluded, sort='name') is None
+    assert db.query_browse_stack_position(
+        rules, matching[0], sort='name',
+    ) == 0
+
+
 def test_query_photo_ids_stacked_folder_scoped(tmp_path):
     """``query_photo_ids_stacked`` restricts to the requested folder — the
     Stacks-enabled folder Select-all path relies on it (Codex P2 on
