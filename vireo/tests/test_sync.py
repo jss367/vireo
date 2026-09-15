@@ -339,6 +339,67 @@ def test_sync_to_xmp_clears_edit_recipe_marker(tmp_path):
     assert "vireo:editRecipe" not in open(xmp_path).read()
 
 
+def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch):
+    """A replacement queued mid-run with a reused rowid must survive the clear.
+
+    The edit route deletes the queued pending row and immediately re-inserts
+    in one transaction; SQLite reissues the freshly-freed rowid to the new
+    row. A clear-by-id at the end of sync_to_xmp would delete that
+    replacement without ever writing it -- for the pre-transfer sync, the
+    stale sidecar just published would then travel to the NAS and the local
+    original be removed. sync_to_xmp captures each planned change's
+    ``change_token`` at read time and passes it through to ``clear_pending``,
+    so the DELETE matches only when both id AND token still identify the
+    row it wrote. The replacement stays queued and the next drain writes it.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    original_token = db.queue_change(pid, "keyword_add", "Osprey")
+    (original_row,) = db.get_pending_changes()
+    original_id = original_row["id"]
+
+    real_clear = db.clear_pending
+    injected = []
+
+    def race_replacement_then_clear(change_ids, **kwargs):
+        # Interject the race at the last possible moment before the sync
+        # clears: delete the row the sync just wrote and reinsert a fresh
+        # change for the same photo. SQLite reissues ``original_id`` to the
+        # replacement, so a clear-by-id would drop it here.
+        if not injected:
+            injected.append(True)
+            db.conn.execute(
+                "DELETE FROM pending_changes WHERE id = ?", (original_id,),
+            )
+            replacement_token = db.queue_change(
+                pid, "keyword_add", "Kestrel",
+            )
+            (replacement_row,) = db.get_pending_changes()
+            assert replacement_row["id"] == original_id
+            assert replacement_row["change_token"] == replacement_token
+            assert replacement_token != original_token
+        return real_clear(change_ids, **kwargs)
+
+    monkeypatch.setattr(db, "clear_pending", race_replacement_then_clear)
+
+    result = sync_to_xmp(db, change_ids=[original_id])
+    assert result["synced"] == 1
+    assert "Osprey" in read_keywords(xmp_path)
+
+    # The replacement must still be queued -- the fix's whole point.
+    remaining = db.get_pending_changes()
+    assert [(c["change_type"], c["value"]) for c in remaining] == [
+        ("keyword_add", "Kestrel"),
+    ]
+
+
 def test_sync_to_xmp_limits_sync_to_selected_change_ids(tmp_path):
     """sync_to_xmp can write only the checked pending changes."""
     from xml.etree import ElementTree as ET

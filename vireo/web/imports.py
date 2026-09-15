@@ -32,7 +32,7 @@ from urllib.parse import quote
 
 import path_guard
 import source_discovery
-from db import Database
+from db import Database, _chunks
 from flask import Blueprint, Response, abort, jsonify, make_response, request
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from metadata import scan_metadata_warning
@@ -288,7 +288,29 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
     return len(synced_photos), undeliverable
 
 
-def _residual_staged_changes(db, folder_ids, undeliverable):
+def _staged_photo_ids(db, folder_ids):
+    """Every photo id currently in the given staging folders.
+
+    Captured before ``send_pending_archive`` so the post-transfer residual
+    check can still find changes queued during the copy even when a
+    tracked-merge move reparents the photos onto the destination folder
+    ids -- at which point a folder-id-scoped re-read would report zero and
+    the completed job would falsely claim no metadata missed the transfer.
+    A photo's id survives the reparent; its folder_id does not.
+    """
+    if not folder_ids:
+        return []
+    ids = []
+    for chunk in _chunks(folder_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        ids.extend(row["id"] for row in db.conn.execute(
+            f"SELECT id FROM photos WHERE folder_id IN ({placeholders})",
+            list(chunk),
+        ))
+    return ids
+
+
+def _residual_staged_changes(db, photo_ids, undeliverable):
     """Count edits queued too late to have travelled with the transfer.
 
     Blocking the rating and keyword routes for the length of a NAS transfer
@@ -298,9 +320,16 @@ def _residual_staged_changes(db, folder_ids, undeliverable):
     considered and left queued was deliberately not written to XMP (a flag
     under sync_flags_to_xmp off), which is a different claim than "missed the
     transfer".
+
+    Scoped by photo id, not folder id: ``send_pending_archive`` takes the
+    tracked-merge path when the NAS destination is already represented in
+    the catalog, and that reparents each staged photo onto the existing
+    destination folder id. A folder-id-scoped re-read would then find
+    nothing even if the user queued an edit during the copy. Photo ids are
+    captured before the move for this reason.
     """
     try:
-        changes, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
+        changes, _here, _elsewhere, _overlap = db.staged_sync_scope_by_photos(photo_ids)
         return sum(1 for key, _cid, _pid in changes if key not in undeliverable)
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
@@ -476,6 +505,14 @@ def create_imports_blueprint(
 
                         folder_ids = _staging_folder_ids(
                             thread_db, archive["staging_destination"]) if sync_first else []
+                        # Photo ids are captured before the move so the
+                        # post-transfer residual check still finds late edits
+                        # after a tracked-merge reparent onto the destination
+                        # folder ids. See _residual_staged_changes.
+                        staged_photo_ids = (
+                            _staged_photo_ids(thread_db, folder_ids)
+                            if sync_first else []
+                        )
                         if sync_first and not sync_job_lock.acquire(blocking=False):
                             # Cancellably: the wait can be minutes if another
                             # workspace's XMP sync holds the lock, and nothing
@@ -512,7 +549,7 @@ def create_imports_blueprint(
                                 # and an edit made during the copy would then
                                 # go unreported.
                                 residual = _residual_staged_changes(
-                                    thread_db, folder_ids, undeliverable)
+                                    thread_db, staged_photo_ids, undeliverable)
                         finally:
                             if sync_first:
                                 sync_job_lock.release()

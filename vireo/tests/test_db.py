@@ -677,6 +677,183 @@ def test_pending_changes_queue(tmp_path):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
+    """After tracked-merge reparents a staged photo, its edits still count.
+
+    ``send_pending_archive`` takes the tracked-merge path when the NAS
+    destination is already represented in the catalog, and that reparents
+    each staged photo onto the existing destination folder id. A folder-id
+    scoped re-read would then miss any edit the user queued during the
+    copy, so the completed job would falsely claim no metadata missed the
+    transfer. Photo ids survive the reparent -- ``staged_sync_scope_by_photos``
+    is called with the ids captured before the move so the count is honest.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    staging = db.add_folder('/staging/trip', name='trip')
+    destination = db.add_folder('/nas/trip', name='trip')
+    pid = db.add_photo(
+        folder_id=staging, filename='bird.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+
+    # Snapshot the photo id here -- this is what the send handler captures
+    # before invoking send_pending_archive.
+    staged_photo_ids = [pid]
+
+    # Simulate the tracked-merge reparent that move_folder performs on a
+    # merge into an existing destination folder.
+    db.conn.execute(
+        "UPDATE photos SET folder_id = ? WHERE id = ?", (destination, pid),
+    )
+    db.conn.commit()
+    # An edit queued during the copy still needs to be reported: it will
+    # now be over the NAS connection.
+    db.queue_change(pid, "keyword_add", "Osprey")
+
+    # A folder-id scan of the ORIGINAL staging folder now misses the edit
+    # entirely -- this is the bug the photo-id variant fixes.
+    folder_scoped, _here, _else, _overlap = db.staged_sync_scope([staging])
+    assert folder_scoped == []
+
+    changes, here, elsewhere, overlap = db.staged_sync_scope_by_photos(
+        staged_photo_ids,
+    )
+    assert len(changes) == 1
+    assert changes[0][2] == pid
+    assert here == 1 and elsewhere == 0 and overlap == 0
+
+
+def test_staged_sync_scope_by_photos_separates_sibling_workspaces(tmp_path):
+    """Same shape as staged_sync_scope: here/elsewhere/overlap counts match."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    ws2 = db.create_workspace('sibling')
+    db.set_active_workspace(ws1)
+    fid = db.add_folder('/photos', name='photos')
+    shared = db.add_photo(
+        folder_id=fid, filename='a.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    other_only = db.add_photo(
+        folder_id=fid, filename='b.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    db.queue_change(shared, "keyword_add", "Osprey")
+    db.queue_change(shared, "keyword_add", "Kestrel", workspace_id=ws2)
+    db.queue_change(other_only, "keyword_add", "Egret", workspace_id=ws2)
+
+    changes, here, elsewhere, overlap = db.staged_sync_scope_by_photos(
+        [shared, other_only],
+    )
+    active_photos = {row[2] for row in changes}
+    assert active_photos == {shared}
+    assert here == 1
+    assert elsewhere == 1
+    assert overlap == 1
+
+
+def test_staged_sync_scope_by_photos_empty_input_is_a_no_op(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    assert db.staged_sync_scope_by_photos([]) == ([], 0, 0, 0)
+
+
+def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
+    """A replacement queued during a sync must not be dropped without a write.
+
+    The edit route deletes the queued pending row and immediately re-inserts
+    inside one transaction; SQLite reissues the freshly-freed rowid to the
+    new row, so a clear-by-id would delete the replacement -- for a
+    pre-transfer sync, the stale sidecar would then travel to the NAS and
+    the local original be removed. Passing the change's token as
+    ``expected_tokens`` conditions the DELETE on both id and token, so the
+    replacement survives and the next drain writes it.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(
+        folder_id=fid, filename='a.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+
+    original_token = db.queue_change(pid, 'keyword_add', 'Osprey')
+    (original_row,) = db.get_pending_changes()
+    original_id = original_row['id']
+    assert original_row['change_token'] == original_token
+
+    # Stand in for the edit route rewriting the queue while sync is running:
+    # delete-and-reinsert in one transaction reuses ``original_id`` for the
+    # new row on SQLite. Verify that first so the test asserts the actual
+    # bug shape, not a hypothetical one.
+    db.conn.execute(
+        "DELETE FROM pending_changes WHERE id = ?", (original_id,),
+    )
+    replacement_token = db.queue_change(pid, 'keyword_add', 'Kestrel')
+    (replacement_row,) = db.get_pending_changes()
+    assert replacement_row['id'] == original_id, (
+        "test premise: SQLite must reissue the rowid to the replacement"
+    )
+    assert replacement_row['change_token'] == replacement_token
+    assert replacement_token != original_token
+
+    # The sync captured (id, token) for the original -- clearing by both
+    # leaves the replacement in place.
+    db.clear_pending([original_id], expected_tokens=[original_token])
+    remaining = db.get_pending_changes()
+    assert len(remaining) == 1
+    assert remaining[0]['change_token'] == replacement_token
+    assert remaining[0]['value'] == 'Kestrel'
+
+    # Clearing with the replacement's own token drops it as expected.
+    db.clear_pending([original_id], expected_tokens=[replacement_token])
+    assert db.get_pending_changes() == []
+
+
+def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
+    """Rows predating change_token (nullable, no backfill) keep their exposure.
+
+    The pre-transfer sync passes ``None`` in ``expected_tokens`` for such
+    rows, and the delete falls back to id-conditioned clearing scoped to
+    null-token rows so the historical behaviour is preserved. A separate
+    tokened row must not be swept along with it.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(
+        folder_id=fid, filename='a.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', 'Legacy', NULL, ?)",
+        (pid, ws_id),
+    )
+    db.conn.commit()
+    (legacy,) = db.get_pending_changes()
+    tokened_token = db.queue_change(pid, 'keyword_add', 'Fresh')
+    tokened_id = next(
+        row['id'] for row in db.get_pending_changes()
+        if row['change_token'] == tokened_token
+    )
+
+    db.clear_pending([legacy['id']], expected_tokens=[None])
+
+    remaining = db.get_pending_changes()
+    assert [row['id'] for row in remaining] == [tokened_id]
+    assert remaining[0]['change_token'] == tokened_token
+
+
 def test_clear_pending_chunks_large_change_sets(tmp_path):
     """Clearing a large sync batch stays below SQLite's bind limit."""
     from db import _SQLITE_PARAM_CHUNK_SIZE, Database

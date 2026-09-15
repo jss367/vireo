@@ -128,6 +128,15 @@ class _PhotoSyncPlan:
     sync_location: bool = False
     cleanup_location: bool = False
     supported_ids: list = field(default_factory=list)
+    # Immutable ``change_token`` values (uuid strings) paired 1:1 with
+    # ``supported_ids``. Captured so ``clear_pending`` can condition its
+    # DELETE on both id and token: SQLite reissues a freshly-freed rowid to
+    # the next INSERT, so a user's edit route -- which deletes the queued row
+    # and immediately re-inserts inside one transaction -- can attach a fresh
+    # change to the same rowid the sync is about to clear. Token-conditioned
+    # clearing lets that replacement survive and the next drain write it. A
+    # row predating the ``change_token`` column carries ``None`` here.
+    supported_tokens: list = field(default_factory=list)
     unsupported_changes: list = field(default_factory=list)
 
 
@@ -159,6 +168,10 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
         else:
             continue
         plan.supported_ids.append(c["id"])
+        # The value is NULL for rows predating the ``change_token`` column
+        # (nullable, no backfill); pass ``None`` through so ``clear_pending``
+        # falls back to id-only clearing scoped to null-token rows for them.
+        plan.supported_tokens.append(c["change_token"])
     return plan
 
 
@@ -545,6 +558,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     synced = 0
     failures = []
     synced_ids = []
+    synced_tokens = []
     for photo_id in by_photo:
         if photo_id in prepare_failures:
             failures.append(prepare_failures[photo_id])
@@ -563,6 +577,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         if plan.supported_ids:
             synced += 1
             synced_ids.extend(plan.supported_ids)
+            synced_tokens.extend(plan.supported_tokens)
         for c in plan.unsupported_changes:
             failures.append({
                 "photo_id": photo_id,
@@ -570,10 +585,14 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 "error": f"unsupported change type: {c['change_type']}",
             })
 
-    # Clear successfully synced changes
+    # Clear successfully synced changes by token so a replacement queued
+    # mid-run with a reused rowid is not dropped without a write. See
+    # ``_PhotoSyncPlan.supported_tokens``.
     if synced_ids:
         db.clear_pending(
-            synced_ids, clear_equivalent_flat_removals=True,
+            synced_ids,
+            clear_equivalent_flat_removals=True,
+            expected_tokens=synced_tokens,
         )
 
     log.info("Sync complete: %d synced, %d failed", synced, len(failures))
