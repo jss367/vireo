@@ -6261,6 +6261,64 @@ def test_pending_archive_finds_staging_unlinked_from_its_own_workspace(app_and_d
     assert "Osprey" in sidecars[0].read_text()
 
 
+def test_pending_archive_syncs_when_staging_is_linked_only_to_a_sibling(app_and_db, tmp_path, monkeypatch):
+    """A staging tree the queue owner cannot see still has to sync.
+
+    The sync activates the queue owner's workspace so its ``sync_flags_to_xmp``
+    / ``write_assigned_location_to_xmp`` settings apply to the edits it made,
+    but the sidecar path is a path on disk. When the staging folders are
+    linked only to a sibling workspace, the queue owner's per-workspace
+    ``get_folder_tree()`` returns nothing for them and the accessibility
+    check would abort the run with "folder not accessible" though the file
+    is right there. ``folder_scope="global"`` reads the folder map from the
+    catalog directly.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+    owning = db._ws_id()
+
+    sibling = db.create_workspace("Sibling")
+    staged_folders = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
+            (staging, os.path.join(staging, "") + "%")).fetchall()
+    ]
+    assert staged_folders
+    for fid in staged_folders:
+        db.add_workspace_folder(sibling, fid, is_root=True)
+    # Queue the edit in the owner workspace -- the one the sync will activate
+    # -- so the resolution path has to work without a folder link.
+    db.queue_change(photo_id, "keyword_add", "Osprey", workspace_id=owning)
+    # And unlink those folders from the owner, so `get_folder_tree()` under
+    # the owner has no way to resolve the sidecar's directory.
+    for fid in staged_folders:
+        db.conn.execute(
+            "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (owning, fid))
+    db.conn.commit()
+
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 1
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "Osprey" in sidecars[0].read_text()
+    assert db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+
+
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
     """A half-done sync must not send stale sidecars to the NAS anyway."""
     import sync as sync_mod

@@ -325,6 +325,12 @@ def _sync_staged_metadata(db, archive, progress, folder_ids):
                     # happened to write last, instead of the newest edit
                     # the user actually left the queue in.
                     expand_keyword_pairs=False,
+                    # A transfer is defined by a path on disk. A staging tree
+                    # linked only to a sibling workspace is unreachable from
+                    # the queue owner's ``get_folder_tree()``, so the default
+                    # per-workspace resolution would abort the run with
+                    # "folder not accessible" though the file is right there.
+                    folder_scope="global",
                 )
                 # A change this workspace declines to write to XMP (a flag,
                 # when sync_flags_to_xmp is off) is reported as a failure so

@@ -1750,3 +1750,47 @@ def test_sync_resolves_same_keyword_add_and_remove_to_the_later_one(tmp_path, or
     # dropped unapplied.
     assert db.count_pending_changes() == 0
     db.close()
+
+
+def test_sync_writes_sidecar_under_a_workspace_that_cannot_see_the_folder(tmp_path):
+    """`folder_scope="global"` reads the folder map from the whole catalog.
+
+    The pre-transfer NAS sync activates the queue owner's workspace so its
+    ``sync_flags_to_xmp`` / ``write_assigned_location_to_xmp`` settings apply
+    to the edits made there, but a staging folder can be unlinked from that
+    workspace (linked only to a sibling) between the queue and the send. The
+    default per-workspace resolution would then abort the run with "folder
+    not accessible" though the file is right there.
+    """
+    import sync
+    from db import Database
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "t.db"))
+    owner = db.ensure_default_workspace()
+    db.set_active_workspace(owner)
+    photo, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    db.queue_change(photo, "keyword_add", "Osprey")
+
+    # Unlink the folder from the owner. It stays a catalog row that a sibling
+    # workspace still sees, but ``get_folder_tree()`` under the owner returns
+    # nothing for it.
+    db.conn.execute(
+        "DELETE FROM workspace_folders WHERE workspace_id = ?", (owner,))
+    db.conn.commit()
+
+    per_workspace = sync.sync_to_xmp(db)
+    # Per-workspace resolution reports the exact failure the option 1 fix
+    # addresses -- the run cannot find the folder to write into.
+    assert per_workspace["synced"] == 0, per_workspace
+    assert any("folder not accessible" in f.get("error", "")
+               for f in per_workspace["failures"]), per_workspace
+    # And the pending row stays queued: nothing was written, so nothing clears.
+    assert db.count_pending_changes() == 1
+
+    result = sync.sync_to_xmp(db, folder_scope="global")
+    assert result["ok"], result
+    assert result["synced"] == 1, result
+    assert "Osprey" in (read_keywords(xmp_path) or set())
+    assert db.count_pending_changes() == 0
+    db.close()

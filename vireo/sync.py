@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 _SYNC_MAX_WORKERS = 8
 
 
-def _resolve_xmp_paths(db, photo_ids):
+def _resolve_xmp_paths(db, photo_ids, folder_scope="workspace"):
     """Map photo ids to sidecar paths with two queries instead of 2N.
 
     Resolving one photo at a time ran the recursive folder-tree CTE and a
@@ -32,8 +32,18 @@ def _resolve_xmp_paths(db, photo_ids):
     active workspace keeps the historical behaviour of resolving against an
     empty folder path, so it fails the accessibility check rather than
     silently writing somewhere else.
+
+    ``folder_scope="global"`` reads the folder map from every catalog folder
+    rather than the active workspace's tree. The pre-transfer sync passes it
+    so a staging tree linked only to a sibling workspace still resolves --
+    scoping by the queue owner's workspace membership would abort the run
+    with "folder not accessible" even though the file is right there.
     """
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    if folder_scope == "global":
+        folder_rows = db.conn.execute("SELECT id, path FROM folders").fetchall()
+    else:
+        folder_rows = db.get_folder_tree()
+    folders = {f["id"]: f["path"] for f in folder_rows}
     paths = {}
     for photo_id, (folder_id, filename) in db.get_photo_filenames(photo_ids).items():
         base = os.path.splitext(filename)[0]
@@ -368,7 +378,8 @@ def _sync_result(synced, failures):
 
 
 def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
-                create_missing_sidecars=False, expand_keyword_pairs=True):
+                create_missing_sidecars=False, expand_keyword_pairs=True,
+                folder_scope="workspace"):
     """Write pending changes to XMP sidecars.
 
     Args:
@@ -400,6 +411,12 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
             collapse them, clear both tokens, and ship the sidecar in the
             state of whichever remaining run happened to write last
             instead of the newest edit the user actually left the queue in.
+        folder_scope: how to resolve sidecar paths. ``"workspace"`` (default)
+            reads from the active workspace's folder tree, matching the
+            ordinary sync job. ``"global"`` reads from every catalog folder;
+            the pre-transfer sync passes it so a staging tree linked only to
+            a sibling workspace still resolves to a real path when the sync
+            runs under the queue owner's workspace.
 
     Returns:
         dict with synced, failed, failures counts
@@ -437,7 +454,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
     # Everything that needs the database happens here, on the caller's
     # thread: the sidecar writers below run on a pool and must not touch the
     # connection.
-    xmp_paths = _resolve_xmp_paths(db, list(by_photo))
+    xmp_paths = _resolve_xmp_paths(db, list(by_photo), folder_scope=folder_scope)
     prepare_failures = {}
     plans = {}
     folder_accessible = {}
