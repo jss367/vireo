@@ -6833,6 +6833,48 @@ class Database:
             (self._ws_id(),),
         ).fetchone()[0]
 
+    def staged_sync_scope(self, folder_ids):
+        """Return ``(changes, photos_here, photos_elsewhere)`` for a folder set.
+
+        ``changes`` is a list of ``(identity, change_id, photo_id)``, where
+        ``identity`` is the row's ``change_token`` -- a uuid assigned at
+        insert. Callers comparing one read against the next must key on it
+        rather than on the id: ``pending_changes.id`` is a bare rowid SQLite
+        re-issues to the next insert, so a change queued right after a sync
+        cleared one can arrive wearing the id that just left, and look to the
+        caller like a row it has already dealt with. The column is nullable
+        with no backfill, so rows predating it fall back to the id and keep
+        exactly the exposure they have always had.
+
+        ``change_ids`` and ``photos_here`` cover the active workspace only,
+        matching what ``sync.sync_to_xmp`` will actually write: the queue is
+        workspace-scoped by design and the ordinary sync job respects that.
+
+        ``photos_elsewhere`` counts photos whose only queued edits belong to
+        another workspace. The sidecar is global to the photo, so those edits
+        are real and this sync will not write them -- the banner has to say so
+        rather than let a number read as "everything is covered".
+        """
+        here_photos, here_changes, other_photos = set(), [], set()
+        # The photo id rides along so a caller can tell which photos a pass
+        # actually wrote without a second query.
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for row in self.conn.execute(
+                f"SELECT pc.id, pc.photo_id, pc.workspace_id, pc.change_token "
+                f"FROM pending_changes pc "
+                f"JOIN photos p ON p.id = pc.photo_id "
+                f"WHERE p.folder_id IN ({placeholders})",
+                tuple(chunk),
+            ):
+                if row["workspace_id"] == self._ws_id():
+                    identity = row["change_token"] or ("id", row["id"])
+                    here_changes.append((identity, row["id"], row["photo_id"]))
+                    here_photos.add(row["photo_id"])
+                else:
+                    other_photos.add(row["photo_id"])
+        return here_changes, len(here_photos), len(other_photos - here_photos)
+
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
     # returns 1 when that pipeline stage has run for the row. Detection and

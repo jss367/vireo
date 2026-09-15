@@ -207,7 +207,7 @@ def _remove_planned_keywords(editor, plan):
         )
 
 
-def _write_photo_sync(xmp_path, plan, assigned_location=None):
+def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sidecars=False):
     """Apply a ``_PhotoSyncPlan`` to the photo's sidecar, in dependency order.
 
     Every mutation lands in one ``SidecarEditor``, so the sidecar is parsed
@@ -218,6 +218,10 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None):
     ``assigned_location`` is passed in rather than looked up here because the
     writers run on a pool thread and the SQLite connection belongs to the
     caller's thread.
+
+    ``create_missing_sidecars`` only affects a rating-only photo, the one
+    mutation that otherwise declines to create a sidecar; see
+    ``SidecarEditor.set_rating``.
     """
     editor = SidecarEditor(xmp_path)
     _remove_planned_keywords(editor, plan)
@@ -255,7 +259,7 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None):
     # selected keyword, flag, location, or edit write should make the
     # same-photo rating persist rather than silently clear it.
     if plan.rating is not None:
-        editor.set_rating(plan.rating)
+        editor.set_rating(plan.rating, create=create_missing_sidecars)
 
     # One publish for the whole photo. Nothing is written when no mutation
     # changed anything -- re-syncing an already-correct sidecar costs a read.
@@ -320,7 +324,7 @@ def _sync_result(synced, failures):
     }
 
 
-def sync_to_xmp(db, progress_callback=None, change_ids=None):
+def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False):
     """Write pending changes to XMP sidecars.
 
     Args:
@@ -328,6 +332,12 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
         progress_callback: optional callable(current, total)
         change_ids: optional pending_changes ids to sync. When provided, any
             other queued changes are left pending.
+        create_missing_sidecars: write a sidecar for a rating-only photo
+            instead of skipping it. Off for the ordinary sync job, which
+            would otherwise litter a sidecar beside every rated photo and
+            can retry later anyway. On for the sync that runs before a NAS
+            transfer, where "later" does not exist: the transfer deletes the
+            local originals, and a cleared-but-unwritten rating is gone.
 
     Returns:
         dict with synced, failed, failures counts
@@ -483,6 +493,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                 with lock_for(xmp_path):
                     _write_photo_sync(
                         xmp_path, plans[photo_id], locations.get(photo_id),
+                        create_missing_sidecars=create_missing_sidecars,
                     )
             except Exception as e:  # recorded per photo, as before
                 outcomes[photo_id] = e
