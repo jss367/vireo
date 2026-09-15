@@ -25268,6 +25268,70 @@ def test_universal_filter_prediction_rules_ignore_alternative_rows(tmp_path):
                    "value": "bioclip-2"}]) == 1
 
 
+def test_prediction_confidence_filter_moves_when_alternative_becomes_rejected(tmp_path):
+    """Rejecting the top pick flips its sibling ``alternative`` row to
+    ``rejected``, and ``_prediction_exists`` only hides ``alternative`` rows —
+    so a runner-up at 0.10 becomes visible to ``prediction_confidence <= 0.2``
+    even though no ``confidence`` value has moved. ``FILTER_FIELDS`` therefore
+    lists ``MUTATION_PREDICTION`` for ``prediction_confidence``: without it
+    the Browse membership-change refresh would skip the reload and leave a
+    stale grid for a rule whose row set genuinely just changed (Codex review
+    r4013497441)."""
+    db, fid = _filter_db(tmp_path)
+    ws_id = db._ws_id()
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.95, '2026-01-01')",
+        (det,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Sparrow', 0.10, '2026-01-01')",
+        (det,),
+    )
+    alt_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND species='Sparrow'",
+        (det,),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status, "
+        "reviewed_at) VALUES (?, ?, 'alternative', '2026-01-02')",
+        (alt_pred, ws_id),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # Before the runner-up is un-alternatived: the displayed 0.95 pick sits
+    # above the threshold and the runner-up is hidden — no match.
+    assert count([{"field": "prediction_confidence", "op": "<=",
+                   "value": 0.2}]) == 0
+
+    # A reject flips the sibling from 'alternative' to 'rejected' in the
+    # same transaction (mirrors ``_batch_reject_under_lock`` in app.py).
+    db.conn.execute(
+        "UPDATE prediction_review SET status = 'rejected', "
+        "reviewed_at = '2026-01-03' WHERE prediction_id = ? "
+        "AND workspace_id = ?",
+        (alt_pred, ws_id),
+    )
+    db.conn.commit()
+
+    # The runner-up is now visible to ``_prediction_exists`` (only
+    # 'alternative' is filtered out), so the same rule now matches the same
+    # photo — the change ``dependsOnMutation([MUTATION_PREDICTION])`` has to
+    # reload for.
+    assert count([{"field": "prediction_confidence", "op": "<=",
+                   "value": 0.2}]) == 1
+
+
 def test_universal_filter_classifier_model_contains_escapes_like_metacharacters(tmp_path):
     """``classifier_model contains`` must treat ``%`` / ``_`` in the value as
     literal characters, matching the other advertised text contains rules.
@@ -25362,13 +25426,22 @@ def test_registry_declares_mutation_impact_for_every_field():
     # keywords, forcing an unnecessary reset of every keyword-filtered
     # grid (Codex review r4013123596).
     #
-    # ``prediction_confidence`` and ``classifier_model`` are set once at
-    # classify time and never mutate under accept/reject/mark-reviewed —
-    # only ``prediction_status`` does. Listing MUTATION_PREDICTION on the
-    # first two forced a full grid reset for a result set that could not
-    # have changed, clearing the selection and detail panel (Codex review
-    # r4013378150).
-    assert moved_by(MUTATION_PREDICTION) == {"prediction_status"}
+    # Confidence and classifier_model are set at classify time and never
+    # mutate under accept/reject/mark-reviewed, but ``_prediction_exists``
+    # (the shared gate every prediction filter routes through) drops rows
+    # with ``prv.status = 'alternative'`` so the runner-up at 0.10 does not
+    # count for ``prediction_confidence <= 0.2`` while the top pick at 0.95
+    # is displayed. Accepting or rejecting the top pick flips its sibling
+    # alternatives to ``rejected`` (``Database.accept_prediction`` and
+    # ``_batch_reject_under_lock``), pulling the runner-up into the rule's
+    # row set — so a confidence filter can newly match even though no
+    # ``confidence`` number moved. ``classifier_model`` stays out because
+    # sibling alternatives share their top pick's classifier, so the
+    # ``EXISTS`` predicate cannot change when a runner-up joins (Codex
+    # review r4013497441, revising r4013378150).
+    assert moved_by(MUTATION_PREDICTION) == {
+        "prediction_status", "prediction_confidence"
+    }
     assert moved_by(MUTATION_WILDLIFE) == {"wildlife_excluded"}
 
     # A typo in a mutation name must not read as "nothing moves this".

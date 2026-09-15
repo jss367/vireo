@@ -145,15 +145,30 @@ FILTER_FIELDS = {
                                 NUMBER_OPS, changed_by=[]),
     "noise_estimate": _field("Noise estimate", "Quality & AI", "number",
                              NUMBER_OPS, changed_by=[]),
-    # A prediction row is written at classify time with its confidence and
-    # classifier_model already set; accept/reject/mark-reviewed only mutate
-    # ``prv.status``. So a filter on confidence or model cannot notice a
-    # review-status edit, and listing ``MUTATION_PREDICTION`` here forced a
-    # full grid reset (clearing the selection and detail panel) for a result
-    # set that could not have changed (Codex review r4013378150).
+    # Confidence is written at classify time and never mutates under
+    # accept/reject/mark-reviewed, but the *set* of prediction rows a
+    # confidence filter sees can still move with a review-status edit.
+    # ``_build_query_from_rules`` routes every prediction filter through
+    # ``_prediction_exists``, which drops rows with
+    # ``prv.status = 'alternative'`` so a top pick at 0.95 with a runner-up
+    # at 0.10 does not satisfy ``prediction_confidence <= 0.2``. Accepting
+    # or rejecting a prediction flips its sibling alternatives to
+    # ``rejected`` (``Database.accept_prediction`` and
+    # ``_batch_reject_under_lock`` in ``app.py``), pulling those low-
+    # confidence runners-up out of the alternative filter and into the
+    # rule's row set — so a photo can newly satisfy the confidence rule
+    # even though its numeric confidence never changed. Listing
+    # ``MUTATION_PREDICTION`` here keeps the confidence-filtered grid in
+    # sync with that visibility flip (Codex review r4013497441, revising
+    # r4013378150). ``classifier_model`` stays empty because sibling
+    # alternatives share the same classifier as their top pick — the
+    # ``EXISTS`` predicate is already satisfied by the visible top row and
+    # cannot change from ``true`` to ``false`` (or the reverse) when a
+    # runner-up joins.
     "prediction_confidence": _field("Prediction confidence", "Quality & AI",
                                     "number", [">=", "<=", ">", "<", "between"],
-                                    pages=["review"], changed_by=[]),
+                                    pages=["review"],
+                                    changed_by=[MUTATION_PREDICTION]),
     "prediction_status": _field("Prediction status", "Quality & AI", "enum",
                                 ENUM_OPS, values=PREDICTION_STATUS_VALUES,
                                 pages=["review"], changed_by=[MUTATION_PREDICTION]),
