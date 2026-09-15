@@ -5391,6 +5391,27 @@ class Database:
           ``cleanup_cached_files_for_deleted_photos`` so orphaned thumbnail /
           preview / working-copy files can't be inherited by a later import
           that reuses one of the freed SQLite rowids.
+        * ``preserved_edit_count`` — pending edits that were queued against
+          a photo the collision loop is about to delete (either the staged
+          row on a byte-identical collision, or the phantom target row on a
+          replacement) and were reparented onto the surviving row before
+          ON DELETE CASCADE on ``pending_changes.photo_id`` could drop them.
+          Reported up so a NAS transfer's residual check can add them to
+          the "still need a sync" count rather than silently losing them.
+        * ``preserved_off_staging_identities`` — active-workspace subset of
+          the above whose survivor is NOT one of the staged photo ids the
+          caller captured before the merge. Reported as a list of
+          ``staged_sync_scope`` identity keys (``change_token`` or
+          ``("id", id)``) so the caller can filter out edits its pre-transfer
+          drain already classified as undeliverable (a flag under
+          ``sync_flags_to_xmp`` off) and NOT count them as "queued during
+          transfer" — they existed before, were considered, and were
+          deliberately not written to XMP. Sibling-workspace edits are
+          omitted for the same reason: this sync would not have written
+          them either. The remaining in-staging remaps (phantom-target and
+          intra-staged) are already found by the by-photo residual re-read
+          scoped to the captured staged ids, so adding them here as well
+          would report one edit as two.
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
@@ -5398,7 +5419,9 @@ class Database:
         if not staged_root:
             return {"new_photos": 0, "new_folders": 0,
                     "merged_folders": 0, "already_present": 0,
-                    "dropped_photo_ids": []}
+                    "dropped_photo_ids": [],
+                    "preserved_edit_count": 0,
+                    "preserved_off_staging_identities": []}
         staged_root_path = staged_root["path"]
         ws = self._ws_id()
 
@@ -5616,7 +5639,35 @@ class Database:
 
         counts = {"new_photos": 0, "new_folders": 0,
                   "merged_folders": 0, "already_present": 0,
-                  "dropped_photo_ids": []}
+                  "dropped_photo_ids": [],
+                  # Pending edits that were queued against a photo the
+                  # collision loop is about to delete (a staged row on a
+                  # real collision, or the phantom target row on a
+                  # replacement), remapped onto the surviving row before
+                  # ON DELETE CASCADE could drop them. Reported up so the
+                  # NAS transfer's residual check can add them to the
+                  # "still need a sync" count instead of silently losing
+                  # them to the cascade.
+                  "preserved_edit_count": 0,
+                  # Active-workspace identities (``change_token`` or
+                  # ``("id", id)``, matching ``staged_sync_scope``) of the
+                  # off-staging remap subset -- the archive-side survivor
+                  # on a real collision. The caller's residual re-read is
+                  # scoped by the captured staged ids, so only this subset
+                  # is invisible to it and has to be added separately. The
+                  # phantom-target branch (survivor is the staged photo)
+                  # and the intra-staged case (survivor is another staged
+                  # photo already reparented in this pass) are already
+                  # covered by the residual re-read, and counting them
+                  # here as well would report one edit as two. Restricted
+                  # to the active workspace and reported as identities --
+                  # not a raw ``rowcount`` -- so the caller can filter out
+                  # rows its pre-transfer drain already left as
+                  # undeliverable (which are not "queued during transfer",
+                  # only edits this workspace declined to write) and
+                  # exclude sibling-workspace rows (which this sync would
+                  # not have written either).
+                  "preserved_off_staging_identities": []}
         # Staged folders that fold into an existing target row are deleted only
         # after every staged folder has been processed. Deleting eagerly would
         # hit a FK violation when a not-yet-reparented staged child still points
@@ -5850,7 +5901,16 @@ class Database:
                     # targets ``normalize`` is identity, so different-case
                     # names have different keys and this tracker never
                     # triggers.
-                    staged_normalized_claimed = set()
+                    #
+                    # Mapped to the winning ``photos.id`` so a later
+                    # intra-staged collision remaps its pending edits
+                    # onto that survivor directly, without a follow-up
+                    # ``LOWER(filename) = LOWER(?)`` probe: SQLite's
+                    # built-in ``LOWER`` is ASCII-only, so
+                    # ``LOWER('Ä.raf') != LOWER('ä.raf')`` would leave
+                    # ``survivor_id`` unset and the cascade would drop
+                    # the edit this branch exists to preserve.
+                    staged_normalized_claimed = {}
                     for staged in staged_photos:
                         pid = staged["id"]
                         staged_norm = normalize(staged["filename"])
@@ -5907,6 +5967,148 @@ class Database:
                             # rsync ``--ignore-existing`` skipped this
                             # file), so treating it as ``already_present``
                             # is correct.
+                            #
+                            # Reparent any pending edits queued against the
+                            # staged row onto the surviving photo before the
+                            # DELETE fires the ON DELETE CASCADE on
+                            # ``pending_changes.photo_id`` and drops them.
+                            # An edit queued between the pre-transfer sync's
+                            # last drain and this reconciliation is still a
+                            # write the user asked for: the survivor points
+                            # at the same on-disk file (real-collision → the
+                            # byte-identical archived row; intra-staged →
+                            # the earlier staged twin that already claimed
+                            # the normalized slot in ``target["id"]``), so
+                            # its sidecar is the one the edit was aimed at.
+                            # Without this remap the cascade would silently
+                            # discard the edit and the residual re-read
+                            # below would find nothing to report.
+                            survivor_id = (
+                                collision["id"] if collision is not None
+                                else None)
+                            # An off-staging survivor (the byte-identical
+                            # archive row) is invisible to a photo-id-scoped
+                            # residual re-read of the pending queue, so the
+                            # caller has to add its remap count separately.
+                            # An in-staging survivor (another staged row
+                            # that already claimed this normalized slot in
+                            # ``target["id"]``) is still in the captured
+                            # ``staged_photo_ids`` and the residual re-read
+                            # already picks its remapped edits up — adding
+                            # the same count again would report one edit as
+                            # two. See ``_residual_staged_changes``.
+                            survivor_off_staging = collision is not None
+                            if survivor_id is None:
+                                # Intra-staged: an earlier staged row in the
+                                # same iteration was reparented into
+                                # ``target["id"]`` under a matching
+                                # case-normalized filename. The tracker
+                                # already knows its ``photos.id`` -- reading
+                                # it there also sidesteps SQLite's
+                                # ASCII-only ``LOWER``, which cannot match
+                                # non-ASCII case aliases like ``Ä.raf`` /
+                                # ``ä.raf`` and would otherwise leave the
+                                # remap unset.
+                                survivor_id = staged_normalized_claimed.get(
+                                    staged_norm)
+                            if survivor_id is not None:
+                                # A queued ``location`` change stores its
+                                # coordinates only in the staged photo's
+                                # ``photo_keywords`` link to a
+                                # ``type='location'`` keyword; the delete
+                                # below strips those links and
+                                # ``sync_to_xmp`` would otherwise derive
+                                # coordinates from whatever unrelated
+                                # location keyword (or none) the survivor
+                                # carries, silently writing the wrong GPS
+                                # -- or clearing it -- for the remapped
+                                # row. Move the staged photo's location
+                                # keyword links onto the survivor so the
+                                # queued edit's intent survives the delete.
+                                has_location_change = self.conn.execute(
+                                    "SELECT 1 FROM pending_changes "
+                                    "WHERE photo_id = ? "
+                                    "AND change_type = 'location' LIMIT 1",
+                                    (pid,),
+                                ).fetchone() is not None
+                                if has_location_change:
+                                    staged_location_kw_ids = [
+                                        r["keyword_id"] for r in
+                                        self.conn.execute(
+                                            "SELECT pk.keyword_id "
+                                            "FROM photo_keywords pk "
+                                            "JOIN keywords k "
+                                            "  ON k.id = pk.keyword_id "
+                                            "WHERE pk.photo_id = ? "
+                                            "  AND k.type = 'location'",
+                                            (pid,),
+                                        ).fetchall()
+                                    ]
+                                    # Replace survivor's existing location
+                                    # tag: the queued edit is the user's
+                                    # chosen assignment for this on-disk
+                                    # file, and the survivor's earlier
+                                    # location keyword predates that
+                                    # intent. An empty staged list encodes
+                                    # a "clear location" edit and drops
+                                    # the survivor's tag too.
+                                    self.conn.execute(
+                                        "DELETE FROM photo_keywords "
+                                        "WHERE photo_id = ? "
+                                        "AND keyword_id IN ("
+                                        "  SELECT id FROM keywords "
+                                        "  WHERE type = 'location')",
+                                        (survivor_id,),
+                                    )
+                                    for kw_id in staged_location_kw_ids:
+                                        # Route through tag_photo so the
+                                        # write carries the manual
+                                        # provenance stamp and folds
+                                        # against any survivor row via the
+                                        # shared upsert. A queued
+                                        # `location` change originates in
+                                        # set_photo_location (manual), so
+                                        # the intent moving with it is a
+                                        # user-authored assignment.
+                                        self.tag_photo(
+                                            survivor_id, kw_id,
+                                            _commit=False,
+                                        )
+                                # Capture the identities of the rows this
+                                # remap is about to move -- restricted to
+                                # the active workspace so sibling-workspace
+                                # edits (which this sync would not have
+                                # written anyway) don't inflate the caller's
+                                # "queued during transfer" count. Read
+                                # before the UPDATE, because after it the
+                                # rows now live on ``survivor_id`` and the
+                                # caller has no way to distinguish them
+                                # from anything the survivor already
+                                # carried.
+                                off_staging_row_identities = []
+                                if survivor_off_staging:
+                                    off_staging_row_identities = [
+                                        (row["change_token"]
+                                         or ("id", row["id"]))
+                                        for row in self.conn.execute(
+                                            "SELECT id, change_token "
+                                            "FROM pending_changes "
+                                            "WHERE photo_id = ? "
+                                            "  AND workspace_id = ?",
+                                            (pid, ws),
+                                        ).fetchall()
+                                    ]
+                                remap = self.conn.execute(
+                                    "UPDATE pending_changes "
+                                    "SET photo_id = ? WHERE photo_id = ?",
+                                    (survivor_id, pid),
+                                )
+                                counts["preserved_edit_count"] += (
+                                    remap.rowcount or 0)
+                                if off_staging_row_identities:
+                                    counts[
+                                        "preserved_off_staging_identities"
+                                    ].extend(off_staging_row_identities)
                             self.conn.execute(
                                 "DELETE FROM photo_keywords "
                                 "WHERE photo_id = ?",
@@ -5941,6 +6143,103 @@ class Database:
                                 # the SQL ``filename = ?`` lookup used earlier
                                 # would miss the stale row and leave both
                                 # intact.
+                                #
+                                # Reparent the phantom's pending edits onto
+                                # the staged row that is about to take its
+                                # slot. The staged bytes are what will live
+                                # at that (folder_id, filename), so any
+                                # queued write is aimed at that sidecar --
+                                # letting the cascade drop it would silently
+                                # discard the user's edit.
+                                #
+                                # A queued ``location`` change on the
+                                # phantom stores its coordinates only in
+                                # the phantom's ``photo_keywords`` link to
+                                # a ``type='location'`` keyword; the
+                                # DELETE below strips those links and
+                                # ``sync_to_xmp`` would otherwise derive
+                                # coordinates from whatever unrelated
+                                # location tag (or none) the staged
+                                # survivor carries, silently writing the
+                                # wrong GPS -- or clearing it -- for the
+                                # remapped row. Move the phantom's
+                                # location keyword links onto the survivor
+                                # before the delete so the queued edit's
+                                # intent survives. Symmetric to the same
+                                # handling in the collision→staged branch
+                                # above.
+                                has_phantom_location_change = (
+                                    self.conn.execute(
+                                        "SELECT 1 FROM pending_changes "
+                                        "WHERE photo_id = ? "
+                                        "AND change_type = 'location' "
+                                        "LIMIT 1",
+                                        (collision["id"],),
+                                    ).fetchone() is not None
+                                )
+                                if has_phantom_location_change:
+                                    phantom_location_kw_ids = [
+                                        r["keyword_id"] for r in
+                                        self.conn.execute(
+                                            "SELECT pk.keyword_id "
+                                            "FROM photo_keywords pk "
+                                            "JOIN keywords k "
+                                            "  ON k.id = pk.keyword_id "
+                                            "WHERE pk.photo_id = ? "
+                                            "  AND k.type = 'location'",
+                                            (collision["id"],),
+                                        ).fetchall()
+                                    ]
+                                    # Replace the staged survivor's
+                                    # existing location tag: the queued
+                                    # edit on the phantom is the user's
+                                    # chosen assignment for the on-disk
+                                    # file that ``pid`` will represent,
+                                    # and the survivor's earlier location
+                                    # keyword predates that intent. An
+                                    # empty phantom list encodes a "clear
+                                    # location" edit and drops the
+                                    # survivor's tag too.
+                                    self.conn.execute(
+                                        "DELETE FROM photo_keywords "
+                                        "WHERE photo_id = ? "
+                                        "AND keyword_id IN ("
+                                        "  SELECT id FROM keywords "
+                                        "  WHERE type = 'location')",
+                                        (pid,),
+                                    )
+                                    for kw_id in phantom_location_kw_ids:
+                                        # Route through tag_photo (same
+                                        # reason as the collision→staged
+                                        # branch above): a raw INSERT
+                                        # would land with source = NULL,
+                                        # which retirement passes read
+                                        # as generated and delete, and
+                                        # would skip the shared
+                                        # provenance-fold contract every
+                                        # photo_keywords writer honors.
+                                        # A queued ``location`` change
+                                        # originates in set_photo_location
+                                        # -- a user-authored assignment --
+                                        # so KEYWORD_SOURCE_MANUAL is the
+                                        # right stamp for the intent
+                                        # riding along.
+                                        self.tag_photo(
+                                            pid, kw_id, _commit=False,
+                                        )
+                                remap = self.conn.execute(
+                                    "UPDATE pending_changes "
+                                    "SET photo_id = ? WHERE photo_id = ?",
+                                    (pid, collision["id"]),
+                                )
+                                # No ``preserved_off_staging_identities``
+                                # bump: the survivor is ``pid``, still one
+                                # of the ids the caller captured before
+                                # the merge, so a residual re-read scoped
+                                # by those ids already finds the remapped
+                                # edits.
+                                counts["preserved_edit_count"] += (
+                                    remap.rowcount or 0)
                                 self.conn.execute(
                                     "DELETE FROM photo_keywords "
                                     "WHERE photo_id = ?", (collision["id"],))
@@ -5966,7 +6265,7 @@ class Database:
                             # name is dropped as ``already_present``
                             # instead of adding a second catalog row for
                             # the same on-disk destination.
-                            staged_normalized_claimed.add(staged_norm)
+                            staged_normalized_claimed[staged_norm] = pid
                     to_delete.append(sf["id"])
                     counts["merged_folders"] += 1
                     last_target_parent[target_path] = target["id"]
