@@ -25361,9 +25361,14 @@ def test_registry_declares_mutation_impact_for_every_field():
     # status-only prediction paths (reject, mark reviewed) that write no
     # keywords, forcing an unnecessary reset of every keyword-filtered
     # grid (Codex review r4013123596).
-    assert moved_by(MUTATION_PREDICTION) == {
-        "prediction_status", "prediction_confidence", "classifier_model",
-    }
+    #
+    # ``prediction_confidence`` and ``classifier_model`` are set once at
+    # classify time and never mutate under accept/reject/mark-reviewed —
+    # only ``prediction_status`` does. Listing MUTATION_PREDICTION on the
+    # first two forced a full grid reset for a result set that could not
+    # have changed, clearing the selection and detail panel (Codex review
+    # r4013378150).
+    assert moved_by(MUTATION_PREDICTION) == {"prediction_status"}
     assert moved_by(MUTATION_WILDLIFE) == {"wildlife_excluded"}
 
     # A typo in a mutation name must not read as "nothing moves this".

@@ -4268,16 +4268,29 @@ function captureSelectedPhotoAnchor() {
   var container = document.getElementById('gridContainer');
   var containerRect = container.getBoundingClientRect();
   var cardRect = card.getBoundingClientRect();
+  // Position in ``photos`` at capture time. Bounds the paged rescan below
+  // when a ``preserveScroll`` reload runs after an edit that may have
+  // removed this photo from the filter (Codex review r4013123608): a
+  // 60k-photo library would otherwise walk to ``allLoaded`` — ~1,200
+  // page requests — before giving up.
+  //
+  // An expanded stack member is not itself in ``photos`` — only its cover
+  // is — so ``findIndex`` returns -1 and the scan budget collapses to a
+  // single page even though the cover may sit tens of thousands of rows
+  // in. Anchor the position via the cover so the budget matches where the
+  // member actually lives; ``loadUntilPhotoRendered`` with
+  // ``resolveStackMember: true`` will re-expand the tray on the far side
+  // (Codex review r4013378153).
+  var index = photos.findIndex(function(p) { return p.id === selectedPhotoId; });
+  if (index < 0) {
+    var cover = loadedBrowseStackCoverForPhoto(selectedPhotoId);
+    if (cover) index = photos.findIndex(function(p) { return p.id === cover.id; });
+  }
   return {
     photoId: selectedPhotoId,
     topOffset: cardRect.top - containerRect.top,
     detailVisible: document.getElementById('detailContent').classList.contains('visible'),
-    // Position in ``photos`` at capture time. Bounds the paged rescan below
-    // when a ``preserveScroll`` reload runs after an edit that may have
-    // removed this photo from the filter (Codex review r4013123608): a
-    // 60k-photo library would otherwise walk to ``allLoaded`` — ~1,200
-    // page requests — before giving up.
-    index: photos.findIndex(function(p) { return p.id === selectedPhotoId; }),
+    index: index,
   };
 }
 
@@ -5684,39 +5697,6 @@ function refreshActiveCollectionAfterMembershipChange(mutations) {
     return;
   }
   resetAndLoad({ preserveAnchor: false, preserveScroll: true });
-}
-
-// When bulk-removing the keyword that currently drives the filter, the
-// photos we just untagged no longer match the query. Without this reload
-// they stay in the grid and in the selection until the user manually
-// changes filters. Two paths can drive the current keyword filter — the
-// keyword tree (via `activeKeyword`) or the search box text (via
-// `appendKeywordSearchParams`) — so check both. Reloading is safe either
-// way (a photo still matching via another keyword or filename token
-// just comes back on the next fetch).
-function refreshActiveKeywordAfterRemoval(removedName) {
-  if (!removedName) return;
-  if (activeKeyword && activeKeyword === removedName) {
-    reloadBrowseResults({ preserveScroll: true });
-    return;
-  }
-  // While a collection is active, `refreshActiveCollectionAfterMembershipChange`
-  // has already reloaded via `filterByCollection`. Collections ignore the
-  // search input, so any stale `#searchInput` text is not driving the
-  // current grid. Calling `reloadBrowseResults` here would run
-  // `resetAndLoad`, which clears `activeCollectionId` and drops the user
-  // into the global keyword search.
-  if (activeCollectionId) return;
-  // The universal filter expression may reference the removed keyword via
-  // keyword/species rules or the quick-search group; a name substring test
-  // over the serialized expression over-reloads at worst (reloading is
-  // safe), never under-reloads.
-  var rules = getBrowseRules();
-  if (!rules) return;
-  var needle = String(removedName).toLowerCase();
-  if (JSON.stringify(rules).toLowerCase().indexOf(needle) !== -1) {
-    reloadBrowseResults({ preserveScroll: true });
-  }
 }
 
 function refreshBrowseSidebarCounts() {
@@ -10215,8 +10195,16 @@ async function removeSelectionKeyword(keywordId) {
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();
+  // One reload only. ``refreshActiveCollectionAfterMembershipChange`` runs
+  // ``resetAndLoad({preserveScroll: true})`` when any active rule reads a
+  // keyword-derived field (``dependsOnMutation([MUTATION_KEYWORD])``), and
+  // the sidebar's ``activeKeyword`` path installs the same ``keyword``
+  // rule into VireoFilter — so the earlier follow-up call to
+  // ``refreshActiveKeywordAfterRemoval`` fired a *second* reset that
+  // arrived after the first had already cleared ``photos`` and grid
+  // cards, leaving ``captureBrowseViewportAnchor`` nothing to anchor on
+  // and dropping the scroll position (Codex review r4013311737).
   refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
-  refreshActiveKeywordAfterRemoval(removedName);
   refreshPendingSyncBanner();
   showUndoToast();
 }

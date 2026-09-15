@@ -145,15 +145,21 @@ FILTER_FIELDS = {
                                 NUMBER_OPS, changed_by=[]),
     "noise_estimate": _field("Noise estimate", "Quality & AI", "number",
                              NUMBER_OPS, changed_by=[]),
+    # A prediction row is written at classify time with its confidence and
+    # classifier_model already set; accept/reject/mark-reviewed only mutate
+    # ``prv.status``. So a filter on confidence or model cannot notice a
+    # review-status edit, and listing ``MUTATION_PREDICTION`` here forced a
+    # full grid reset (clearing the selection and detail panel) for a result
+    # set that could not have changed (Codex review r4013378150).
     "prediction_confidence": _field("Prediction confidence", "Quality & AI",
                                     "number", [">=", "<=", ">", "<", "between"],
-                                    pages=["review"], changed_by=[MUTATION_PREDICTION]),
+                                    pages=["review"], changed_by=[]),
     "prediction_status": _field("Prediction status", "Quality & AI", "enum",
                                 ENUM_OPS, values=PREDICTION_STATUS_VALUES,
                                 pages=["review"], changed_by=[MUTATION_PREDICTION]),
     "classifier_model": _field("Classifier model", "Quality & AI", "text",
                                ["contains", "is", "is not"], pages=["review"],
-                               changed_by=[MUTATION_PREDICTION]),
+                               changed_by=[]),
     # Workflow
     "has_edits": _field("Has edits", "Workflow", "boolean", BOOLEAN_OPS,
                         changed_by=[]),
