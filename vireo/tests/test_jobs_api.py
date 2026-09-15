@@ -5718,6 +5718,86 @@ def test_pending_archive_sync_dispatches_by_token_not_reused_id(app_and_db, tmp_
         p.read_text() for p in (tmp_path / "NAS" / "trip").rglob("*.xmp"))
 
 
+def test_keyword_endpoint_holds_registry_lock_across_cancel_shortcut(app_and_db, tmp_path, monkeypatch):
+    """Assert the atomicity property directly: while the keyword endpoint's
+    ``_queue_keyword_add`` is inside its cancel-shortcut delete, the
+    registry lock must be UNAVAILABLE to any other actor.
+
+    That is the guarantee the send job's registration relies on. Without
+    it, a sibling that reads the guard as ``False`` can be preempted while
+    the send job registers the photo and snapshots the pending opposite,
+    then resume and delete the row the sync just captured. The sync writes
+    the snapshotted change to the sidecar and the drain sees an empty
+    queue -- the sidecar ships in the state the sibling's request tried
+    to invert.
+
+    Reproducing the race requires interposing between the guard check and
+    the delete, which is only observable in the OLD non-atomic code path;
+    testing the fix's PROPERTY (lock held around the whole transaction) is
+    stable and does not depend on a specific interleaving.
+    """
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    fid = db.add_folder(str(photos_dir), name="photos")
+    db.add_workspace_folder(db._ws_id(), fid, is_root=True)
+    photo_id = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    keyword_id = db.add_keyword("Osprey")
+    db.tag_photo(photo_id, keyword_id, source="manual")
+    del_resp = client.delete(f"/api/photos/{photo_id}/keywords/{keyword_id}")
+    assert del_resp.status_code == 200
+    assert [r["change_type"] for r in db.get_pending_changes()] == ["keyword_remove"]
+
+    entered = threading.Event()
+    release = threading.Event()
+    lock_available_during_delete = []
+    original_remove = Database.remove_pending_changes
+
+    def slow_remove(self, photo_id_arg, change_type=None, value=None,
+                    workspace_id=None, _commit=True):
+        if photo_id_arg == photo_id and change_type == "keyword_remove":
+            entered.set()
+            # While the sibling is here, sample whether the registry lock
+            # is currently held. If the fix is in place the lock is held
+            # for the whole transaction and this ``acquire(blocking=False)``
+            # returns False; if not, the check-to-delete window is open.
+            got = app._pretransfer_sync_photo_ids_lock.acquire(blocking=False)
+            if got:
+                app._pretransfer_sync_photo_ids_lock.release()
+            lock_available_during_delete.append(got)
+            release.wait(5.0)
+        return original_remove(
+            self, photo_id_arg, change_type=change_type, value=value,
+            workspace_id=workspace_id, _commit=_commit,
+        )
+
+    monkeypatch.setattr(Database, "remove_pending_changes", slow_remove)
+
+    def sibling_add():
+        client.post(f"/api/photos/{photo_id}/keywords", json={"name": "Osprey"})
+
+    worker = threading.Thread(target=sibling_add, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(5.0), "sibling endpoint never reached remove_pending_changes"
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+    assert not worker.is_alive(), "sibling endpoint never returned"
+
+    assert lock_available_during_delete == [False], (
+        "registry lock was AVAILABLE during the cancel-shortcut delete -- "
+        "the check and the mutation are not atomic against send-job "
+        "registration"
+    )
+
+
 def test_keyword_remove_endpoint_skips_cancel_shortcut_during_pretransfer_sync(app_and_db, tmp_path):
     """Registering the photo must divert ``_queue_keyword_remove`` off its
     cancel-a-pending-add shortcut and onto the real ``keyword_remove``
