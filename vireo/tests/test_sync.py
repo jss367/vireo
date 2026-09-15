@@ -1689,3 +1689,74 @@ def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
     assert len(set(threads)) == 1, threads
     assert "Osprey" in read_keywords(xmp_a)
     assert "Kestrel" in read_keywords(xmp_b)
+
+
+def test_sync_clears_by_token_so_a_replacement_row_survives(tmp_path):
+    """A flag edit made during the sidecar write must not be cleared instead.
+
+    queue_flag_change_if_enabled deletes the old flag row and inserts the new
+    value, and pending_changes.id is a bare rowid SQLite re-issues -- so the
+    replacement can land on the id the running sync selected. Clearing by id
+    would delete the user's newest edit without ever writing it.
+    """
+    import sync
+    from db import Database
+
+    db = Database(str(tmp_path / "t.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    photo, _xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    db.queue_change(photo, "keyword_add", "Osprey")
+    selected = db.conn.execute("SELECT id FROM pending_changes").fetchone()["id"]
+
+    real_write = sync._write_photo_sync
+
+    def write_then_replace_the_row(*args, **kwargs):
+        result = real_write(*args, **kwargs)
+        # Mid-write: the selected row goes away and a new edit takes its id.
+        db.conn.execute("DELETE FROM pending_changes WHERE id = ?", (selected,))
+        db.conn.execute(
+            "INSERT INTO pending_changes (id, photo_id, change_type, value, change_token, workspace_id) "
+            "VALUES (?, ?, 'rating', '5', 'tok-new', ?)",
+            (selected, photo, db._ws_id()),
+        )
+        db.conn.commit()
+        return result
+
+    sync._write_photo_sync = write_then_replace_the_row
+    try:
+        sync.sync_to_xmp(db)
+    finally:
+        sync._write_photo_sync = real_write
+
+    survivors = db.conn.execute(
+        "SELECT change_token FROM pending_changes").fetchall()
+    assert [row["change_token"] for row in survivors] == ["tok-new"], survivors
+    db.close()
+
+
+def test_sync_clears_rows_that_predate_the_change_token_column(tmp_path):
+    """`IN (NULL)` matches nothing, so a token-only clear would never clear them.
+
+    change_token is a nullable TEXT column with no backfill, and a real
+    catalog still holds rows queued before it existed -- 466 of 644 in the
+    development catalog. Clearing those by token would leave them queued
+    forever, rewritten by every later sync.
+    """
+    import sync
+    from db import Database
+
+    db = Database(str(tmp_path / "t.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    photo, _xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', 'Osprey', NULL, ?)",
+        (photo, db._ws_id()),
+    )
+    db.conn.commit()
+
+    result = sync.sync_to_xmp(db)
+    assert result["ok"], result
+    assert result["synced"] == 1, result
+    assert db.count_pending_changes() == 0, "a NULL-token row was left queued"
+    db.close()
