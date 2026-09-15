@@ -588,7 +588,6 @@ def test_job_history_workspace_id(db_with_workspace):
 
 
 def test_job_history_filtered_by_workspace(db_with_workspace):
-    import sqlite3
     import time
 
     from jobs import JobRunner
@@ -604,26 +603,29 @@ def test_job_history_filtered_by_workspace(db_with_workspace):
     job1_id = runner.start("test-ws1", noop, workspace_id=ws_id)
     job2_id = runner.start("test-ws2", noop, workspace_id=ws2_id)
 
-    # Wait for both to complete
-    for _ in range(100):
+    # Wait for both jobs to be fully persisted to job_history. Polling
+    # ``status`` alone races the worker thread: it sets ``status =
+    # "completed"`` before ``_persist_job`` writes the row and flips
+    # ``_persisted``. Under xdist load ``_persist_job`` can also stall
+    # inside its OperationalError-retry sleep, so give the wait a 30s
+    # budget (matching ``vireo/tests/wait.py``) and fail loudly rather
+    # than silently proceeding with an empty history.
+    deadline = time.monotonic() + 30.0
+    j1 = j2 = None
+    while True:
         j1 = runner.get(job1_id)
         j2 = runner.get(job2_id)
-        if (j1 and j1["status"] in ("completed", "failed") and
-                j2 and j2["status"] in ("completed", "failed")):
+        if (j1 and j1.get("_persisted") and
+                j2 and j2.get("_persisted")):
             break
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                "job history not persisted within 30s; "
+                f"job1={j1!r} job2={j2!r}"
+            )
         time.sleep(0.05)
     assert j1["status"] == "completed", f"Job 1 did not complete: {j1}"
     assert j2["status"] == "completed", f"Job 2 did not complete: {j2}"
-
-    # Poll for persistence (written by background thread via separate connection)
-    db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
-    for _ in range(50):
-        conn = sqlite3.connect(db_path, timeout=5)
-        count = conn.execute("SELECT COUNT(*) FROM job_history").fetchone()[0]
-        conn.close()
-        if count >= 2:
-            break
-        time.sleep(0.05)
 
     # Query history scoped to ws_id
     db.set_active_workspace(ws_id)

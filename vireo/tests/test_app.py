@@ -19051,7 +19051,17 @@ def test_browse_reject_predictions_refreshes_collections(app_and_db):
     next_fn_idx = html.find("\nasync function ", reject_fn_idx + 1)
     body = html[reject_fn_idx: next_fn_idx if next_fn_idx != -1 else len(html)]
     assert "scheduleCollectionCountsRefresh()" in body
-    assert "refreshActiveCollectionAfterMembershipChange()" in body
+    # The refresh names what the rejection changed, so the filter bar can tell
+    # an expression this edit can move from one it cannot. Declaring nothing
+    # would reload every filtered grid; declaring the wrong thing would leave
+    # a prediction-status filter showing the row that just left it.
+    assert (
+        "refreshActiveCollectionAfterMembershipChange("
+        "[MUTATION_PREDICTION])" in body
+    ), (
+        "rejection changes no keywords, so a keyword/species filter cannot "
+        "notice the edit — passing MUTATION_KEYWORD reloads it for nothing"
+    )
 
 
 def test_selection_prediction_suggestions_applies_confidence_threshold(app_and_db):
