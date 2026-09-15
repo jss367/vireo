@@ -9,6 +9,19 @@
   let sending = false;
   let actionError = '';
 
+  // The banner is not the only place a pending transfer has to show up: the
+  // Browse sidebar badges the staging folders these photos still sit in, and
+  // it renders from whatever this poll last saw. Publishing the items (rather
+  // than having the sidebar poll the endpoint itself) keeps both surfaces on
+  // one snapshot, so a transfer can never look sent in one and pending in the
+  // other.
+  function publish(items) {
+    window.vireoPendingArchives = items;
+    try {
+      window.dispatchEvent(new CustomEvent('vireo:pending-archives-changed', {detail: {items: items}}));
+    } catch (_error) {}
+  }
+
   async function refresh() {
     if (loading || sending || document.hidden) return;
     loading = true;
@@ -20,6 +33,7 @@
       const next = JSON.stringify(data.items || []);
       if (next === signature) return;
       signature = next;
+      publish(data.items || []);
       const expanded = new Set(Array.from(list.querySelectorAll('details[open]'), el => el.dataset.archiveId));
       list.replaceChildren();
       panel.hidden = !data.items.length;

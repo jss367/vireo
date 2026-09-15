@@ -106,7 +106,8 @@ body.sidebar-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.folder-local-status-slot {
+.folder-local-status-slot,
+.folder-archive-status-slot {
   display: inline-flex;
   flex: 0 0 auto;
 }
@@ -133,6 +134,10 @@ body.sidebar-resizing {
 .folder-local-status.recovery {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.folder-local-status.pending-archive {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
 }
 .folder-local-status.updating::before {
   content: '';
@@ -4848,6 +4853,7 @@ function renderFolderTree(folders) {
   }
   (byParent['root'] || []).forEach(computeRollup);
   var localStatuses = statusResult.statuses;
+  var archiveStatuses = pendingArchiveFolderStatuses();
 
   function buildTree(parentId, depth) {
     var children = byParent[parentId] || [];
@@ -4863,8 +4869,13 @@ function renderFolderTree(folders) {
         : '';
       html += '<div class="tree-item' + activeClass + '" onclick="filterByFolder(' + f.id + ')" data-folder-id="' + f.id + '" data-workspace-root="' + (f.is_workspace_root ? '1' : '0') + '">' +
         indent + toggle +
-        '<span class="folder-name">' + escapeHtml(f.name) + '</span>' +
+        // A folder row shows only its leaf name, which can be as opaque as
+        // "12" for a date-templated import. The full path on hover is the
+        // cheapest way to say which directory the row actually is.
+        '<span class="folder-name"' + (f.path ? ' title="' + escapeAttr(f.path) + '"' : '') + '>' +
+          escapeHtml(f.name) + '</span>' +
         '<span class="folder-local-status-slot">' + folderLocalStatusMarkup(localStatuses[f.id]) + '</span>' +
+        '<span class="folder-archive-status-slot">' + folderLocalStatusMarkup(archiveStatuses[f.id]) + '</span>' +
         partialBadge +
         '<span class="count">' + rolledUp[f.id] + '</span>' +
       '</div>';
@@ -5069,6 +5080,48 @@ function folderLocalStatuses(folders, byParent, options) {
   }
   return result;
 }
+
+function pendingArchiveFolderStatuses() {
+  // "Kept locally" photos are an import that was processed in Vireo's
+  // staging directory and has not been copied to its destination yet. The
+  // staging tree is in the catalog like any other folder, so without this
+  // badge the sidebar row is indistinguishable from a folder that already
+  // lives on the destination storage.
+  var items = window.vireoPendingArchives;
+  if (!Array.isArray(items)) return {};
+  var statuses = {};
+  items.forEach(function(item) {
+    if (!item || !Array.isArray(item.folder_ids)) return;
+    var sending = item.state === 'sending';
+    var destination = item.destination
+      ? ' to ' + item.destination
+      : ' to its destination';
+    var description = sending
+      ? 'Kept locally — being copied' + destination + ' now'
+      : 'Kept locally — still in Vireo’s staging folder, not copied' +
+        destination + ' yet. Use "Photos kept locally" at the top of this page to send them.';
+    item.folder_ids.forEach(function(rawId) {
+      statuses[Number(rawId)] = {
+        kind: sending ? 'pending-archive updating' : 'pending-archive',
+        label: sending ? 'SENDING' : 'KEPT LOCALLY',
+        description: description
+      };
+    });
+  });
+  return statuses;
+}
+
+function refreshPendingArchiveStatusIndicators() {
+  var statuses = pendingArchiveFolderStatuses();
+  document.querySelectorAll('#folderTree .tree-item[data-folder-id]').forEach(function(row) {
+    var slot = row.querySelector('.folder-archive-status-slot');
+    if (slot) slot.innerHTML = folderLocalStatusMarkup(statuses[Number(row.dataset.folderId)]);
+  });
+}
+
+window.addEventListener('vireo:pending-archives-changed', function() {
+  refreshPendingArchiveStatusIndicators();
+});
 
 function folderLocalStatusMarkup(status) {
   if (!status) return '';

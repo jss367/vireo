@@ -5142,6 +5142,37 @@ def test_pending_archive_deleted_collection_does_not_relink(app_and_db, tmp_path
     assert item["name"] == "Imported photos"
 
 
+def test_pending_archive_reports_its_staging_folders(app_and_db, tmp_path, monkeypatch):
+    """Browse badges these folder ids, so they must be exactly the staging tree."""
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    staging = imported["config"]["managed_staging"]["destination"]
+    unrelated = tmp_path / "already-on-nas"
+    unrelated.mkdir()
+    unrelated_id = db.add_folder(str(unrelated), name="already-on-nas")
+
+    item = app.test_client().get("/api/import/pending-archives").get_json()["items"][0]
+    folder_ids = item["folder_ids"]
+    assert folder_ids, "the staged photos' folders must be identifiable"
+    assert unrelated_id not in folder_ids
+    paths = {
+        db.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (fid,)
+        ).fetchone()["path"]
+        for fid in folder_ids
+    }
+    assert paths, folder_ids
+    assert all(
+        path == staging or path.startswith(os.path.join(staging, ""))
+        for path in paths
+    ), paths
+    # A sibling directory whose name merely starts with the staging path must
+    # not be swept in with it.
+    near_miss = db.add_folder(staging + "-backup", name="staging-backup")
+    refreshed = app.test_client().get("/api/import/pending-archives").get_json()
+    assert near_miss not in refreshed["items"][0]["folder_ids"]
+
+
 @pytest.mark.parametrize("state", ["pending", "sending"])
 def test_pending_archive_missing_transfer_can_be_forgotten(app_and_db, tmp_path, monkeypatch, state):
     app, db = app_and_db
