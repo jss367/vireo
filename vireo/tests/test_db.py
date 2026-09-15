@@ -11113,6 +11113,161 @@ def test_merge_staged_tree_refiles_queued_edits_off_a_dropped_photo(db, tmp_path
         (dropped,)).fetchone()[0] == 0
 
 
+def test_merge_staged_tree_materializes_queued_edits_onto_survivor(db, tmp_path):
+    """A byte-identical merge must land queued edits on the survivor's own
+    ``photos`` and ``photo_keywords``, not just re-file the pending rows.
+
+    The rating and keyword endpoints update both the catalog and the queue
+    in one shot. When the staged row is deleted here, its ``photo_keywords``
+    entries and its ``photos.rating`` go with it -- and the pending-change
+    reassignment alone would leave the survivor's own catalog reading the
+    pre-edit value even after a later sync writes the queued value to the
+    sidecar and clears the pending row. That divergence is the bug this
+    test guards: post-sync, the sidecar carries the new rating/keyword
+    while the catalog still shows the old one.
+    """
+    ws = db._active_workspace_id
+    archive = tmp_path / "arch"
+    (archive / "USA").mkdir(parents=True)
+    (archive / "USA" / "bird.raf").write_bytes(b"same bytes")
+
+    base_id = db.add_folder(str(archive / "USA"), name="USA")
+    survivor = db.add_photo(folder_id=base_id, filename="bird.raf", extension=".raf",
+                            file_size=10, file_mtime=1.0, file_hash="SAME")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Survivor starts with a stale rating (from an earlier XMP scan, say).
+    db.conn.execute("UPDATE photos SET rating = 2 WHERE id = ?", (survivor,))
+    db.conn.commit()
+
+    stage_root = db.add_folder(str(tmp_path / "stage" / "USA"), name="USA",
+                               workspace_root=False)
+    dropped = db.add_photo(folder_id=stage_root, filename="bird.raf", extension=".raf",
+                           file_size=10, file_mtime=1.0, file_hash="SAME")
+
+    # User edits the staged photo during the copy: both catalog fields
+    # AND queued sidecar edits.
+    osprey_id = db.add_keyword("Osprey")
+    db.tag_photo(dropped, osprey_id)
+    db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (dropped,))
+    db.conn.commit()
+    db.queue_change(dropped, "keyword_add", "Osprey")
+    db.queue_change(dropped, "rating", "4")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(archive / "USA"))
+
+    assert counts["already_present"] == 1, counts
+    assert counts["pending_reassigned_to"] == [survivor], counts
+
+    # Catalog on the survivor now reflects the user's edit -- not the
+    # stale pre-merge rating and not an empty keyword set.
+    survivor_row = db.conn.execute(
+        "SELECT rating FROM photos WHERE id = ?", (survivor,)
+    ).fetchone()
+    assert survivor_row["rating"] == 4, survivor_row
+    survivor_keywords = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+        (survivor,)).fetchall()
+    assert [r["keyword_id"] for r in survivor_keywords] == [osprey_id], (
+        survivor_keywords)
+
+
+def test_merge_staged_tree_materializes_queued_keyword_remove_onto_survivor(
+    db, tmp_path,
+):
+    """A queued ``keyword_remove`` on the staged row must strip the same
+    keyword from the survivor's catalog before the delete cascades.
+
+    The survivor may still hold the keyword from its own earlier state.
+    Without the fix, the queued remove syncs to the sidecar (once
+    reassigned) while the survivor's catalog keeps the row.
+    """
+    ws = db._active_workspace_id
+    archive = tmp_path / "arch"
+    (archive / "USA").mkdir(parents=True)
+    (archive / "USA" / "owl.raf").write_bytes(b"same bytes")
+
+    base_id = db.add_folder(str(archive / "USA"), name="USA")
+    survivor = db.add_photo(folder_id=base_id, filename="owl.raf", extension=".raf",
+                            file_size=20, file_mtime=1.0, file_hash="SAME2")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    osprey_id = db.add_keyword("Osprey")
+    db.tag_photo(survivor, osprey_id)
+
+    stage_root = db.add_folder(str(tmp_path / "stage" / "USA"), name="USA",
+                               workspace_root=False)
+    dropped = db.add_photo(folder_id=stage_root, filename="owl.raf", extension=".raf",
+                           file_size=20, file_mtime=1.0, file_hash="SAME2")
+    # The user removed the keyword on the staged row: photo_keywords on
+    # staged doesn't carry it, and a keyword_remove is queued.
+    db.queue_change(dropped, "keyword_remove", "Osprey")
+
+    db.merge_staged_tree_into_archive(stage_root, str(archive / "USA"))
+
+    survivor_keywords = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+        (survivor,)).fetchall()
+    assert survivor_keywords == [], survivor_keywords
+
+
+def test_merge_staged_tree_phantom_does_not_reassign_pending_edits(db, tmp_path):
+    """The phantom row's queued edits belong to a different image (the one
+    whose bytes went missing) and must NOT land on the fresh staged bytes
+    that rsync just placed at the same filename slot.
+
+    Reassignment would silently write the old image's rating and keywords
+    to the replacement image's sidecar. The cascade drop takes the queued
+    edits with the phantom row; that's a loss, but the alternative --
+    misfiling them onto the wrong picture -- is worse and invisible.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # The file on disk is the STAGED bytes (rsync replaced the missing
+    # archived file). The phantom row's recorded hash disagrees.
+    (date_dir / "collide.raf").write_bytes(b"fresh-staged-bytes")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30", parent_id=base_id)
+    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+                               extension=".raf", file_size=100,
+                               file_mtime=1.0, file_hash="STALEHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # User queued edits for the phantom image before this transfer.
+    db.queue_change(phantom_pid, "keyword_add", "OldSubject")
+    db.queue_change(phantom_pid, "rating", "5")
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0,
+                           file_hash="NEWHASH")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # Phantom is dropped, staged row survives with a different fresh identity.
+    assert counts["new_photos"] == 1
+    assert phantom_pid in counts["dropped_photo_ids"]
+    # No pending changes ended up on the replacement photo.
+    assert counts["pending_reassigned_to"] == [], counts
+    survivor_changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (new_pid,)).fetchall()
+    assert survivor_changes == [], survivor_changes
+    # And the phantom's own queued rows are cascade-cleared (not sitting
+    # around pointing at a deleted photo_id).
+    orphaned = db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE photo_id = ?",
+        (phantom_pid,)).fetchone()[0]
+    assert orphaned == 0
+
+
 def test_merge_staged_tree_new_subfolders(db):
     """Staged tree merged under an existing tracked base: new date folders
     are repointed under the base, parent_id fixed, workspace linked, and the

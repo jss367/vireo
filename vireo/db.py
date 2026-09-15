@@ -5860,9 +5860,23 @@ class Database:
                             # say -- would vanish here along with the row. It
                             # describes the same image the survivor represents,
                             # so re-file it rather than lose it.
+                            #
+                            # ``_reassign_photo_state`` mirrors those queued
+                            # values onto the survivor's own ``photos`` and
+                            # ``photo_keywords`` rows before the delete. The
+                            # staged row already carries the user's most recent
+                            # rating and keyword associations (the write
+                            # endpoints update both catalog and queue), and
+                            # this delete would otherwise take them with it --
+                            # leaving the survivor's catalog reading the
+                            # pre-edit value even after the later sync writes
+                            # the queued value to the sidecar and clears the
+                            # pending row. Apply first, then re-file the
+                            # pending changes, then delete.
                             survivor = (collision["id"] if real_collision
                                         else staged_normalized_claimed.get(staged_norm))
                             if survivor is not None and survivor != pid:
+                                self._reassign_photo_state(pid, survivor)
                                 if self._reassign_pending_changes(pid, survivor):
                                     counts["pending_reassigned_to"].append(survivor)
                                 staged_normalized_claimed.setdefault(
@@ -5902,11 +5916,22 @@ class Database:
                                 # would miss the stale row and leave both
                                 # intact.
                                 # Same cascade, other direction: the phantom
-                                # row is the one going away, and the staged row
-                                # is what now represents the file.
-                                if self._reassign_pending_changes(
-                                        collision["id"], pid):
-                                    counts["pending_reassigned_to"].append(pid)
+                                # row is the one going away.
+                                #
+                                # The phantom's queued edits are deliberately
+                                # NOT reassigned onto the staged row. A phantom
+                                # represents a different image -- the archived
+                                # bytes went missing or were replaced by rsync
+                                # -- and its queued ratings or keywords were
+                                # the user's intent for that missing image,
+                                # not for the fresh staged bytes that now
+                                # occupy the filename slot. Reassigning them
+                                # would silently write the old image's
+                                # metadata onto the replacement. Letting the
+                                # cascade drop them loses those queued edits,
+                                # but the alternative is worse: the edits
+                                # would land on the wrong picture and the
+                                # user could not tell.
                                 self.conn.execute(
                                     "DELETE FROM photo_keywords "
                                     "WHERE photo_id = ?", (collision["id"],))
@@ -21554,6 +21579,72 @@ class Database:
             (to_photo_id, from_photo_id),
         )
         return cursor.rowcount
+
+    def _reassign_photo_state(self, from_photo_id, to_photo_id):
+        """Materialize queued sidecar edits onto the survivor's catalog row.
+
+        Sibling to ``_reassign_pending_changes``. A byte-identical merge
+        deletes the staged row (and its ``photo_keywords``) and re-files
+        the queued sidecar edits onto the survivor. But nothing propagates
+        those queued values into the survivor's own ``photos.rating``,
+        ``flag``, or ``photo_keywords``, so once the pending changes are
+        cleared by a later sync the catalog reads the pre-edit value while
+        the sidecar carries the user's most recent one. Apply the queued
+        values to the survivor here so both stay in step.
+
+        Only the edits that ``sync_to_xmp`` actually writes to the sidecar
+        are mirrored: rating, flag, keyword add/remove. Keyword rows
+        transfer by ``keyword_id`` from the staged photo's own
+        ``photo_keywords`` (INSERT OR IGNORE union), which dodges the
+        ambiguity of resolving keyword names -- ``keywords.UNIQUE(name,
+        parent_id)`` allows the same name under different parents.
+        A queued ``keyword_remove`` matches the survivor's rows by name;
+        that mirrors ``_remove_planned_keywords``, which matches sidecar
+        entries the same way.
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id, source) "
+            "SELECT ?, keyword_id, source FROM photo_keywords WHERE photo_id = ?",
+            (to_photo_id, from_photo_id),
+        )
+        changes = self.conn.execute(
+            "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+            "ORDER BY created_at, id",
+            (from_photo_id,),
+        ).fetchall()
+        for change in changes:
+            change_type = change["change_type"]
+            value = change["value"]
+            if change_type == "rating":
+                try:
+                    rating = int(value)
+                except (TypeError, ValueError):
+                    continue
+                self.conn.execute(
+                    "UPDATE photos SET rating = ? WHERE id = ?",
+                    (rating, to_photo_id),
+                )
+            elif change_type == "flag":
+                self.conn.execute(
+                    "UPDATE photos SET flag = ? WHERE id = ?",
+                    (value or "none", to_photo_id),
+                )
+            elif change_type in ("keyword_remove", "keyword_remove_flat"):
+                # The removed keyword is no longer in the staged photo's
+                # ``photo_keywords`` (the remove endpoint already dropped
+                # the row), so the INSERT OR IGNORE above didn't add it.
+                # But the survivor may still hold that keyword from its
+                # earlier state -- delete matching rows so the catalog
+                # matches the sidecar the sync will publish.
+                keyword_rows = self.conn.execute(
+                    "SELECT id FROM keywords WHERE name = ?", (value,),
+                ).fetchall()
+                for kw_row in keyword_rows:
+                    self.conn.execute(
+                        "DELETE FROM photo_keywords "
+                        "WHERE photo_id = ? AND keyword_id = ?",
+                        (to_photo_id, kw_row["id"]),
+                    )
 
     def clear_equivalent_flat_removals(self, changes, _commit=True):
         """Clear shared-sidecar flat removals represented by ``changes``."""
