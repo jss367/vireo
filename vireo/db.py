@@ -5330,6 +5330,10 @@ class Database:
           ``cleanup_cached_files_for_deleted_photos`` so orphaned thumbnail /
           preview / working-copy files can't be inherited by a later import
           that reuses one of the freed SQLite rowids.
+        * ``pending_reassigned_to`` — surviving photo ids that inherited
+          queued sidecar edits from a row this merge deleted. Callers scoping
+          a post-move sync-queue check by photo id need these, because the
+          edits are no longer filed under the id they started on.
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
@@ -5337,7 +5341,7 @@ class Database:
         if not staged_root:
             return {"new_photos": 0, "new_folders": 0,
                     "merged_folders": 0, "already_present": 0,
-                    "dropped_photo_ids": []}
+                    "dropped_photo_ids": [], "pending_reassigned_to": []}
         staged_root_path = staged_root["path"]
         ws = self._ws_id()
 
@@ -5555,7 +5559,7 @@ class Database:
 
         counts = {"new_photos": 0, "new_folders": 0,
                   "merged_folders": 0, "already_present": 0,
-                  "dropped_photo_ids": []}
+                  "dropped_photo_ids": [], "pending_reassigned_to": []}
         # Staged folders that fold into an existing target row are deleted only
         # after every staged folder has been processed. Deleting eagerly would
         # hit a FK violation when a not-yet-reparented staged child still points
@@ -5789,7 +5793,11 @@ class Database:
                     # targets ``normalize`` is identity, so different-case
                     # names have different keys and this tracker never
                     # triggers.
-                    staged_normalized_claimed = set()
+                    # Maps the case-normalized name to the photo row that
+                    # survives for it, so a deleted row's queued sidecar
+                    # edits can be re-filed onto the survivor rather than
+                    # cascade-deleted with it.
+                    staged_normalized_claimed = {}
                     for staged in staged_photos:
                         pid = staged["id"]
                         staged_norm = normalize(staged["filename"])
@@ -5846,6 +5854,19 @@ class Database:
                             # rsync ``--ignore-existing`` skipped this
                             # file), so treating it as ``already_present``
                             # is correct.
+                            # pending_changes.photo_id cascades on delete,
+                            # so a sidecar edit queued against this staged row
+                            # -- by a linked sibling workspace during the copy,
+                            # say -- would vanish here along with the row. It
+                            # describes the same image the survivor represents,
+                            # so re-file it rather than lose it.
+                            survivor = (collision["id"] if real_collision
+                                        else staged_normalized_claimed.get(staged_norm))
+                            if survivor is not None and survivor != pid:
+                                if self._reassign_pending_changes(pid, survivor):
+                                    counts["pending_reassigned_to"].append(survivor)
+                                staged_normalized_claimed.setdefault(
+                                    staged_norm, survivor)
                             self.conn.execute(
                                 "DELETE FROM photo_keywords "
                                 "WHERE photo_id = ?",
@@ -5880,6 +5901,12 @@ class Database:
                                 # the SQL ``filename = ?`` lookup used earlier
                                 # would miss the stale row and leave both
                                 # intact.
+                                # Same cascade, other direction: the phantom
+                                # row is the one going away, and the staged row
+                                # is what now represents the file.
+                                if self._reassign_pending_changes(
+                                        collision["id"], pid):
+                                    counts["pending_reassigned_to"].append(pid)
                                 self.conn.execute(
                                     "DELETE FROM photo_keywords "
                                     "WHERE photo_id = ?", (collision["id"],))
@@ -5905,7 +5932,7 @@ class Database:
                             # name is dropped as ``already_present``
                             # instead of adding a second catalog row for
                             # the same on-disk destination.
-                            staged_normalized_claimed.add(staged_norm)
+                            staged_normalized_claimed[staged_norm] = pid
                     to_delete.append(sf["id"])
                     counts["merged_folders"] += 1
                     last_target_parent[target_path] = target["id"]
@@ -21465,6 +21492,27 @@ class Database:
         if synced_changes:
             self.clear_equivalent_flat_removals(synced_changes, _commit=False)
         self.conn.commit()
+
+    def _reassign_pending_changes(self, from_photo_id, to_photo_id):
+        """Re-file queued sidecar edits onto ``to_photo_id``. Returns a count.
+
+        ``pending_changes.photo_id`` cascades on delete, so a merge that drops
+        one of two rows describing the same image would take that row's queued
+        edits with it -- silently, and after the sidecar was already written.
+        The surviving row represents the same file, so the edit still applies
+        to it.
+
+        Duplicates are left alone rather than collapsed. ``_plan_photo_sync``
+        folds keywords through a set and takes the last rating in queue order,
+        so an identical pair is harmless -- whereas de-duplicating a rating
+        would reorder a deliberate 1 -> 2 -> 1 sequence and settle on the
+        wrong value.
+        """
+        cursor = self.conn.execute(
+            "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
+            (to_photo_id, from_photo_id),
+        )
+        return cursor.rowcount
 
     def clear_equivalent_flat_removals(self, changes, _commit=True):
         """Clear shared-sidecar flat removals represented by ``changes``."""

@@ -5781,6 +5781,57 @@ def test_pending_archive_send_rejects_falsy_non_object_body(app_and_db, tmp_path
     assert "JSON object" in response.get_json()["error"]
 
 
+def test_pending_archive_finds_staging_unlinked_from_its_own_workspace(app_and_db, tmp_path, monkeypatch):
+    """Folder membership is not what defines the transfer -- the path is.
+
+    Nothing guards pending_archives against folder removal, so the staging
+    tree can leave the workspace that imported it while still linked to a
+    sibling. Scoping by membership would report nothing to sync, hide the
+    button, and move the shared tree with stale sidecars.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+    owning = db._ws_id()
+
+    sibling = db.create_workspace("Sibling")
+    staged_folders = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
+            (staging, os.path.join(staging, "") + "%")).fetchall()
+    ]
+    assert staged_folders
+    for fid in staged_folders:
+        db.add_workspace_folder(sibling, fid, is_root=True)
+    db.queue_change(photo_id, "keyword_add", "Osprey", workspace_id=sibling)
+    # The staging tree leaves the workspace that owns the transfer.
+    for fid in staged_folders:
+        db.conn.execute(
+            "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (owning, fid))
+    db.conn.commit()
+
+    item = client.get("/api/import/pending-archives").get_json()["items"][0]
+    assert item["unsynced_photos"] == 1, item
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "Osprey" in sidecars[0].read_text()
+
+
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
     """A half-done sync must not send stale sidecars to the NAS anyway."""
     import sync as sync_mod

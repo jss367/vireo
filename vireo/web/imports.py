@@ -178,20 +178,28 @@ def _folder_ids_under(folders, staging_destination):
     return ids
 
 
+def _all_folders(db):
+    """Every catalog folder, not just the active workspace's.
+
+    A staging tree can be unlinked from the workspace that imported it while
+    still linked to a sibling -- nothing guards ``pending_archives`` against
+    folder removal -- and the rows, the files and the sibling's metadata queue
+    all survive that. Scoping by workspace membership would report
+    ``unsynced_photos = 0``, hide the sync button, and let even an explicit
+    ``sync_first=true`` sync an empty set before moving the shared tree.
+    The transfer is defined by a path on disk, so resolve it from the path.
+    """
+    return db.conn.execute("SELECT id, path FROM folders").fetchall()
+
+
 def _staging_folder_ids(db, staging_destination):
     """``_folder_ids_under`` for one archive, reading the folder list itself.
 
-    The listing route hoists the workspace folder read across every pending
-    row; a job thread has exactly one archive and its own db, so it asks
-    directly rather than carrying the hoisted list across threads.
+    The listing route hoists the folder read across every pending row; a job
+    thread has exactly one archive and its own db, so it asks directly rather
+    than carrying the hoisted list across threads.
     """
-    ws_folders = db.conn.execute(
-        "SELECT f.id, f.path FROM folders f "
-        "JOIN workspace_folders wf ON wf.folder_id = f.id "
-        "WHERE wf.workspace_id = ?",
-        (db._ws_id(),),
-    ).fetchall()
-    return _folder_ids_under(ws_folders, staging_destination)
+    return _folder_ids_under(_all_folders(db), staging_destination)
 
 
 def _staged_photo_ids(db, folder_ids):
@@ -387,12 +395,7 @@ def create_imports_blueprint(
         # Only pay for the folder read when something is actually pending —
         # three pages poll this endpoint every 5s with an empty list most of
         # the time.
-        ws_folders = db.conn.execute(
-            "SELECT f.id, f.path FROM folders f "
-            "JOIN workspace_folders wf ON wf.folder_id = f.id "
-            "WHERE wf.workspace_id = ?",
-            (db._ws_id(),),
-        ).fetchall() if rows else []
+        ws_folders = _all_folders(db) if rows else []
         items = []
         for row in rows:
             sending = any(j.get("type") == "send-to-nas"
@@ -557,8 +560,16 @@ def create_imports_blueprint(
                                 # a queue holding only changes this workspace
                                 # declines to write syncs nothing, and an edit made
                                 # during the copy would then go unreported.
+                                # Union the survivors of a tracked-archive
+                                # merge: it deletes the staged row for an
+                                # identical photo and this re-files that
+                                # row's queued edits onto the surviving one,
+                                # which is not in the pre-move snapshot.
                                 residual = _residual_staged_changes(
-                                    thread_db, staged_photo_ids, considered)
+                                    thread_db,
+                                    list(staged_photo_ids)
+                                    + list(result.get("pending_reassigned_to") or []),
+                                    considered)
                         finally:
                             if sync_first:
                                 sync_job_lock.release()

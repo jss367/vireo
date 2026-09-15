@@ -10997,6 +10997,47 @@ def test_move_folder_path_is_case_sensitive(db):
     assert sibling_child["path"] == "/photos/2024/sibling"
 
 
+def test_merge_staged_tree_refiles_queued_edits_off_a_dropped_photo(db, tmp_path):
+    """pending_changes cascades on delete, so the merge must move them first.
+
+    A staged photo identical to one already in the archive is deleted here.
+    A sidecar edit queued against it -- by a linked sibling workspace during
+    the copy, say -- would go with it: silently, and after the sidecar was
+    already written. The surviving row is the same image, so the edit still
+    applies to it.
+    """
+    ws = db._active_workspace_id
+    archive = tmp_path / "arch"
+    (archive / "USA").mkdir(parents=True)
+    (archive / "USA" / "bird.raf").write_bytes(b"same bytes")
+
+    base_id = db.add_folder(str(archive / "USA"), name="USA")
+    survivor = db.add_photo(folder_id=base_id, filename="bird.raf", extension=".raf",
+                            file_size=10, file_mtime=1.0, file_hash="SAME")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage_root = db.add_folder(str(tmp_path / "stage" / "USA"), name="USA",
+                               workspace_root=False)
+    dropped = db.add_photo(folder_id=stage_root, filename="bird.raf", extension=".raf",
+                           file_size=10, file_mtime=1.0, file_hash="SAME")
+    db.queue_change(dropped, "keyword_add", "Osprey")
+    db.queue_change(dropped, "rating", "4")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(archive / "USA"))
+
+    assert counts["already_present"] == 1, counts
+    assert dropped in counts["dropped_photo_ids"], counts
+    assert counts["pending_reassigned_to"] == [survivor], counts
+    refiled = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY change_type", (survivor,)).fetchall()
+    assert [(r["change_type"], r["value"]) for r in refiled] == [
+        ("keyword_add", "Osprey"), ("rating", "4")], refiled
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE photo_id = ?",
+        (dropped,)).fetchone()[0] == 0
+
+
 def test_merge_staged_tree_new_subfolders(db):
     """Staged tree merged under an existing tracked base: new date folders
     are repointed under the base, parent_id fixed, workspace linked, and the

@@ -3061,6 +3061,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # stays a stable dict of display numbers that gets serialized straight
         # into the archive-stage summary/API payload.
         dropped = merge_counts.pop("dropped_photo_ids", None) or []
+        # Likewise a caller handle, not a display number: photos that
+        # inherited queued sidecar edits from a row this merge deleted.
+        reassigned = merge_counts.pop("pending_reassigned_to", None) or []
         result["merge"] = merge_counts
         result["merged_into_existing"] = merge_into_tracked
         # On the merge path ``total_photos`` counts every staged source photo,
@@ -3069,6 +3072,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         result["moved"] = merge_counts["new_photos"]
         if dropped:
             result["dropped_photo_ids"] = dropped
+        if reassigned:
+            result["pending_reassigned_to"] = reassigned
     if cleanup_error is not None:
         result["cleanup_error"] = cleanup_error
     return result
