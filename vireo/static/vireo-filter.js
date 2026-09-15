@@ -41,6 +41,10 @@
   ];
   // Quick search fans out over these fields as one replaceable any-group.
   const QUICK_SEARCH_FIELDS = ['filename', 'keyword', 'species', 'camera_make', 'camera_model', 'lens'];
+  const MISSING_TAG_LABELS = {
+    has_species: 'Missing species',
+    has_location_keyword: 'Missing location tag',
+  };
 
   const state = {
     page: 'browse',
@@ -274,6 +278,7 @@
   }
 
   function ruleLabel(rule) {
+    if (isMissingTagRule(rule)) return MISSING_TAG_LABELS[rule.field];
     if (rule.field === 'keyword_identity') return 'Keyword · ' + (rule.label || 'Selected species or place');
     if (rule.field === 'photo_ids') {
       const n = Array.isArray(rule.value) ? rule.value.length : 0;
@@ -310,6 +315,8 @@
     state.root.rules.forEach((node) => {
       if (isGroup(node) && node._qs) {
         entries.push({ node, label: `Search: “${node._qs_text}”`, qs: true });
+      } else if (isMissingTagGroup(node)) {
+        entries.push({ node, label: node.rules.map(ruleLabel).join(' OR ') });
       } else {
         allLeaves(node).forEach((leaf) => entries.push({ node: leaf, label: ruleLabel(leaf) }));
       }
@@ -748,6 +755,7 @@
     btn.classList.toggle('active', state.muted);
     btn.title = 'Temporarily disable filters without losing them (\\)';
     $('.vf-chip-row').classList.toggle('muted', state.muted);
+    $('.vf-shortcuts').classList.toggle('muted', state.muted);
     const note = $('.vf-paused-note');
     if (state.muted) {
       const n = state.wouldMatch;
@@ -803,6 +811,49 @@
     return state.root.rules.find((n) => !isGroup(n) && n.field === field);
   }
 
+  function isMissingTagRule(node) {
+    return node && Object.hasOwn(MISSING_TAG_LABELS, node.field) &&
+      node.op === 'is' && [0, false, '0'].includes(node.value);
+  }
+
+  function isMissingTagGroup(node) {
+    return isGroup(node) && node.mode === 'any' && node.rules.length > 0 &&
+      node.rules.every(isMissingTagRule);
+  }
+
+  function quickMissingNode() {
+    // Only recognize a clause that narrows the other filters. An arbitrary
+    // nested rule or a leaf in an OR/NOT root does not have that meaning.
+    if (state.root.mode !== 'all') return null;
+    return state.root.rules.find(isMissingTagGroup) ||
+      state.root.rules.find(isMissingTagRule);
+  }
+
+  function quickMissingFields() {
+    const node = quickMissingNode();
+    return node ? (isGroup(node) ? node.rules : [node]).map((rule) => rule.field) : [];
+  }
+
+  function toggleQuickMissing(field) {
+    if (!Object.hasOwn(MISSING_TAG_LABELS, field)) return;
+    mutate(() => {
+      const node = quickMissingNode();
+      const fields = new Set(quickMissingFields());
+      if (fields.has(field)) fields.delete(field);
+      else fields.add(field);
+      if (node) removeByReference(state.root, node);
+      // Keep existing advanced OR/NOT expressions intact while narrowing
+      // their results with the shortcut, just as with the collection scope.
+      if (state.root.mode !== 'all') {
+        state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
+      }
+      if (fields.size) state.root.rules.unshift({
+        mode: 'any',
+        rules: Array.from(fields, (key) => makeRule(key, 'is', 0)),
+      });
+    });
+  }
+
   function quickEnumValues(field) {
     const rule = findRootRule(field);
     if (!rule) return [];
@@ -814,6 +865,9 @@
   function toggleQuickEnum(field, value) {
     if (!fieldValueAvailable(field, value)) return;
     mutate(() => {
+      if (state.root.mode !== 'all') {
+        state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
+      }
       const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === field);
       if (idx < 0) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
       const rule = state.root.rules[idx];
@@ -829,6 +883,13 @@
   }
 
   function renderQuick() {
+    const missing = quickMissingFields();
+    $$('[data-missing]').forEach((btn) => {
+      const active = missing.includes(btn.dataset.missing);
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
+    $('.vf-missing-hint').hidden = new Set(missing).size < 2;
     const rating = findRootRule('rating');
     const opSel = $('.vf-quick-rating select');
     if (rating && ['>=', 'is', '<='].includes(rating.op)) opSel.value = rating.op;
@@ -839,6 +900,7 @@
     $$('.vf-quick-flags button').forEach((btn) => {
       btn.hidden = !fieldValueAvailable('flag', btn.dataset.flag);
       btn.classList.toggle('active', flags.includes(btn.dataset.flag));
+      btn.setAttribute('aria-pressed', String(flags.includes(btn.dataset.flag)));
     });
     const colors = quickEnumValues('color_label');
     $$('.vf-quick-colors button').forEach((btn) => btn.classList.toggle('active', colors.includes(btn.dataset.color)));
@@ -1227,6 +1289,10 @@
     });
 
     // Quick filters
+    $('.vf-quick-missing').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-missing]');
+      if (btn) toggleQuickMissing(btn.dataset.missing);
+    });
     $('.vf-quick-rating').addEventListener('click', (e) => {
       const btn = e.target.closest('.vf-star');
       if (!btn) return;

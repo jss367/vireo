@@ -10,6 +10,8 @@ Seed data (conftest): 3 hawk photos in /photos/park, 2 robins in
 /photos/yard; hawk1 has rating 4 and the Red-tailed Hawk species keyword.
 """
 
+import json
+
 import pytest
 from playwright.sync_api import expect
 
@@ -428,7 +430,7 @@ def test_quick_rating_filter_and_chip_semantics(live_server, page):
     _open_browse(page, live_server)
     assert _total(page) == 5
 
-    # Quick filters stay out of the header until Filters is opened.
+    # Rating and color stay in the popover; tag and flag shortcuts are visible.
     expect(page.locator(".vf-quick")).to_be_hidden()
     page.click(".vf-filters-btn")
     expect(page.locator(".vf-quick")).to_be_visible()
@@ -444,15 +446,118 @@ def test_quick_rating_filter_and_chip_semantics(live_server, page):
 
 def test_quick_flags_multi_select_combines(live_server, page):
     _open_browse(page, live_server)
-    page.click(".vf-filters-btn")
+    expect(page.locator(".vf-popover")).to_be_hidden()
     assert page.locator('.vf-quick-flags [data-flag="flagged"]').is_visible()
     page.click('.vf-quick-flags [data-flag="flagged"]')
-    page.wait_for_timeout(300)
+    _wait_total(page, 0)
+    expect(page.locator('[data-flag="flagged"]')).to_have_attribute("aria-pressed", "true")
     page.click('.vf-quick-flags [data-flag="none"]')
     # Seed photos have NULL flags — all 5 must count as Unflagged.
     _wait_total(page, 5)
     chips = page.evaluate("document.querySelector('.vf-chips').textContent")
     assert "Flag is one of Picked, Unflagged" in chips
+
+
+def test_missing_tag_shortcuts_combine_and_distinguish_gps(live_server, page):
+    db = live_server["db"]
+    photos = live_server["data"]["photos"]
+    place = db.add_keyword("City Park", kw_type="location")
+    # A named place without coordinates counts as tagged; GPS alone does not.
+    db.tag_photo(photos[0], place)
+    db.tag_photo(photos[1], place)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id=?",
+            (photos[2],),
+        )
+    _open_browse(page, live_server)
+    species = page.locator('[data-missing="has_species"]')
+    location = page.locator('[data-missing="has_location_keyword"]')
+    expect(species).to_be_visible()
+    expect(location).to_be_visible()
+    expect(page.locator(".vf-popover")).to_be_hidden()
+
+    # Pending AI predictions on all five photos do not count as species tags.
+    species.click()
+    _wait_total(page, 3)
+    location.click()
+    _wait_total(page, 4)
+    expect(page.locator(".vf-missing-hint")).to_be_visible()
+    expect(page.locator(".vf-chips")).to_contain_text(
+        "Missing species OR Missing location tag"
+    )
+
+    # Existing search and flag filters still narrow the missing-either set.
+    page.locator(".vf-search input").fill("hawk")
+    _wait_total(page, 2)
+    page.locator('[data-flag="flagged"]').click()
+    _wait_total(page, 0)
+    page.locator('[data-flag="flagged"]').click()
+    _wait_total(page, 2)
+    page.locator(".vf-search input").fill("")
+    _wait_total(page, 4)
+
+    species.click()
+    _wait_total(page, 3)
+    expect(species).to_have_attribute("aria-pressed", "false")
+    expect(location).to_have_attribute("aria-pressed", "true")
+    expect(page.locator(".vf-missing-hint")).to_be_hidden()
+    location.click()
+    _wait_total(page, 5)
+
+
+@pytest.mark.parametrize("shortcut", ["missing", "flag"])
+def test_shortcuts_narrow_collection_with_any_rules(live_server, page, shortcut):
+    db = live_server["db"]
+    photos = live_server["data"]["photos"]
+    collection_id = db.add_collection("Two hawk photos", json.dumps({
+        "mode": "any",
+        "rules": [
+            {"field": "filename", "op": "is", "value": "hawk1.jpg"},
+            {"field": "filename", "op": "is", "value": "hawk2.jpg"},
+        ],
+    }))
+    with db.conn:
+        db.conn.execute("UPDATE photos SET flag='flagged' WHERE id IN (?, ?)",
+                        (photos[1], photos[4]))
+    _open_browse(page, live_server)
+    page.evaluate("id => filterByCollection(id)", collection_id)
+    _wait_total(page, 2)
+    original = page.evaluate("VireoFilter.getUserRules()")
+    url = page.url
+    button = page.locator('[data-missing="has_species"]' if shortcut == "missing"
+                          else '[data-flag="flagged"]')
+    button.click()
+    _wait_total(page, 1)
+    expect(page.locator("#grid .grid-card")).to_have_count(1)
+    assert page.url == url
+    # Toggling off restores the collection's original set and OR expression.
+    button.click()
+    _wait_total(page, 2)
+    assert original in page.evaluate("VireoFilter.getUserRules().rules")
+
+
+def test_missing_tag_shortcuts_restore_pause_and_clear(live_server, page):
+    _open_browse(page, live_server)
+    species = page.locator('[data-missing="has_species"]')
+    location = page.locator('[data-missing="has_location_keyword"]')
+    species.click()
+    _wait_total(page, 3)
+    with page.expect_response(lambda response: "/api/workspaces/" in response.url
+                              and response.request.method == "PUT"):
+        location.click()
+    _wait_total(page, 5)
+    page.reload()
+    page.wait_for_function("VireoFilter.isReady()")
+    expect(species).to_have_attribute("aria-pressed", "true")
+    expect(location).to_have_attribute("aria-pressed", "true")
+    page.locator(".vf-mute").click()
+    expect(page.locator(".vf-shortcuts")).to_have_class("vf-shortcuts muted")
+    page.locator(".vf-mute").click()
+    page.locator(".vf-chip-x").click()
+    expect(species).to_have_attribute("aria-pressed", "false")
+    expect(location).to_have_attribute("aria-pressed", "false")
+    _wait_total(page, 5)
 
 
 def test_quick_search_is_single_replaceable_clause(live_server, page):
@@ -792,7 +897,13 @@ def test_compact_header_and_floating_selection_actions(live_server, page, width)
     header = page.locator(".browse-filter-shell")
     grid = page.locator("#gridContainer")
     grid_top = grid.bounding_box()["y"]
-    assert header.bounding_box()["height"] < (100 if width == 1440 else 160)
+    # Allow the new shortcut row (which wraps at the narrower window size).
+    assert header.bounding_box()["height"] < (145 if width == 1440 else 240)
+    primary = page.locator(".vf-primary").bounding_box()
+    shortcuts = page.locator(".vf-shortcuts").bounding_box()
+    secondary = page.locator(".vf-secondary").bounding_box()
+    assert primary["y"] + primary["height"] <= shortcuts["y"]
+    assert shortcuts["y"] + shortcuts["height"] <= secondary["y"]
     expect(page.locator(".vf-quick")).to_be_hidden()
     expect(page.locator(".vf-overflow")).to_be_hidden()
 
@@ -831,7 +942,7 @@ def test_compact_header_and_floating_selection_actions(live_server, page, width)
     expect(page.locator(".vf-chips")).to_contain_text("Rating is at least 4 stars")
     assert page.locator("#vireoFilterBar").evaluate("""bar => {
         const right = bar.getBoundingClientRect().right;
-        return [...bar.querySelectorAll('.vf-primary > *, .vf-chip-row > *')]
+        return [...bar.querySelectorAll('.vf-primary > *, .vf-shortcuts button, .vf-chip-row > *')]
             .filter(el => el.getBoundingClientRect().width)
             .every(el => el.getBoundingClientRect().right <= right + 1);
     }""")

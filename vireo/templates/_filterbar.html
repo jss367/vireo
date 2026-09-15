@@ -23,6 +23,19 @@
     </div>
   </div>
 
+  <div class="vf-shortcuts" role="group" aria-label="Quick filters">
+    <div class="vf-quick-missing" role="group" aria-label="Missing tags">
+      <button type="button" data-missing="has_species" aria-pressed="false">Missing species</button>
+      <button type="button" data-missing="has_location_keyword" aria-pressed="false">Missing location tag</button>
+    </div>
+    <div class="vf-segmented vf-quick-flags" role="group" aria-label="Flag filters">
+      <button type="button" data-flag="flagged" aria-pressed="false">⚑ Picked</button>
+      <button type="button" data-flag="none" aria-pressed="false">– Unflagged</button>
+      <button type="button" data-flag="rejected" aria-pressed="false">× Rejected</button>
+    </div>
+    <span class="vf-missing-hint" hidden>Missing either tag</span>
+  </div>
+
   <div class="vf-secondary">
     <div class="vf-chip-row">
       <div class="vf-scope-chip" title="This page always applies this scope">
@@ -43,7 +56,7 @@
     </div>
 
     <section class="vf-quick" aria-label="Quick filters">
-      <div class="vf-section-heading"><h3>Quick filters</h3><span>Click again to clear · flags and colors combine</span></div>
+      <div class="vf-section-heading"><h3>Quick filters</h3><span>Click again to clear · colors combine</span></div>
       <div class="vf-quick-grid">
         <div class="vf-quick-group vf-quick-rating">
           <span>Rating</span>
@@ -60,14 +73,6 @@
               <button type="button" class="vf-star" data-rating="4" aria-label="4 stars">★</button>
               <button type="button" class="vf-star" data-rating="5" aria-label="5 stars">★</button>
             </div>
-          </div>
-        </div>
-        <div class="vf-quick-group">
-          <span>Flag</span>
-          <div class="vf-segmented vf-quick-flags">
-            <button type="button" data-flag="flagged">⚑ Picked</button>
-            <button type="button" data-flag="none">– Unflagged</button>
-            <button type="button" data-flag="rejected">× Rejected</button>
           </div>
         </div>
         <div class="vf-quick-group">
@@ -215,6 +220,16 @@
 .vf-segmented { display: flex; width: max-content; padding: 2px; border-radius: 7px; background: var(--bg-secondary); }
 .vf-segmented button { padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 11px; }
 .vf-segmented button.active { background: var(--bg-tertiary); color: var(--accent); }
+.vf-shortcuts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; margin: 7px 0; }
+.vf-quick-missing { display: flex; flex-wrap: wrap; gap: 6px; }
+.vf-quick-missing button { height: 28px; padding: 0 9px; border: 1px solid var(--border-secondary); border-radius: 6px; background: var(--bg-input); color: var(--text-secondary); cursor: pointer; font-size: 12px; white-space: nowrap; }
+.vf-shortcuts .vf-quick-flags button { font-size: 12px; }
+.vf-quick-missing button:hover, .vf-shortcuts .vf-quick-flags button:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+.vf-quick-missing button.active, .vf-shortcuts .vf-quick-flags button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg-input)); }
+.vf-quick-missing button.active { border-color: var(--accent); }
+.vf-shortcuts button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vf-shortcuts.muted { opacity: .5; }
+.vf-missing-hint { font-size: 11px; color: var(--text-muted); }
 .vf-quick-colors { display: flex; align-items: center; gap: 7px; padding-top: 3px; }
 .vf-quick-colors button { width: 20px; height: 20px; border: 2px solid transparent; border-radius: 50%; cursor: pointer; box-shadow: 0 0 0 1px var(--border-secondary); }
 .vf-quick-colors button.active { border-color: var(--text-primary); box-shadow: 0 0 0 2px var(--accent); }
