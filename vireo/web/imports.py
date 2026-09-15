@@ -282,15 +282,23 @@ def _sync_staged_metadata(db, archive, progress, folder_ids):
             for workspace_id, entries in runs:
                 considered.update({token: photo_id for _cid, token, photo_id in entries})
                 db.set_active_workspace(workspace_id)
-                # By token, never by the ids captured above: an earlier run
-                # in this same pass cleared its rows, and SQLite re-issues
-                # those ids to the next insert. A request thread queueing an
-                # edit in between would hand this run somebody else's change
-                # -- a photo outside the staging tree, whose sidecar would be
-                # created and whose edit would be cleared.
+                # By token whenever possible: an earlier run in this same
+                # pass cleared its rows, and SQLite re-issues those ids to
+                # the next insert. A request thread queueing an edit in
+                # between would hand this run somebody else's change -- a
+                # photo outside the staging tree, whose sidecar would be
+                # created and whose edit would be cleared. A pre-migration
+                # legacy row has no token to name it by, so it dispatches
+                # by id; ``sync_to_xmp`` unions the two channels so a mixed
+                # run stays one call. Passing ``[None, ...]`` as
+                # ``change_tokens`` would have resolved to every NULL-token
+                # row in the workspace, including photos outside staging.
+                modern_tokens = [token for _cid, token, _pid in entries if token is not None]
+                legacy_ids = [cid for cid, token, _pid in entries if token is None]
                 result = sync_mod.sync_to_xmp(
                     db, progress_callback=sync_progress,
-                    change_tokens=[token for _cid, token, _pid in entries],
+                    change_tokens=modern_tokens or None,
+                    change_ids=legacy_ids or None,
                     create_missing_sidecars=True,
                 )
                 # A change this workspace declines to write to XMP (a flag,

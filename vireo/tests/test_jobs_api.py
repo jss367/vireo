@@ -5845,6 +5845,68 @@ def test_pending_archive_send_registers_and_clears_pretransfer_photos(app_and_db
     )
 
 
+def test_pending_archive_sync_leaves_null_token_rows_outside_the_scope_alone(app_and_db, tmp_path, monkeypatch):
+    """A NULL ``change_token`` in the run (pre-migration legacy row) must not
+    make the dispatch pick up every NULL-token row in the workspace.
+
+    Without the split: the run passes ``change_tokens=[None, "uuid", ...]``
+    to ``sync_to_xmp``; the resolver builds ``wanted = {None, "uuid", ...}``
+    and matches ``None in wanted`` for every ``pending_changes`` row whose
+    ``change_token IS NULL`` -- including photos outside the staging tree,
+    whose sidecars would be created (``create_missing_sidecars`` is on) and
+    whose queued edits cleared. Legacy rows dispatch by id; modern rows keep
+    their token safety.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staged = imported["result"]["photo_ids"][0]
+
+    # A photo the transfer must never touch, in a folder of its own. A
+    # pre-migration legacy row (change_token IS NULL) is queued against it
+    # in the transferring workspace -- the exact shape that used to leak
+    # through a mixed token dispatch.
+    outside_dir = tmp_path / "already-on-nas"
+    outside_dir.mkdir()
+    outside = db.add_photo(db.add_folder(str(outside_dir), name="already-on-nas"),
+                           "elsewhere.jpg", ".jpg", 10, 0)
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Stolen', NULL, ?, '2026-09-15T09:00:00')",
+        (outside, db._ws_id()),
+    )
+    # A legacy row inside the staging scope so the run actually mixes NULL
+    # and non-NULL tokens the way the finding described.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Osprey', NULL, ?, '2026-09-15T10:00:00')",
+        (staged, db._ws_id()),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    # The outside legacy row is untouched, no unrelated sidecar was written,
+    # and the staged row's legacy edit still travelled with the transfer.
+    assert not (outside_dir / "elsewhere.xmp").exists()
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE photo_id = ? AND value = 'Stolen'",
+        (outside,),
+    ).fetchone()[0] == 1
+    nas_text = "".join(
+        p.read_text() for p in (tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert "Osprey" in nas_text
+    assert "Stolen" not in nas_text
+
+
 @pytest.mark.parametrize("raw_body", ['{"sync_first":', "not json at all", "{"])
 def test_pending_archive_send_rejects_malformed_json(app_and_db, tmp_path, monkeypatch, raw_body):
     """``get_json(silent=True)`` returns ``None`` for both an absent body and a

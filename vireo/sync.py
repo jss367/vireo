@@ -362,11 +362,22 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
         dict with synced, failed, failures counts
     """
     changes = db.get_pending_changes()
-    if change_tokens is not None:
-        wanted = set(change_tokens)
-        change_ids = [c["id"] for c in changes if c["change_token"] in wanted]
-    if change_ids is not None:
-        changes = _select_changes(changes, change_ids)
+    if change_tokens is not None or change_ids is not None:
+        # ``None`` is stripped from the token set: pre-``change_token``
+        # rows carry ``NULL`` in the column, so ``None in wanted`` would
+        # otherwise resolve for every NULL-token row in the workspace --
+        # including photos outside a caller's selected scope. Legacy rows
+        # can only be named by id (there is no safer identifier for them),
+        # so a caller mixing modern token dispatch with legacy ids passes
+        # both channels and this resolves them as a union.
+        wanted_tokens = {t for t in (change_tokens or []) if t is not None}
+        wanted_ids = set(change_ids or [])
+        selected_ids = [
+            c["id"] for c in changes
+            if (c["change_token"] is not None and c["change_token"] in wanted_tokens)
+            or c["id"] in wanted_ids
+        ]
+        changes = _select_changes(changes, selected_ids)
     if not changes:
         return _sync_result(0, [])
 
