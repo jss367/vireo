@@ -25322,6 +25322,52 @@ def test_universal_filter_validation_errors(tmp_path):
         count([{"field": "no_such_field", "op": "is", "value": 1}])
 
 
+def test_registry_declares_mutation_impact_for_every_field():
+    """Every field states which in-grid mutations can move its value.
+
+    Browse skips its post-tag reload when no active rule reads a field the
+    edit can change — that is what keeps a keyword from throwing a
+    rating-filtered grid back to page 1. A field that declared nothing would
+    make that reload silently stop happening where it is needed, so
+    ``_field`` requires the argument and this pins what the current fields
+    say.
+    """
+    import pytest as _pytest
+    from filter_fields import (
+        FILTER_FIELDS,
+        MUTATION_KEYWORD,
+        MUTATION_PREDICTION,
+        MUTATION_WILDLIFE,
+        MUTATIONS,
+        _field,
+    )
+
+    for key, spec in FILTER_FIELDS.items():
+        assert isinstance(spec.get("changed_by"), list), key
+        assert all(m in MUTATIONS for m in spec["changed_by"]), key
+
+    def moved_by(mutation):
+        return {k for k, s in FILTER_FIELDS.items() if mutation in s["changed_by"]}
+
+    assert moved_by(MUTATION_KEYWORD) == {
+        "keyword", "species", "keyword_count", "species_count",
+        "life_list_uncounted", "has_species", "has_subject",
+        "has_location_keyword", "has_coord_location_keyword",
+    }
+    # Accepting a prediction writes the species keyword, so it moves
+    # everything a tag moves plus the review-only fields.
+    assert moved_by(MUTATION_PREDICTION) == moved_by(MUTATION_KEYWORD) - {
+        "has_location_keyword", "has_coord_location_keyword", "has_subject",
+    } | {"prediction_status", "prediction_confidence", "classifier_model"}
+    assert moved_by(MUTATION_WILDLIFE) == {"wildlife_excluded"}
+
+    # A typo in a mutation name must not read as "nothing moves this".
+    with _pytest.raises(ValueError):
+        _field("X", "File", "text", ["is"], changed_by=["keywords"])
+    with _pytest.raises(TypeError):
+        _field("X", "File", "text", ["is"])
+
+
 def test_registry_ops_all_compile(tmp_path):
     """Every field/op combination the registry advertises must build SQL —
     the registry and the engine share this test so they cannot drift."""

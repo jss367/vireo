@@ -1688,6 +1688,28 @@
       return true;
     },
     hasFilters() { return hasUserFilters(); },
+    // Can one of the named in-grid mutations ("keyword", "prediction",
+    // "wildlife_excluded") change which photos this expression matches?
+    // Pages ask before re-running a query behind the user's back: reloading
+    // costs them their place in the grid, so a rating filter must not be
+    // reloaded because a keyword was added. The answer comes from the field
+    // registry's `changed_by`, which is declared per field in
+    // vireo/filter_fields.py, so the two cannot drift.
+    dependsOnMutation(mutations) {
+      const kinds = Array.isArray(mutations) ? mutations : [mutations];
+      const affected = (node) => {
+        if (isGroup(node)) return (node.rules || []).some(affected);
+        if (!node || !node.field) return false;
+        const spec = state.fields && state.fields[node.field];
+        // A field the registry cannot describe — `keyword_identity`, a rule
+        // saved by a newer build — might depend on anything. Re-running the
+        // query is the answer that cannot show a stale grid.
+        if (!spec) return true;
+        const changedBy = spec.changed_by || [];
+        return kinds.some((kind) => changedBy.indexOf(kind) !== -1);
+      };
+      return affected(state.root);
+    },
     // Wipe restored/current filters without firing onChange. Used when the
     // page detects a deep-link (e.g. plain collection view) that must
     // ignore whatever was persisted — the alternative (applying then

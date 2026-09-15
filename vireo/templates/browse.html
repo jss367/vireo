@@ -4286,6 +4286,68 @@ function restorePhotoAnchor(anchor) {
   return true;
 }
 
+/* A membership-change reload (tag, untag, location save, prediction accept)
+   re-runs the current query because the edit can move photos in or out of it.
+   The dataset it comes back with is the one the user was already looking at,
+   minus or plus a few rows — so restarting at page 1 with ``scrollTop = 0``
+   threw away their place in the grid and made them scroll down again after
+   every single tag. Anchor on the topmost photo on screen instead.
+
+   Separate from ``captureSelectedPhotoAnchor``: that one restores a *single*
+   selection and its detail panel, and deliberately declines when a batch
+   selection is active — which is exactly when a user is tagging. */
+function captureBrowseViewportAnchor() {
+  var container = document.getElementById('gridContainer');
+  if (!container) return null;
+  var containerTop = container.getBoundingClientRect().top;
+  var cards = document.querySelectorAll('#grid .grid-card');
+  for (var i = 0; i < cards.length; i++) {
+    var rect = cards[i].getBoundingClientRect();
+    // First card still on screen: its bottom edge has not passed the top of
+    // the scroll container.
+    if (rect.bottom > containerTop + 1) {
+      var id = parseInt(cards[i].dataset.id, 10);
+      if (!id) return null;
+      return {
+        photoId: id,
+        index: photos.findIndex(function(p) { return p.id === id; }),
+        topOffset: rect.top - containerTop,
+      };
+    }
+  }
+  return null;
+}
+
+async function restoreBrowseViewportAnchor(anchor, shouldContinue) {
+  if (!anchor) return;
+  // Page forward only as far as the anchor plausibly sits. Scanning to
+  // ``allLoaded`` the way ``loadUntilPhotoRendered`` does would walk a
+  // 60k-photo library end to end whenever the anchored photo is the one the
+  // edit removed from the filtered set.
+  var budget = Math.max(anchor.index, 0) + perPage;
+  while (!allLoaded && photos.length <= budget && !getGridCard(anchor.photoId)) {
+    if (shouldContinue && !shouldContinue()) return;
+    var beforeLen = photos.length;
+    if (await loadPhotos() !== true) return;
+    if (shouldContinue && !shouldContinue()) return;
+    if (photos.length === beforeLen) break;
+  }
+  var target = anchor;
+  if (!getGridCard(anchor.photoId)) {
+    // The anchored photo is gone — the user untagged the keyword the filter
+    // is built on, say. Its neighbours are still there, so hold the same
+    // position in the result set rather than snapping back to the top.
+    var fallback = photos[Math.min(Math.max(anchor.index, 0), photos.length - 1)];
+    if (!fallback || !getGridCard(fallback.id)) return;
+    target = { photoId: fallback.id, topOffset: anchor.topOffset };
+  }
+  requestAnimationFrame(function() {
+    if (shouldContinue && !shouldContinue()) return;
+    restorePhotoAnchor(target);
+    updateScrollPosition();
+  });
+}
+
 function anchorRestoreIsPending(anchor, restoreEpoch) {
   return !!anchor && anchorRestoreEpoch === restoreEpoch && selectedPhotoId == null && selectedPhotos.size === 0;
 }
@@ -4523,7 +4585,15 @@ async function bootstrapBrowse() {
           // whole refreshed set looking for it (Codex review r3622521603).
           info.reason === 'expressionLoaded'
         );
-        resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
+        // A membership-change refresh ('expressionRefreshed') re-runs the
+        // expression the user is already looking at, so hold their place in
+        // the grid instead of restarting at the first result.
+        var reloadOptions;
+        if (preserveAnchor) reloadOptions = { preserveAnchor: true };
+        else if (info && info.reason === 'expressionRefreshed') {
+          reloadOptions = { preserveScroll: true };
+        }
+        resetAndLoad(reloadOptions);
         // Summary panel (photo count, classified, top species) is a separate
         // endpoint from the grid; without this the filter changes the grid
         // but leaves the summary showing pre-filter numbers.
@@ -5520,7 +5590,17 @@ function toggleOfflineCollectionPhotos() {
   resetAndLoad({ preserveCollection: true });
 }
 
-function refreshActiveCollectionAfterMembershipChange() {
+/* Mutation kinds, as declared per filter field in vireo/filter_fields.py
+   (``changed_by``). A membership-change refresh names what it just changed so
+   the filter bar can answer whether the active expression can even notice —
+   adding a keyword cannot change which photos a "Rating >= 3" filter matches,
+   and reloading for it costs the user their place in the grid and their
+   selection for nothing. */
+var MUTATION_KEYWORD = 'keyword';
+var MUTATION_PREDICTION = 'prediction';
+var MUTATION_WILDLIFE = 'wildlife_excluded';
+
+function refreshActiveCollectionAfterMembershipChange(mutations) {
   if (activeCollectionId) {
     filterByCollection(activeCollectionId, { preserveAnchor: false });
     return;
@@ -5562,10 +5642,15 @@ function refreshActiveCollectionAfterMembershipChange() {
   }
   // Collections open into the filter bar now (Phase 5): when a membership
   // change (tag/untag, add/remove) happens while an expression is active,
-  // re-evaluate it so photos that no longer match leave the grid.
-  if (window.VireoFilter && VireoFilter.hasFilters()) {
-    resetAndLoad({ preserveAnchor: false });
+  // re-evaluate it so photos that no longer match leave the grid — but only
+  // when the expression reads something this edit can actually move. A
+  // caller that doesn't say what it changed is treated as "anything".
+  if (!window.VireoFilter || !VireoFilter.hasFilters()) return;
+  if (mutations && VireoFilter.dependsOnMutation &&
+      !VireoFilter.dependsOnMutation(mutations)) {
+    return;
   }
+  resetAndLoad({ preserveAnchor: false, preserveScroll: true });
 }
 
 // When bulk-removing the keyword that currently drives the filter, the
@@ -5579,7 +5664,7 @@ function refreshActiveCollectionAfterMembershipChange() {
 function refreshActiveKeywordAfterRemoval(removedName) {
   if (!removedName) return;
   if (activeKeyword && activeKeyword === removedName) {
-    reloadBrowseResults();
+    reloadBrowseResults({ preserveScroll: true });
     return;
   }
   // While a collection is active, `refreshActiveCollectionAfterMembershipChange`
@@ -5597,7 +5682,7 @@ function refreshActiveKeywordAfterRemoval(removedName) {
   if (!rules) return;
   var needle = String(removedName).toLowerCase();
   if (JSON.stringify(rules).toLowerCase().indexOf(needle) !== -1) {
-    reloadBrowseResults();
+    reloadBrowseResults({ preserveScroll: true });
   }
 }
 
@@ -6524,6 +6609,12 @@ async function resetAndLoad(options) {
   var preserveCollection = !!(options && options.preserveCollection);
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
+  // ``preserveAnchor`` already restores the scroll position around the
+  // selected photo; the viewport anchor is the fallback for the reloads that
+  // have no single selection to restore (a batch tag, above all).
+  var scrollAnchor = (!anchor && !!(options && options.preserveScroll))
+    ? captureBrowseViewportAnchor()
+    : null;
   browseDatasetReady = false;
   expandedBrowseStacks.clear();
   browseStackMembers = {};
@@ -6571,11 +6662,15 @@ async function resetAndLoad(options) {
     return resetRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
   }
 
-  if (anchor) anchorScanDepth++;
+  if (anchor || scrollAnchor) anchorScanDepth++;
   try {
     var initialLoadStatus = await loadPhotos();
     if (initialLoadStatus !== true) return initialLoadStatus;
     if (!resetRequestIsCurrent()) return null;
+    if (scrollAnchor) {
+      await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+      return true;
+    }
     if (!anchor) return true;
 
     var card = await loadUntilPhotoRendered(
@@ -6618,7 +6713,7 @@ async function resetAndLoad(options) {
     });
     return true;
   } finally {
-    if (anchor) {
+    if (anchor || scrollAnchor) {
       anchorScanDepth = Math.max(0, anchorScanDepth - 1);
       if (anchorScanDepth === 0) {
         rearmInfiniteScrollObserver();
@@ -9498,7 +9593,7 @@ async function _afterPredictionMutation(photoIds, opts) {
   if (reloadingDetail) loadDetail(opts.photoId);
   loadKeywords();
   scheduleCollectionCountsRefresh();
-  refreshActiveCollectionAfterMembershipChange();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD, MUTATION_PREDICTION]);
   refreshPendingSyncBanner();
   // Only when the call actually accepted something. batch-accept returns
   // success with `accepted: 0` for a payload whose rows have all been decided
@@ -9627,7 +9722,7 @@ async function rejectDetailPredictions(predictionIds, photoId) {
   // active collection so the grid and counts don't lag behind the DB.
   // The accept path fans out the same way via _afterPredictionMutation.
   scheduleCollectionCountsRefresh();
-  refreshActiveCollectionAfterMembershipChange();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD, MUTATION_PREDICTION]);
 }
 
 async function loadSelectionPredictions(ids) {
@@ -10003,7 +10098,7 @@ async function setSelectionWildlifeExcluded(excluded) {
   // newer state request with counts and actions for the old photo ids.
   renderSelectionWildlifeState(getActiveSelection());
   scheduleCollectionCountsRefresh();
-  refreshActiveCollectionAfterMembershipChange();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_WILDLIFE]);
   // The batch endpoint skips missing/out-of-workspace IDs instead of
   // rejecting the whole selection; tell the user how many were skipped
   // so a partial apply is never invisible.
@@ -10030,7 +10125,7 @@ async function applySelectionKeyword(keywordId) {
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();
-  refreshActiveCollectionAfterMembershipChange();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -10052,7 +10147,7 @@ async function removeSelectionKeyword(keywordId) {
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();
-  refreshActiveCollectionAfterMembershipChange();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
   refreshActiveKeywordAfterRemoval(removedName);
   refreshPendingSyncBanner();
   showUndoToast();
@@ -10368,7 +10463,7 @@ async function confirmBatchKeyword() {
   loadSelectionKeywordSuggestions(ids);
   loadKeywords();
   scheduleCollectionCountsRefresh();
-  refreshActiveCollectionAfterMembershipChange();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -11606,7 +11701,7 @@ async function addKeyword(keyword) {
     }
     loadKeywords();
     scheduleCollectionCountsRefresh();
-    refreshActiveCollectionAfterMembershipChange();
+    refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -11625,7 +11720,7 @@ async function removeKeyword(photoId, keywordId) {
     loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
-    refreshActiveCollectionAfterMembershipChange();
+    refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -11806,8 +11901,13 @@ async function _afterLocationMutation(photoIds, detailPhotoId) {
     await filterByCollection(activeCollectionId);
     return;
   }
-  if (window.VireoFilter && VireoFilter.hasFilters()) {
-    resetAndLoad();
+  // A saved location is a location keyword, so the same rule as the keyword
+  // paths applies: re-run the query when the active expression can notice,
+  // and keep the user where they were when it does.
+  if (window.VireoFilter && VireoFilter.hasFilters() &&
+      (!VireoFilter.dependsOnMutation ||
+       VireoFilter.dependsOnMutation([MUTATION_KEYWORD]))) {
+    resetAndLoad({ preserveScroll: true });
     return;
   }
   if (photoIds && photoIds.length) {
@@ -13535,7 +13635,15 @@ async function _runPhotoDeepLink(photoId) {
             info.reason === 'quickSearchCleared' ||
             info.reason === 'filtersCleared'
           );
-          resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
+          // Same as the bootstrap handler: a membership-change refresh
+          // re-runs the expression already on screen, so keep the user's
+          // place in the grid.
+          var reloadOptions;
+          if (preserveAnchor) reloadOptions = { preserveAnchor: true };
+          else if (info && info.reason === 'expressionRefreshed') {
+            reloadOptions = { preserveScroll: true };
+          }
+          resetAndLoad(reloadOptions);
           loadSummary();
         },
         getScope: function() {
