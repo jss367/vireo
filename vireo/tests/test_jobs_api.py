@@ -6116,6 +6116,23 @@ def test_pending_archive_send_rejects_falsy_non_object_body(app_and_db, tmp_path
     assert "JSON object" in response.get_json()["error"]
 
 
+def test_pending_archive_send_rejects_top_level_json_null(app_and_db, tmp_path, monkeypatch):
+    """``json.loads('null')`` returns ``None`` and an ``if body is None:
+    body = {}`` fallback would start the destructive transfer with
+    ``sync_first=False`` for a caller who explicitly said ``null``. Treat
+    it the same as any other non-object JSON body and return 400.
+    """
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    response = app.test_client().post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        data="null", content_type="application/json",
+    )
+    assert response.status_code == 400, response.get_json()
+    assert "JSON object" in response.get_json()["error"]
+
+
 def test_pending_archive_finds_staging_unlinked_from_its_own_workspace(app_and_db, tmp_path, monkeypatch):
     """Folder membership is not what defines the transfer -- the path is.
 

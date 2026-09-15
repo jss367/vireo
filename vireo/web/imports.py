@@ -486,9 +486,12 @@ def create_imports_blueprint(
                 body = json.loads(raw)
             except ValueError:
                 return json_error("Request body must be valid JSON")
-            if body is None:
-                body = {}
-            elif not isinstance(body, dict):
+            # A top-level JSON ``null`` parses to ``None`` -- treat it the
+            # same as ``false``, ``0``, ``[]`` and other falsy non-objects
+            # here rather than swallowing it into ``{}``. Defaulting to
+            # ``{}`` would start the destructive transfer with
+            # ``sync_first=False`` for a caller who explicitly said ``null``.
+            if not isinstance(body, dict):
                 return json_error("Request body must be a JSON object")
         else:
             body = {}
