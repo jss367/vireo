@@ -194,6 +194,25 @@ def _staging_folder_ids(db, staging_destination):
     return _folder_ids_under(ws_folders, staging_destination)
 
 
+def _staged_photo_ids(db, folder_ids):
+    """Photo ids in the staging tree, snapshotted before the transfer.
+
+    The residual re-check needs a scope that survives ``move_folder(...,
+    merge=True, allow_tracked_merge=True)``: source folder rows can be
+    folded into destination folders, but photo rows keep their ids.
+    """
+    if not folder_ids:
+        return []
+    ids = []
+    for chunk in (folder_ids[i:i + 800] for i in range(0, len(folder_ids), 800)):
+        placeholders = ",".join("?" * len(chunk))
+        ids.extend(row[0] for row in db.conn.execute(
+            f"SELECT id FROM photos WHERE folder_id IN ({placeholders})",
+            tuple(chunk),
+        ).fetchall())
+    return ids
+
+
 # How many times the pre-transfer sync re-reads the queue before giving up on
 # draining it. Job admission is workspace-scoped and the rating/keyword routes
 # are ordinary requests, so the user can queue an edit while the sync runs. Two
@@ -203,7 +222,7 @@ def _staging_folder_ids(db, staging_destination):
 _MAX_SYNC_DRAIN_PASSES = 5
 
 
-def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
+def _sync_staged_metadata(db, archive, progress, folder_ids):
     """Write the staged import's queued sidecar edits, before it leaves.
 
     Runs against the local staging copy on purpose. A verified transfer
@@ -215,11 +234,12 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
     were trying to avoid. ``considered`` maps every change token the drain
     looked at to its photo.
 
-    Held under the same app-wide lock as ``/api/jobs/sync``. Job admission is
-    workspace-scoped and ``sync_to_xmp`` takes its sidecar locks per call, so
-    a sync running for another workspace over a folder shared with this one
-    would otherwise read-modify-write the same .xmp concurrently -- last
-    writer wins, both queues cleared.
+    The caller holds the app-wide ``sync_job_lock`` across the whole send --
+    this sync, the move, and the residual re-check -- so a sibling
+    workspace's ordinary ``/api/jobs/sync`` cannot slip in against the same
+    sidecars mid-transfer. ``sync_to_xmp`` takes its own sidecar locks per
+    call, so without that outer lock two writers on one .xmp would settle on
+    the last one and clear both queues.
 
     The queue is walked in chronological runs (see
     ``pending_change_runs_in_folders``) so a photo shared between workspaces
@@ -238,10 +258,6 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
     def sync_progress(current, total):
         progress(current, total, "", "Writing metadata to sidecars")
 
-    if not sync_job_lock.acquire(blocking=False):
-        # Never a silent stall: the bar says what it is waiting for.
-        progress(0, 0, "", "Waiting for current XMP sync")
-        sync_job_lock.acquire()
     transferring_ws = db._ws_id()
     considered = {}
     try:
@@ -301,11 +317,10 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
         })
     finally:
         db.set_active_workspace(transferring_ws)
-        sync_job_lock.release()
     return synced, considered
 
 
-def _residual_staged_changes(db, folder_ids, considered):
+def _residual_staged_changes(db, photo_ids, considered):
     """Count edits queued too late to have travelled with the transfer.
 
     Blocking the rating and keyword routes for the length of a NAS transfer
@@ -318,16 +333,13 @@ def _residual_staged_changes(db, folder_ids, considered):
     sync_flags_to_xmp off), and reporting that as an edit that "missed the
     transfer" would be a different claim than the true one. Matched on
     ``change_token`` rather than id because SQLite reuses a cleared row's id
-    for the next insert. Folder rows can be folded away by a merge commit, in
-    which case there is nothing left to ask about and the count is zero.
+    for the next insert. Scoped by photo ids captured before the move, not by
+    folder ids: ``move_folder(..., merge=True, allow_tracked_merge=True)``
+    can fold source folder rows into destination folders, so a folder-id
+    scope would silently miss edits whose photos are still queued.
     """
     try:
-        return sum(
-            1
-            for _workspace_id, entries in db.pending_change_runs_in_folders(folder_ids)
-            for _change_id, token, _photo_id in entries
-            if token not in considered
-        )
+        return len(db.pending_change_tokens_for_photos(photo_ids) - considered.keys())
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
         return 0
@@ -487,23 +499,49 @@ def create_imports_blueprint(
                         # local disk. Recomputed here rather than trusting the
                         # count the banner showed, so edits queued between the
                         # click and the job travel with the transfer too.
-                        folder_ids = _staging_folder_ids(
-                            thread_db, archive["staging_destination"]) if sync_first else []
-                        synced, considered = _sync_staged_metadata(
-                            thread_db, archive, progress, sync_job_lock,
-                            folder_ids) if sync_first else (0, {})
-
-                        result = send_pending_archive(
-                            thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
-                            guard_folder=guard_move_folder, progress_cb=progress,
-                        )
                         if sync_first:
-                            # Unconditionally, not just when something synced:
-                            # a queue holding only changes this workspace
-                            # declines to write syncs nothing, and an edit made
-                            # during the copy would then go unreported.
-                            residual = _residual_staged_changes(
-                                thread_db, folder_ids, considered)
+                            folder_ids = _staging_folder_ids(
+                                thread_db, archive["staging_destination"])
+                            # Captured before the transfer because
+                            # ``move_folder(..., merge=True,
+                            # allow_tracked_merge=True)`` can fold source
+                            # folder rows into destination folders, and the
+                            # residual re-check must not lose edits when its
+                            # folder scope has been folded away.
+                            staged_photo_ids = _staged_photo_ids(thread_db, folder_ids)
+                            # One app-wide lock across the sync, the move, and
+                            # the residual re-check. ``/api/jobs/sync`` on
+                            # another workspace could otherwise touch the same
+                            # sidecars between the sync and the copy, clearing
+                            # its queue while the NAS ends up with whichever
+                            # version won -- and the residual check would then
+                            # see nothing queued and report all clear.
+                            if not sync_job_lock.acquire(blocking=False):
+                                progress(0, 0, "", "Waiting for current XMP sync")
+                                sync_job_lock.acquire()
+                        else:
+                            folder_ids = []
+                            staged_photo_ids = []
+                        try:
+                            synced, considered = _sync_staged_metadata(
+                                thread_db, archive, progress,
+                                folder_ids) if sync_first else (0, {})
+
+                            result = send_pending_archive(
+                                thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                                guard_folder=guard_move_folder, progress_cb=progress,
+                            )
+                            if sync_first:
+                                # Unconditionally, not just when something synced:
+                                # a queue holding only changes this workspace
+                                # declines to write syncs nothing, and an edit made
+                                # during the copy would then go unreported.
+                                residual = _residual_staged_changes(
+                                    thread_db, staged_photo_ids, considered)
+                        finally:
+                            if sync_first:
+                                sync_job_lock.release()
+                        if sync_first:
                             summary = result["summary"]
                             if synced:
                                 summary = (

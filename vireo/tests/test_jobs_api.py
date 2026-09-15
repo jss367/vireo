@@ -5282,7 +5282,8 @@ def test_pending_archive_sync_first_writes_a_rating_only_sidecar(app_and_db, tmp
 
     sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
     assert len(sidecars) == 1, sidecars
-    assert "3" in re.search(r'Rating="(\d+)"', sidecars[0].read_text()).group(1)
+    rating = re.search(r'Rating="(\d+)"', sidecars[0].read_text())
+    assert rating and rating.group(1) == "3", sidecars[0].read_text()
     assert db.count_pending_changes() == 0
 
 

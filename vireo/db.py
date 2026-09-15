@@ -6863,6 +6863,24 @@ class Database:
             ).fetchone()[0]
         return total
 
+    def pending_change_tokens_for_photos(self, photo_ids):
+        """Return the set of ``change_token`` strings still queued for these photos.
+
+        The residual check after a NAS transfer needs a stable scope: the
+        source folder rows can be folded into destination folders by
+        ``move.move_folder(..., merge=True, allow_tracked_merge=True)``, so
+        the folder-id scope the sync ran under is not usable afterwards.
+        Photo ids are, because photo rows survive a folder merge.
+        """
+        tokens = set()
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" * len(chunk))
+            tokens.update(row[0] for row in self.conn.execute(
+                f"SELECT change_token FROM pending_changes WHERE photo_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall())
+        return tokens
+
     def pending_change_runs_in_folders(self, folder_ids):
         """Return ``[(workspace_id, [(change_id, change_token, photo_id), ...]), ...]``, in queue order.
 
