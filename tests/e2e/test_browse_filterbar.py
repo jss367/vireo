@@ -537,6 +537,39 @@ def test_shortcuts_narrow_collection_with_any_rules(live_server, page, shortcut)
     assert original in page.evaluate("VireoFilter.getUserRules().rules")
 
 
+@pytest.mark.parametrize("mode", ["any", "none"])
+@pytest.mark.parametrize("field,value,selector", [
+    ("flag", "flagged", '[data-flag="flagged"]'),
+    ("color_label", "red", '.vf-quick-colors [data-color="red"]'),
+])
+def test_enum_shortcuts_preserve_advanced_root(live_server, page, mode, field, value, selector):
+    """An OR/NOT leaf must not look like a selected narrowing shortcut."""
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+    if field == "flag":
+        db.update_photo_flag(photo_id, value)
+    else:
+        db.set_color_label(photo_id, value)
+    _open_browse(page, live_server)
+    original = {"mode": mode, "rules": [
+        {"field": field, "op": "is", "value": value},
+        {"field": "filename", "op": "is", "value": "hawk2.jpg"},
+    ]}
+    page.evaluate("rules => VireoFilter.loadExpression(rules)", original)
+    _wait_total(page, 2 if mode == "any" else 3)
+    if field == "color_label":
+        page.locator(".vf-filters-btn").click()
+    button = page.locator(selector)
+    expect(button).not_to_have_class("active")
+    button.click()
+    _wait_total(page, 1 if mode == "any" else 0)
+    expect(button).to_have_class("active")
+    button.click()
+    _wait_total(page, 2 if mode == "any" else 3)
+    expect(button).not_to_have_class("active")
+    assert page.evaluate("VireoFilter.getUserRules().rules") == [original]
+
+
 def test_missing_tag_shortcuts_restore_pause_and_clear(live_server, page):
     _open_browse(page, live_server)
     species = page.locator('[data-missing="has_species"]')

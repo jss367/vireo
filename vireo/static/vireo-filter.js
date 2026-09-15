@@ -855,6 +855,9 @@
   }
 
   function quickEnumValues(field) {
+    // OR/NOT leaves belong to the advanced expression, not an active
+    // narrowing shortcut. Clicking a shortcut will AND it with that tree.
+    if (state.root.mode !== 'all') return [];
     const rule = findRootRule(field);
     if (!rule) return [];
     if (rule.op === 'in' && Array.isArray(rule.value)) return rule.value;
