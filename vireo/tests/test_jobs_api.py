@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 import time
 
@@ -5218,8 +5219,8 @@ def test_pending_archive_sync_first_writes_sidecars_before_the_transfer(app_and_
     assert response.status_code == 200, response.get_json()
     sent = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert sent["status"] == "completed", sent
-    assert sent["result"]["sidecars_synced"] == 1
-    assert sent["summary"].startswith("Wrote metadata to 1 sidecar.")
+    assert sent["result"]["metadata_synced"] == 1
+    assert sent["summary"].startswith("Synced metadata for 1 photo.")
 
     # The originals are gone from local disk, so a sidecar holding the keyword
     # on the NAS can only have been written before the move.
@@ -5247,10 +5248,73 @@ def test_pending_archive_send_leaves_sidecars_alone_without_sync_first(app_and_d
     sent = wait_for_job_via_client(
         client, client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["job_id"])
     assert sent["status"] == "completed", sent
-    assert "sidecars_synced" not in sent["result"]
+    assert "metadata_synced" not in sent["result"]
     assert not list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
     # Still queued, so it can be synced later over the mount.
     assert db.count_pending_changes() == 1
+
+
+def test_pending_archive_sync_first_writes_a_rating_only_sidecar(app_and_db, tmp_path, monkeypatch):
+    """A rating with no sidecar yet has no later chance: the file is about to go.
+
+    The ordinary sync job leaves rating-only photos alone rather than
+    littering a sidecar beside every rated photo, and can retry once
+    something else creates one. Before a NAS transfer there is no retry --
+    the originals are deleted, so a rating cleared from the queue without a
+    write is gone for good.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "rating", "3")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "3" in re.search(r'Rating="(\d+)"', sidecars[0].read_text()).group(1)
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_sync_first_waits_for_a_running_xmp_sync(app_and_db, tmp_path, monkeypatch):
+    """Two writers on one sidecar means last-writer-wins, both queues cleared."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    # Hold the app-wide sync lock the ordinary /api/jobs/sync job takes. The
+    # pre-transfer sync must block on it rather than racing the same .xmp.
+    assert app._sync_job_lock.acquire(blocking=False)
+    started = client.post(f"/api/import/pending-archives/{archive_id}/send",
+                          json={"sync_first": True})
+    assert started.status_code == 200, started.get_json()
+    try:
+        time.sleep(1)
+        assert db.count_pending_changes() == 1, "sync ran while the lock was held"
+        assert not (tmp_path / "NAS").exists(), "transfer ran ahead of its sync"
+    finally:
+        app._sync_job_lock.release()
+    sent = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert db.count_pending_changes() == 0
 
 
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):

@@ -682,14 +682,24 @@ class SidecarEditor:
             log.info("Removed keywords from %s: %s", self.path, removed)
         return bool(removed)
 
-    def set_rating(self, rating):
+    def set_rating(self, rating, create=False):
         """Set xmp:Rating on a sidecar that exists or is already being written.
 
         A rating alone never creates a sidecar. Within one editor an earlier
         keyword, flag, location or edit mutation may have created one, and the
         rating then belongs in it -- which is why callers apply the rating
         last.
+
+        ``create`` opts out of that, for the one caller whose skip would be
+        permanent: the sync that runs before a NAS transfer. That transfer
+        deletes the local originals once verified, so a rating skipped here
+        has nowhere left to land -- every later sync would find no sidecar
+        and skip it again, while the queued change was already cleared.
         """
+        if create:
+            return self._set_attributes(
+                self._description(), {f"{{{NS_XMP}}}Rating": str(rating)},
+            )
         if not self._dirty and not self._readable():
             return False
         desc = self._find_description()

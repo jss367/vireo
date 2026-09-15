@@ -194,15 +194,25 @@ def _staging_folder_ids(db, staging_destination):
     return _folder_ids_under(ws_folders, staging_destination)
 
 
-def _sync_staged_metadata(db, archive, progress):
+def _sync_staged_metadata(db, archive, progress, sync_job_lock):
     """Write the staged import's queued sidecar edits, before it leaves.
 
     Runs against the local staging copy on purpose. A verified transfer
     deletes the originals, so from then on the same sync has to write over
     the NAS connection -- and only while that mount is up. Returns the number
-    of sidecar writes, or raises so the caller abandons the transfer: the
-    user asked for both halves, and silently sending stale sidecars to the
-    NAS is the outcome they were trying to avoid.
+    of photos synced, or raises so the caller abandons the transfer: the user
+    asked for both halves, and silently sending stale sidecars to the NAS is
+    the outcome they were trying to avoid.
+
+    Held under the same app-wide lock as ``/api/jobs/sync``. Job admission is
+    workspace-scoped and ``sync_to_xmp`` takes its sidecar locks per call, so
+    a sync running for another workspace over a folder shared with this one
+    would otherwise read-modify-write the same .xmp concurrently -- last
+    writer wins, both queues cleared.
+
+    ``create_missing_sidecars`` is on here and nowhere else: this is the last
+    moment a rating-only photo can get a sidecar at all, because the transfer
+    is about to delete the file it would sit next to.
     """
     import sync as sync_mod
 
@@ -214,7 +224,17 @@ def _sync_staged_metadata(db, archive, progress):
     def sync_progress(current, total):
         progress(current, total, "", "Writing metadata to sidecars")
 
-    result = sync_mod.sync_to_xmp(db, progress_callback=sync_progress, change_ids=change_ids)
+    if not sync_job_lock.acquire(blocking=False):
+        # Never a silent stall: the bar says what it is waiting for.
+        progress(0, 0, "", "Waiting for current XMP sync")
+        sync_job_lock.acquire()
+    try:
+        result = sync_mod.sync_to_xmp(
+            db, progress_callback=sync_progress, change_ids=change_ids,
+            create_missing_sidecars=True,
+        )
+    finally:
+        sync_job_lock.release()
     if not result["ok"]:
         raise ValueError(
             "Metadata sync failed, so nothing was sent: "
@@ -239,6 +259,7 @@ def create_imports_blueprint(
     chain_after_move,
     bulk_gps_location_payload,
     guard_move_folder,
+    sync_job_lock,
 ):
     """Build the imports blueprint.
 
@@ -361,18 +382,19 @@ def create_imports_blueprint(
                         # local disk. Recomputed here rather than trusting the
                         # count the banner showed, so edits queued between the
                         # click and the job travel with the transfer too.
-                        sidecars = _sync_staged_metadata(thread_db, archive, progress) if sync_first else 0
+                        synced = _sync_staged_metadata(
+                            thread_db, archive, progress, sync_job_lock) if sync_first else 0
 
                         result = send_pending_archive(
                             thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
                             guard_folder=guard_move_folder, progress_cb=progress,
                         )
-                        if sidecars:
+                        if synced:
                             result = {
-                                **result, "sidecars_synced": sidecars,
+                                **result, "metadata_synced": synced,
                                 "summary": (
-                                    f"Wrote metadata to {sidecars} sidecar"
-                                    f"{'' if sidecars == 1 else 's'}. {result['summary']}"
+                                    f"Synced metadata for {synced} photo"
+                                    f"{'' if synced == 1 else 's'}. {result['summary']}"
                                 ),
                             }
                         thread_db.conn.execute(
