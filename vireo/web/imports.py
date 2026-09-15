@@ -239,7 +239,11 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
     active workspace's tree so the sync resolves sidecar paths even when the
     staging tree has been unlinked from its owning workspace. Membership is
     not what defines the transfer -- the path is -- and the workspace-scoped
-    map would otherwise fail every photo as "folder not accessible".
+    map would otherwise fail every photo as "folder not accessible". The
+    same shape drives ``require_workspace_membership=False``: an unlinked
+    staged photo's assigned-location lookup would otherwise raise "photo
+    not in workspace" and drop every queued ``location`` change on the
+    floor, so that check is skipped for the pre-transfer sync too.
     """
     import sync as sync_mod
 
@@ -264,6 +268,13 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
             change_ids=[cid for _key, cid, _pid in pending],
             create_missing_sidecars=True,
             folder_paths=folder_paths,
+            # Same reason ``folder_paths`` is passed: the staging tree may
+            # have been unlinked from the workspace that imported it, and
+            # the default workspace-membership verification on
+            # ``get_assigned_photo_location`` would then refuse every
+            # queued ``location`` change for those photos even though the
+            # sidecar path resolves fine.
+            require_workspace_membership=False,
         )
         # A change this workspace declines to write to XMP is reported as a
         # failure so the ordinary sync job lands in history as "failed". It is

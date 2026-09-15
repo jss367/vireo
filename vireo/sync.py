@@ -338,7 +338,7 @@ def _sync_result(synced, failures):
 
 
 def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
-                folder_paths=None):
+                folder_paths=None, require_workspace_membership=True):
     """Write pending changes to XMP sidecars.
 
     Args:
@@ -360,6 +360,15 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             what defines the transfer, the path is -- and the workspace-
             scoped map would otherwise fail every photo as "folder not
             accessible".
+        require_workspace_membership: gate the assigned-location lookup on
+            the photo being visible in the active workspace. Off for the
+            pre-transfer sync of a pending NAS archive: the same
+            unlinked-staging shape that ``folder_paths`` covers for path
+            resolution also breaks ``get_assigned_photo_location``, whose
+            default verification would refuse an unlinked photo and fail
+            every queued ``location`` change with "photo not in workspace"
+            -- another way "Sync metadata and send to NAS" would silently
+            miss a supported change on files it can otherwise reach.
 
     Returns:
         dict with synced, failed, failures counts
@@ -437,7 +446,10 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             if not plan.sync_location:
                 continue
             try:
-                locations[photo_id] = db.get_assigned_photo_location(photo_id)
+                locations[photo_id] = db.get_assigned_photo_location(
+                    photo_id,
+                    verify_workspace=require_workspace_membership,
+                )
             except Exception as e:
                 # Historically this lookup ran inside the per-photo try, so a
                 # photo the workspace can no longer see failed alone rather
