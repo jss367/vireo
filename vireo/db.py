@@ -5854,33 +5854,43 @@ class Database:
                             # rsync ``--ignore-existing`` skipped this
                             # file), so treating it as ``already_present``
                             # is correct.
-                            # pending_changes.photo_id cascades on delete,
-                            # so a sidecar edit queued against this staged row
-                            # -- by a linked sibling workspace during the copy,
-                            # say -- would vanish here along with the row. It
-                            # describes the same image the survivor represents,
-                            # so re-file it rather than lose it.
                             #
+                            # But intra-staged and real collisions differ on
+                            # what the queued edits mean. For a real
+                            # (byte-identical) collision the staged and
+                            # archive rows describe the same image, so a
+                            # sidecar edit queued against this staged row
+                            # applies equally to the survivor: re-file it
+                            # rather than lose it to the cascade, and
+                            # materialize the queued values onto the
+                            # survivor's own ``photos`` and ``photo_keywords``
+                            # rows so the catalog stays in step with the
+                            # sidecar the later sync will publish.
                             # ``_reassign_photo_state`` mirrors those queued
-                            # values onto the survivor's own ``photos`` and
-                            # ``photo_keywords`` rows before the delete. The
-                            # staged row already carries the user's most recent
-                            # rating and keyword associations (the write
-                            # endpoints update both catalog and queue), and
-                            # this delete would otherwise take them with it --
-                            # leaving the survivor's catalog reading the
-                            # pre-edit value even after the later sync writes
-                            # the queued value to the sidecar and clears the
-                            # pending row. Apply first, then re-file the
-                            # pending changes, then delete.
-                            survivor = (collision["id"] if real_collision
-                                        else staged_normalized_claimed.get(staged_norm))
-                            if survivor is not None and survivor != pid:
-                                self._reassign_photo_state(pid, survivor)
-                                if self._reassign_pending_changes(pid, survivor):
-                                    counts["pending_reassigned_to"].append(survivor)
-                                staged_normalized_claimed.setdefault(
-                                    staged_norm, survivor)
+                            # values (rating, flag, keyword add/remove); the
+                            # write endpoints keep catalog and queue in step,
+                            # so this delete would otherwise take the user's
+                            # most recent values with it.
+                            #
+                            # An intra-staged case-alias is different: rsync
+                            # ``--ignore-existing`` skipped THIS file's bytes,
+                            # so it may represent a completely different
+                            # image than the earlier staged row that claimed
+                            # the slot. Reassigning its queued rating or
+                            # keywords onto that survivor would silently
+                            # write this image's metadata to the wrong photo
+                            # -- same failure mode as the phantom branch
+                            # below. Let the cascade drop them; that loses
+                            # the queued edits, but misfiling them onto the
+                            # wrong picture (invisibly) is worse.
+                            if real_collision:
+                                survivor = collision["id"]
+                                if survivor != pid:
+                                    self._reassign_photo_state(pid, survivor)
+                                    if self._reassign_pending_changes(pid, survivor):
+                                        counts["pending_reassigned_to"].append(survivor)
+                                    staged_normalized_claimed.setdefault(
+                                        staged_norm, survivor)
                             self.conn.execute(
                                 "DELETE FROM photo_keywords "
                                 "WHERE photo_id = ?",
@@ -21602,34 +21612,52 @@ class Database:
         values to the survivor here so both stay in step.
 
         Only the edits that ``sync_to_xmp`` actually writes to the sidecar
-        are mirrored: rating, flag, keyword add/remove. Keyword rows
-        transfer by ``keyword_id`` from the staged photo's own
-        ``photo_keywords``, which dodges the ambiguity of resolving keyword
-        names -- ``keywords.UNIQUE(name, parent_id)`` allows the same name
-        under different parents. The union goes through the shared
-        provenance fold rather than ``INSERT OR IGNORE``: where both rows
-        exist, IGNORE would keep whichever stamp was already there, so a
-        hand-added keyword on the staged row could come out the other side
-        wearing a weaker source and be deleted by a later retirement pass.
+        are mirrored: rating, flag, keyword add/remove. Keyword adds only
+        propagate the ``photo_keywords`` rows for keywords a queued
+        ``keyword_add`` names -- byte-identity does not imply identical
+        catalog metadata, so a staged row's OWN pre-existing keyword links
+        (imported from its sidecar, tagged by a scan, or auto-classified
+        before the transfer was requested) would otherwise silently tag
+        the archive photo alongside the genuinely queued edit. Rows
+        transfer by ``keyword_id`` from the staged photo's
+        ``photo_keywords`` joined against ``keywords.name``, which dodges
+        the ambiguity of re-resolving names --
+        ``keywords.UNIQUE(name, parent_id)`` allows the same name under
+        different parents, and picking the row already linked to the
+        staged photo picks the parent the write endpoint chose. The union
+        goes through the shared provenance fold rather than
+        ``INSERT OR IGNORE``: where both rows exist, IGNORE would keep
+        whichever stamp was already there, so a hand-added keyword on the
+        staged row could come out the other side wearing a weaker source
+        and be deleted by a later retirement pass.
         A queued ``keyword_remove`` matches the survivor's rows by name,
         case-insensitively. ``_remove_planned_keywords`` matches sidecar
         entries through ``keyword_match_key``, an ASCII case fold, so a
-        binary ``=`` here would strip the term from the sidecar and leave it
-        in the catalog -- the divergence this helper exists to prevent.
-        ``COLLATE NOCASE`` is the same fold, and is what every other keyword
-        lookup in this file uses.
+        binary ``=`` here would strip the term from the sidecar and leave
+        it in the catalog -- the divergence this helper exists to
+        prevent. ``COLLATE NOCASE`` is the same fold, and is what every
+        other keyword lookup in this file uses.
         """
-        self.conn.execute(
-            "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
-            "SELECT ?, keyword_id, source FROM photo_keywords WHERE photo_id = ? "
-            + KEYWORD_SOURCE_CONFLICT_SQL,
-            (to_photo_id, from_photo_id),
-        )
         changes = self.conn.execute(
             "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
             "ORDER BY created_at, id",
             (from_photo_id,),
         ).fetchall()
+        queued_add_names = [
+            c["value"] for c in changes
+            if c["change_type"] == "keyword_add" and c["value"]
+        ]
+        if queued_add_names:
+            placeholders = ",".join("?" * len(queued_add_names))
+            self.conn.execute(
+                "INSERT INTO photo_keywords "
+                "(photo_id, keyword_id, source) "
+                "SELECT ?, pk.keyword_id, pk.source FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                f"WHERE pk.photo_id = ? AND k.name IN ({placeholders}) "
+                + KEYWORD_SOURCE_CONFLICT_SQL,
+                (to_photo_id, from_photo_id, *queued_add_names),
+            )
         for change in changes:
             change_type = change["change_type"]
             value = change["value"]

@@ -11237,8 +11237,12 @@ def test_merge_staged_tree_keeps_the_stronger_keyword_source(db, tmp_path):
                            file_size=40, file_mtime=1.0, file_hash="SAME4")
     keyword = db.add_keyword("Tern")
     # Survivor holds it weakly; the staged row is where the user said so.
+    # The write endpoint pairs the hand-tag with a queued keyword_add
+    # so the sync will propagate it -- and the reassignment materializes
+    # it onto the survivor.
     db.tag_photo(survivor, keyword, source=KEYWORD_SOURCE_UNKNOWN)
     db.tag_photo(dropped, keyword, source="human")
+    db.queue_change(dropped, "keyword_add", "Tern")
 
     db.merge_staged_tree_into_archive(stage_root, str(archive / "USA"))
 
@@ -12261,16 +12265,20 @@ def test_merge_staged_tree_phantom_alias_updates_collision_map_for_later_iterati
                              extension=".raf", file_size=100,
                              file_mtime=1.0, file_hash="FIRSTBYTES")
     # Second staged (case alias): hash HAPPENS to equal phantom's stale
-    # hash. Without the fix, ``real_collision`` in this iteration
-    # compares against the deleted phantom row and resolves the survivor
-    # to the deleted id -- FK violation on the pending_changes update.
+    # hash. Without the collision-map fix, ``real_collision`` in this
+    # iteration would compare against the deleted phantom row and try to
+    # reassign onto its stale id -- FK violation on the pending_changes
+    # update.
     second_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
                               extension=".raf", file_size=50,
                               file_mtime=2.0, file_hash="PHANTOMHASH")
-    # A queued edit on the second staged row makes ``_reassign_pending_changes``
-    # actually touch a row: an empty update matches zero rows and the FK
-    # check never fires, so the bug is only visible when there is an edit
-    # to move.
+    # A queued edit on the second staged row is what surfaced the FK
+    # violation historically (an empty update matches zero rows and never
+    # fires the FK check). With the collision map refreshed after the
+    # phantom promotion, the second iteration correctly resolves to an
+    # intra-staged case-alias against the reparented survivor, and the
+    # queued edit is cascade-dropped -- see the follow-up test below for
+    # why writing this staged row's edit onto the survivor would be wrong.
     db.queue_change(second_pid, "keyword_add", "Osprey")
 
     import move
@@ -12280,8 +12288,7 @@ def test_merge_staged_tree_phantom_alias_updates_collision_map_for_later_iterati
 
     # One survivor in the target folder (the first staged row), the
     # phantom is gone, the second case-alias was dropped as
-    # ``already_present``, and its queued edit was re-filed onto the
-    # survivor rather than aborting the merge on a stale-id FK.
+    # ``already_present``, and the merge did NOT abort on a stale-id FK.
     rows = db.conn.execute(
         "SELECT id, filename FROM photos WHERE folder_id = ?", (date_id,),
     ).fetchall()
@@ -12295,10 +12302,127 @@ def test_merge_staged_tree_phantom_alias_updates_collision_map_for_later_iterati
     ).fetchone() is None
     assert counts["new_photos"] == 1
     assert counts["already_present"] == 1
-    # The queued edit survives on the surviving staged row.
+    # The queued edit is cascade-dropped, not reassigned: the second
+    # staged row's bytes were skipped by rsync so they describe a
+    # different image than the survivor.
     assert db.conn.execute(
-        "SELECT photo_id FROM pending_changes WHERE value = 'Osprey'"
-    ).fetchone()["photo_id"] == first_pid
+        "SELECT COUNT(*) FROM pending_changes WHERE value = 'Osprey'"
+    ).fetchone()[0] == 0
+
+
+def test_merge_staged_tree_intra_staged_case_alias_drops_queued_edits(
+    db, tmp_path, monkeypatch,
+):
+    """An intra-staged case-alias collision must NOT reassign queued edits
+    onto the earlier staged survivor.
+
+    On a case-insensitive target, two staged files whose names differ
+    only in case land on the same on-disk slot. rsync
+    ``--ignore-existing`` writes the first and skips the second, so the
+    second row's bytes never reach disk -- they may represent a
+    completely different image. Reassigning a rating or keyword queued on
+    the skipped row would silently write it onto the wrong photo (same
+    failure mode as the phantom branch). Let the cascade drop the queued
+    edits.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # Two staged photos with case-differing names and DIFFERENT bytes.
+    first_pid = db.add_photo(folder_id=stage_leaf, filename="IMG.RAF",
+                             extension=".raf", file_size=100,
+                             file_mtime=1.0, file_hash="FIRSTBYTES")
+    second_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                              extension=".raf", file_size=200,
+                              file_mtime=2.0, file_hash="OTHERBYTES")
+    # A sibling workspace queues edits on the second staged row during
+    # the copy -- they describe THIS row's bytes, not the first's.
+    db.queue_change(second_pid, "rating", "5")
+    db.queue_change(second_pid, "keyword_add", "Falcon")
+
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # First staged reparented, second dropped as ``already_present``.
+    rows = db.conn.execute(
+        "SELECT id FROM photos WHERE folder_id = ?", (date_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == first_pid
+    assert counts["already_present"] == 1
+    assert second_pid in counts["dropped_photo_ids"]
+    # No pending changes were reassigned onto the survivor.
+    assert counts["pending_reassigned_to"] == [], counts
+    survivor_changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (first_pid,),
+    ).fetchall()
+    assert survivor_changes == [], survivor_changes
+    # And the survivor's catalog rating/keywords were not touched.
+    survivor_row = db.conn.execute(
+        "SELECT rating FROM photos WHERE id = ?", (first_pid,)
+    ).fetchone()
+    assert survivor_row["rating"] == 0, survivor_row
+
+
+def test_merge_staged_tree_byte_identical_merge_only_copies_queued_keyword_adds(
+    db, tmp_path,
+):
+    """A byte-identical merge propagates only keywords represented by
+    queued ``keyword_add`` edits, not the staged row's entire keyword set.
+
+    Identical bytes don't imply identical catalog metadata: the staged
+    row may still carry pre-existing keyword links (imported from its
+    sidecar, tagged by a scan, or auto-classified before the transfer
+    was requested). Only the queued keyword_adds represent the user's
+    edit intent for THIS merge, so only those should tag the survivor.
+    """
+    ws = db._active_workspace_id
+    archive = tmp_path / "arch"
+    (archive / "USA").mkdir(parents=True)
+    (archive / "USA" / "bird.raf").write_bytes(b"same bytes")
+
+    base_id = db.add_folder(str(archive / "USA"), name="USA")
+    survivor = db.add_photo(folder_id=base_id, filename="bird.raf",
+                            extension=".raf", file_size=10,
+                            file_mtime=1.0, file_hash="SAME")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage_root = db.add_folder(str(tmp_path / "stage" / "USA"), name="USA",
+                               workspace_root=False)
+    dropped = db.add_photo(folder_id=stage_root, filename="bird.raf",
+                           extension=".raf", file_size=10,
+                           file_mtime=1.0, file_hash="SAME")
+
+    # The staged row carries an old imported keyword (a prior scan, say),
+    # plus a keyword that will be queued as the user's intent.
+    old_kw = db.add_keyword("Imported")
+    new_kw = db.add_keyword("Osprey")
+    db.tag_photo(dropped, old_kw)
+    db.tag_photo(dropped, new_kw)
+    # Only ``Osprey`` was queued -- ``Imported`` is a leftover association
+    # that the user did not intend to apply to the archive photo.
+    db.queue_change(dropped, "keyword_add", "Osprey")
+
+    db.merge_staged_tree_into_archive(stage_root, str(archive / "USA"))
+
+    survivor_kws = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+        (survivor,)).fetchall()
+    assert [r["keyword_id"] for r in survivor_kws] == [new_kw], survivor_kws
 
 
 def test_merge_staged_tree_intra_staged_case_alias_case_sensitive_volume(
