@@ -208,10 +208,11 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
 
     Runs against the local staging copy on purpose. A verified transfer
     deletes the originals, so from then on the same sync has to write over
-    the NAS connection -- and only while that mount is up. Returns the number
-    of photos synced, or raises so the caller abandons the transfer: the user
-    asked for both halves, and silently sending stale sidecars to the NAS is
-    the outcome they were trying to avoid.
+    the NAS connection -- and only while that mount is up. Returns
+    ``(photos_synced, considered_change_tokens)``; raises so the caller abandons
+    the transfer when a write actually fails, because the user asked for both
+    halves and silently sending stale sidecars to the NAS is the outcome they
+    were trying to avoid.
 
     Held under the same app-wide lock as ``/api/jobs/sync``. Job admission is
     workspace-scoped and ``sync_to_xmp`` takes its sidecar locks per call, so
@@ -219,11 +220,10 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
     would otherwise read-modify-write the same .xmp concurrently -- last
     writer wins, both queues cleared.
 
-    Each workspace holding edits for these photos is synced under its own
-    active workspace, because ``sync_to_xmp`` reads both the queue and the
-    sync-to-XMP settings through ``_ws_id()``. The loop re-reads the queue
-    after every pass so an edit made while the sync was running still travels
-    with the transfer.
+    The queue is walked in chronological runs (see
+    ``pending_change_runs_in_folders``) so a photo shared between workspaces
+    ends up with the edit the user made last, and re-read after every pass so
+    an edit made while the sync was running still travels with the transfer.
 
     ``create_missing_sidecars`` is on here and nowhere else: this is the last
     moment a rating-only photo can get a sidecar at all, because the transfer
@@ -231,8 +231,8 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
     """
     import sync as sync_mod
 
-    if not db.pending_change_ids_in_folders(folder_ids):
-        return 0
+    if not db.pending_change_runs_in_folders(folder_ids):
+        return 0, set()
 
     def sync_progress(current, total):
         progress(current, total, "", "Writing metadata to sidecars")
@@ -243,18 +243,34 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
         sync_job_lock.acquire()
     transferring_ws = db._ws_id()
     synced = 0
+    considered = set()
     try:
         for _ in range(_MAX_SYNC_DRAIN_PASSES):
-            queued = db.pending_change_ids_in_folders(folder_ids)
-            if not queued:
+            runs = db.pending_change_runs_in_folders(folder_ids)
+            if not runs:
                 break
-            for workspace_id, change_ids in sorted(queued.items()):
+            if all(token in considered for _ws, entries in runs for _cid, token in entries):
+                # Everything left is something the sync looked at and chose
+                # not to write -- a flag queued in a workspace with
+                # sync_flags_to_xmp off. Re-running would not clear it.
+                break
+            for workspace_id, entries in runs:
+                considered.update(token for _cid, token in entries)
                 db.set_active_workspace(workspace_id)
                 result = sync_mod.sync_to_xmp(
-                    db, progress_callback=sync_progress, change_ids=change_ids,
+                    db, progress_callback=sync_progress,
+                    change_ids=[cid for cid, _token in entries],
                     create_missing_sidecars=True,
                 )
-                if not result["ok"]:
+                # A change this workspace declines to write to XMP (a flag,
+                # when sync_flags_to_xmp is off) is reported as a failure so
+                # the ordinary sync job lands in history as "failed". It is
+                # not a reason to abandon a transfer: nothing went wrong, and
+                # the edit was never bound for the sidecar. Only failures
+                # carrying a ``reason`` -- the ones raised by an actual
+                # prepare or write -- stop the move.
+                blocking = [f for f in result["failures"] if f.get("reason")]
+                if blocking:
                     raise ValueError(
                         "Metadata sync failed, so nothing was sent: "
                         + "; ".join(result["errors"])
@@ -265,20 +281,32 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
     finally:
         db.set_active_workspace(transferring_ws)
         sync_job_lock.release()
-    return synced
+    return synced, considered
 
 
-def _residual_staged_changes(db, folder_ids):
+def _residual_staged_changes(db, folder_ids, considered):
     """Count edits queued too late to have travelled with the transfer.
 
     Blocking the rating and keyword routes for the length of a NAS transfer
     would be a worse trade than this gap, so the gap is reported instead of
     closed: the job must not claim it synced everything when an edit landed
-    after the last drain. Folder rows can be folded away by a merge commit,
-    in which case there is nothing left to ask about and the count is zero.
+    after the last drain.
+
+    Only changes the sync never saw count. Something it considered and left
+    queued was deliberately not written to XMP (a flag under
+    sync_flags_to_xmp off), and reporting that as an edit that "missed the
+    transfer" would be a different claim than the true one. Matched on
+    ``change_token`` rather than id because SQLite reuses a cleared row's id
+    for the next insert. Folder rows can be folded away by a merge commit, in
+    which case there is nothing left to ask about and the count is zero.
     """
     try:
-        return sum(len(ids) for ids in db.pending_change_ids_in_folders(folder_ids).values())
+        return sum(
+            1
+            for _workspace_id, entries in db.pending_change_runs_in_folders(folder_ids)
+            for _change_id, token in entries
+            if token not in considered
+        )
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
         return 0
@@ -423,9 +451,9 @@ def create_imports_blueprint(
                         # click and the job travel with the transfer too.
                         folder_ids = _staging_folder_ids(
                             thread_db, archive["staging_destination"]) if sync_first else []
-                        synced = _sync_staged_metadata(
+                        synced, considered = _sync_staged_metadata(
                             thread_db, archive, progress, sync_job_lock,
-                            folder_ids) if sync_first else 0
+                            folder_ids) if sync_first else (0, set())
 
                         result = send_pending_archive(
                             thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
@@ -436,7 +464,8 @@ def create_imports_blueprint(
                                 f"Synced metadata for {synced} photo"
                                 f"{'' if synced == 1 else 's'}. {result['summary']}"
                             )
-                            residual = _residual_staged_changes(thread_db, folder_ids)
+                            residual = _residual_staged_changes(
+                                thread_db, folder_ids, considered)
                             if residual:
                                 summary += (
                                     f". {residual} edit{'' if residual == 1 else 's'} queued "

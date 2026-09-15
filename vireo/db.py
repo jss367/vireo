@@ -6863,25 +6863,52 @@ class Database:
             ).fetchone()[0]
         return total
 
-    def pending_change_ids_in_folders(self, folder_ids):
-        """Return ``{workspace_id: [change_id, ...]}`` for photos in ``folder_ids``.
+    def pending_change_runs_in_folders(self, folder_ids):
+        """Return ``[(workspace_id, [(change_id, change_token), ...]), ...]``, in queue order.
 
-        Grouped by workspace because ``sync.sync_to_xmp`` reads the queue and
-        the sync-to-XMP settings through the active workspace: each group has
-        to be written with its own workspace's flag and location preferences,
-        not the transferring workspace's.
+        Split by workspace because ``sync.sync_to_xmp`` reads both the queue
+        and the sync-to-XMP settings through the active workspace, so each
+        group has to be written with its own workspace's flag and location
+        preferences rather than the transferring workspace's.
+
+        Split into *consecutive runs* rather than one group per workspace
+        because the order the user made the edits in is the order they have
+        to reach the sidecar. A rating of 1 queued in one workspace and a
+        later 5 queued in another are two writes to one ``xmp:Rating``;
+        applying them grouped by workspace would settle on whichever
+        workspace ran last, not on the newer value. Runs preserve the global
+        chronology exactly, at the cost of one extra pass per workspace
+        switch -- and a switch only happens when the user actually alternated
+        between workspaces.
+
+        ``change_token`` rides along because ``pending_changes.id`` is a bare
+        ``INTEGER PRIMARY KEY``: SQLite hands the rowid straight back out
+        after ``clear_pending`` deletes it, so a change queued right after a
+        sync can reuse the id the sync just cleared. Callers tracking which
+        changes they have already looked at must key on the token, which is a
+        fresh uuid per insert.
         """
-        grouped = {}
+        rows = []
         for chunk in _chunks(folder_ids):
             placeholders = ",".join("?" * len(chunk))
-            for ws_id, change_id in self.conn.execute(
-                f"SELECT pc.workspace_id, pc.id FROM pending_changes pc "
+            rows.extend(self.conn.execute(
+                f"SELECT pc.created_at, pc.id, pc.workspace_id, pc.change_token "
+                f"FROM pending_changes pc "
                 f"JOIN photos p ON p.id = pc.photo_id "
                 f"WHERE p.folder_id IN ({placeholders})",
                 tuple(chunk),
-            ):
-                grouped.setdefault(ws_id, []).append(change_id)
-        return grouped
+            ).fetchall())
+        # Sorted here rather than in SQL: chunking splits the scan into
+        # several statements, so only a final pass over the union is ordered
+        # across all of them. Matches get_pending_changes' (created_at, id).
+        rows.sort(key=lambda r: (r[0], r[1]))
+        runs = []
+        for _created_at, change_id, workspace_id, change_token in rows:
+            if runs and runs[-1][0] == workspace_id:
+                runs[-1][1].append((change_id, change_token))
+            else:
+                runs.append((workspace_id, [(change_id, change_token)]))
+        return runs
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and

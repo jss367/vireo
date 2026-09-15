@@ -5424,6 +5424,130 @@ def test_pending_archive_reports_edits_that_missed_the_transfer(app_and_db, tmp_
     assert "over the NAS connection" in sent["summary"]
 
 
+def test_pending_archive_sync_applies_cross_workspace_edits_in_queue_order(app_and_db, tmp_path, monkeypatch):
+    """The sidecar must end up with the edit the user made last.
+
+    Two workspaces queueing a rating for one shared photo are two writes to
+    one xmp:Rating. Walking the queue grouped by workspace would settle on
+    whichever workspace happened to run last; walking it in queue order
+    settles on the newer value, whichever workspace it came from.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+
+    sibling = db.create_workspace("Sibling")
+    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+    # Older edit in the higher-numbered workspace, newer in the lower one, so
+    # workspace-id order and queue order disagree.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'rating', '1', 'tok-old', ?, '2026-09-15T10:00:00')",
+        (photo_id, sibling),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'rating', '5', 'tok-new', ?, '2026-09-15T11:00:00')",
+        (photo_id, db._ws_id()),
+    )
+    db.conn.commit()
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert re.search(r'Rating="(\d+)"', sidecars[0].read_text()).group(1) == "5"
+    assert db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+
+
+def test_pending_archive_sync_drain_survives_reused_change_ids(app_and_db, tmp_path, monkeypatch):
+    """pending_changes.id is a bare rowid, so a cleared id comes straight back.
+
+    The drain tracks what it has already looked at so it can stop early on
+    changes the workspace declines to write. Keying that on the row id would
+    mistake the *next* edit -- handed the id the sync just cleared -- for one
+    it had already seen, and leave it behind.
+    """
+    import move
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    db.queue_change(first, "keyword_add", "Osprey")
+    reused = db.conn.execute("SELECT id FROM pending_changes").fetchone()["id"]
+
+    real_sync = sync_mod.sync_to_xmp
+    late = []
+
+    def sync_then_queue_more(worker_db, **kwargs):
+        result = real_sync(worker_db, **kwargs)
+        if not late:
+            late.append(True)
+            worker_db.queue_change(second, "keyword_add", "Kestrel")
+        return result
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_then_queue_more)
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    # The late edit really did land on the id the first one vacated.
+    assert reused == 1
+    sidecars = sorted((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 2, sidecars
+    assert "Kestrel" in "".join(s.read_text() for s in sidecars)
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_db, tmp_path, monkeypatch):
+    """A flag under sync_flags_to_xmp off is not a failed sync.
+
+    sync_to_xmp reports it as a failure so the ordinary sync job lands in
+    history as "failed", but nothing went wrong and the edit was never bound
+    for the sidecar. Abandoning the transfer over it would strand the whole
+    import on a setting the user chose.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.update_workspace(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
+    db.queue_change(imported["result"]["photo_ids"][0], "flag", "flagged")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
+    # Still queued -- and not miscounted as an edit that missed the transfer.
+    assert db.count_pending_changes() == 1
+    assert sent["result"].get("metadata_queued_during_transfer", 0) == 0
+
+
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
     """A half-done sync must not send stale sidecars to the NAS anyway."""
     import sync as sync_mod
@@ -5435,7 +5559,9 @@ def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path
     db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
 
     def failing_sync(*a, **kw):
-        return {"synced": 0, "failed": 1, "failures": [], "ok": False,
+        return {"synced": 0, "failed": 1, "ok": False,
+                "failures": [{"photo_id": 1, "error": "folder not accessible: /gone",
+                              "reason": "folder not accessible"}],
                 "errors": ["folder not accessible (1 photo)"]}
 
     monkeypatch.setattr(sync_mod, "sync_to_xmp", failing_sync)
