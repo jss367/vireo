@@ -234,12 +234,19 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
     ``create_missing_sidecars`` is on here and nowhere else: this is the last
     moment a rating-only photo can get a sidecar at all, because the transfer
     is about to delete the file it would sit next to.
+
+    ``folder_paths`` is built from every catalog folder rather than from the
+    active workspace's tree so the sync resolves sidecar paths even when the
+    staging tree has been unlinked from its owning workspace. Membership is
+    not what defines the transfer -- the path is -- and the workspace-scoped
+    map would otherwise fail every photo as "folder not accessible".
     """
     import sync as sync_mod
 
     def sync_progress(current, total):
         progress(current, total, "", "Writing metadata to sidecars")
 
+    folder_paths = {row["id"]: row["path"] for row in _all_folders(db)}
     synced_photos = set()
     # Changes this workspace declines to write to XMP (a flag under
     # sync_flags_to_xmp off). Tracked so the drain stops instead of re-running
@@ -256,6 +263,7 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
             db, progress_callback=sync_progress,
             change_ids=[cid for _key, cid, _pid in pending],
             create_missing_sidecars=True,
+            folder_paths=folder_paths,
         )
         # A change this workspace declines to write to XMP is reported as a
         # failure so the ordinary sync job lands in history as "failed". It is

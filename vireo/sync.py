@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 _SYNC_MAX_WORKERS = 8
 
 
-def _resolve_xmp_paths(db, photo_ids):
+def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
     """Map photo ids to sidecar paths with two queries instead of 2N.
 
     Resolving one photo at a time ran the recursive folder-tree CTE and a
@@ -32,8 +32,18 @@ def _resolve_xmp_paths(db, photo_ids):
     active workspace keeps the historical behaviour of resolving against an
     empty folder path, so it fails the accessibility check rather than
     silently writing somewhere else.
+
+    ``folder_paths`` overrides the workspace-scoped folder map. The
+    pre-transfer sync for a pending NAS archive passes one built from every
+    catalog folder because the staging tree may have been unlinked from its
+    owning workspace -- the transfer is defined by a path on disk, not by
+    workspace membership -- and the ordinary map would resolve it to an empty
+    directory and then fail "folder not accessible".
     """
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    if folder_paths is not None:
+        folders = folder_paths
+    else:
+        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     paths = {}
     for photo_id, (folder_id, filename) in db.get_photo_filenames(photo_ids).items():
         base = os.path.splitext(filename)[0]
@@ -324,7 +334,8 @@ def _sync_result(synced, failures):
     }
 
 
-def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False):
+def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
+                folder_paths=None):
     """Write pending changes to XMP sidecars.
 
     Args:
@@ -338,6 +349,14 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             can retry later anyway. On for the sync that runs before a NAS
             transfer, where "later" does not exist: the transfer deletes the
             local originals, and a cleared-but-unwritten rating is gone.
+        folder_paths: optional ``{folder_id: path}`` map used to resolve
+            sidecar paths in place of the active workspace's folder tree.
+            The pre-transfer sync for a pending NAS archive passes one
+            covering every catalog folder because the staging tree may have
+            been unlinked from its owning workspace -- membership is not
+            what defines the transfer, the path is -- and the workspace-
+            scoped map would otherwise fail every photo as "folder not
+            accessible".
 
     Returns:
         dict with synced, failed, failures counts
@@ -358,7 +377,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     # Everything that needs the database happens here, on the caller's
     # thread: the sidecar writers below run on a pool and must not touch the
     # connection.
-    xmp_paths = _resolve_xmp_paths(db, list(by_photo))
+    xmp_paths = _resolve_xmp_paths(db, list(by_photo), folder_paths=folder_paths)
     prepare_failures = {}
     plans = {}
     folder_accessible = {}
