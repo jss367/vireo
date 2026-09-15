@@ -5317,6 +5317,113 @@ def test_pending_archive_sync_first_waits_for_a_running_xmp_sync(app_and_db, tmp
     assert db.count_pending_changes() == 0
 
 
+def test_pending_archive_syncs_edits_queued_in_a_sibling_workspace(app_and_db, tmp_path, monkeypatch):
+    """The review queue is per workspace; the sidecar it writes is not.
+
+    A staging folder linked to a second workspace can carry edits queued
+    there against the same photo and the same .xmp. Skipping them would
+    strand them behind the NAS -- the transfer moves the shared folder row
+    globally and deletes the local tree either way.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+    staged_folder = db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (photo_id,)).fetchone()["folder_id"]
+
+    sibling = db.create_workspace("Sibling")
+    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+    db.queue_change(photo_id, "keyword_add", "Osprey", workspace_id=sibling)
+
+    # The banner counts it too, or it would offer to sync nothing.
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 1
+    assert staged_folder  # the photo really is inside the staging tree
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "Osprey" in sidecars[0].read_text()
+    assert db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+
+
+def test_pending_archive_sync_drains_edits_queued_while_it_runs(app_and_db, tmp_path, monkeypatch):
+    """An edit made during the sync still has to travel with the transfer."""
+    import move
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    db.queue_change(first, "keyword_add", "Osprey")
+
+    real_sync = sync_mod.sync_to_xmp
+    late = []
+
+    def sync_then_queue_more(worker_db, **kwargs):
+        result = real_sync(worker_db, **kwargs)
+        # Stand in for the user tagging a photo while "Sending to NAS…" shows:
+        # the rating and keyword routes are ordinary requests, and the job's
+        # workspace exclusivity does not hold them off.
+        if not late:
+            late.append(True)
+            worker_db.queue_change(second, "keyword_add", "Kestrel")
+        return result
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_then_queue_more)
+    monkeypatch.setattr(move, "_run_rsync_streamed", lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = sorted((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 2, sidecars
+    assert "Kestrel" in "".join(s.read_text() for s in sidecars)
+    assert db.count_pending_changes() == 0
+    assert sent["result"]["metadata_queued_during_transfer"] == 0
+
+
+def test_pending_archive_reports_edits_that_missed_the_transfer(app_and_db, tmp_path, monkeypatch):
+    """What the drain cannot catch gets said out loud, not swallowed."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    db.queue_change(first, "keyword_add", "Osprey")
+
+    def queue_during_the_move(*a, **kw):
+        # The move is past the last drain, so this edit cannot travel.
+        db.queue_change(second, "keyword_add", "Kestrel")
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", queue_during_the_move)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert sent["result"]["metadata_queued_during_transfer"] == 1
+    assert "1 edit queued during the transfer" in sent["summary"]
+    assert "over the NAS connection" in sent["summary"]
+
+
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
     """A half-done sync must not send stale sidecars to the NAS anyway."""
     import sync as sync_mod

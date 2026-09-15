@@ -6833,12 +6833,21 @@ class Database:
             (self._ws_id(),),
         ).fetchone()[0]
 
+    # Both of these span workspaces on purpose. The review queue is
+    # workspace-scoped but the sidecar is global to the photo, so when a
+    # staged folder is also linked to a sibling workspace, edits queued there
+    # target the very file this transfer is about to move. Filtering to the
+    # active workspace would hide them from the banner and skip them in the
+    # pre-transfer sync, stranding them behind the NAS exactly as this
+    # feature exists to prevent. ``clear_pending`` already reaches across
+    # workspaces for the same reason.
+
     def count_photos_with_pending_changes_in_folders(self, folder_ids):
         """Return how many photos in ``folder_ids`` have unwritten sidecar edits.
 
-        Deliberately scoped rather than reusing ``count_pending_changes``: the
-        "Photos kept locally" banner offers to sync before a NAS transfer, and
-        a workspace-wide number there would claim edits the transfer never
+        Scoped to the folders rather than reusing ``count_pending_changes``:
+        the "Photos kept locally" banner offers to sync before a NAS transfer,
+        and a catalog-wide number there would claim edits the transfer never
         touches. Counts photos, not rows, because that is the unit the banner
         names. Summing per chunk is exact -- ``photos.folder_id`` is a single
         column, so no photo can appear under two chunks.
@@ -6849,28 +6858,30 @@ class Database:
             total += self.conn.execute(
                 f"SELECT COUNT(DISTINCT p.id) FROM pending_changes pc "
                 f"JOIN photos p ON p.id = pc.photo_id "
-                f"WHERE pc.workspace_id = ? AND p.folder_id IN ({placeholders})",
-                (self._ws_id(), *chunk),
+                f"WHERE p.folder_id IN ({placeholders})",
+                tuple(chunk),
             ).fetchone()[0]
         return total
 
     def pending_change_ids_in_folders(self, folder_ids):
-        """Return the queued change ids for photos in ``folder_ids``.
+        """Return ``{workspace_id: [change_id, ...]}`` for photos in ``folder_ids``.
 
-        The id list feeds ``sync.sync_to_xmp(change_ids=...)`` so a pre-transfer
-        sync writes only the staged import's sidecars and leaves every other
-        queued edit pending.
+        Grouped by workspace because ``sync.sync_to_xmp`` reads the queue and
+        the sync-to-XMP settings through the active workspace: each group has
+        to be written with its own workspace's flag and location preferences,
+        not the transferring workspace's.
         """
-        ids = []
+        grouped = {}
         for chunk in _chunks(folder_ids):
             placeholders = ",".join("?" * len(chunk))
-            ids.extend(row[0] for row in self.conn.execute(
-                f"SELECT pc.id FROM pending_changes pc "
+            for ws_id, change_id in self.conn.execute(
+                f"SELECT pc.workspace_id, pc.id FROM pending_changes pc "
                 f"JOIN photos p ON p.id = pc.photo_id "
-                f"WHERE pc.workspace_id = ? AND p.folder_id IN ({placeholders})",
-                (self._ws_id(), *chunk),
-            ))
-        return ids
+                f"WHERE p.folder_id IN ({placeholders})",
+                tuple(chunk),
+            ):
+                grouped.setdefault(ws_id, []).append(change_id)
+        return grouped
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and

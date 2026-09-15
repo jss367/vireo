@@ -194,7 +194,16 @@ def _staging_folder_ids(db, staging_destination):
     return _folder_ids_under(ws_folders, staging_destination)
 
 
-def _sync_staged_metadata(db, archive, progress, sync_job_lock):
+# How many times the pre-transfer sync re-reads the queue before giving up on
+# draining it. Job admission is workspace-scoped and the rating/keyword routes
+# are ordinary requests, so the user can queue an edit while the sync runs. Two
+# passes catch that; the cap only exists so a change that somehow never clears
+# cannot spin here forever. Whatever is still queued after the move is reported
+# rather than silently swallowed -- see ``_residual_staged_changes``.
+_MAX_SYNC_DRAIN_PASSES = 5
+
+
+def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
     """Write the staged import's queued sidecar edits, before it leaves.
 
     Runs against the local staging copy on purpose. A verified transfer
@@ -210,15 +219,19 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock):
     would otherwise read-modify-write the same .xmp concurrently -- last
     writer wins, both queues cleared.
 
+    Each workspace holding edits for these photos is synced under its own
+    active workspace, because ``sync_to_xmp`` reads both the queue and the
+    sync-to-XMP settings through ``_ws_id()``. The loop re-reads the queue
+    after every pass so an edit made while the sync was running still travels
+    with the transfer.
+
     ``create_missing_sidecars`` is on here and nowhere else: this is the last
     moment a rating-only photo can get a sidecar at all, because the transfer
     is about to delete the file it would sit next to.
     """
     import sync as sync_mod
 
-    change_ids = db.pending_change_ids_in_folders(
-        _staging_folder_ids(db, archive["staging_destination"]))
-    if not change_ids:
+    if not db.pending_change_ids_in_folders(folder_ids):
         return 0
 
     def sync_progress(current, total):
@@ -228,21 +241,47 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock):
         # Never a silent stall: the bar says what it is waiting for.
         progress(0, 0, "", "Waiting for current XMP sync")
         sync_job_lock.acquire()
+    transferring_ws = db._ws_id()
+    synced = 0
     try:
-        result = sync_mod.sync_to_xmp(
-            db, progress_callback=sync_progress, change_ids=change_ids,
-            create_missing_sidecars=True,
-        )
+        for _ in range(_MAX_SYNC_DRAIN_PASSES):
+            queued = db.pending_change_ids_in_folders(folder_ids)
+            if not queued:
+                break
+            for workspace_id, change_ids in sorted(queued.items()):
+                db.set_active_workspace(workspace_id)
+                result = sync_mod.sync_to_xmp(
+                    db, progress_callback=sync_progress, change_ids=change_ids,
+                    create_missing_sidecars=True,
+                )
+                if not result["ok"]:
+                    raise ValueError(
+                        "Metadata sync failed, so nothing was sent: "
+                        + "; ".join(result["errors"])
+                        + ". The local originals are untouched. Fix the sidecars and try "
+                        "again, or use Send to NAS to transfer without syncing first."
+                    )
+                synced += result["synced"]
     finally:
+        db.set_active_workspace(transferring_ws)
         sync_job_lock.release()
-    if not result["ok"]:
-        raise ValueError(
-            "Metadata sync failed, so nothing was sent: "
-            + "; ".join(result["errors"])
-            + ". The local originals are untouched. Fix the sidecars and try "
-            "again, or use Send to NAS to transfer without syncing first."
-        )
-    return result["synced"]
+    return synced
+
+
+def _residual_staged_changes(db, folder_ids):
+    """Count edits queued too late to have travelled with the transfer.
+
+    Blocking the rating and keyword routes for the length of a NAS transfer
+    would be a worse trade than this gap, so the gap is reported instead of
+    closed: the job must not claim it synced everything when an edit landed
+    after the last drain. Folder rows can be folded away by a merge commit,
+    in which case there is nothing left to ask about and the count is zero.
+    """
+    try:
+        return sum(len(ids) for ids in db.pending_change_ids_in_folders(folder_ids).values())
+    except Exception:
+        log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
+        return 0
 
 
 def create_imports_blueprint(
@@ -382,20 +421,32 @@ def create_imports_blueprint(
                         # local disk. Recomputed here rather than trusting the
                         # count the banner showed, so edits queued between the
                         # click and the job travel with the transfer too.
+                        folder_ids = _staging_folder_ids(
+                            thread_db, archive["staging_destination"]) if sync_first else []
                         synced = _sync_staged_metadata(
-                            thread_db, archive, progress, sync_job_lock) if sync_first else 0
+                            thread_db, archive, progress, sync_job_lock,
+                            folder_ids) if sync_first else 0
 
                         result = send_pending_archive(
                             thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
                             guard_folder=guard_move_folder, progress_cb=progress,
                         )
                         if synced:
+                            summary = (
+                                f"Synced metadata for {synced} photo"
+                                f"{'' if synced == 1 else 's'}. {result['summary']}"
+                            )
+                            residual = _residual_staged_changes(thread_db, folder_ids)
+                            if residual:
+                                summary += (
+                                    f". {residual} edit{'' if residual == 1 else 's'} queued "
+                                    "during the transfer and still need a sync, now over the "
+                                    "NAS connection"
+                                )
                             result = {
                                 **result, "metadata_synced": synced,
-                                "summary": (
-                                    f"Synced metadata for {synced} photo"
-                                    f"{'' if synced == 1 else 's'}. {result['summary']}"
-                                ),
+                                "metadata_queued_during_transfer": residual,
+                                "summary": summary,
                             }
                         thread_db.conn.execute(
                             "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
