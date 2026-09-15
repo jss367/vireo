@@ -71,6 +71,7 @@ PROVENANCE_CONVERGENCE_POINTS = {
     ("db.py", "link_keyword_to_place"): "place link repoints rows onto canonical",
     ("db.py", "retire_builtin_wildlife_genre"): "latches sidecar verdict to the top",
     ("scanner.py", "_pair_raw_jpeg_companions"): "pairing copies companion keywords",
+    ("db.py", "_reassign_photo_state"): "merge unions staged keywords onto the survivor",
 }
 
 

@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 _SYNC_MAX_WORKERS = 8
 
 
-def _resolve_xmp_paths(db, photo_ids):
+def _resolve_xmp_paths(db, photo_ids, folder_scope="workspace"):
     """Map photo ids to sidecar paths with two queries instead of 2N.
 
     Resolving one photo at a time ran the recursive folder-tree CTE and a
@@ -32,8 +32,18 @@ def _resolve_xmp_paths(db, photo_ids):
     active workspace keeps the historical behaviour of resolving against an
     empty folder path, so it fails the accessibility check rather than
     silently writing somewhere else.
+
+    ``folder_scope="global"`` reads the folder map from every catalog folder
+    rather than the active workspace's tree. The pre-transfer sync passes it
+    so a staging tree linked only to a sibling workspace still resolves --
+    scoping by the queue owner's workspace membership would abort the run
+    with "folder not accessible" even though the file is right there.
     """
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    if folder_scope == "global":
+        folder_rows = db.conn.execute("SELECT id, path FROM folders").fetchall()
+    else:
+        folder_rows = db.get_folder_tree()
+    folders = {f["id"]: f["path"] for f in folder_rows}
     paths = {}
     for photo_id, (folder_id, filename) in db.get_photo_filenames(photo_ids).items():
         base = os.path.splitext(filename)[0]
@@ -70,7 +80,7 @@ def _write_assigned_location_to_xmp_enabled(db):
 _KEYWORD_CHANGE_TYPES = ("keyword_add", "keyword_remove", "keyword_remove_flat")
 
 
-def _select_changes(changes, change_ids):
+def _select_changes(changes, change_ids, *, expand_keyword_pairs=True):
     """Restrict ``changes`` to ``change_ids`` plus their paired keyword changes.
 
     Auto-includes any unselected pending keyword_add / keyword_remove
@@ -83,8 +93,20 @@ def _select_changes(changes, change_ids):
     clean spelling, and a later remove-only sync strips the clean spelling
     under the same normalized match. Sync both sides together whenever the
     user picks either.
+
+    ``expand_keyword_pairs`` gates that cross-selection. A caller that
+    manages its own chronological ordering -- ``_sync_staged_metadata``'s
+    per-run dispatch, whose runs deliberately split at workspace boundaries
+    to preserve edit order -- passes ``False``: reaching into ANOTHER run's
+    row (e.g. a later ``keyword_add`` for the same photo/key) would collapse
+    it into an earlier run's plan, clear both tokens together, and let the
+    plan for a later run write nothing where it should have written the
+    newest edit. Within a single-workspace run the pairing rows are
+    already in ``change_ids``, so the expansion adds nothing there.
     """
     selected_ids = {int(cid) for cid in change_ids}
+    if not expand_keyword_pairs:
+        return [c for c in changes if c["id"] in selected_ids]
     kw_index = defaultdict(list)
     for c in changes:
         if c["change_type"] in _KEYWORD_CHANGE_TYPES and c["value"]:
@@ -117,19 +139,41 @@ class _PhotoSyncPlan:
     edit_recipe_json: str | None = None
     sync_location: bool = False
     cleanup_location: bool = False
-    supported_ids: list = field(default_factory=list)
+    # (change_id, change_token) per supported change. The token is what the
+    # clear keys on -- see clear_pending_by_token -- but change_token is a
+    # nullable column with no backfill, and rows that predate it still need
+    # clearing by id.
+    supported_changes: list = field(default_factory=list)
     unsupported_changes: list = field(default_factory=list)
 
 
 def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
-    """Fold one photo's pending changes into a ``_PhotoSyncPlan``."""
+    """Fold one photo's pending changes into a ``_PhotoSyncPlan``.
+
+    Supported changes are tracked by ``change_token`` rather than by
+    ``pending_changes.id``: SQLite reuses a cleared row's rowid on the next
+    insert, so an id captured here can name a different queue row -- often
+    for a different photo -- by the time the sidecar write completes and
+    the clear runs. Tokens are UUIDs and stay put.
+    """
     plan = _PhotoSyncPlan()
+    # Last intent per exact keyword string. A genuine add-then-remove of the
+    # SAME term must resolve to whichever the user did last; without this the
+    # pair reaches ``_remove_planned_keywords``, which reads any add/remove
+    # sharing a normalized key as a normalization rename, strips the legacy
+    # spelling and then writes the term back -- so a removal silently became
+    # a no-op. Renames pair DIFFERENT spellings of one key and are untouched
+    # here. The pair only became reachable once the keyword endpoints stopped
+    # cancelling a queued opposite for photos under a pre-transfer NAS sync.
+    last_keyword_intent = {}
     for c in photo_changes:
         kind = c["change_type"]
         if kind == "keyword_add":
             plan.keywords_to_add.add(c["value"])
+            last_keyword_intent[c["value"]] = "add"
         elif kind == "keyword_remove":
             plan.keywords_to_remove.add(c["value"])
+            last_keyword_intent[c["value"]] = "remove"
         elif kind == "keyword_remove_flat":
             plan.keywords_to_remove_flat.add(c["value"])
         elif kind == "rating":
@@ -148,7 +192,16 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
             plan.edit_recipe_json = c["value"] or ""
         else:
             continue
-        plan.supported_ids.append(c["id"])
+        plan.supported_changes.append((c["id"], c["change_token"]))
+    for value, intent in last_keyword_intent.items():
+        if value in plan.keywords_to_add and value in plan.keywords_to_remove:
+            # Both queued for one term: the later one is what the user meant.
+            # Both rows still clear -- the losing intent was genuinely
+            # superseded, not dropped unapplied.
+            if intent == "add":
+                plan.keywords_to_remove.discard(value)
+            else:
+                plan.keywords_to_add.discard(value)
     return plan
 
 
@@ -207,7 +260,7 @@ def _remove_planned_keywords(editor, plan):
         )
 
 
-def _write_photo_sync(xmp_path, plan, assigned_location=None):
+def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sidecars=False):
     """Apply a ``_PhotoSyncPlan`` to the photo's sidecar, in dependency order.
 
     Every mutation lands in one ``SidecarEditor``, so the sidecar is parsed
@@ -218,6 +271,10 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None):
     ``assigned_location`` is passed in rather than looked up here because the
     writers run on a pool thread and the SQLite connection belongs to the
     caller's thread.
+
+    ``create_missing_sidecars`` only affects a rating-only photo, the one
+    mutation that otherwise declines to create a sidecar; see
+    ``SidecarEditor.set_rating``.
     """
     editor = SidecarEditor(xmp_path)
     _remove_planned_keywords(editor, plan)
@@ -255,7 +312,7 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None):
     # selected keyword, flag, location, or edit write should make the
     # same-photo rating persist rather than silently clear it.
     if plan.rating is not None:
-        editor.set_rating(plan.rating)
+        editor.set_rating(plan.rating, create=create_missing_sidecars)
 
     # One publish for the whole photo. Nothing is written when no mutation
     # changed anything -- re-syncing an already-correct sidecar costs a read.
@@ -320,7 +377,9 @@ def _sync_result(synced, failures):
     }
 
 
-def sync_to_xmp(db, progress_callback=None, change_ids=None):
+def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
+                create_missing_sidecars=False, expand_keyword_pairs=True,
+                folder_scope="workspace"):
     """Write pending changes to XMP sidecars.
 
     Args:
@@ -328,13 +387,60 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
         progress_callback: optional callable(current, total)
         change_ids: optional pending_changes ids to sync. When provided, any
             other queued changes are left pending.
+        change_tokens: like ``change_ids``, but naming the changes by their
+            immutable token. ``pending_changes.id`` is a bare rowid that
+            SQLite re-issues to the next insert once a row is cleared, so a
+            caller that selected ids a moment ago can find them pointing at
+            somebody else's change -- a different photo, in a different
+            folder. Tokens are resolved against the same queue snapshot the
+            selection runs on, which leaves no window at all.
+        create_missing_sidecars: write a sidecar for a rating-only photo
+            instead of skipping it. Off for the ordinary sync job, which
+            would otherwise litter a sidecar beside every rated photo and
+            can retry later anyway. On for the sync that runs before a NAS
+            transfer, where "later" does not exist: the transfer deletes the
+            local originals, and a cleared-but-unwritten rating is gone.
+        expand_keyword_pairs: whether ``_select_changes`` may reach OUTSIDE
+            the selection to pull in another row that shares a normalized
+            keyword key with a selected row. On (default) for the manual
+            sync path, which serves single-shot selections and needs the
+            paired half to avoid a rename clobbering itself across two
+            syncs. Off for the pre-transfer sync's per-run dispatch, which
+            manages its own chronological ordering: pulling a later run's
+            keyword_add into an earlier run's keyword_remove would
+            collapse them, clear both tokens, and ship the sidecar in the
+            state of whichever remaining run happened to write last
+            instead of the newest edit the user actually left the queue in.
+        folder_scope: how to resolve sidecar paths. ``"workspace"`` (default)
+            reads from the active workspace's folder tree, matching the
+            ordinary sync job. ``"global"`` reads from every catalog folder;
+            the pre-transfer sync passes it so a staging tree linked only to
+            a sibling workspace still resolves to a real path when the sync
+            runs under the queue owner's workspace.
 
     Returns:
         dict with synced, failed, failures counts
     """
     changes = db.get_pending_changes()
-    if change_ids is not None:
-        changes = _select_changes(changes, change_ids)
+    if change_tokens is not None or change_ids is not None:
+        # ``None`` is stripped from the token set: pre-``change_token``
+        # rows carry ``NULL`` in the column, so ``None in wanted`` would
+        # otherwise resolve for every NULL-token row in the workspace --
+        # including photos outside a caller's selected scope. Legacy rows
+        # can only be named by id (there is no safer identifier for them),
+        # so a caller mixing modern token dispatch with legacy ids passes
+        # both channels and this resolves them as a union.
+        wanted_tokens = {t for t in (change_tokens or []) if t is not None}
+        wanted_ids = set(change_ids or [])
+        selected_ids = [
+            c["id"] for c in changes
+            if (c["change_token"] is not None and c["change_token"] in wanted_tokens)
+            or c["id"] in wanted_ids
+        ]
+        changes = _select_changes(
+            changes, selected_ids,
+            expand_keyword_pairs=expand_keyword_pairs,
+        )
     if not changes:
         return _sync_result(0, [])
 
@@ -348,7 +454,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
     # Everything that needs the database happens here, on the caller's
     # thread: the sidecar writers below run on a pool and must not touch the
     # connection.
-    xmp_paths = _resolve_xmp_paths(db, list(by_photo))
+    xmp_paths = _resolve_xmp_paths(db, list(by_photo), folder_scope=folder_scope)
     prepare_failures = {}
     plans = {}
     folder_accessible = {}
@@ -483,6 +589,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                 with lock_for(xmp_path):
                     _write_photo_sync(
                         xmp_path, plans[photo_id], locations.get(photo_id),
+                        create_missing_sidecars=create_missing_sidecars,
                     )
             except Exception as e:  # recorded per photo, as before
                 outcomes[photo_id] = e
@@ -514,7 +621,12 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
     # Report in queue order regardless of the order the pool finished in.
     synced = 0
     failures = []
-    synced_ids = []
+    synced_tokens = []
+    # Rows predating the change_token column carry NULL, and `IN (NULL)`
+    # matches nothing -- clearing those by token would leave them queued
+    # forever, to be rewritten by every later sync. They fall back to the id,
+    # which is exactly the behaviour they have always had.
+    synced_legacy_ids = []
     for photo_id in by_photo:
         if photo_id in prepare_failures:
             failures.append(prepare_failures[photo_id])
@@ -530,9 +642,13 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
             })
             log.warning("Failed to sync photo %d: %s", photo_id, error)
             continue
-        if plan.supported_ids:
+        if plan.supported_changes:
             synced += 1
-            synced_ids.extend(plan.supported_ids)
+            for change_id, token in plan.supported_changes:
+                if token:
+                    synced_tokens.append(token)
+                else:
+                    synced_legacy_ids.append(change_id)
         for c in plan.unsupported_changes:
             failures.append({
                 "photo_id": photo_id,
@@ -540,10 +656,18 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                 "error": f"unsupported change type: {c['change_type']}",
             })
 
-    # Clear successfully synced changes
-    if synced_ids:
+    # Clear successfully synced changes by their immutable tokens. Clearing
+    # by id would race delete+insert replacements: if a rating endpoint runs
+    # between _plan_photo_sync and the delete below, SQLite can hand the
+    # cleared row's numeric id straight back to the new insert, and this
+    # DELETE would then drop the just-queued replacement.
+    if synced_tokens:
+        db.clear_pending_by_token(
+            synced_tokens, clear_equivalent_flat_removals=True,
+        )
+    if synced_legacy_ids:
         db.clear_pending(
-            synced_ids, clear_equivalent_flat_removals=True,
+            synced_legacy_ids, clear_equivalent_flat_removals=True,
         )
 
     log.info("Sync complete: %d synced, %d failed", synced, len(failures))

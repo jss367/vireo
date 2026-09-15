@@ -178,6 +178,223 @@ def _folder_ids_under(folders, staging_destination):
     return ids
 
 
+def _all_folders(db):
+    """Every catalog folder, not just the active workspace's.
+
+    A staging tree can be unlinked from the workspace that imported it while
+    still linked to a sibling -- nothing guards ``pending_archives`` against
+    folder removal -- and the rows, the files and the sibling's metadata queue
+    all survive that. Scoping by workspace membership would report
+    ``unsynced_photos = 0``, hide the sync button, and let even an explicit
+    ``sync_first=true`` sync an empty set before moving the shared tree.
+    The transfer is defined by a path on disk, so resolve it from the path.
+    """
+    return db.conn.execute("SELECT id, path FROM folders").fetchall()
+
+
+def _staging_folder_ids(db, staging_destination):
+    """``_folder_ids_under`` for one archive, reading the folder list itself.
+
+    The listing route hoists the folder read across every pending row; a job
+    thread has exactly one archive and its own db, so it asks directly rather
+    than carrying the hoisted list across threads.
+    """
+    return _folder_ids_under(_all_folders(db), staging_destination)
+
+
+def _staged_photo_ids(db, folder_ids):
+    """Photo ids in the staging tree, snapshotted before the transfer.
+
+    The residual re-check needs a scope that survives ``move_folder(...,
+    merge=True, allow_tracked_merge=True)``: source folder rows can be
+    folded into destination folders, but photo rows keep their ids.
+    """
+    if not folder_ids:
+        return []
+    ids = []
+    for chunk in (folder_ids[i:i + 800] for i in range(0, len(folder_ids), 800)):
+        placeholders = ",".join("?" * len(chunk))
+        ids.extend(row[0] for row in db.conn.execute(
+            f"SELECT id FROM photos WHERE folder_id IN ({placeholders})",
+            tuple(chunk),
+        ).fetchall())
+    return ids
+
+
+# How many times the pre-transfer sync re-reads the queue before giving up on
+# draining it. Job admission is workspace-scoped and the rating/keyword routes
+# are ordinary requests, so the user can queue an edit while the sync runs. Two
+# passes catch that; the cap only exists so a change that somehow never clears
+# cannot spin here forever. Whatever is still queued after the move is reported
+# rather than silently swallowed -- see ``_residual_staged_changes``.
+_MAX_SYNC_DRAIN_PASSES = 5
+
+
+def _sync_staged_metadata(db, archive, progress, folder_ids):
+    """Write the staged import's queued sidecar edits, before it leaves.
+
+    Runs against the local staging copy on purpose. A verified transfer
+    deletes the originals, so from then on the same sync has to write over
+    the NAS connection -- and only while that mount is up. Returns
+    ``(photos_synced, considered)``; raises so the caller abandons
+    the transfer when a write actually fails, because the user asked for both
+    halves and silently sending stale sidecars to the NAS is the outcome they
+    were trying to avoid. ``considered`` maps every change token the drain
+    looked at to its photo.
+
+    The caller holds the app-wide ``sync_job_lock`` across the whole send --
+    this sync, the move, and the residual re-check -- so a sibling
+    workspace's ordinary ``/api/jobs/sync`` cannot slip in against the same
+    sidecars mid-transfer. ``sync_to_xmp`` takes its own sidecar locks per
+    call, so without that outer lock two writers on one .xmp would settle on
+    the last one and clear both queues.
+
+    The queue is walked in chronological runs (see
+    ``pending_change_runs_in_folders``) so a photo shared between workspaces
+    ends up with the edit the user made last, and re-read after every pass so
+    an edit made while the sync was running still travels with the transfer.
+
+    ``create_missing_sidecars`` is on here and nowhere else: this is the last
+    moment a rating-only photo can get a sidecar at all, because the transfer
+    is about to delete the file it would sit next to.
+    """
+    import sync as sync_mod
+
+    if not db.pending_change_runs_in_folders(folder_ids):
+        return 0, {}
+
+    def sync_progress(current, total):
+        progress(current, total, "", "Writing metadata to sidecars")
+
+    transferring_ws = db._ws_id()
+    # ``considered`` maps a stable per-row identity to the row's photo id.
+    # Rows with a ``change_token`` key on the token; pre-migration NULL-token
+    # rows key on ``("legacy", change_id)`` so multiple legacy rows for
+    # different photos do not collapse under a single ``None`` key -- that
+    # collapse would lose photos from the ``synced`` count and let the drain
+    # break prematurely because "everything looks considered".
+    considered = {}
+
+    def _identity(change_id, change_token):
+        return change_token if change_token is not None else ("legacy", change_id)
+    try:
+        for _ in range(_MAX_SYNC_DRAIN_PASSES):
+            runs = db.pending_change_runs_in_folders(folder_ids)
+            if not runs:
+                break
+            if all(_identity(cid, token) in considered
+                   for _ws, entries in runs for cid, token, _pid in entries):
+                # Everything left is something the sync looked at and chose
+                # not to write -- a flag queued in a workspace with
+                # sync_flags_to_xmp off. Re-running would not clear it.
+                break
+            for workspace_id, entries in runs:
+                considered.update({
+                    _identity(cid, token): photo_id
+                    for cid, token, photo_id in entries
+                })
+                db.set_active_workspace(workspace_id)
+                # By token whenever possible: an earlier run in this same
+                # pass cleared its rows, and SQLite re-issues those ids to
+                # the next insert. A request thread queueing an edit in
+                # between would hand this run somebody else's change -- a
+                # photo outside the staging tree, whose sidecar would be
+                # created and whose edit would be cleared. A pre-migration
+                # legacy row has no token to name it by, so it dispatches
+                # by id; ``sync_to_xmp`` unions the two channels so a mixed
+                # run stays one call. Passing ``[None, ...]`` as
+                # ``change_tokens`` would have resolved to every NULL-token
+                # row in the workspace, including photos outside staging.
+                modern_tokens = [token for _cid, token, _pid in entries if token is not None]
+                legacy_ids = [cid for cid, token, _pid in entries if token is None]
+                result = sync_mod.sync_to_xmp(
+                    db, progress_callback=sync_progress,
+                    change_tokens=modern_tokens or None,
+                    change_ids=legacy_ids or None,
+                    create_missing_sidecars=True,
+                    # This dispatch already walks the queue in chronology
+                    # via ``pending_change_runs_in_folders``. Letting
+                    # ``_select_changes`` reach across the run boundary and
+                    # pull a LATER run's ``keyword_add`` into an EARLIER
+                    # run's ``keyword_remove`` (both in the same workspace,
+                    # co-existing because the pretransfer registry skipped
+                    # their cancel-the-opposite shortcut) collapses them
+                    # into one plan, clears both tokens, and the later
+                    # run's write never happens. The sidecar then ships
+                    # in whatever intermediate state a remaining run
+                    # happened to write last, instead of the newest edit
+                    # the user actually left the queue in.
+                    expand_keyword_pairs=False,
+                    # A transfer is defined by a path on disk. A staging tree
+                    # linked only to a sibling workspace is unreachable from
+                    # the queue owner's ``get_folder_tree()``, so the default
+                    # per-workspace resolution would abort the run with
+                    # "folder not accessible" though the file is right there.
+                    folder_scope="global",
+                )
+                # A change this workspace declines to write to XMP (a flag,
+                # when sync_flags_to_xmp is off) is reported as a failure so
+                # the ordinary sync job lands in history as "failed". It is
+                # not a reason to abandon a transfer: nothing went wrong, and
+                # the edit was never bound for the sidecar. Only failures
+                # carrying a ``reason`` -- the ones raised by an actual
+                # prepare or write -- stop the move.
+                blocking = [f for f in result["failures"] if f.get("reason")]
+                if blocking:
+                    raise ValueError(
+                        "Metadata sync failed, so nothing was sent: "
+                        + "; ".join(result["errors"])
+                        + ". The local originals are untouched. Fix the sidecars and try "
+                        "again, or use Send to NAS to transfer without syncing first."
+                    )
+        # Count photos, not per-run tallies. One photo with changes in two
+        # runs -- the cross-workspace case this walk exists for -- is one
+        # sidecar, and summing each run's ``synced`` would report it twice and
+        # disagree with the banner's distinct-photo count. A row whose
+        # identity stopped being queued is one ``clear_pending`` wrote, so
+        # its photo was written.
+        still_queued = {
+            _identity(cid, token)
+            for _ws, entries in db.pending_change_runs_in_folders(folder_ids)
+            for cid, token, _pid in entries
+        }
+        synced = len({
+            photo_id for identity, photo_id in considered.items()
+            if identity not in still_queued
+        })
+    finally:
+        db.set_active_workspace(transferring_ws)
+    return synced, considered
+
+
+def _residual_staged_changes(db, photo_ids, considered):
+    """Count edits queued too late to have travelled with the transfer.
+
+    Blocking the rating and keyword routes for the length of a NAS transfer
+    would be a worse trade than this gap, so the gap is reported instead of
+    closed: the job must not claim it synced everything when an edit landed
+    after the last drain.
+
+    Only changes the sync never saw count. Something it considered and left
+    queued was deliberately not written to XMP (a flag under
+    sync_flags_to_xmp off), and reporting that as an edit that "missed the
+    transfer" would be a different claim than the true one. Matched on a
+    per-row identity (``change_token`` if present, else ``("legacy",
+    change_id)``) rather than id alone, because SQLite reuses a cleared
+    row's id for the next insert AND multiple legacy rows would otherwise
+    collapse under a shared ``None``. Scoped by photo ids captured before
+    the move, not by folder ids: ``move_folder(..., merge=True,
+    allow_tracked_merge=True)`` can fold source folder rows into destination
+    folders, so a folder-id scope would silently miss edits whose photos
+    are still queued.
+    """
+    try:
+        return len(db.pending_change_identities_for_photos(photo_ids) - considered.keys())
+    except Exception:
+        log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
+        return 0
+
+
 def create_imports_blueprint(
     get_db,
     json_error,
@@ -192,6 +409,9 @@ def create_imports_blueprint(
     chain_after_move,
     bulk_gps_location_payload,
     guard_move_folder,
+    sync_job_lock,
+    pretransfer_sync_photo_ids,
+    pretransfer_sync_photo_ids_lock,
 ):
     """Build the imports blueprint.
 
@@ -219,19 +439,19 @@ def create_imports_blueprint(
         # Only pay for the folder read when something is actually pending —
         # three pages poll this endpoint every 5s with an empty list most of
         # the time.
-        ws_folders = db.conn.execute(
-            "SELECT f.id, f.path FROM folders f "
-            "JOIN workspace_folders wf ON wf.folder_id = f.id "
-            "WHERE wf.workspace_id = ?",
-            (db._ws_id(),),
-        ).fetchall() if rows else []
+        ws_folders = _all_folders(db) if rows else []
         items = []
         for row in rows:
             sending = any(j.get("type") == "send-to-nas"
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
+            folder_ids = _folder_ids_under(ws_folders, row["staging_destination"])
             items.append({
                 "id": row["id"], "destination": row["destination"],
-                "folder_ids": _folder_ids_under(ws_folders, row["staging_destination"]),
+                "folder_ids": folder_ids,
+                # Scoped to this archive's staging tree, not the workspace-wide
+                # sync queue: the banner offers to sync *these* photos, so the
+                # number has to be the ones the transfer would leave stale.
+                "unsynced_photos": db.count_photos_with_pending_changes_in_folders(folder_ids),
                 "source_available": os.path.isdir(row["staging_destination"]),
                 "collection_id": row["review_collection_id"], "name": row["collection_name"] or "Imported photos",
                 "state": "sending" if sending else "waiting" if jobs else "ready",
@@ -271,6 +491,34 @@ def create_imports_blueprint(
         db = get_db()
         runner = get_runner()
         workspace_id = db._ws_id()
+        # ``get_json(silent=True)`` returns ``None`` for both an absent body
+        # AND for a JSON parse failure, so a client sending
+        # ``Content-Type: application/json`` with truncated or malformed JSON
+        # would be treated as ``sync_first=False`` and the destructive
+        # transfer would start without the metadata sync. Read the raw body
+        # and default only when it is genuinely empty. An ``or {}`` on the
+        # parsed value would similarly swallow the falsy JSON literals
+        # ``false``, ``0``, ``[]``, ``""``.
+        raw = request.get_data(cache=True, as_text=True)
+        if raw and raw.strip():
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                return json_error("Request body must be valid JSON")
+            # A top-level JSON ``null`` parses to ``None`` -- treat it the
+            # same as ``false``, ``0``, ``[]`` and other falsy non-objects
+            # here rather than swallowing it into ``{}``. Defaulting to
+            # ``{}`` would start the destructive transfer with
+            # ``sync_first=False`` for a caller who explicitly said ``null``.
+            if not isinstance(body, dict):
+                return json_error("Request body must be a JSON object")
+        else:
+            body = {}
+        sync_first = body.get("sync_first", False)
+        # Not coerced: "false" and 0 are truthy/falsy in ways a caller does not
+        # intend, and this option writes sidecars and can fail a transfer.
+        if not isinstance(sync_first, bool):
+            return json_error("sync_first must be a boolean")
         with archive_dispatch_lock:
             archive = get_pending_archive(db, archive_id)
             if archive is None:
@@ -281,6 +529,17 @@ def create_imports_blueprint(
             existing = next((j for j in active if j.get("type") == "send-to-nas"
                              and (j.get("config") or {}).get("pending_archive_id") == archive_id), None)
             if existing:
+                # Joining is only honest when the running job is doing what
+                # this caller asked for. A plain transfer cannot be upgraded
+                # mid-flight, so handing back its id would promise a metadata
+                # sync that is never going to run.
+                if bool((existing.get("config") or {}).get("sync_first")) != sync_first:
+                    return json_error(
+                        "These photos are already being sent to NAS "
+                        + ("without the metadata sync" if sync_first else "with the metadata sync")
+                        + ". Wait for that transfer to finish before starting a different one.",
+                        409,
+                    )
                 return jsonify({"job_id": existing["id"]})
             if active:
                 return json_error("Wait for running jobs to finish before sending these photos to NAS", 409)
@@ -294,19 +553,121 @@ def create_imports_blueprint(
                     )
                     thread_db.conn.commit()
                     try:
-                        if not runner.begin_uncancellable(job["id"]):
-                            raise ValueError("Transfer cancelled before it started. Local originals are retained.")
-
                         def progress(current, total, filename, phase="Sending to NAS"):
                             job["progress"].update(current=current, total=total, current_file=filename)
                             runner.push_event(job["id"], "progress", {
                                 "current": current, "total": total, "current_file": filename, "phase": phase,
                             })
 
-                        result = send_pending_archive(
-                            thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
-                            guard_folder=guard_move_folder, progress_cb=progress,
-                        )
+                        # Acquired BEFORE begin_uncancellable so a cancel or
+                        # shutdown during this wait is still honored. Another
+                        # workspace's ``/api/jobs/sync`` can hold the lock for
+                        # minutes, and nothing here has touched the filesystem
+                        # yet -- entering the uncancellable phase first would
+                        # wedge the transfer against a wait a cancel could
+                        # safely have unwound. Mirrors ``/api/jobs/sync``'s
+                        # own cancellable acquire in ``app.py``.
+                        if sync_first:
+                            folder_ids = _staging_folder_ids(
+                                thread_db, archive["staging_destination"])
+                            # Captured before the transfer because
+                            # ``move_folder(..., merge=True,
+                            # allow_tracked_merge=True)`` can fold source
+                            # folder rows into destination folders, and the
+                            # residual re-check must not lose edits when its
+                            # folder scope has been folded away.
+                            staged_photo_ids = _staged_photo_ids(thread_db, folder_ids)
+                            # One app-wide lock across the sync, the move, and
+                            # the residual re-check. ``/api/jobs/sync`` on
+                            # another workspace could otherwise touch the same
+                            # sidecars between the sync and the copy, clearing
+                            # its queue while the NAS ends up with whichever
+                            # version won -- and the residual check would then
+                            # see nothing queued and report all clear.
+                            #
+                            # Wait cancellably: ``begin_uncancellable`` below
+                            # would otherwise strand the transfer here if
+                            # another workspace's XMP sync is running, since
+                            # Stop and shutdown would be ignored during a
+                            # blocking acquire and nothing on disk has been
+                            # touched yet. Same poll-``is_cancelled`` pattern
+                            # as the /api/jobs/sync route.
+                            if not sync_job_lock.acquire(blocking=False):
+                                progress(0, 0, "", "Waiting for current XMP sync")
+                                while True:
+                                    if runner.is_cancelled(job["id"]):
+                                        raise ValueError("Transfer cancelled before it started. Local originals are retained.")
+                                    if sync_job_lock.acquire(timeout=0.1):
+                                        break
+                        else:
+                            folder_ids = []
+                            staged_photo_ids = []
+                        # Register the staged photos so the keyword add/remove
+                        # endpoints (``_queue_keyword_add`` /
+                        # ``_queue_keyword_remove`` in ``app.py``) skip their
+                        # cancel-a-pending-opposite shortcut for the duration
+                        # of the send: cancelling a row the sync has already
+                        # snapshotted would silently drop it, and the drain
+                        # would find no fresh row to pick up. Set only in the
+                        # ``sync_first`` path; a plain transfer does not read
+                        # or clear the queue, so cancellation is safe.
+                        registered_photo_ids = frozenset(staged_photo_ids) if sync_first else frozenset()
+                        if registered_photo_ids:
+                            with pretransfer_sync_photo_ids_lock:
+                                pretransfer_sync_photo_ids.update(registered_photo_ids)
+                        try:
+                            # Enter the uninterruptible phase only after the
+                            # lock is in hand, so the wait above stayed
+                            # cancellable.
+                            if not runner.begin_uncancellable(job["id"]):
+                                raise ValueError("Transfer cancelled before it started. Local originals are retained.")
+                            synced, considered = _sync_staged_metadata(
+                                thread_db, archive, progress,
+                                folder_ids) if sync_first else (0, {})
+
+                            result = send_pending_archive(
+                                thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                                guard_folder=guard_move_folder, progress_cb=progress,
+                            )
+                            if sync_first:
+                                # Unconditionally, not just when something synced:
+                                # a queue holding only changes this workspace
+                                # declines to write syncs nothing, and an edit made
+                                # during the copy would then go unreported.
+                                # Union the survivors of a tracked-archive
+                                # merge: it deletes the staged row for an
+                                # identical photo and this re-files that
+                                # row's queued edits onto the surviving one,
+                                # which is not in the pre-move snapshot.
+                                residual = _residual_staged_changes(
+                                    thread_db,
+                                    list(staged_photo_ids)
+                                    + list(result.get("pending_reassigned_to") or []),
+                                    considered)
+                        finally:
+                            if registered_photo_ids:
+                                with pretransfer_sync_photo_ids_lock:
+                                    pretransfer_sync_photo_ids.difference_update(registered_photo_ids)
+                            if sync_first:
+                                sync_job_lock.release()
+                        if sync_first:
+                            summary = result["summary"]
+                            if synced:
+                                summary = (
+                                    f"Synced metadata for {synced} photo"
+                                    f"{'' if synced == 1 else 's'}. {summary}"
+                                )
+                            if residual:
+                                summary += (
+                                    f". {residual} edit{'' if residual == 1 else 's'} queued "
+                                    "during the transfer and still need a sync, now over the "
+                                    "NAS connection"
+                                )
+                            result = {
+                                **result, "metadata_synced": synced,
+                                "metadata_queued_during_transfer": residual,
+                                "summary": summary,
+                            }
                         thread_db.conn.execute(
                             "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
                         )
@@ -326,7 +687,8 @@ def create_imports_blueprint(
                 "send-to-nas", work, singleton_key=archive_id,
                 workspace_id=workspace_id,
                 exclusive_workspace=True,
-                config={"pending_archive_id": archive_id, "destination": archive["destination"]},
+                config={"pending_archive_id": archive_id, "destination": archive["destination"],
+                        "sync_first": sync_first},
             )
         return jsonify({"job_id": job_id})
     # Import workers run on separate threads. Serialize execution of the same

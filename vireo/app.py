@@ -4995,6 +4995,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # XMP sidecars are read-modify-written files; serialize sync jobs so
     # repeated clicks cannot race while touching the same sidecar.
     app._sync_job_lock = threading.Lock()
+    # Photos currently the target of a pre-transfer NAS sync
+    # (``_sync_staged_metadata``). The keyword add/remove endpoints check
+    # this before their cancel-a-pending-opposite shortcut: if a photo is in
+    # here, the shortcut would silently drop a change the running sync has
+    # already snapshotted, and the drain would find no fresh row to pick up.
+    # Registered on entry and cleared on exit inside the imports blueprint.
+    app._pretransfer_sync_photo_ids = set()
+    app._pretransfer_sync_photo_ids_lock = threading.Lock()
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
@@ -7838,10 +7846,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not keyword_name:
             return
         db = _get_db()
-        removed = db.remove_pending_changes(
-            photo_id, "keyword_remove", keyword_name,
-            workspace_id=workspace_id, _commit=_commit,
-        )
+        # The guard check and the follow-on ``remove_pending_changes`` have
+        # to be atomic against the send job's ``pretransfer_sync_photo_ids``
+        # registration. Without the lock, a check-to-delete window lets the
+        # sibling read ``False`` here, be suspended while the send job
+        # registers the photo and snapshots the pending opposite, then
+        # resume and delete that row. The sync then writes the snapshotted
+        # change to the sidecar and the drain sees an empty queue -- the
+        # sidecar ships in the state the sibling's request just tried to
+        # invert. Holding the registry lock across the check + delete
+        # collapses that window: either the sibling gets in first (delete
+        # happens before registration, sync never snapshotted the row) or
+        # the send gets in first (guard reads True, cancel is skipped, the
+        # real change is queued below for the drain).
+        with app._pretransfer_sync_photo_ids_lock:
+            if photo_id in app._pretransfer_sync_photo_ids:
+                removed = 0
+            else:
+                removed = db.remove_pending_changes(
+                    photo_id, "keyword_remove", keyword_name,
+                    workspace_id=workspace_id, _commit=_commit,
+                )
         # A migration-generated flat removal is obsolete as soon as the user
         # explicitly re-adds that term. Clear it across every workspace that
         # owns the shared sidecar; otherwise "Use XMP" can filter the term
@@ -7868,10 +7893,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not keyword_name:
             return
         db = _get_db()
-        removed = db.remove_pending_changes(
-            photo_id, "keyword_add", keyword_name,
-            workspace_id=workspace_id, _commit=_commit,
-        )
+        # See _queue_keyword_add: the check and the delete are held under
+        # the registry lock atomically against the send job's registration,
+        # so a sibling cannot read ``False``, then be preempted while the
+        # send registers and snapshots, then delete a row the sync has
+        # already captured.
+        with app._pretransfer_sync_photo_ids_lock:
+            if photo_id in app._pretransfer_sync_photo_ids:
+                removed = 0
+            else:
+                removed = db.remove_pending_changes(
+                    photo_id, "keyword_add", keyword_name,
+                    workspace_id=workspace_id, _commit=_commit,
+                )
         if removed == 0:
             db.queue_change(
                 photo_id, "keyword_remove", keyword_name,
@@ -30409,6 +30443,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             chain_after_move=pipeline_chain.chain_after_move,
             bulk_gps_location_payload=_bulk_gps_location_payload,
             guard_move_folder=_move_folder_guard_error,
+            sync_job_lock=app._sync_job_lock,
+            pretransfer_sync_photo_ids=app._pretransfer_sync_photo_ids,
+            pretransfer_sync_photo_ids_lock=app._pretransfer_sync_photo_ids_lock,
         )
     )
 

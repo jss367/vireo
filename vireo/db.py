@@ -5330,6 +5330,10 @@ class Database:
           ``cleanup_cached_files_for_deleted_photos`` so orphaned thumbnail /
           preview / working-copy files can't be inherited by a later import
           that reuses one of the freed SQLite rowids.
+        * ``pending_reassigned_to`` — surviving photo ids that inherited
+          queued sidecar edits from a row this merge deleted. Callers scoping
+          a post-move sync-queue check by photo id need these, because the
+          edits are no longer filed under the id they started on.
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
@@ -5337,7 +5341,7 @@ class Database:
         if not staged_root:
             return {"new_photos": 0, "new_folders": 0,
                     "merged_folders": 0, "already_present": 0,
-                    "dropped_photo_ids": []}
+                    "dropped_photo_ids": [], "pending_reassigned_to": []}
         staged_root_path = staged_root["path"]
         ws = self._ws_id()
 
@@ -5555,7 +5559,7 @@ class Database:
 
         counts = {"new_photos": 0, "new_folders": 0,
                   "merged_folders": 0, "already_present": 0,
-                  "dropped_photo_ids": []}
+                  "dropped_photo_ids": [], "pending_reassigned_to": []}
         # Staged folders that fold into an existing target row are deleted only
         # after every staged folder has been processed. Deleting eagerly would
         # hit a FK violation when a not-yet-reparented staged child still points
@@ -5789,7 +5793,11 @@ class Database:
                     # targets ``normalize`` is identity, so different-case
                     # names have different keys and this tracker never
                     # triggers.
-                    staged_normalized_claimed = set()
+                    # Maps the case-normalized name to the photo row that
+                    # survives for it, so a deleted row's queued sidecar
+                    # edits can be re-filed onto the survivor rather than
+                    # cascade-deleted with it.
+                    staged_normalized_claimed = {}
                     for staged in staged_photos:
                         pid = staged["id"]
                         staged_norm = normalize(staged["filename"])
@@ -5846,6 +5854,43 @@ class Database:
                             # rsync ``--ignore-existing`` skipped this
                             # file), so treating it as ``already_present``
                             # is correct.
+                            #
+                            # But intra-staged and real collisions differ on
+                            # what the queued edits mean. For a real
+                            # (byte-identical) collision the staged and
+                            # archive rows describe the same image, so a
+                            # sidecar edit queued against this staged row
+                            # applies equally to the survivor: re-file it
+                            # rather than lose it to the cascade, and
+                            # materialize the queued values onto the
+                            # survivor's own ``photos`` and ``photo_keywords``
+                            # rows so the catalog stays in step with the
+                            # sidecar the later sync will publish.
+                            # ``_reassign_photo_state`` mirrors those queued
+                            # values (rating, flag, keyword add/remove); the
+                            # write endpoints keep catalog and queue in step,
+                            # so this delete would otherwise take the user's
+                            # most recent values with it.
+                            #
+                            # An intra-staged case-alias is different: rsync
+                            # ``--ignore-existing`` skipped THIS file's bytes,
+                            # so it may represent a completely different
+                            # image than the earlier staged row that claimed
+                            # the slot. Reassigning its queued rating or
+                            # keywords onto that survivor would silently
+                            # write this image's metadata to the wrong photo
+                            # -- same failure mode as the phantom branch
+                            # below. Let the cascade drop them; that loses
+                            # the queued edits, but misfiling them onto the
+                            # wrong picture (invisibly) is worse.
+                            if real_collision:
+                                survivor = collision["id"]
+                                if survivor != pid:
+                                    self._reassign_photo_state(pid, survivor)
+                                    if self._reassign_pending_changes(pid, survivor):
+                                        counts["pending_reassigned_to"].append(survivor)
+                                    staged_normalized_claimed.setdefault(
+                                        staged_norm, survivor)
                             self.conn.execute(
                                 "DELETE FROM photo_keywords "
                                 "WHERE photo_id = ?",
@@ -5880,6 +5925,23 @@ class Database:
                                 # the SQL ``filename = ?`` lookup used earlier
                                 # would miss the stale row and leave both
                                 # intact.
+                                # Same cascade, other direction: the phantom
+                                # row is the one going away.
+                                #
+                                # The phantom's queued edits are deliberately
+                                # NOT reassigned onto the staged row. A phantom
+                                # represents a different image -- the archived
+                                # bytes went missing or were replaced by rsync
+                                # -- and its queued ratings or keywords were
+                                # the user's intent for that missing image,
+                                # not for the fresh staged bytes that now
+                                # occupy the filename slot. Reassigning them
+                                # would silently write the old image's
+                                # metadata onto the replacement. Letting the
+                                # cascade drop them loses those queued edits,
+                                # but the alternative is worse: the edits
+                                # would land on the wrong picture and the
+                                # user could not tell.
                                 self.conn.execute(
                                     "DELETE FROM photo_keywords "
                                     "WHERE photo_id = ?", (collision["id"],))
@@ -5905,7 +5967,24 @@ class Database:
                             # name is dropped as ``already_present``
                             # instead of adding a second catalog row for
                             # the same on-disk destination.
-                            staged_normalized_claimed.add(staged_norm)
+                            staged_normalized_claimed[staged_norm] = pid
+                            # Same-pass update to the collision map: without
+                            # this a subsequent case-alias iteration whose
+                            # hash happens to match the phantom's stale
+                            # ``file_hash`` would compute
+                            # ``real_collision=True`` against a row that no
+                            # longer exists, hand ``_reassign_pending_changes``
+                            # the deleted phantom id, and trip the
+                            # ``pending_changes.photo_id`` FK constraint --
+                            # aborting the whole merge. The survivor is now
+                            # the reparented staged row, so a later real
+                            # collision resolves to it.
+                            existing_by_key[staged_norm] = {
+                                "id": pid,
+                                "filename": staged["filename"],
+                                "file_hash": staged["file_hash"],
+                                "file_size": staged["file_size"],
+                            }
                     to_delete.append(sf["id"])
                     counts["merged_folders"] += 1
                     last_target_parent[target_path] = target["id"]
@@ -6832,6 +6911,136 @@ class Database:
             "SELECT COUNT(*) FROM pending_changes WHERE workspace_id = ?",
             (self._ws_id(),),
         ).fetchone()[0]
+
+    # Both of these span workspaces on purpose. The review queue is
+    # workspace-scoped but the sidecar is global to the photo, so when a
+    # staged folder is also linked to a sibling workspace, edits queued there
+    # target the very file this transfer is about to move. Filtering to the
+    # active workspace would hide them from the banner and skip them in the
+    # pre-transfer sync, stranding them behind the NAS exactly as this
+    # feature exists to prevent. ``clear_pending`` already reaches across
+    # workspaces for the same reason.
+
+    def count_photos_with_pending_changes_in_folders(self, folder_ids):
+        """Return how many photos in ``folder_ids`` have unwritten sidecar edits.
+
+        Scoped to the folders rather than reusing ``count_pending_changes``:
+        the "Photos kept locally" banner offers to sync before a NAS transfer,
+        and a catalog-wide number there would claim edits the transfer never
+        touches. Counts photos, not rows, because that is the unit the banner
+        names. Summing per chunk is exact -- ``photos.folder_id`` is a single
+        column, so no photo can appear under two chunks.
+        """
+        total = 0
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" * len(chunk))
+            total += self.conn.execute(
+                f"SELECT COUNT(DISTINCT p.id) FROM pending_changes pc "
+                f"JOIN photos p ON p.id = pc.photo_id "
+                f"WHERE p.folder_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchone()[0]
+        return total
+
+    def pending_change_identities_for_photos(self, photo_ids):
+        """Return the set of per-row identities still queued for these photos.
+
+        Each row's identity is its ``change_token`` if one is stored, and
+        ``("legacy", change_id)`` otherwise (pre-migration NULL-token rows).
+        A raw-tokens set would collapse every legacy row under ``None`` and
+        both under-report the residual count and let it match against a
+        ``None`` in a caller's ``considered`` set, so legacy rows for
+        different photos have to key on something distinct.
+
+        The residual check after a NAS transfer needs a stable scope: the
+        source folder rows can be folded into destination folders by
+        ``move.move_folder(..., merge=True, allow_tracked_merge=True)``, so
+        the folder-id scope the sync ran under is not usable afterwards.
+        Photo ids are, because photo rows survive a folder merge.
+        """
+        identities = set()
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for row in self.conn.execute(
+                f"SELECT id, change_token FROM pending_changes WHERE photo_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall():
+                token = row["change_token"]
+                identities.add(token if token is not None else ("legacy", row["id"]))
+        return identities
+
+    def pending_change_runs_in_folders(self, folder_ids):
+        """Return ``[(workspace_id, [(change_id, change_token, photo_id), ...]), ...]``, in queue order.
+
+        Split by workspace because ``sync.sync_to_xmp`` reads both the queue
+        and the sync-to-XMP settings through the active workspace, so each
+        group has to be written with its own workspace's flag and location
+        preferences rather than the transferring workspace's.
+
+        Split into *consecutive runs* rather than one group per workspace
+        because the order the user made the edits in is the order they have
+        to reach the sidecar. A rating of 1 queued in one workspace and a
+        later 5 queued in another are two writes to one ``xmp:Rating``;
+        applying them grouped by workspace would settle on whichever
+        workspace ran last, not on the newer value. Runs preserve the global
+        chronology exactly, at the cost of one extra pass per workspace
+        switch -- and a switch only happens when the user actually alternated
+        between workspaces.
+
+        Also split when the same photo re-appears interleaved with another
+        photo in the same workspace. A RAW and a JPEG with one basename
+        share one ``.xmp`` sidecar, so an interleaved rating sequence like
+        ``RAW=1, JPEG=2, RAW=3`` groups inside ``sync_to_xmp`` as
+        ``{RAW: [1, 3], JPEG: [2]}`` and folds to ``RAW=3, JPEG=2``. Both
+        writes go to one sidecar and the sidecar settles on whichever ran
+        last -- for the shared ``xmp:Rating`` that is ``JPEG=2``, not the
+        newer ``RAW=3``. Splitting the run at ``RAW``'s interleaved reappearance
+        yields ``[RAW=1, JPEG=2]`` then ``[RAW=3]``, so the last write is the
+        newest edit and the sidecar settles on the right value. Repeats of one
+        photo with no other photo in between (``RAW=1, RAW=3``) still coalesce
+        in one run, so the fast case stays fast.
+
+        ``change_token`` rides along because ``pending_changes.id`` is a bare
+        ``INTEGER PRIMARY KEY``: SQLite hands the rowid straight back out
+        after ``clear_pending`` deletes it, so a change queued right after a
+        sync can reuse the id the sync just cleared. Callers tracking which
+        changes they have already looked at must key on the token, which is a
+        fresh uuid per insert. ``photo_id`` rides along so a caller can tell
+        which photos a sync actually wrote, by seeing whose tokens stopped
+        being queued.
+        """
+        rows = []
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" * len(chunk))
+            rows.extend(self.conn.execute(
+                f"SELECT pc.created_at, pc.id, pc.workspace_id, pc.change_token, pc.photo_id "
+                f"FROM pending_changes pc "
+                f"JOIN photos p ON p.id = pc.photo_id "
+                f"WHERE p.folder_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall())
+        # Sorted here rather than in SQL: chunking splits the scan into
+        # several statements, so only a final pass over the union is ordered
+        # across all of them. Matches get_pending_changes' (created_at, id).
+        rows.sort(key=lambda r: (r[0], r[1]))
+        runs = []
+        current_photos = set()
+        last_photo = None
+        for _created_at, change_id, workspace_id, change_token, photo_id in rows:
+            same_workspace = bool(runs) and runs[-1][0] == workspace_id
+            interleaved_repeat = (
+                same_workspace
+                and photo_id in current_photos
+                and photo_id != last_photo
+            )
+            if same_workspace and not interleaved_repeat:
+                runs[-1][1].append((change_id, change_token, photo_id))
+                current_photos.add(photo_id)
+            else:
+                runs.append((workspace_id, [(change_id, change_token, photo_id)]))
+                current_photos = {photo_id}
+            last_photo = photo_id
+        return runs
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
@@ -21331,6 +21540,158 @@ class Database:
         if synced_changes:
             self.clear_equivalent_flat_removals(synced_changes, _commit=False)
         self.conn.commit()
+
+    def clear_pending_by_token(
+        self, change_tokens, *, clear_equivalent_flat_removals=False,
+    ):
+        """Delete pending changes named by their immutable tokens.
+
+        ``pending_changes.id`` is a bare ``INTEGER PRIMARY KEY``, so SQLite
+        reuses a cleared row's rowid on the next insert into the same table.
+        A caller that captured ids at plan time and cleared them after a slow
+        sidecar write can therefore delete a newly queued replacement row that
+        landed on the same numeric id. Tokens are UUIDs assigned at insert and
+        are stable across such delete+insert cycles.
+
+        ``clear_equivalent_flat_removals`` behaves as in :meth:`clear_pending`.
+        """
+        if not change_tokens:
+            return
+        workspace_id = self._ws_id()
+        synced_changes = []
+        for chunk in _chunks(change_tokens):
+            placeholders = ",".join("?" for _ in chunk)
+            if clear_equivalent_flat_removals:
+                rows = self.conn.execute(
+                    f"""SELECT photo_id, change_type, value
+                        FROM pending_changes
+                        WHERE change_token IN ({placeholders}) AND workspace_id = ?
+                          AND change_type = 'keyword_remove_flat'""",
+                    [*chunk, workspace_id],
+                ).fetchall()
+                synced_changes.extend(rows)
+            self.conn.execute(
+                f"DELETE FROM pending_changes WHERE change_token IN ({placeholders}) AND workspace_id = ?",
+                [*chunk, workspace_id],
+            )
+        if synced_changes:
+            self.clear_equivalent_flat_removals(synced_changes, _commit=False)
+        self.conn.commit()
+
+    def _reassign_pending_changes(self, from_photo_id, to_photo_id):
+        """Re-file queued sidecar edits onto ``to_photo_id``. Returns a count.
+
+        ``pending_changes.photo_id`` cascades on delete, so a merge that drops
+        one of two rows describing the same image would take that row's queued
+        edits with it -- silently, and after the sidecar was already written.
+        The surviving row represents the same file, so the edit still applies
+        to it.
+
+        Duplicates are left alone rather than collapsed. ``_plan_photo_sync``
+        folds keywords through a set and takes the last rating in queue order,
+        so an identical pair is harmless -- whereas de-duplicating a rating
+        would reorder a deliberate 1 -> 2 -> 1 sequence and settle on the
+        wrong value.
+        """
+        cursor = self.conn.execute(
+            "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
+            (to_photo_id, from_photo_id),
+        )
+        return cursor.rowcount
+
+    def _reassign_photo_state(self, from_photo_id, to_photo_id):
+        """Materialize queued sidecar edits onto the survivor's catalog row.
+
+        Sibling to ``_reassign_pending_changes``. A byte-identical merge
+        deletes the staged row (and its ``photo_keywords``) and re-files
+        the queued sidecar edits onto the survivor. But nothing propagates
+        those queued values into the survivor's own ``photos.rating``,
+        ``flag``, or ``photo_keywords``, so once the pending changes are
+        cleared by a later sync the catalog reads the pre-edit value while
+        the sidecar carries the user's most recent one. Apply the queued
+        values to the survivor here so both stay in step.
+
+        Only the edits that ``sync_to_xmp`` actually writes to the sidecar
+        are mirrored: rating, flag, keyword add/remove. Keyword adds only
+        propagate the ``photo_keywords`` rows for keywords a queued
+        ``keyword_add`` names -- byte-identity does not imply identical
+        catalog metadata, so a staged row's OWN pre-existing keyword links
+        (imported from its sidecar, tagged by a scan, or auto-classified
+        before the transfer was requested) would otherwise silently tag
+        the archive photo alongside the genuinely queued edit. Rows
+        transfer by ``keyword_id`` from the staged photo's
+        ``photo_keywords`` joined against ``keywords.name``, which dodges
+        the ambiguity of re-resolving names --
+        ``keywords.UNIQUE(name, parent_id)`` allows the same name under
+        different parents, and picking the row already linked to the
+        staged photo picks the parent the write endpoint chose. The union
+        goes through the shared provenance fold rather than
+        ``INSERT OR IGNORE``: where both rows exist, IGNORE would keep
+        whichever stamp was already there, so a hand-added keyword on the
+        staged row could come out the other side wearing a weaker source
+        and be deleted by a later retirement pass.
+        A queued ``keyword_remove`` matches the survivor's rows by name,
+        case-insensitively. ``_remove_planned_keywords`` matches sidecar
+        entries through ``keyword_match_key``, an ASCII case fold, so a
+        binary ``=`` here would strip the term from the sidecar and leave
+        it in the catalog -- the divergence this helper exists to
+        prevent. ``COLLATE NOCASE`` is the same fold, and is what every
+        other keyword lookup in this file uses.
+        """
+        changes = self.conn.execute(
+            "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+            "ORDER BY created_at, id",
+            (from_photo_id,),
+        ).fetchall()
+        queued_add_names = [
+            c["value"] for c in changes
+            if c["change_type"] == "keyword_add" and c["value"]
+        ]
+        if queued_add_names:
+            placeholders = ",".join("?" * len(queued_add_names))
+            self.conn.execute(
+                "INSERT INTO photo_keywords "
+                "(photo_id, keyword_id, source) "
+                "SELECT ?, pk.keyword_id, pk.source FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                f"WHERE pk.photo_id = ? AND k.name IN ({placeholders}) "
+                + KEYWORD_SOURCE_CONFLICT_SQL,
+                (to_photo_id, from_photo_id, *queued_add_names),
+            )
+        for change in changes:
+            change_type = change["change_type"]
+            value = change["value"]
+            if change_type == "rating":
+                try:
+                    rating = int(value)
+                except (TypeError, ValueError):
+                    continue
+                self.conn.execute(
+                    "UPDATE photos SET rating = ? WHERE id = ?",
+                    (rating, to_photo_id),
+                )
+            elif change_type == "flag":
+                self.conn.execute(
+                    "UPDATE photos SET flag = ? WHERE id = ?",
+                    (value or "none", to_photo_id),
+                )
+            elif change_type in ("keyword_remove", "keyword_remove_flat"):
+                # The removed keyword is no longer in the staged photo's
+                # ``photo_keywords`` (the remove endpoint already dropped
+                # the row), so the INSERT OR IGNORE above didn't add it.
+                # But the survivor may still hold that keyword from its
+                # earlier state -- delete matching rows so the catalog
+                # matches the sidecar the sync will publish.
+                keyword_rows = self.conn.execute(
+                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE",
+                    (value,),
+                ).fetchall()
+                for kw_row in keyword_rows:
+                    self.conn.execute(
+                        "DELETE FROM photo_keywords "
+                        "WHERE photo_id = ? AND keyword_id = ?",
+                        (to_photo_id, kw_row["id"]),
+                    )
 
     def clear_equivalent_flat_removals(self, changes, _commit=True):
         """Clear shared-sidecar flat removals represented by ``changes``."""

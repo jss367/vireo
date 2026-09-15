@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 import time
 
@@ -5171,6 +5172,1183 @@ def test_pending_archive_reports_its_staging_folders(app_and_db, tmp_path, monke
     near_miss = db.add_folder(staging + "-backup", name="staging-backup")
     refreshed = app.test_client().get("/api/import/pending-archives").get_json()
     assert near_miss not in refreshed["items"][0]["folder_ids"]
+
+
+def test_pending_archive_reports_unsynced_metadata_for_its_own_photos_only(app_and_db, tmp_path, monkeypatch):
+    """The banner offers to sync *these* photos, so the count must be theirs."""
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 0
+
+    # Queued on a photo that already lives on the NAS: this transfer would
+    # not leave its sidecar stale, so it must not inflate the banner.
+    elsewhere = tmp_path / "already-on-nas"
+    elsewhere.mkdir()
+    outside = db.add_photo(db.add_folder(str(elsewhere), name="already-on-nas"),
+                           "elsewhere.jpg", ".jpg", 10, 0)
+    db.queue_change(outside, "keyword_add", "Elsewhere")
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 0
+
+    staged = imported["result"]["photo_ids"]
+    # Two changes on one photo are one photo's worth of stale sidecar.
+    db.queue_change(staged[0], "keyword_add", "Osprey")
+    db.queue_change(staged[0], "rating", "3")
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 1
+    db.queue_change(staged[1], "keyword_add", "Osprey")
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 2
+
+
+def test_pending_archive_sync_first_writes_sidecars_before_the_transfer(app_and_db, tmp_path, monkeypatch):
+    """Sidecars must be written on local disk, then travel with the move."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    assert not list((tmp_path / "staging").rglob("*.xmp"))
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": True})
+    assert response.status_code == 200, response.get_json()
+    sent = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert sent["result"]["metadata_synced"] == 1
+    assert sent["summary"].startswith("Synced metadata for 1 photo.")
+
+    # The originals are gone from local disk, so a sidecar holding the keyword
+    # on the NAS can only have been written before the move.
+    assert not os.path.exists(staging)
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "Osprey" in sidecars[0].read_text()
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_send_leaves_sidecars_alone_without_sync_first(app_and_db, tmp_path, monkeypatch):
+    """Plain Send stays a pure transfer; the queued edit survives it."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(
+        client, client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert "metadata_synced" not in sent["result"]
+    assert not list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    # Still queued, so it can be synced later over the mount.
+    assert db.count_pending_changes() == 1
+
+
+def test_pending_archive_sync_first_writes_a_rating_only_sidecar(app_and_db, tmp_path, monkeypatch):
+    """A rating with no sidecar yet has no later chance: the file is about to go.
+
+    The ordinary sync job leaves rating-only photos alone rather than
+    littering a sidecar beside every rated photo, and can retry once
+    something else creates one. Before a NAS transfer there is no retry --
+    the originals are deleted, so a rating cleared from the queue without a
+    write is gone for good.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "rating", "3")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    rating = re.search(r'Rating="(\d+)"', sidecars[0].read_text())
+    assert rating and rating.group(1) == "3", sidecars[0].read_text()
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_sync_first_waits_for_a_running_xmp_sync(app_and_db, tmp_path, monkeypatch):
+    """Two writers on one sidecar means last-writer-wins, both queues cleared."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    # Hold the app-wide sync lock the ordinary /api/jobs/sync job takes. The
+    # pre-transfer sync must block on it rather than racing the same .xmp.
+    assert app._sync_job_lock.acquire(blocking=False)
+    started = client.post(f"/api/import/pending-archives/{archive_id}/send",
+                          json={"sync_first": True})
+    assert started.status_code == 200, started.get_json()
+    try:
+        time.sleep(1)
+        assert db.count_pending_changes() == 1, "sync ran while the lock was held"
+        assert not (tmp_path / "NAS").exists(), "transfer ran ahead of its sync"
+    finally:
+        app._sync_job_lock.release()
+    sent = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_sync_first_cancellable_while_waiting_for_lock(app_and_db, tmp_path, monkeypatch):
+    """A Stop press during the pre-sync wait must release the transfer.
+
+    ``begin_uncancellable`` before the ``_sync_job_lock`` acquire would
+    ignore cancel and shutdown for as long as another workspace's XMP
+    sync held the lock -- even though nothing on disk had been touched
+    yet, so cancellation is still the honest outcome.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    # Hold the app-wide sync lock so the send job blocks in the pre-sync wait.
+    assert app._sync_job_lock.acquire(blocking=False)
+    started = client.post(f"/api/import/pending-archives/{archive_id}/send",
+                          json={"sync_first": True})
+    assert started.status_code == 200, started.get_json()
+    job_id = started.get_json()["job_id"]
+    try:
+        # Give the worker time to reach the wait.
+        time.sleep(0.5)
+        cancelled = client.post(f"/api/jobs/{job_id}/cancel")
+        assert cancelled.status_code == 200, cancelled.get_json()
+        # The job must release the wait and land in a terminal state
+        # while the lock is still held -- the whole point of the fix.
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            job = client.get(f"/api/jobs/{job_id}").get_json()
+            if job["status"] in ("cancelled", "failed", "completed"):
+                break
+            time.sleep(0.05)
+        else:
+            job = client.get(f"/api/jobs/{job_id}").get_json()
+        assert job["status"] in ("cancelled", "failed"), job
+        # Nothing moved, the queue is intact -- the cancel really was
+        # honoured before any filesystem work started.
+        assert db.count_pending_changes() == 1
+        assert not (tmp_path / "NAS").exists()
+    finally:
+        app._sync_job_lock.release()
+
+
+def test_pending_archive_syncs_edits_queued_in_a_sibling_workspace(app_and_db, tmp_path, monkeypatch):
+    """The review queue is per workspace; the sidecar it writes is not.
+
+    A staging folder linked to a second workspace can carry edits queued
+    there against the same photo and the same .xmp. Skipping them would
+    strand them behind the NAS -- the transfer moves the shared folder row
+    globally and deletes the local tree either way.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+    staged_folder = db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (photo_id,)).fetchone()["folder_id"]
+
+    sibling = db.create_workspace("Sibling")
+    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+    db.queue_change(photo_id, "keyword_add", "Osprey", workspace_id=sibling)
+
+    # The banner counts it too, or it would offer to sync nothing.
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 1
+    assert staged_folder  # the photo really is inside the staging tree
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "Osprey" in sidecars[0].read_text()
+    assert db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+
+
+def test_pending_archive_sync_drains_edits_queued_while_it_runs(app_and_db, tmp_path, monkeypatch):
+    """An edit made during the sync still has to travel with the transfer."""
+    import move
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    db.queue_change(first, "keyword_add", "Osprey")
+
+    real_sync = sync_mod.sync_to_xmp
+    late = []
+
+    def sync_then_queue_more(worker_db, **kwargs):
+        result = real_sync(worker_db, **kwargs)
+        # Stand in for the user tagging a photo while "Sending to NAS…" shows:
+        # the rating and keyword routes are ordinary requests, and the job's
+        # workspace exclusivity does not hold them off.
+        if not late:
+            late.append(True)
+            worker_db.queue_change(second, "keyword_add", "Kestrel")
+        return result
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_then_queue_more)
+    monkeypatch.setattr(move, "_run_rsync_streamed", lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = sorted((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 2, sidecars
+    assert "Kestrel" in "".join(s.read_text() for s in sidecars)
+    assert db.count_pending_changes() == 0
+    assert sent["result"]["metadata_queued_during_transfer"] == 0
+
+
+def test_pending_archive_reports_edits_that_missed_the_transfer(app_and_db, tmp_path, monkeypatch):
+    """What the drain cannot catch gets said out loud, not swallowed."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    db.queue_change(first, "keyword_add", "Osprey")
+
+    def queue_during_the_move(*a, **kw):
+        # The move is past the last drain, so this edit cannot travel.
+        db.queue_change(second, "keyword_add", "Kestrel")
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", queue_during_the_move)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert sent["result"]["metadata_queued_during_transfer"] == 1
+    assert "1 edit queued during the transfer" in sent["summary"]
+    assert "over the NAS connection" in sent["summary"]
+
+
+def test_pending_archive_sync_applies_cross_workspace_edits_in_queue_order(app_and_db, tmp_path, monkeypatch):
+    """The sidecar must end up with the edit the user made last.
+
+    Two workspaces queueing a rating for one shared photo are two writes to
+    one xmp:Rating. Walking the queue grouped by workspace would settle on
+    whichever workspace happened to run last; walking it in queue order
+    settles on the newer value, whichever workspace it came from.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+
+    sibling = db.create_workspace("Sibling")
+    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+    # Older edit in the higher-numbered workspace, newer in the lower one, so
+    # workspace-id order and queue order disagree.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'rating', '1', 'tok-old', ?, '2026-09-15T10:00:00')",
+        (photo_id, sibling),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'rating', '5', 'tok-new', ?, '2026-09-15T11:00:00')",
+        (photo_id, db._ws_id()),
+    )
+    db.conn.commit()
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert re.search(r'Rating="(\d+)"', sidecars[0].read_text()).group(1) == "5"
+    assert db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+    # One photo and one sidecar, across two runs. Summing each run's tally
+    # would say 2 here and disagree with the banner's distinct-photo count.
+    assert sent["result"]["metadata_synced"] == 1
+    assert sent["summary"].startswith("Synced metadata for 1 photo.")
+
+
+def test_pending_archive_sync_drain_survives_reused_change_ids(app_and_db, tmp_path, monkeypatch):
+    """pending_changes.id is a bare rowid, so a cleared id comes straight back.
+
+    The drain tracks what it has already looked at so it can stop early on
+    changes the workspace declines to write. Keying that on the row id would
+    mistake the *next* edit -- handed the id the sync just cleared -- for one
+    it had already seen, and leave it behind.
+    """
+    import move
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    db.queue_change(first, "keyword_add", "Osprey")
+    reused = db.conn.execute("SELECT id FROM pending_changes").fetchone()["id"]
+
+    real_sync = sync_mod.sync_to_xmp
+    late = []
+
+    def sync_then_queue_more(worker_db, **kwargs):
+        result = real_sync(worker_db, **kwargs)
+        if not late:
+            late.append(True)
+            worker_db.queue_change(second, "keyword_add", "Kestrel")
+        return result
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_then_queue_more)
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    # The late edit really did land on the id the first one vacated.
+    assert reused == 1
+    sidecars = sorted((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 2, sidecars
+    assert "Kestrel" in "".join(s.read_text() for s in sidecars)
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_db, tmp_path, monkeypatch):
+    """A flag under sync_flags_to_xmp off is not a failed sync.
+
+    sync_to_xmp reports it as a failure so the ordinary sync job lands in
+    history as "failed", but nothing went wrong and the edit was never bound
+    for the sidecar. Abandoning the transfer over it would strand the whole
+    import on a setting the user chose.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.update_workspace(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
+    db.queue_change(imported["result"]["photo_ids"][0], "flag", "flagged")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
+    # Still queued -- and not miscounted as an edit that missed the transfer.
+    assert db.count_pending_changes() == 1
+    assert sent["result"].get("metadata_queued_during_transfer", 0) == 0
+
+
+def test_pending_archive_reports_late_edits_even_when_nothing_synced(app_and_db, tmp_path, monkeypatch):
+    """A queue that writes nothing still has to report what arrived too late.
+
+    A flag queued under sync_flags_to_xmp off syncs no photos, so gating the
+    residual re-check on "something synced" would drop the warning for any
+    rating or keyword queued during the copy -- the longest part of the job.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    db.update_workspace(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
+    db.queue_change(first, "flag", "flagged")
+
+    def queue_during_the_move(*a, **kw):
+        db.queue_change(second, "keyword_add", "Kestrel")
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", queue_during_the_move)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert sent["result"]["metadata_synced"] == 0
+    # The declined flag is not an edit that "missed the transfer"; the
+    # keyword queued mid-copy is.
+    assert sent["result"]["metadata_queued_during_transfer"] == 1
+    assert "1 edit queued during the transfer" in sent["summary"]
+    assert not sent["summary"].startswith("Synced metadata")
+
+
+def test_pending_archive_sync_dispatches_by_token_not_reused_id(app_and_db, tmp_path, monkeypatch):
+    """A later run's ids can be re-issued to somebody else's change first.
+
+    Runs are read in one go, then dispatched one at a time. An earlier run
+    clears its rows, SQLite hands those ids to the next insert, and a request
+    thread queueing an edit in between leaves the later run pointing at a
+    change for a photo outside the staging tree -- whose sidecar would be
+    created (create_missing_sidecars is on) and whose edit cleared.
+    """
+    import move
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    staged = imported["result"]["photo_ids"][0]
+
+    # A photo the transfer must never touch, in a folder of its own.
+    outside_dir = tmp_path / "already-on-nas"
+    outside_dir.mkdir()
+    outside = db.add_photo(db.add_folder(str(outside_dir), name="already-on-nas"),
+                           "elsewhere.jpg", ".jpg", 10, 0)
+
+    # Two runs: sibling workspace first, then the transferring one.
+    sibling = db.create_workspace("Sibling")
+    transferring = db._ws_id()
+    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Osprey', 'tok-a', ?, '2026-09-15T10:00:00')",
+        (staged, sibling),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Kestrel', 'tok-b', ?, '2026-09-15T11:00:00')",
+        (staged, transferring),
+    )
+    db.conn.commit()
+    second_run_id = db.conn.execute(
+        "SELECT id FROM pending_changes WHERE change_token = 'tok-b'").fetchone()["id"]
+
+    real_sync = sync_mod.sync_to_xmp
+    hijacked = []
+
+    def sync_then_steal_the_id(worker_db, **kwargs):
+        result = real_sync(worker_db, **kwargs)
+        if not hijacked:
+            hijacked.append(True)
+            # Free the second run's id and hand it to an unrelated photo,
+            # exactly as clear_pending + a queued edit would.
+            worker_db.conn.execute(
+                "DELETE FROM pending_changes WHERE change_token = 'tok-b'")
+            # Into the workspace the *second* run will execute under, which
+            # is not the one active right now: the walk switches per run.
+            worker_db.conn.execute(
+                "INSERT INTO pending_changes (id, photo_id, change_type, value, change_token, workspace_id) "
+                "VALUES (?, ?, 'keyword_add', 'Stolen', 'tok-c', ?)",
+                (second_run_id, outside, transferring),
+            )
+            worker_db.conn.commit()
+        return result
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_then_steal_the_id)
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    # The unrelated photo keeps its edit and gains no sidecar.
+    assert not (outside_dir / "elsewhere.xmp").exists()
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE change_token = 'tok-c'"
+    ).fetchone()[0] == 1
+    assert "Stolen" not in "".join(
+        p.read_text() for p in (tmp_path / "NAS" / "trip").rglob("*.xmp"))
+
+
+def test_keyword_endpoint_holds_registry_lock_across_cancel_shortcut(app_and_db, tmp_path, monkeypatch):
+    """Assert the atomicity property directly: while the keyword endpoint's
+    ``_queue_keyword_add`` is inside its cancel-shortcut delete, the
+    registry lock must be UNAVAILABLE to any other actor.
+
+    That is the guarantee the send job's registration relies on. Without
+    it, a sibling that reads the guard as ``False`` can be preempted while
+    the send job registers the photo and snapshots the pending opposite,
+    then resume and delete the row the sync just captured. The sync writes
+    the snapshotted change to the sidecar and the drain sees an empty
+    queue -- the sidecar ships in the state the sibling's request tried
+    to invert.
+
+    Reproducing the race requires interposing between the guard check and
+    the delete, which is only observable in the OLD non-atomic code path;
+    testing the fix's PROPERTY (lock held around the whole transaction) is
+    stable and does not depend on a specific interleaving.
+    """
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    fid = db.add_folder(str(photos_dir), name="photos")
+    db.add_workspace_folder(db._ws_id(), fid, is_root=True)
+    photo_id = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    keyword_id = db.add_keyword("Osprey")
+    db.tag_photo(photo_id, keyword_id, source="manual")
+    del_resp = client.delete(f"/api/photos/{photo_id}/keywords/{keyword_id}")
+    assert del_resp.status_code == 200
+    assert [r["change_type"] for r in db.get_pending_changes()] == ["keyword_remove"]
+
+    entered = threading.Event()
+    release = threading.Event()
+    lock_available_during_delete = []
+    original_remove = Database.remove_pending_changes
+
+    def slow_remove(self, photo_id_arg, change_type=None, value=None,
+                    workspace_id=None, _commit=True):
+        if photo_id_arg == photo_id and change_type == "keyword_remove":
+            entered.set()
+            # While the sibling is here, sample whether the registry lock
+            # is currently held. If the fix is in place the lock is held
+            # for the whole transaction and this ``acquire(blocking=False)``
+            # returns False; if not, the check-to-delete window is open.
+            got = app._pretransfer_sync_photo_ids_lock.acquire(blocking=False)
+            if got:
+                app._pretransfer_sync_photo_ids_lock.release()
+            lock_available_during_delete.append(got)
+            release.wait(5.0)
+        return original_remove(
+            self, photo_id_arg, change_type=change_type, value=value,
+            workspace_id=workspace_id, _commit=_commit,
+        )
+
+    monkeypatch.setattr(Database, "remove_pending_changes", slow_remove)
+
+    def sibling_add():
+        client.post(f"/api/photos/{photo_id}/keywords", json={"name": "Osprey"})
+
+    worker = threading.Thread(target=sibling_add, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(5.0), "sibling endpoint never reached remove_pending_changes"
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+    assert not worker.is_alive(), "sibling endpoint never returned"
+
+    assert lock_available_during_delete == [False], (
+        "registry lock was AVAILABLE during the cancel-shortcut delete -- "
+        "the check and the mutation are not atomic against send-job "
+        "registration"
+    )
+
+
+def test_keyword_remove_endpoint_skips_cancel_shortcut_during_pretransfer_sync(app_and_db, tmp_path):
+    """Registering the photo must divert ``_queue_keyword_remove`` off its
+    cancel-a-pending-add shortcut and onto the real ``keyword_remove``
+    queue insert.
+
+    Otherwise a remove reached during a running pre-transfer sync would
+    delete the snapshotted ``keyword_add`` before ``clear_pending_by_token``
+    runs, leaving nothing for the sync's drain to pick up -- and the NAS
+    would receive a sidecar carrying a keyword the user had already
+    removed.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    fid = db.add_folder(str(photos_dir), name="photos")
+    db.add_workspace_folder(db._ws_id(), fid, is_root=True)
+    photo_id = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    add_resp = client.post(
+        f"/api/photos/{photo_id}/keywords", json={"name": "Osprey"})
+    assert add_resp.status_code == 200, add_resp.get_json()
+    keyword_id = add_resp.get_json()["keyword_id"]
+    assert [r["change_type"] for r in db.get_pending_changes()] == ["keyword_add"]
+
+    with app._pretransfer_sync_photo_ids_lock:
+        app._pretransfer_sync_photo_ids.add(photo_id)
+    try:
+        del_resp = client.delete(f"/api/photos/{photo_id}/keywords/{keyword_id}")
+        assert del_resp.status_code == 200, del_resp.get_json()
+    finally:
+        with app._pretransfer_sync_photo_ids_lock:
+            app._pretransfer_sync_photo_ids.discard(photo_id)
+
+    types = sorted(r["change_type"] for r in db.get_pending_changes())
+    assert types == ["keyword_add", "keyword_remove"], (
+        f"expected the shortcut to be skipped and a real keyword_remove to be "
+        f"queued; got {types}"
+    )
+
+
+def test_keyword_add_endpoint_skips_cancel_shortcut_during_pretransfer_sync(app_and_db, tmp_path):
+    """Symmetric to the remove-endpoint case: an add reached during a
+    running pre-transfer sync must not cancel the snapshotted
+    ``keyword_remove``, or the sidecar the sync just wrote (with the
+    keyword stripped) would ship to the NAS carrying the user's stale
+    "removed" state.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    fid = db.add_folder(str(photos_dir), name="photos")
+    db.add_workspace_folder(db._ws_id(), fid, is_root=True)
+    photo_id = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    keyword_id = db.add_keyword("Osprey")
+    db.tag_photo(photo_id, keyword_id, source="manual")
+
+    del_resp = client.delete(f"/api/photos/{photo_id}/keywords/{keyword_id}")
+    assert del_resp.status_code == 200, del_resp.get_json()
+    assert [r["change_type"] for r in db.get_pending_changes()] == ["keyword_remove"]
+
+    with app._pretransfer_sync_photo_ids_lock:
+        app._pretransfer_sync_photo_ids.add(photo_id)
+    try:
+        add_resp = client.post(
+            f"/api/photos/{photo_id}/keywords", json={"name": "Osprey"})
+        assert add_resp.status_code == 200, add_resp.get_json()
+    finally:
+        with app._pretransfer_sync_photo_ids_lock:
+            app._pretransfer_sync_photo_ids.discard(photo_id)
+
+    types = sorted(r["change_type"] for r in db.get_pending_changes())
+    assert types == ["keyword_add", "keyword_remove"], (
+        f"expected the shortcut to be skipped and a real keyword_add to be "
+        f"queued; got {types}"
+    )
+
+
+def test_pending_archive_send_registers_and_clears_pretransfer_photos(app_and_db, tmp_path, monkeypatch):
+    """The send job registers staged photos before ``_sync_staged_metadata``
+    starts and clears them once it (and the move) return, so the keyword
+    endpoints only skip their cancel shortcut for the duration of the
+    write window and free the shortcut everywhere else.
+    """
+    import move
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    photo_id = imported["result"]["photo_ids"][0]
+    db.queue_change(photo_id, "keyword_add", "Osprey")
+
+    saw_registered = []
+    real_sync = sync_mod.sync_to_xmp
+
+    def sync_inspect_registry(worker_db, **kwargs):
+        with app._pretransfer_sync_photo_ids_lock:
+            saw_registered.append(set(app._pretransfer_sync_photo_ids))
+        return real_sync(worker_db, **kwargs)
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_inspect_registry)
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    assert saw_registered and photo_id in saw_registered[0], (
+        f"pre-transfer sync ran with an unregistered photo id: {saw_registered}"
+    )
+    with app._pretransfer_sync_photo_ids_lock:
+        remaining = set(app._pretransfer_sync_photo_ids)
+    assert not remaining, (
+        f"registry retained photo ids after the send finished: {remaining}"
+    )
+
+
+def test_pending_archive_sync_preserves_intra_workspace_run_boundaries(app_and_db, tmp_path, monkeypatch):
+    """A later run's ``keyword_add`` must not be pulled into an earlier
+    run's ``keyword_remove`` via ``_select_changes``' pairing expansion.
+
+    Reachable via the pretransfer registry: the same-workspace queue can
+    hold a ``keyword_remove`` and a later ``keyword_add`` for one term at
+    the same time (my registry fix on ``_queue_keyword_add`` skips the
+    cancel-shortcut when the photo is registered). Chronological runs
+    then split at a third workspace's edit between them:
+
+        [A: keyword_remove(X)] → [B: keyword_remove(X)] → [A: keyword_add(X)]
+
+    Without the fix, run 1 activates workspace A and reads the whole A
+    queue (both A rows). ``_select_changes`` expansion picks up the later
+    ``keyword_add`` under the shared normalized key, ``_plan_photo_sync``
+    folds via ``last_intent`` to "add wins", writes ``X`` to the sidecar,
+    and clears BOTH A tokens. Run 2 then strips ``X`` for the workspace-B
+    remove. Run 3 finds its token already cleared and does nothing. The
+    sidecar ships without ``X`` even though ``keyword_add`` is the user's
+    newest edit.
+
+    ``expand_keyword_pairs=False`` in the pre-transfer dispatch keeps
+    each run's selection exact, so run 1 only writes the A remove and
+    run 3 gets to write the A add.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+
+    sibling = db.create_workspace("Sibling")
+    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+
+    # Chronological queue: A_remove(X) at T1, B_remove(X) at T2, A_add(X) at T3.
+    # A_remove and A_add coexist in workspace A because we insert them
+    # directly, matching what the pretransfer registry allows via the
+    # skipped cancel-shortcut.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_remove', 'Osprey', 'tok-a-remove', ?, '2026-09-15T10:00:00')",
+        (photo_id, db._ws_id()),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_remove', 'Osprey', 'tok-b-remove', ?, '2026-09-15T11:00:00')",
+        (photo_id, sibling),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Osprey', 'tok-a-add', ?, '2026-09-15T12:00:00')",
+        (photo_id, db._ws_id()),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    sidecar_text = sidecars[0].read_text()
+    assert "Osprey" in sidecar_text, (
+        "the NAS sidecar dropped a keyword the user added last -- run 1 "
+        "collapsed the later same-workspace add into its plan via keyword "
+        "pairing expansion, cleared both A tokens, and then run 2's B_remove "
+        "stripped the keyword. Run 3 (the actual keyword_add) had no work"
+    )
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_sync_counts_two_null_token_rows_for_distinct_photos(app_and_db, tmp_path, monkeypatch):
+    """The ``considered`` map must not collapse two legacy NULL-token rows
+    under a shared ``None`` key.
+
+    Two pre-migration legacy rows on distinct photos would otherwise share
+    ``considered[None]`` and lose one photo from ``metadata_synced`` -- the
+    summary would then disagree with the number of sidecars actually
+    written. Key legacy entries on ``("legacy", change_id)`` so each row's
+    photo survives in the tally.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    # Two legacy rows (NULL change_token) on distinct photos in the staging tree.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Osprey', NULL, ?, '2026-09-15T10:00:00')",
+        (first, db._ws_id()),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Kestrel', NULL, ?, '2026-09-15T10:01:00')",
+        (second, db._ws_id()),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecar_text = "".join(
+        p.read_text() for p in (tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert "Osprey" in sidecar_text
+    assert "Kestrel" in sidecar_text
+    # Two distinct photos, two sidecars written, so the tally is two -- not
+    # one, as a collapsed ``considered[None]`` would report.
+    assert sent["result"]["metadata_synced"] == 2, sent["result"]
+    assert sent["summary"].startswith("Synced metadata for 2 photos.")
+    assert db.count_pending_changes() == 0
+
+
+def test_pending_archive_sync_leaves_null_token_rows_outside_the_scope_alone(app_and_db, tmp_path, monkeypatch):
+    """A NULL ``change_token`` in the run (pre-migration legacy row) must not
+    make the dispatch pick up every NULL-token row in the workspace.
+
+    Without the split: the run passes ``change_tokens=[None, "uuid", ...]``
+    to ``sync_to_xmp``; the resolver builds ``wanted = {None, "uuid", ...}``
+    and matches ``None in wanted`` for every ``pending_changes`` row whose
+    ``change_token IS NULL`` -- including photos outside the staging tree,
+    whose sidecars would be created (``create_missing_sidecars`` is on) and
+    whose queued edits cleared. Legacy rows dispatch by id; modern rows keep
+    their token safety.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staged = imported["result"]["photo_ids"][0]
+
+    # A photo the transfer must never touch, in a folder of its own. A
+    # pre-migration legacy row (change_token IS NULL) is queued against it
+    # in the transferring workspace -- the exact shape that used to leak
+    # through a mixed token dispatch.
+    outside_dir = tmp_path / "already-on-nas"
+    outside_dir.mkdir()
+    outside = db.add_photo(db.add_folder(str(outside_dir), name="already-on-nas"),
+                           "elsewhere.jpg", ".jpg", 10, 0)
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Stolen', NULL, ?, '2026-09-15T09:00:00')",
+        (outside, db._ws_id()),
+    )
+    # A legacy row inside the staging scope so the run actually mixes NULL
+    # and non-NULL tokens the way the finding described.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Osprey', NULL, ?, '2026-09-15T10:00:00')",
+        (staged, db._ws_id()),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    # The outside legacy row is untouched, no unrelated sidecar was written,
+    # and the staged row's legacy edit still travelled with the transfer.
+    assert not (outside_dir / "elsewhere.xmp").exists()
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE photo_id = ? AND value = 'Stolen'",
+        (outside,),
+    ).fetchone()[0] == 1
+    nas_text = "".join(
+        p.read_text() for p in (tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert "Osprey" in nas_text
+    assert "Stolen" not in nas_text
+
+
+@pytest.mark.parametrize("raw_body", ['{"sync_first":', "not json at all", "{"])
+def test_pending_archive_send_rejects_malformed_json(app_and_db, tmp_path, monkeypatch, raw_body):
+    """``get_json(silent=True)`` returns ``None`` for both an absent body and a
+    JSON parse failure, so treating ``None`` as "no body" would let a
+    truncated or malformed request start the destructive transfer without the
+    metadata sync the caller intended to select.
+    """
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    response = app.test_client().post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        data=raw_body, content_type="application/json",
+    )
+    assert response.status_code == 400, response.get_json()
+    assert "valid JSON" in response.get_json()["error"]
+
+
+def test_pending_archive_send_rejects_a_conflicting_sync_option(app_and_db, tmp_path, monkeypatch):
+    """A plain transfer already in flight cannot be upgraded mid-move."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_transfer(*a, **kw):
+        entered.set()
+        assert release.wait(10)
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", slow_transfer)
+    first = client.post(f"/api/import/pending-archives/{archive_id}/send")
+    assert first.status_code == 200, first.get_json()
+    try:
+        assert entered.wait(10)
+        # Same intent joins the running job, as before.
+        assert client.post(
+            f"/api/import/pending-archives/{archive_id}/send"
+        ).get_json()["job_id"] == first.get_json()["job_id"]
+        # A different intent must not be told "yes" by a job that will not do it.
+        conflict = client.post(f"/api/import/pending-archives/{archive_id}/send",
+                               json={"sync_first": True})
+        assert conflict.status_code == 409, conflict.get_json()
+        assert "without the metadata sync" in conflict.get_json()["error"]
+    finally:
+        release.set()
+    wait_for_job_via_client(client, first.get_json()["job_id"])
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, 0, None, []])
+def test_pending_archive_send_rejects_non_boolean_sync_first(app_and_db, tmp_path, monkeypatch, value):
+    """"false" is a truthy string; coercing it would write sidecars unasked."""
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    response = app.test_client().post(
+        f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": value})
+    assert response.status_code == 400, response.get_json()
+    assert "sync_first must be a boolean" in response.get_json()["error"]
+
+
+@pytest.mark.parametrize("body", [False, 0, [], ""])
+def test_pending_archive_send_rejects_falsy_non_object_body(app_and_db, tmp_path, monkeypatch, body):
+    """A falsy JSON literal must not be coerced through `or {}` into a valid request.
+
+    Otherwise `{"sync_first": True}` becomes indistinguishable from `false`, and
+    the destructive transfer starts without the metadata sync the caller was
+    denied the chance to request.
+    """
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    response = app.test_client().post(
+        f"/api/import/pending-archives/{archive_id}/send", json=body)
+    assert response.status_code == 400, response.get_json()
+    assert "JSON object" in response.get_json()["error"]
+
+
+def test_pending_archive_send_rejects_top_level_json_null(app_and_db, tmp_path, monkeypatch):
+    """``json.loads('null')`` returns ``None`` and an ``if body is None:
+    body = {}`` fallback would start the destructive transfer with
+    ``sync_first=False`` for a caller who explicitly said ``null``. Treat
+    it the same as any other non-object JSON body and return 400.
+    """
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    response = app.test_client().post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        data="null", content_type="application/json",
+    )
+    assert response.status_code == 400, response.get_json()
+    assert "JSON object" in response.get_json()["error"]
+
+
+def test_pending_archive_finds_staging_unlinked_from_its_own_workspace(app_and_db, tmp_path, monkeypatch):
+    """Folder membership is not what defines the transfer -- the path is.
+
+    Nothing guards pending_archives against folder removal, so the staging
+    tree can leave the workspace that imported it while still linked to a
+    sibling. Scoping by membership would report nothing to sync, hide the
+    button, and move the shared tree with stale sidecars.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+    owning = db._ws_id()
+
+    sibling = db.create_workspace("Sibling")
+    staged_folders = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
+            (staging, os.path.join(staging, "") + "%")).fetchall()
+    ]
+    assert staged_folders
+    for fid in staged_folders:
+        db.add_workspace_folder(sibling, fid, is_root=True)
+    db.queue_change(photo_id, "keyword_add", "Osprey", workspace_id=sibling)
+    # The staging tree leaves the workspace that owns the transfer.
+    for fid in staged_folders:
+        db.conn.execute(
+            "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (owning, fid))
+    db.conn.commit()
+
+    item = client.get("/api/import/pending-archives").get_json()["items"][0]
+    assert item["unsynced_photos"] == 1, item
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "Osprey" in sidecars[0].read_text()
+
+
+def test_pending_archive_syncs_when_staging_is_linked_only_to_a_sibling(app_and_db, tmp_path, monkeypatch):
+    """A staging tree the queue owner cannot see still has to sync.
+
+    The sync activates the queue owner's workspace so its ``sync_flags_to_xmp``
+    / ``write_assigned_location_to_xmp`` settings apply to the edits it made,
+    but the sidecar path is a path on disk. When the staging folders are
+    linked only to a sibling workspace, the queue owner's per-workspace
+    ``get_folder_tree()`` returns nothing for them and the accessibility
+    check would abort the run with "folder not accessible" though the file
+    is right there. ``folder_scope="global"`` reads the folder map from the
+    catalog directly.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+    owning = db._ws_id()
+
+    sibling = db.create_workspace("Sibling")
+    staged_folders = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
+            (staging, os.path.join(staging, "") + "%")).fetchall()
+    ]
+    assert staged_folders
+    for fid in staged_folders:
+        db.add_workspace_folder(sibling, fid, is_root=True)
+    # Queue the edit in the owner workspace -- the one the sync will activate
+    # -- so the resolution path has to work without a folder link.
+    db.queue_change(photo_id, "keyword_add", "Osprey", workspace_id=owning)
+    # And unlink those folders from the owner, so `get_folder_tree()` under
+    # the owner has no way to resolve the sidecar's directory.
+    for fid in staged_folders:
+        db.conn.execute(
+            "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (owning, fid))
+    db.conn.commit()
+
+    assert client.get("/api/import/pending-archives").get_json()["items"][0]["unsynced_photos"] == 1
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    assert "Osprey" in sidecars[0].read_text()
+    assert db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+
+
+def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
+    """A half-done sync must not send stale sidecars to the NAS anyway."""
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def failing_sync(*a, **kw):
+        return {"synced": 0, "failed": 1, "ok": False,
+                "failures": [{"photo_id": 1, "error": "folder not accessible: /gone",
+                              "reason": "folder not accessible"}],
+                "errors": ["folder not accessible (1 photo)"]}
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", failing_sync)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": True})
+    assert response.status_code == 200, response.get_json()
+    failed = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert failed["status"] == "failed", failed
+
+    # Nothing moved, and the banner says so and stays retryable.
+    assert not (tmp_path / "NAS").exists()
+    assert len(list((tmp_path / "staging").rglob("*.jpg"))) == 2
+    item = client.get("/api/import/pending-archives").get_json()["items"][0]
+    assert item["state"] == "ready"
+    assert "folder not accessible" in item["error"]
+    assert "without syncing" in item["error"]
+    assert item["unsynced_photos"] == 1
 
 
 @pytest.mark.parametrize("state", ["pending", "sending"])
