@@ -258,9 +258,15 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
             for workspace_id, entries in runs:
                 considered.update({token: photo_id for _cid, token, photo_id in entries})
                 db.set_active_workspace(workspace_id)
+                # By token, never by the ids captured above: an earlier run
+                # in this same pass cleared its rows, and SQLite re-issues
+                # those ids to the next insert. A request thread queueing an
+                # edit in between would hand this run somebody else's change
+                # -- a photo outside the staging tree, whose sidecar would be
+                # created and whose edit would be cleared.
                 result = sync_mod.sync_to_xmp(
                     db, progress_callback=sync_progress,
-                    change_ids=[cid for cid, _token, _pid in entries],
+                    change_tokens=[token for _cid, token, _pid in entries],
                     create_missing_sidecars=True,
                 )
                 # A change this workspace declines to write to XMP (a flag,
@@ -427,7 +433,13 @@ def create_imports_blueprint(
         runner = get_runner()
         workspace_id = db._ws_id()
         body = request.get_json(silent=True) or {}
-        sync_first = bool(isinstance(body, dict) and body.get("sync_first"))
+        if not isinstance(body, dict):
+            return json_error("Request body must be a JSON object")
+        sync_first = body.get("sync_first", False)
+        # Not coerced: "false" and 0 are truthy/falsy in ways a caller does not
+        # intend, and this option writes sidecars and can fail a transfer.
+        if not isinstance(sync_first, bool):
+            return json_error("sync_first must be a boolean")
         with archive_dispatch_lock:
             archive = get_pending_archive(db, archive_id)
             if archive is None:
@@ -438,6 +450,17 @@ def create_imports_blueprint(
             existing = next((j for j in active if j.get("type") == "send-to-nas"
                              and (j.get("config") or {}).get("pending_archive_id") == archive_id), None)
             if existing:
+                # Joining is only honest when the running job is doing what
+                # this caller asked for. A plain transfer cannot be upgraded
+                # mid-flight, so handing back its id would promise a metadata
+                # sync that is never going to run.
+                if bool((existing.get("config") or {}).get("sync_first")) != sync_first:
+                    return json_error(
+                        "These photos are already being sent to NAS "
+                        + ("without the metadata sync" if sync_first else "with the metadata sync")
+                        + ". Wait for that transfer to finish before starting a different one.",
+                        409,
+                    )
                 return jsonify({"job_id": existing["id"]})
             if active:
                 return json_error("Wait for running jobs to finish before sending these photos to NAS", 409)

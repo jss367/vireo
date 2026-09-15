@@ -5586,6 +5586,133 @@ def test_pending_archive_reports_late_edits_even_when_nothing_synced(app_and_db,
     assert not sent["summary"].startswith("Synced metadata")
 
 
+def test_pending_archive_sync_dispatches_by_token_not_reused_id(app_and_db, tmp_path, monkeypatch):
+    """A later run's ids can be re-issued to somebody else's change first.
+
+    Runs are read in one go, then dispatched one at a time. An earlier run
+    clears its rows, SQLite hands those ids to the next insert, and a request
+    thread queueing an edit in between leaves the later run pointing at a
+    change for a photo outside the staging tree -- whose sidecar would be
+    created (create_missing_sidecars is on) and whose edit cleared.
+    """
+    import move
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    staged = imported["result"]["photo_ids"][0]
+
+    # A photo the transfer must never touch, in a folder of its own.
+    outside_dir = tmp_path / "already-on-nas"
+    outside_dir.mkdir()
+    outside = db.add_photo(db.add_folder(str(outside_dir), name="already-on-nas"),
+                           "elsewhere.jpg", ".jpg", 10, 0)
+
+    # Two runs: sibling workspace first, then the transferring one.
+    sibling = db.create_workspace("Sibling")
+    transferring = db._ws_id()
+    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Osprey', 'tok-a', ?, '2026-09-15T10:00:00')",
+        (staged, sibling),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Kestrel', 'tok-b', ?, '2026-09-15T11:00:00')",
+        (staged, transferring),
+    )
+    db.conn.commit()
+    second_run_id = db.conn.execute(
+        "SELECT id FROM pending_changes WHERE change_token = 'tok-b'").fetchone()["id"]
+
+    real_sync = sync_mod.sync_to_xmp
+    hijacked = []
+
+    def sync_then_steal_the_id(worker_db, **kwargs):
+        result = real_sync(worker_db, **kwargs)
+        if not hijacked:
+            hijacked.append(True)
+            # Free the second run's id and hand it to an unrelated photo,
+            # exactly as clear_pending + a queued edit would.
+            worker_db.conn.execute(
+                "DELETE FROM pending_changes WHERE change_token = 'tok-b'")
+            # Into the workspace the *second* run will execute under, which
+            # is not the one active right now: the walk switches per run.
+            worker_db.conn.execute(
+                "INSERT INTO pending_changes (id, photo_id, change_type, value, change_token, workspace_id) "
+                "VALUES (?, ?, 'keyword_add', 'Stolen', 'tok-c', ?)",
+                (second_run_id, outside, transferring),
+            )
+            worker_db.conn.commit()
+        return result
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_then_steal_the_id)
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    # The unrelated photo keeps its edit and gains no sidecar.
+    assert not (outside_dir / "elsewhere.xmp").exists()
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE change_token = 'tok-c'"
+    ).fetchone()[0] == 1
+    assert "Stolen" not in "".join(
+        p.read_text() for p in (tmp_path / "NAS" / "trip").rglob("*.xmp"))
+
+
+def test_pending_archive_send_rejects_a_conflicting_sync_option(app_and_db, tmp_path, monkeypatch):
+    """A plain transfer already in flight cannot be upgraded mid-move."""
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_transfer(*a, **kw):
+        entered.set()
+        assert release.wait(10)
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", slow_transfer)
+    first = client.post(f"/api/import/pending-archives/{archive_id}/send")
+    assert first.status_code == 200, first.get_json()
+    try:
+        assert entered.wait(10)
+        # Same intent joins the running job, as before.
+        assert client.post(
+            f"/api/import/pending-archives/{archive_id}/send"
+        ).get_json()["job_id"] == first.get_json()["job_id"]
+        # A different intent must not be told "yes" by a job that will not do it.
+        conflict = client.post(f"/api/import/pending-archives/{archive_id}/send",
+                               json={"sync_first": True})
+        assert conflict.status_code == 409, conflict.get_json()
+        assert "without the metadata sync" in conflict.get_json()["error"]
+    finally:
+        release.set()
+    wait_for_job_via_client(client, first.get_json()["job_id"])
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, 0, None, []])
+def test_pending_archive_send_rejects_non_boolean_sync_first(app_and_db, tmp_path, monkeypatch, value):
+    """"false" is a truthy string; coercing it would write sidecars unasked."""
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    response = app.test_client().post(
+        f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": value})
+    assert response.status_code == 400, response.get_json()
+    assert "sync_first must be a boolean" in response.get_json()["error"]
+
+
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
     """A half-done sync must not send stale sidecars to the NAS anyway."""
     import sync as sync_mod

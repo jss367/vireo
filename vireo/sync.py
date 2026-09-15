@@ -324,7 +324,8 @@ def _sync_result(synced, failures):
     }
 
 
-def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False):
+def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
+                create_missing_sidecars=False):
     """Write pending changes to XMP sidecars.
 
     Args:
@@ -332,6 +333,13 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         progress_callback: optional callable(current, total)
         change_ids: optional pending_changes ids to sync. When provided, any
             other queued changes are left pending.
+        change_tokens: like ``change_ids``, but naming the changes by their
+            immutable token. ``pending_changes.id`` is a bare rowid that
+            SQLite re-issues to the next insert once a row is cleared, so a
+            caller that selected ids a moment ago can find them pointing at
+            somebody else's change -- a different photo, in a different
+            folder. Tokens are resolved against the same queue snapshot the
+            selection runs on, which leaves no window at all.
         create_missing_sidecars: write a sidecar for a rating-only photo
             instead of skipping it. Off for the ordinary sync job, which
             would otherwise litter a sidecar beside every rated photo and
@@ -343,6 +351,9 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         dict with synced, failed, failures counts
     """
     changes = db.get_pending_changes()
+    if change_tokens is not None:
+        wanted = set(change_tokens)
+        change_ids = [c["id"] for c in changes if c["change_token"] in wanted]
     if change_ids is not None:
         changes = _select_changes(changes, change_ids)
     if not changes:
