@@ -5470,6 +5470,10 @@ def test_pending_archive_sync_applies_cross_workspace_edits_in_queue_order(app_a
     assert len(sidecars) == 1, sidecars
     assert re.search(r'Rating="(\d+)"', sidecars[0].read_text()).group(1) == "5"
     assert db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+    # One photo and one sidecar, across two runs. Summing each run's tally
+    # would say 2 here and disagree with the banner's distinct-photo count.
+    assert sent["result"]["metadata_synced"] == 1
+    assert sent["summary"].startswith("Synced metadata for 1 photo.")
 
 
 def test_pending_archive_sync_drain_survives_reused_change_ids(app_and_db, tmp_path, monkeypatch):
@@ -5546,6 +5550,40 @@ def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_
     # Still queued -- and not miscounted as an edit that missed the transfer.
     assert db.count_pending_changes() == 1
     assert sent["result"].get("metadata_queued_during_transfer", 0) == 0
+
+
+def test_pending_archive_reports_late_edits_even_when_nothing_synced(app_and_db, tmp_path, monkeypatch):
+    """A queue that writes nothing still has to report what arrived too late.
+
+    A flag queued under sync_flags_to_xmp off syncs no photos, so gating the
+    residual re-check on "something synced" would drop the warning for any
+    rating or keyword queued during the copy -- the longest part of the job.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    db.update_workspace(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
+    db.queue_change(first, "flag", "flagged")
+
+    def queue_during_the_move(*a, **kw):
+        db.queue_change(second, "keyword_add", "Kestrel")
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", queue_during_the_move)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert sent["result"]["metadata_synced"] == 0
+    # The declined flag is not an edit that "missed the transfer"; the
+    # keyword queued mid-copy is.
+    assert sent["result"]["metadata_queued_during_transfer"] == 1
+    assert "1 edit queued during the transfer" in sent["summary"]
+    assert not sent["summary"].startswith("Synced metadata")
 
 
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):

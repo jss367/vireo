@@ -209,10 +209,11 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
     Runs against the local staging copy on purpose. A verified transfer
     deletes the originals, so from then on the same sync has to write over
     the NAS connection -- and only while that mount is up. Returns
-    ``(photos_synced, considered_change_tokens)``; raises so the caller abandons
+    ``(photos_synced, considered)``; raises so the caller abandons
     the transfer when a write actually fails, because the user asked for both
     halves and silently sending stale sidecars to the NAS is the outcome they
-    were trying to avoid.
+    were trying to avoid. ``considered`` maps every change token the drain
+    looked at to its photo.
 
     Held under the same app-wide lock as ``/api/jobs/sync``. Job admission is
     workspace-scoped and ``sync_to_xmp`` takes its sidecar locks per call, so
@@ -232,7 +233,7 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
     import sync as sync_mod
 
     if not db.pending_change_runs_in_folders(folder_ids):
-        return 0, set()
+        return 0, {}
 
     def sync_progress(current, total):
         progress(current, total, "", "Writing metadata to sidecars")
@@ -242,24 +243,24 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
         progress(0, 0, "", "Waiting for current XMP sync")
         sync_job_lock.acquire()
     transferring_ws = db._ws_id()
-    synced = 0
-    considered = set()
+    considered = {}
     try:
         for _ in range(_MAX_SYNC_DRAIN_PASSES):
             runs = db.pending_change_runs_in_folders(folder_ids)
             if not runs:
                 break
-            if all(token in considered for _ws, entries in runs for _cid, token in entries):
+            if all(token in considered
+                   for _ws, entries in runs for _cid, token, _pid in entries):
                 # Everything left is something the sync looked at and chose
                 # not to write -- a flag queued in a workspace with
                 # sync_flags_to_xmp off. Re-running would not clear it.
                 break
             for workspace_id, entries in runs:
-                considered.update(token for _cid, token in entries)
+                considered.update({token: photo_id for _cid, token, photo_id in entries})
                 db.set_active_workspace(workspace_id)
                 result = sync_mod.sync_to_xmp(
                     db, progress_callback=sync_progress,
-                    change_ids=[cid for cid, _token in entries],
+                    change_ids=[cid for cid, _token, _pid in entries],
                     create_missing_sidecars=True,
                 )
                 # A change this workspace declines to write to XMP (a flag,
@@ -277,7 +278,21 @@ def _sync_staged_metadata(db, archive, progress, sync_job_lock, folder_ids):
                         + ". The local originals are untouched. Fix the sidecars and try "
                         "again, or use Send to NAS to transfer without syncing first."
                     )
-                synced += result["synced"]
+        # Count photos, not per-run tallies. One photo with changes in two
+        # runs -- the cross-workspace case this walk exists for -- is one
+        # sidecar, and summing each run's ``synced`` would report it twice and
+        # disagree with the banner's distinct-photo count. A token that
+        # stopped being queued is one ``clear_pending`` wrote, so its photo
+        # was written.
+        still_queued = {
+            token
+            for _ws, entries in db.pending_change_runs_in_folders(folder_ids)
+            for _cid, token, _pid in entries
+        }
+        synced = len({
+            photo_id for token, photo_id in considered.items()
+            if token not in still_queued
+        })
     finally:
         db.set_active_workspace(transferring_ws)
         sync_job_lock.release()
@@ -304,7 +319,7 @@ def _residual_staged_changes(db, folder_ids, considered):
         return sum(
             1
             for _workspace_id, entries in db.pending_change_runs_in_folders(folder_ids)
-            for _change_id, token in entries
+            for _change_id, token, _photo_id in entries
             if token not in considered
         )
     except Exception:
@@ -453,19 +468,25 @@ def create_imports_blueprint(
                             thread_db, archive["staging_destination"]) if sync_first else []
                         synced, considered = _sync_staged_metadata(
                             thread_db, archive, progress, sync_job_lock,
-                            folder_ids) if sync_first else (0, set())
+                            folder_ids) if sync_first else (0, {})
 
                         result = send_pending_archive(
                             thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
                             guard_folder=guard_move_folder, progress_cb=progress,
                         )
-                        if synced:
-                            summary = (
-                                f"Synced metadata for {synced} photo"
-                                f"{'' if synced == 1 else 's'}. {result['summary']}"
-                            )
+                        if sync_first:
+                            # Unconditionally, not just when something synced:
+                            # a queue holding only changes this workspace
+                            # declines to write syncs nothing, and an edit made
+                            # during the copy would then go unreported.
                             residual = _residual_staged_changes(
                                 thread_db, folder_ids, considered)
+                            summary = result["summary"]
+                            if synced:
+                                summary = (
+                                    f"Synced metadata for {synced} photo"
+                                    f"{'' if synced == 1 else 's'}. {summary}"
+                                )
                             if residual:
                                 summary += (
                                     f". {residual} edit{'' if residual == 1 else 's'} queued "

@@ -6864,7 +6864,7 @@ class Database:
         return total
 
     def pending_change_runs_in_folders(self, folder_ids):
-        """Return ``[(workspace_id, [(change_id, change_token), ...]), ...]``, in queue order.
+        """Return ``[(workspace_id, [(change_id, change_token, photo_id), ...]), ...]``, in queue order.
 
         Split by workspace because ``sync.sync_to_xmp`` reads both the queue
         and the sync-to-XMP settings through the active workspace, so each
@@ -6886,13 +6886,15 @@ class Database:
         after ``clear_pending`` deletes it, so a change queued right after a
         sync can reuse the id the sync just cleared. Callers tracking which
         changes they have already looked at must key on the token, which is a
-        fresh uuid per insert.
+        fresh uuid per insert. ``photo_id`` rides along so a caller can tell
+        which photos a sync actually wrote, by seeing whose tokens stopped
+        being queued.
         """
         rows = []
         for chunk in _chunks(folder_ids):
             placeholders = ",".join("?" * len(chunk))
             rows.extend(self.conn.execute(
-                f"SELECT pc.created_at, pc.id, pc.workspace_id, pc.change_token "
+                f"SELECT pc.created_at, pc.id, pc.workspace_id, pc.change_token, pc.photo_id "
                 f"FROM pending_changes pc "
                 f"JOIN photos p ON p.id = pc.photo_id "
                 f"WHERE p.folder_id IN ({placeholders})",
@@ -6903,11 +6905,11 @@ class Database:
         # across all of them. Matches get_pending_changes' (created_at, id).
         rows.sort(key=lambda r: (r[0], r[1]))
         runs = []
-        for _created_at, change_id, workspace_id, change_token in rows:
+        for _created_at, change_id, workspace_id, change_token, photo_id in rows:
             if runs and runs[-1][0] == workspace_id:
-                runs[-1][1].append((change_id, change_token))
+                runs[-1][1].append((change_id, change_token, photo_id))
             else:
-                runs.append((workspace_id, [(change_id, change_token)]))
+                runs.append((workspace_id, [(change_id, change_token, photo_id)]))
         return runs
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
