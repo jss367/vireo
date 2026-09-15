@@ -127,16 +127,10 @@ class _PhotoSyncPlan:
     edit_recipe_json: str | None = None
     sync_location: bool = False
     cleanup_location: bool = False
-    supported_ids: list = field(default_factory=list)
-    # Immutable ``change_token`` values (uuid strings) paired 1:1 with
-    # ``supported_ids``. Captured so ``clear_pending`` can condition its
-    # DELETE on both id and token: SQLite reissues a freshly-freed rowid to
-    # the next INSERT, so a user's edit route -- which deletes the queued row
-    # and immediately re-inserts inside one transaction -- can attach a fresh
-    # change to the same rowid the sync is about to clear. Token-conditioned
-    # clearing lets that replacement survive and the next drain write it. A
-    # row predating the ``change_token`` column carries ``None`` here.
-    supported_tokens: list = field(default_factory=list)
+    # (change_id, change_token) per supported change. The clear runs after
+    # the sidecar write, by which time a reused rowid can name a different
+    # row -- see Database.clear_pending_by_token.
+    supported_changes: list = field(default_factory=list)
     unsupported_changes: list = field(default_factory=list)
 
 
@@ -167,11 +161,7 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
             plan.edit_recipe_json = c["value"] or ""
         else:
             continue
-        plan.supported_ids.append(c["id"])
-        # The value is NULL for rows predating the ``change_token`` column
-        # (nullable, no backfill); pass ``None`` through so ``clear_pending``
-        # falls back to id-only clearing scoped to null-token rows for them.
-        plan.supported_tokens.append(c["change_token"])
+        plan.supported_changes.append((c["id"], c["change_token"]))
     return plan
 
 
@@ -557,8 +547,12 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     # Report in queue order regardless of the order the pool finished in.
     synced = 0
     failures = []
-    synced_ids = []
     synced_tokens = []
+    # Rows predating the change_token column carry NULL, and `IN (NULL)`
+    # matches nothing -- clearing those by token would leave them queued
+    # forever, rewritten by every later sync. They keep the id-based clear,
+    # which is exactly the behaviour they have always had.
+    synced_legacy_ids = []
     for photo_id in by_photo:
         if photo_id in prepare_failures:
             failures.append(prepare_failures[photo_id])
@@ -574,10 +568,13 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             })
             log.warning("Failed to sync photo %d: %s", photo_id, error)
             continue
-        if plan.supported_ids:
+        if plan.supported_changes:
             synced += 1
-            synced_ids.extend(plan.supported_ids)
-            synced_tokens.extend(plan.supported_tokens)
+            for change_id, token in plan.supported_changes:
+                if token:
+                    synced_tokens.append(token)
+                else:
+                    synced_legacy_ids.append(change_id)
         for c in plan.unsupported_changes:
             failures.append({
                 "photo_id": photo_id,
@@ -585,14 +582,20 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 "error": f"unsupported change type: {c['change_type']}",
             })
 
-    # Clear successfully synced changes by token so a replacement queued
-    # mid-run with a reused rowid is not dropped without a write. See
-    # ``_PhotoSyncPlan.supported_tokens``.
-    if synced_ids:
+    # Clear by token, not by row id. ``pending_changes.id`` is a bare
+    # ``INTEGER PRIMARY KEY``, so SQLite re-issues a deleted row's rowid to the
+    # next insert -- and ``queue_flag_change_if_enabled`` deletes the old flag
+    # row before inserting the new value. A flag changed while the sidecar
+    # write was in flight (as long as the storage takes) could therefore land
+    # on the id this run selected, and clearing by id would delete the user's
+    # newest edit without ever having written it.
+    if synced_tokens:
+        db.clear_pending_by_token(
+            synced_tokens, clear_equivalent_flat_removals=True,
+        )
+    if synced_legacy_ids:
         db.clear_pending(
-            synced_ids,
-            clear_equivalent_flat_removals=True,
-            expected_tokens=synced_tokens,
+            synced_legacy_ids, clear_equivalent_flat_removals=True,
         )
 
     log.info("Sync complete: %d synced, %d failed", synced, len(failures))
