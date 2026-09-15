@@ -5187,6 +5187,7 @@ def test_pending_archive_separates_this_workspace_from_the_others(app_and_db, tm
 
     assert item()["unsynced_photos"] == 0
     assert item()["unsynced_photos_other_workspaces"] == 0
+    assert item()["unsynced_photos_here_with_sibling_edits"] == 0
 
     # Queued on a photo already on the NAS: not this transfer's problem.
     elsewhere = tmp_path / "already-on-nas"
@@ -5206,11 +5207,17 @@ def test_pending_archive_separates_this_workspace_from_the_others(app_and_db, tm
     db.queue_change(second, "keyword_add", "Kestrel", workspace_id=sibling)
     assert item()["unsynced_photos"] == 1, "a sibling's edit is not ours to write"
     assert item()["unsynced_photos_other_workspaces"] == 1
+    assert item()["unsynced_photos_here_with_sibling_edits"] == 0
 
-    # A photo counted here is not double-counted there.
+    # A photo counted here is not double-counted there, but the sibling's
+    # half of its edits will still miss the transfer -- the sidecar is
+    # shared and only this workspace's half will be written. Surfaced as
+    # a separate overlap count so the "other workspaces" number does not
+    # read as extra photos.
     db.queue_change(first, "keyword_add", "Kestrel", workspace_id=sibling)
     assert item()["unsynced_photos"] == 1
     assert item()["unsynced_photos_other_workspaces"] == 1
+    assert item()["unsynced_photos_here_with_sibling_edits"] == 1
 
 
 def test_pending_archive_finds_staging_unlinked_from_its_own_workspace(app_and_db, tmp_path, monkeypatch):

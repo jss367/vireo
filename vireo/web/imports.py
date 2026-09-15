@@ -255,7 +255,7 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
     # Keyed on row identity, never on the row id; see ``staged_sync_scope``.
     undeliverable = set()
     for _ in range(_MAX_SYNC_DRAIN_PASSES):
-        changes, _here, _elsewhere = db.staged_sync_scope(folder_ids)
+        changes, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
         pending = [entry for entry in changes if entry[0] not in undeliverable]
         if not pending:
             break
@@ -277,7 +277,7 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
                 + ". The local originals are untouched. Fix the sidecars and "
                 "try again, or use Send to NAS to transfer without syncing first."
             )
-        after, _here, _elsewhere = db.staged_sync_scope(folder_ids)
+        after, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
         remaining = {key for key, _cid, _pid in after}
         # Counted as photos, not as per-pass tallies: one photo edited across
         # two passes is one sidecar, and the banner counts distinct photos too.
@@ -300,7 +300,7 @@ def _residual_staged_changes(db, folder_ids, undeliverable):
     transfer".
     """
     try:
-        changes, _here, _elsewhere = db.staged_sync_scope(folder_ids)
+        changes, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
         return sum(1 for key, _cid, _pid in changes if key not in undeliverable)
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
@@ -355,7 +355,7 @@ def create_imports_blueprint(
             sending = any(j.get("type") == "send-to-nas"
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
             folder_ids = _folder_ids_under(ws_folders, row["staging_destination"])
-            _changes, here, elsewhere = db.staged_sync_scope(folder_ids)
+            _changes, here, elsewhere, overlap = db.staged_sync_scope(folder_ids)
             items.append({
                 "id": row["id"], "destination": row["destination"],
                 "folder_ids": folder_ids,
@@ -364,8 +364,16 @@ def create_imports_blueprint(
                 # number has to be the ones the transfer would leave stale.
                 # ``_other_workspaces`` is what this sync will NOT write, kept
                 # separate so neither number over-promises.
+                # ``_here_with_sibling_edits`` is the overlap: photos already
+                # counted in ``unsynced_photos`` that also have edits queued in
+                # a sibling workspace. Left out of ``other_workspaces`` because
+                # it would read as extra photos rather than the same photo
+                # carrying two workspaces' edits, and surfaced on its own so
+                # the banner can warn that the sibling's changes on those
+                # photos will not be written by this button.
                 "unsynced_photos": here,
                 "unsynced_photos_other_workspaces": elsewhere,
+                "unsynced_photos_here_with_sibling_edits": overlap,
                 "source_available": os.path.isdir(row["staging_destination"]),
                 "collection_id": row["review_collection_id"], "name": row["collection_name"] or "Imported photos",
                 "state": "sending" if sending else "waiting" if jobs else "ready",

@@ -6834,7 +6834,7 @@ class Database:
         ).fetchone()[0]
 
     def staged_sync_scope(self, folder_ids):
-        """Return ``(changes, photos_here, photos_elsewhere)`` for a folder set.
+        """Return ``(changes, photos_here, photos_elsewhere, photos_here_with_sibling_edits)``.
 
         ``changes`` is a list of ``(identity, change_id, photo_id)``, where
         ``identity`` is the row's ``change_token`` -- a uuid assigned at
@@ -6854,6 +6854,16 @@ class Database:
         another workspace. The sidecar is global to the photo, so those edits
         are real and this sync will not write them -- the banner has to say so
         rather than let a number read as "everything is covered".
+
+        ``photos_here_with_sibling_edits`` counts photos in ``photos_here``
+        that *also* have queued edits in a sibling workspace. Those photos are
+        already promised by the "here" number, so they must not double-count
+        into ``photos_elsewhere`` (which would read as extra photos rather
+        than the same photo carrying two workspaces' edits). The overlap is
+        reported separately so the UI can still warn that the sibling's
+        changes on those photos will remain unwritten after the pre-transfer
+        sync -- the sidecar is shared and only the active workspace's edits
+        travel with it.
         """
         here_photos, here_changes, other_photos = set(), [], set()
         # The photo id rides along so a caller can tell which photos a pass
@@ -6873,7 +6883,12 @@ class Database:
                     here_photos.add(row["photo_id"])
                 else:
                     other_photos.add(row["photo_id"])
-        return here_changes, len(here_photos), len(other_photos - here_photos)
+        return (
+            here_changes,
+            len(here_photos),
+            len(other_photos - here_photos),
+            len(other_photos & here_photos),
+        )
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
