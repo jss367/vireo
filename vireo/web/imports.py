@@ -493,9 +493,6 @@ def create_imports_blueprint(
                     )
                     thread_db.conn.commit()
                     try:
-                        if not runner.begin_uncancellable(job["id"]):
-                            raise ValueError("Transfer cancelled before it started. Local originals are retained.")
-
                         def progress(current, total, filename, phase="Sending to NAS"):
                             job["progress"].update(current=current, total=total, current_file=filename)
                             runner.push_event(job["id"], "progress", {
@@ -523,13 +520,30 @@ def create_imports_blueprint(
                             # its queue while the NAS ends up with whichever
                             # version won -- and the residual check would then
                             # see nothing queued and report all clear.
+                            #
+                            # Wait cancellably: ``begin_uncancellable`` below
+                            # would otherwise strand the transfer here if
+                            # another workspace's XMP sync is running, since
+                            # Stop and shutdown would be ignored during a
+                            # blocking acquire and nothing on disk has been
+                            # touched yet. Same poll-``is_cancelled`` pattern
+                            # as the /api/jobs/sync route.
                             if not sync_job_lock.acquire(blocking=False):
                                 progress(0, 0, "", "Waiting for current XMP sync")
-                                sync_job_lock.acquire()
+                                while True:
+                                    if runner.is_cancelled(job["id"]):
+                                        raise ValueError("Transfer cancelled before it started. Local originals are retained.")
+                                    if sync_job_lock.acquire(timeout=0.1):
+                                        break
                         else:
                             folder_ids = []
                             staged_photo_ids = []
                         try:
+                            # Enter the uninterruptible phase only after the
+                            # lock is in hand, so the wait above stayed
+                            # cancellable.
+                            if not runner.begin_uncancellable(job["id"]):
+                                raise ValueError("Transfer cancelled before it started. Local originals are retained.")
                             synced, considered = _sync_staged_metadata(
                                 thread_db, archive, progress,
                                 folder_ids) if sync_first else (0, {})

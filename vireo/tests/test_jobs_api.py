@@ -5318,6 +5318,56 @@ def test_pending_archive_sync_first_waits_for_a_running_xmp_sync(app_and_db, tmp
     assert db.count_pending_changes() == 0
 
 
+def test_pending_archive_sync_first_cancellable_while_waiting_for_lock(app_and_db, tmp_path, monkeypatch):
+    """A Stop press during the pre-sync wait must release the transfer.
+
+    ``begin_uncancellable`` before the ``_sync_job_lock`` acquire would
+    ignore cancel and shutdown for as long as another workspace's XMP
+    sync held the lock -- even though nothing on disk had been touched
+    yet, so cancellation is still the honest outcome.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    # Hold the app-wide sync lock so the send job blocks in the pre-sync wait.
+    assert app._sync_job_lock.acquire(blocking=False)
+    started = client.post(f"/api/import/pending-archives/{archive_id}/send",
+                          json={"sync_first": True})
+    assert started.status_code == 200, started.get_json()
+    job_id = started.get_json()["job_id"]
+    try:
+        # Give the worker time to reach the wait.
+        time.sleep(0.5)
+        cancelled = client.post(f"/api/jobs/{job_id}/cancel")
+        assert cancelled.status_code == 200, cancelled.get_json()
+        # The job must release the wait and land in a terminal state
+        # while the lock is still held -- the whole point of the fix.
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            job = client.get(f"/api/jobs/{job_id}").get_json()
+            if job["status"] in ("cancelled", "failed", "completed"):
+                break
+            time.sleep(0.05)
+        else:
+            job = client.get(f"/api/jobs/{job_id}").get_json()
+        assert job["status"] in ("cancelled", "failed"), job
+        # Nothing moved, the queue is intact -- the cancel really was
+        # honoured before any filesystem work started.
+        assert db.count_pending_changes() == 1
+        assert not (tmp_path / "NAS").exists()
+    finally:
+        app._sync_job_lock.release()
+
+
 def test_pending_archive_syncs_edits_queued_in_a_sibling_workspace(app_and_db, tmp_path, monkeypatch):
     """The review queue is per workspace; the sidecar it writes is not.
 
