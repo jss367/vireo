@@ -21332,6 +21332,45 @@ class Database:
             self.clear_equivalent_flat_removals(synced_changes, _commit=False)
         self.conn.commit()
 
+    def clear_pending_by_token(
+        self, change_tokens, *, clear_equivalent_flat_removals=False,
+    ):
+        """Delete pending changes named by their immutable tokens.
+
+        ``pending_changes.id`` is a bare ``INTEGER PRIMARY KEY``, so SQLite
+        re-issues a deleted row's rowid to the next insert into the table. A
+        caller that selected rows a while ago -- the sidecar sync, whose
+        writes take as long as the storage does -- can find those ids now
+        naming a *replacement* row: ``queue_flag_change_if_enabled`` deletes
+        the old flag and inserts the new value, so clearing by id would throw
+        away the edit the user just made, unwritten. A token is a fresh uuid
+        per insert, so it names the row that was actually written.
+
+        ``clear_equivalent_flat_removals`` behaves as in :meth:`clear_pending`.
+        """
+        if not change_tokens:
+            return
+        workspace_id = self._ws_id()
+        synced_changes = []
+        for chunk in _chunks(change_tokens):
+            placeholders = ",".join("?" for _ in chunk)
+            if clear_equivalent_flat_removals:
+                synced_changes.extend(self.conn.execute(
+                    f"""SELECT photo_id, change_type, value
+                        FROM pending_changes
+                        WHERE change_token IN ({placeholders}) AND workspace_id = ?
+                          AND change_type = 'keyword_remove_flat'""",
+                    [*chunk, workspace_id],
+                ).fetchall())
+            self.conn.execute(
+                f"DELETE FROM pending_changes WHERE change_token IN ({placeholders}) "
+                f"AND workspace_id = ?",
+                [*chunk, workspace_id],
+            )
+        if synced_changes:
+            self.clear_equivalent_flat_removals(synced_changes, _commit=False)
+        self.conn.commit()
+
     def clear_equivalent_flat_removals(self, changes, _commit=True):
         """Clear shared-sidecar flat removals represented by ``changes``."""
         shared_flat_removals = {
