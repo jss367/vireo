@@ -5714,6 +5714,23 @@ def test_pending_archive_send_rejects_non_boolean_sync_first(app_and_db, tmp_pat
     assert "sync_first must be a boolean" in response.get_json()["error"]
 
 
+@pytest.mark.parametrize("body", [False, 0, [], ""])
+def test_pending_archive_send_rejects_falsy_non_object_body(app_and_db, tmp_path, monkeypatch, body):
+    """A falsy JSON literal must not be coerced through `or {}` into a valid request.
+
+    Otherwise `{"sync_first": True}` becomes indistinguishable from `false`, and
+    the destructive transfer starts without the metadata sync the caller was
+    denied the chance to request.
+    """
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    response = app.test_client().post(
+        f"/api/import/pending-archives/{archive_id}/send", json=body)
+    assert response.status_code == 400, response.get_json()
+    assert "JSON object" in response.get_json()["error"]
+
+
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
     """A half-done sync must not send stale sidecars to the NAS anyway."""
     import sync as sync_mod

@@ -444,8 +444,15 @@ def create_imports_blueprint(
         db = get_db()
         runner = get_runner()
         workspace_id = db._ws_id()
-        body = request.get_json(silent=True) or {}
-        if not isinstance(body, dict):
+        body = request.get_json(silent=True)
+        # An `or {}` here would swallow falsy JSON literals -- `false`, `0`,
+        # `[]`, `""` -- and hide them behind the dict check below, so a
+        # malformed body would be treated as `sync_first=False` and the
+        # destructive transfer would start without the metadata sync. Default
+        # only when the body is genuinely absent.
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
             return json_error("Request body must be a JSON object")
         sync_first = body.get("sync_first", False)
         # Not coerced: "false" and 0 are truthy/falsy in ways a caller does not

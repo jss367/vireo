@@ -703,6 +703,51 @@ def test_clear_pending_chunks_large_change_sets(tmp_path):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_clear_pending_by_token_survives_rowid_reuse(tmp_path):
+    """A cleared row's rowid gets reused; token-based clear must ignore that.
+
+    ``pending_changes.id`` is a bare INTEGER PRIMARY KEY, so once a row is
+    deleted SQLite hands the same numeric id back to the next INSERT into the
+    same table. If the sync path captured ids for the delete, it would drop
+    the newly queued replacement -- exactly the pending edit the caller was
+    supposed to preserve. Clearing by immutable token does not.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(
+        folder_id=fid, filename='a.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    original_token = db.queue_change(pid, 'flag', 'flagged')
+    original = db.get_pending_changes()
+    assert len(original) == 1
+    original_id = original[0]['id']
+
+    # Simulate the endpoint replacing the queued row while a sidecar write is
+    # still in flight: the delete releases the rowid, and the very next INSERT
+    # gets it back.
+    db.conn.execute("DELETE FROM pending_changes WHERE id = ?", (original_id,))
+    db.conn.commit()
+    replacement_token = db.queue_change(pid, 'flag', 'rejected')
+    replacement = db.get_pending_changes()
+    assert len(replacement) == 1
+    assert replacement[0]['id'] == original_id, (
+        "SQLite is expected to reuse the freed rowid; test premise is stale"
+    )
+    assert replacement[0]['change_token'] == replacement_token
+    assert replacement[0]['change_token'] != original_token
+
+    # Now the sync path completes and tries to clear the row it actually
+    # wrote. By token, the new row survives; by id, it would be lost.
+    db.clear_pending_by_token([original_token])
+    remaining = db.get_pending_changes()
+    assert len(remaining) == 1
+    assert remaining[0]['change_token'] == replacement_token
+
+
 def test_get_photos_keyword_search(tmp_path):
     """get_photos can filter by keyword name."""
     from db import Database

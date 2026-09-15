@@ -117,12 +117,19 @@ class _PhotoSyncPlan:
     edit_recipe_json: str | None = None
     sync_location: bool = False
     cleanup_location: bool = False
-    supported_ids: list = field(default_factory=list)
+    supported_tokens: list = field(default_factory=list)
     unsupported_changes: list = field(default_factory=list)
 
 
 def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
-    """Fold one photo's pending changes into a ``_PhotoSyncPlan``."""
+    """Fold one photo's pending changes into a ``_PhotoSyncPlan``.
+
+    Supported changes are tracked by ``change_token`` rather than by
+    ``pending_changes.id``: SQLite reuses a cleared row's rowid on the next
+    insert, so an id captured here can name a different queue row -- often
+    for a different photo -- by the time the sidecar write completes and
+    the clear runs. Tokens are UUIDs and stay put.
+    """
     plan = _PhotoSyncPlan()
     for c in photo_changes:
         kind = c["change_type"]
@@ -148,7 +155,7 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
             plan.edit_recipe_json = c["value"] or ""
         else:
             continue
-        plan.supported_ids.append(c["id"])
+        plan.supported_tokens.append(c["change_token"])
     return plan
 
 
@@ -536,7 +543,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
     # Report in queue order regardless of the order the pool finished in.
     synced = 0
     failures = []
-    synced_ids = []
+    synced_tokens = []
     for photo_id in by_photo:
         if photo_id in prepare_failures:
             failures.append(prepare_failures[photo_id])
@@ -552,9 +559,9 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
             })
             log.warning("Failed to sync photo %d: %s", photo_id, error)
             continue
-        if plan.supported_ids:
+        if plan.supported_tokens:
             synced += 1
-            synced_ids.extend(plan.supported_ids)
+            synced_tokens.extend(plan.supported_tokens)
         for c in plan.unsupported_changes:
             failures.append({
                 "photo_id": photo_id,
@@ -562,10 +569,14 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
                 "error": f"unsupported change type: {c['change_type']}",
             })
 
-    # Clear successfully synced changes
-    if synced_ids:
-        db.clear_pending(
-            synced_ids, clear_equivalent_flat_removals=True,
+    # Clear successfully synced changes by their immutable tokens. Clearing
+    # by id would race delete+insert replacements: if a rating endpoint runs
+    # between _plan_photo_sync and the delete below, SQLite can hand the
+    # cleared row's numeric id straight back to the new insert, and this
+    # DELETE would then drop the just-queued replacement.
+    if synced_tokens:
+        db.clear_pending_by_token(
+            synced_tokens, clear_equivalent_flat_removals=True,
         )
 
     log.info("Sync complete: %d synced, %d failed", synced, len(failures))
