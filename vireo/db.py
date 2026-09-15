@@ -6932,8 +6932,15 @@ class Database:
             ).fetchone()[0]
         return total
 
-    def pending_change_tokens_for_photos(self, photo_ids):
-        """Return the set of ``change_token`` strings still queued for these photos.
+    def pending_change_identities_for_photos(self, photo_ids):
+        """Return the set of per-row identities still queued for these photos.
+
+        Each row's identity is its ``change_token`` if one is stored, and
+        ``("legacy", change_id)`` otherwise (pre-migration NULL-token rows).
+        A raw-tokens set would collapse every legacy row under ``None`` and
+        both under-report the residual count and let it match against a
+        ``None`` in a caller's ``considered`` set, so legacy rows for
+        different photos have to key on something distinct.
 
         The residual check after a NAS transfer needs a stable scope: the
         source folder rows can be folded into destination folders by
@@ -6941,14 +6948,16 @@ class Database:
         the folder-id scope the sync ran under is not usable afterwards.
         Photo ids are, because photo rows survive a folder merge.
         """
-        tokens = set()
+        identities = set()
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" * len(chunk))
-            tokens.update(row[0] for row in self.conn.execute(
-                f"SELECT change_token FROM pending_changes WHERE photo_id IN ({placeholders})",
+            for row in self.conn.execute(
+                f"SELECT id, change_token FROM pending_changes WHERE photo_id IN ({placeholders})",
                 tuple(chunk),
-            ).fetchall())
-        return tokens
+            ).fetchall():
+                token = row["change_token"]
+                identities.add(token if token is not None else ("legacy", row["id"]))
+        return identities
 
     def pending_change_runs_in_folders(self, folder_ids):
         """Return ``[(workspace_id, [(change_id, change_token, photo_id), ...]), ...]``, in queue order.

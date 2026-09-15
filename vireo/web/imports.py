@@ -267,20 +267,32 @@ def _sync_staged_metadata(db, archive, progress, folder_ids):
         progress(current, total, "", "Writing metadata to sidecars")
 
     transferring_ws = db._ws_id()
+    # ``considered`` maps a stable per-row identity to the row's photo id.
+    # Rows with a ``change_token`` key on the token; pre-migration NULL-token
+    # rows key on ``("legacy", change_id)`` so multiple legacy rows for
+    # different photos do not collapse under a single ``None`` key -- that
+    # collapse would lose photos from the ``synced`` count and let the drain
+    # break prematurely because "everything looks considered".
     considered = {}
+
+    def _identity(change_id, change_token):
+        return change_token if change_token is not None else ("legacy", change_id)
     try:
         for _ in range(_MAX_SYNC_DRAIN_PASSES):
             runs = db.pending_change_runs_in_folders(folder_ids)
             if not runs:
                 break
-            if all(token in considered
-                   for _ws, entries in runs for _cid, token, _pid in entries):
+            if all(_identity(cid, token) in considered
+                   for _ws, entries in runs for cid, token, _pid in entries):
                 # Everything left is something the sync looked at and chose
                 # not to write -- a flag queued in a workspace with
                 # sync_flags_to_xmp off. Re-running would not clear it.
                 break
             for workspace_id, entries in runs:
-                considered.update({token: photo_id for _cid, token, photo_id in entries})
+                considered.update({
+                    _identity(cid, token): photo_id
+                    for cid, token, photo_id in entries
+                })
                 db.set_active_workspace(workspace_id)
                 # By token whenever possible: an earlier run in this same
                 # pass cleared its rows, and SQLite re-issues those ids to
@@ -319,17 +331,17 @@ def _sync_staged_metadata(db, archive, progress, folder_ids):
         # Count photos, not per-run tallies. One photo with changes in two
         # runs -- the cross-workspace case this walk exists for -- is one
         # sidecar, and summing each run's ``synced`` would report it twice and
-        # disagree with the banner's distinct-photo count. A token that
-        # stopped being queued is one ``clear_pending`` wrote, so its photo
-        # was written.
+        # disagree with the banner's distinct-photo count. A row whose
+        # identity stopped being queued is one ``clear_pending`` wrote, so
+        # its photo was written.
         still_queued = {
-            token
+            _identity(cid, token)
             for _ws, entries in db.pending_change_runs_in_folders(folder_ids)
-            for _cid, token, _pid in entries
+            for cid, token, _pid in entries
         }
         synced = len({
-            photo_id for token, photo_id in considered.items()
-            if token not in still_queued
+            photo_id for identity, photo_id in considered.items()
+            if identity not in still_queued
         })
     finally:
         db.set_active_workspace(transferring_ws)
@@ -347,15 +359,18 @@ def _residual_staged_changes(db, photo_ids, considered):
     Only changes the sync never saw count. Something it considered and left
     queued was deliberately not written to XMP (a flag under
     sync_flags_to_xmp off), and reporting that as an edit that "missed the
-    transfer" would be a different claim than the true one. Matched on
-    ``change_token`` rather than id because SQLite reuses a cleared row's id
-    for the next insert. Scoped by photo ids captured before the move, not by
-    folder ids: ``move_folder(..., merge=True, allow_tracked_merge=True)``
-    can fold source folder rows into destination folders, so a folder-id
-    scope would silently miss edits whose photos are still queued.
+    transfer" would be a different claim than the true one. Matched on a
+    per-row identity (``change_token`` if present, else ``("legacy",
+    change_id)``) rather than id alone, because SQLite reuses a cleared
+    row's id for the next insert AND multiple legacy rows would otherwise
+    collapse under a shared ``None``. Scoped by photo ids captured before
+    the move, not by folder ids: ``move_folder(..., merge=True,
+    allow_tracked_merge=True)`` can fold source folder rows into destination
+    folders, so a folder-id scope would silently miss edits whose photos
+    are still queued.
     """
     try:
-        return len(db.pending_change_tokens_for_photos(photo_ids) - considered.keys())
+        return len(db.pending_change_identities_for_photos(photo_ids) - considered.keys())
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
         return 0

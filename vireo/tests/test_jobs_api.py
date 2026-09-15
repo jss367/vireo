@@ -5845,6 +5845,54 @@ def test_pending_archive_send_registers_and_clears_pretransfer_photos(app_and_db
     )
 
 
+def test_pending_archive_sync_counts_two_null_token_rows_for_distinct_photos(app_and_db, tmp_path, monkeypatch):
+    """The ``considered`` map must not collapse two legacy NULL-token rows
+    under a shared ``None`` key.
+
+    Two pre-migration legacy rows on distinct photos would otherwise share
+    ``considered[None]`` and lose one photo from ``metadata_synced`` -- the
+    summary would then disagree with the number of sidecars actually
+    written. Key legacy entries on ``("legacy", change_id)`` so each row's
+    photo survives in the tally.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    first, second = imported["result"]["photo_ids"]
+    # Two legacy rows (NULL change_token) on distinct photos in the staging tree.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Osprey', NULL, ?, '2026-09-15T10:00:00')",
+        (first, db._ws_id()),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Kestrel', NULL, ?, '2026-09-15T10:01:00')",
+        (second, db._ws_id()),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecar_text = "".join(
+        p.read_text() for p in (tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert "Osprey" in sidecar_text
+    assert "Kestrel" in sidecar_text
+    # Two distinct photos, two sidecars written, so the tally is two -- not
+    # one, as a collapsed ``considered[None]`` would report.
+    assert sent["result"]["metadata_synced"] == 2, sent["result"]
+    assert sent["summary"].startswith("Synced metadata for 2 photos.")
+    assert db.count_pending_changes() == 0
+
+
 def test_pending_archive_sync_leaves_null_token_rows_outside_the_scope_alone(app_and_db, tmp_path, monkeypatch):
     """A NULL ``change_token`` in the run (pre-migration legacy row) must not
     make the dispatch pick up every NULL-token row in the workspace.
