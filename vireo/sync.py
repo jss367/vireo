@@ -70,7 +70,7 @@ def _write_assigned_location_to_xmp_enabled(db):
 _KEYWORD_CHANGE_TYPES = ("keyword_add", "keyword_remove", "keyword_remove_flat")
 
 
-def _select_changes(changes, change_ids):
+def _select_changes(changes, change_ids, *, expand_keyword_pairs=True):
     """Restrict ``changes`` to ``change_ids`` plus their paired keyword changes.
 
     Auto-includes any unselected pending keyword_add / keyword_remove
@@ -83,8 +83,20 @@ def _select_changes(changes, change_ids):
     clean spelling, and a later remove-only sync strips the clean spelling
     under the same normalized match. Sync both sides together whenever the
     user picks either.
+
+    ``expand_keyword_pairs`` gates that cross-selection. A caller that
+    manages its own chronological ordering -- ``_sync_staged_metadata``'s
+    per-run dispatch, whose runs deliberately split at workspace boundaries
+    to preserve edit order -- passes ``False``: reaching into ANOTHER run's
+    row (e.g. a later ``keyword_add`` for the same photo/key) would collapse
+    it into an earlier run's plan, clear both tokens together, and let the
+    plan for a later run write nothing where it should have written the
+    newest edit. Within a single-workspace run the pairing rows are
+    already in ``change_ids``, so the expansion adds nothing there.
     """
     selected_ids = {int(cid) for cid in change_ids}
+    if not expand_keyword_pairs:
+        return [c for c in changes if c["id"] in selected_ids]
     kw_index = defaultdict(list)
     for c in changes:
         if c["change_type"] in _KEYWORD_CHANGE_TYPES and c["value"]:
@@ -356,7 +368,7 @@ def _sync_result(synced, failures):
 
 
 def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
-                create_missing_sidecars=False):
+                create_missing_sidecars=False, expand_keyword_pairs=True):
     """Write pending changes to XMP sidecars.
 
     Args:
@@ -377,6 +389,17 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
             can retry later anyway. On for the sync that runs before a NAS
             transfer, where "later" does not exist: the transfer deletes the
             local originals, and a cleared-but-unwritten rating is gone.
+        expand_keyword_pairs: whether ``_select_changes`` may reach OUTSIDE
+            the selection to pull in another row that shares a normalized
+            keyword key with a selected row. On (default) for the manual
+            sync path, which serves single-shot selections and needs the
+            paired half to avoid a rename clobbering itself across two
+            syncs. Off for the pre-transfer sync's per-run dispatch, which
+            manages its own chronological ordering: pulling a later run's
+            keyword_add into an earlier run's keyword_remove would
+            collapse them, clear both tokens, and ship the sidecar in the
+            state of whichever remaining run happened to write last
+            instead of the newest edit the user actually left the queue in.
 
     Returns:
         dict with synced, failed, failures counts
@@ -397,7 +420,10 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, change_tokens=None,
             if (c["change_token"] is not None and c["change_token"] in wanted_tokens)
             or c["id"] in wanted_ids
         ]
-        changes = _select_changes(changes, selected_ids)
+        changes = _select_changes(
+            changes, selected_ids,
+            expand_keyword_pairs=expand_keyword_pairs,
+        )
     if not changes:
         return _sync_result(0, [])
 

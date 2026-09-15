@@ -5925,6 +5925,83 @@ def test_pending_archive_send_registers_and_clears_pretransfer_photos(app_and_db
     )
 
 
+def test_pending_archive_sync_preserves_intra_workspace_run_boundaries(app_and_db, tmp_path, monkeypatch):
+    """A later run's ``keyword_add`` must not be pulled into an earlier
+    run's ``keyword_remove`` via ``_select_changes``' pairing expansion.
+
+    Reachable via the pretransfer registry: the same-workspace queue can
+    hold a ``keyword_remove`` and a later ``keyword_add`` for one term at
+    the same time (my registry fix on ``_queue_keyword_add`` skips the
+    cancel-shortcut when the photo is registered). Chronological runs
+    then split at a third workspace's edit between them:
+
+        [A: keyword_remove(X)] → [B: keyword_remove(X)] → [A: keyword_add(X)]
+
+    Without the fix, run 1 activates workspace A and reads the whole A
+    queue (both A rows). ``_select_changes`` expansion picks up the later
+    ``keyword_add`` under the shared normalized key, ``_plan_photo_sync``
+    folds via ``last_intent`` to "add wins", writes ``X`` to the sidecar,
+    and clears BOTH A tokens. Run 2 then strips ``X`` for the workspace-B
+    remove. Run 3 finds its token already cleared and does nothing. The
+    sidecar ships without ``X`` even though ``keyword_add`` is the user's
+    newest edit.
+
+    ``expand_keyword_pairs=False`` in the pre-transfer dispatch keeps
+    each run's selection exact, so run 1 only writes the A remove and
+    run 3 gets to write the A add.
+    """
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+
+    sibling = db.create_workspace("Sibling")
+    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+
+    # Chronological queue: A_remove(X) at T1, B_remove(X) at T2, A_add(X) at T3.
+    # A_remove and A_add coexist in workspace A because we insert them
+    # directly, matching what the pretransfer registry allows via the
+    # skipped cancel-shortcut.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_remove', 'Osprey', 'tok-a-remove', ?, '2026-09-15T10:00:00')",
+        (photo_id, db._ws_id()),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_remove', 'Osprey', 'tok-b-remove', ?, '2026-09-15T11:00:00')",
+        (photo_id, sibling),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'keyword_add', 'Osprey', 'tok-a-add', ?, '2026-09-15T12:00:00')",
+        (photo_id, db._ws_id()),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1, sidecars
+    sidecar_text = sidecars[0].read_text()
+    assert "Osprey" in sidecar_text, (
+        "the NAS sidecar dropped a keyword the user added last -- run 1 "
+        "collapsed the later same-workspace add into its plan via keyword "
+        "pairing expansion, cleared both A tokens, and then run 2's B_remove "
+        "stripped the keyword. Run 3 (the actual keyword_add) had no work"
+    )
+    assert db.count_pending_changes() == 0
+
+
 def test_pending_archive_sync_counts_two_null_token_rows_for_distinct_photos(app_and_db, tmp_path, monkeypatch):
     """The ``considered`` map must not collapse two legacy NULL-token rows
     under a shared ``None`` key.

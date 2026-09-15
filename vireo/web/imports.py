@@ -312,6 +312,19 @@ def _sync_staged_metadata(db, archive, progress, folder_ids):
                     change_tokens=modern_tokens or None,
                     change_ids=legacy_ids or None,
                     create_missing_sidecars=True,
+                    # This dispatch already walks the queue in chronology
+                    # via ``pending_change_runs_in_folders``. Letting
+                    # ``_select_changes`` reach across the run boundary and
+                    # pull a LATER run's ``keyword_add`` into an EARLIER
+                    # run's ``keyword_remove`` (both in the same workspace,
+                    # co-existing because the pretransfer registry skipped
+                    # their cancel-the-opposite shortcut) collapses them
+                    # into one plan, clears both tokens, and the later
+                    # run's write never happens. The sidecar then ships
+                    # in whatever intermediate state a remaining run
+                    # happened to write last, instead of the newest edit
+                    # the user actually left the queue in.
+                    expand_keyword_pairs=False,
                 )
                 # A change this workspace declines to write to XMP (a flag,
                 # when sync_flags_to_xmp is off) is reported as a failure so

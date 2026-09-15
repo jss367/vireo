@@ -5003,10 +5003,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # Registered on entry and cleared on exit inside the imports blueprint.
     app._pretransfer_sync_photo_ids = set()
     app._pretransfer_sync_photo_ids_lock = threading.Lock()
-
-    def _photo_under_pretransfer_sync(photo_id):
-        with app._pretransfer_sync_photo_ids_lock:
-            return photo_id in app._pretransfer_sync_photo_ids
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
