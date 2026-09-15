@@ -22114,6 +22114,7 @@ var selectionPredictionsExpanded = false;
 var selectionPredictionAcceptableById = {};
 var selectionPredictionSpeciesByIdx = {};
 var selectionPredictionSeq = 7;
+var selectionPredictionShowSeq = 0;
 var requests = [], opened = [], toasts = [], dropped = [];
 async function safeFetch(url, opts) {
   var body = JSON.parse(opts.body);
@@ -22189,6 +22190,87 @@ var predictions = [
 
     # The button is restored, not left stuck on "Loading…".
     assert result["button"] == {"disabled": False, "textContent": "Show 2 photos"}
+
+
+def test_selection_prediction_show_button_drops_stale_interleaved_fetch(app_and_db):
+    """A slow earlier Show fetch must not paint over a faster later one.
+
+    The selection-panel seq only ticks when the selection changes, so two
+    Show clicks back-to-back on different rows both capture the same value
+    and both would otherwise be free to open the lightbox. If the first
+    fetch (a 600-photo row) resolves after the second (a 2-photo row), the
+    lightbox ends up showing the wrong species under the wrong count.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    source = "\n".join([
+        _PANEL_DOM_STUB.replace("id === 'detailPredictions'", "id === 'selectionPredictions'"),
+        _browse_escape_helpers(),
+        _browse_js_function_body(html, "function formatPredictionConfidence("),
+        _browse_js_function_body(html, "function renderSelectionPredictions("),
+        _browse_js_function_body(html, "async function showSelectionPredictionPhotos("),
+        """
+var selectionPredictionsExpanded = false;
+var selectionPredictionAcceptableById = {};
+var selectionPredictionSpeciesByIdx = {};
+var selectionPredictionSeq = 3;
+var selectionPredictionShowSeq = 0;
+var opened = [], toasts = [];
+// Slow-first-then-fast: the row-0 fetch queues its resolver behind the
+// row-1 fetch by holding a promise until row 1 has already resolved.
+var slowResolve = null;
+var fastFinished = false;
+async function safeFetch(url, opts) {
+  var body = JSON.parse(opts.body);
+  var photos = body.photo_ids.map(function(id) {
+    return {id: id, filename: 'IMG_' + id + '.CR3'};
+  });
+  if (body.photo_ids.indexOf(11) !== -1) {
+    return new Promise(function(resolve) {
+      slowResolve = function() { resolve({photos: photos}); };
+    });
+  }
+  fastFinished = true;
+  return {photos: photos};
+}
+function openLightbox(id, filename, list) {
+  opened.push({id: id, ids: list.map(function(p) { return p.id; })});
+}
+function showToast(message, kind) { toasts.push({message: message, kind: kind}); }
+var predictions = [
+  {species: 'Blue-breasted Quail', predicted_count: 2, predicted_photo_ids: [11, 12],
+   acceptable_photo_count: 2, acceptable_prediction_ids: [100, 101],
+   ambiguous_photo_ids: [], min_confidence: 0.91, max_confidence: 0.95},
+  {species: 'Common Gallinule', predicted_count: 2, predicted_photo_ids: [21, 22],
+   acceptable_photo_count: 2, acceptable_prediction_ids: [],
+   ambiguous_photo_ids: [], min_confidence: 0.56, max_confidence: 1.0},
+];
+(async function() {
+  renderSelectionPredictions(predictions, 70, {});
+  var slowButton = {disabled: false, textContent: 'Show 2 photos'};
+  var fastButton = {disabled: false, textContent: 'Show 2 photos'};
+  // Row 0 kicks off, then row 1 kicks off before row 0 resolves.
+  var slowPromise = showSelectionPredictionPhotos(0, slowButton);
+  var fastPromise = showSelectionPredictionPhotos(1, fastButton);
+  await fastPromise;
+  // Row 1's lightbox is up; now let row 0's stale fetch finish.
+  slowResolve();
+  await slowPromise;
+  process.stdout.write(JSON.stringify({
+    opened: opened, toasts: toasts, fastFinished: fastFinished,
+  }));
+})();
+""",
+    ])
+    result = _run_node(source, [])
+
+    # The fast row-1 fetch actually ran and its lightbox opened.
+    assert result["fastFinished"] is True
+    # Only row 1's lightbox opens. Row 0's late-arriving response is dropped
+    # rather than replacing the lightbox with the wrong species.
+    assert len(result["opened"]) == 1
+    assert result["opened"][0] == {"id": 21, "ids": [21, 22]}
+    assert result["toasts"] == []
 
 
 def _browse_escape_helpers():

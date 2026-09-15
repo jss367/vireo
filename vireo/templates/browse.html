@@ -2589,6 +2589,12 @@ var selectionKeywordNameById = {};
 // drop a stale response rather than paint the previous selection's rows.
 var detailPredictionSeq = 0;
 var selectionPredictionSeq = 0;
+// "Show N photos" fires an out-of-band fetch that outlives the panel repaint
+// counter (which only bumps when the selection changes). Without a dedicated
+// generation, two Show clicks back-to-back on different rows both pass the
+// selection-seq guard, and a slower earlier fetch can paint its lightbox
+// over the later click's.
+var selectionPredictionShowSeq = 0;
 // A photo can carry dozens of low-confidence guesses, and most users never set
 // a confidence floor. Show the strongest few and collapse the tail behind a
 // counted "show all" rather than either flooding the panel or inventing a
@@ -10033,10 +10039,13 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
 async function showSelectionPredictionPhotos(idx, button) {
   var ids = (selectionPredictionPhotoIdsByIdx[idx] || []).slice();
   if (!ids.length) return;
-  // The panel repaints whenever the selection changes, and this fetch can
-  // outlive that. Pin the render generation so a response for the old
-  // selection can't open a lightbox over the new one.
+  // Two pins, because two things can go stale under this fetch. The panel
+  // seq drops responses for a selection the user has already moved off of;
+  // the show seq drops responses for a Show click the user has already
+  // moved off of — a slow fetch on row A must not paint over a faster
+  // fetch on row B that the user clicked afterwards.
   var seq = selectionPredictionSeq;
+  var showSeq = ++selectionPredictionShowSeq;
   var label = button ? button.textContent : '';
   if (button) {
     button.disabled = true;
@@ -10063,6 +10072,7 @@ async function showSelectionPredictionPhotos(idx, button) {
     }
   }
   if (seq !== selectionPredictionSeq) return;
+  if (showSeq !== selectionPredictionShowSeq) return;
   if (!fetched.length) {
     showToast('Could not open those photos — they are no longer in this workspace.', 'warning');
     return;
