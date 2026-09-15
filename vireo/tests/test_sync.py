@@ -1716,3 +1716,37 @@ def test_sync_clears_rows_that_predate_the_change_token_column(tmp_path):
     assert result["synced"] == 1, result
     assert db.count_pending_changes() == 0, "a NULL-token row was left queued"
     db.close()
+
+
+@pytest.mark.parametrize("order,expected", [
+    (("keyword_add", "keyword_remove"), set()),
+    (("keyword_remove", "keyword_add"), {"Osprey"}),
+])
+def test_sync_resolves_same_keyword_add_and_remove_to_the_later_one(tmp_path, order, expected):
+    """A genuine add-then-remove of one term is not a normalization rename.
+
+    _remove_planned_keywords pairs any add/remove sharing a normalized key,
+    strips the legacy spelling and writes the term back -- right for a rename
+    (`'apapane` -> `apapane`, two spellings), wrong for the same string twice,
+    where it turned a removal into a no-op. The pair became reachable once
+    the keyword endpoints stopped cancelling a queued opposite for photos
+    under a pre-transfer NAS sync.
+    """
+    import sync
+    from db import Database
+    from xmp import read_keywords, write_sidecar
+
+    db = Database(str(tmp_path / "t.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    photo, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    write_sidecar(xmp_path, {"Osprey"}, set())
+    for kind in order:
+        db.queue_change(photo, kind, "Osprey")
+
+    result = sync.sync_to_xmp(db)
+    assert result["ok"], result
+    assert (read_keywords(xmp_path) or set()) == expected
+    # Both rows clear either way: the losing intent was superseded, not
+    # dropped unapplied.
+    assert db.count_pending_changes() == 0
+    db.close()

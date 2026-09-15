@@ -135,12 +135,23 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
     the clear runs. Tokens are UUIDs and stay put.
     """
     plan = _PhotoSyncPlan()
+    # Last intent per exact keyword string. A genuine add-then-remove of the
+    # SAME term must resolve to whichever the user did last; without this the
+    # pair reaches ``_remove_planned_keywords``, which reads any add/remove
+    # sharing a normalized key as a normalization rename, strips the legacy
+    # spelling and then writes the term back -- so a removal silently became
+    # a no-op. Renames pair DIFFERENT spellings of one key and are untouched
+    # here. The pair only became reachable once the keyword endpoints stopped
+    # cancelling a queued opposite for photos under a pre-transfer NAS sync.
+    last_keyword_intent = {}
     for c in photo_changes:
         kind = c["change_type"]
         if kind == "keyword_add":
             plan.keywords_to_add.add(c["value"])
+            last_keyword_intent[c["value"]] = "add"
         elif kind == "keyword_remove":
             plan.keywords_to_remove.add(c["value"])
+            last_keyword_intent[c["value"]] = "remove"
         elif kind == "keyword_remove_flat":
             plan.keywords_to_remove_flat.add(c["value"])
         elif kind == "rating":
@@ -160,6 +171,15 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
         else:
             continue
         plan.supported_changes.append((c["id"], c["change_token"]))
+    for value, intent in last_keyword_intent.items():
+        if value in plan.keywords_to_add and value in plan.keywords_to_remove:
+            # Both queued for one term: the later one is what the user meant.
+            # Both rows still clear -- the losing intent was genuinely
+            # superseded, not dropped unapplied.
+            if intent == "add":
+                plan.keywords_to_remove.discard(value)
+            else:
+                plan.keywords_to_add.discard(value)
     return plan
 
 
