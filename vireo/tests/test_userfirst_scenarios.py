@@ -267,6 +267,25 @@ def test_browse_multiselect_shortcut_regression(userfirst_env):
         pytest.fail(f"browse_multiselect scenario reported bugs:\n{msg}")
 
 
+def test_browse_prediction_show_button(userfirst_env):
+    """The selection panel's Show button opens the row's photos, and only those."""
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import browse_prediction_show
+    from vireo.testing.userfirst.seeds import prediction_selection_seed
+
+    with vireo_session(
+        name="browse_prediction_show", seed=prediction_selection_seed
+    ) as session:
+        browse_prediction_show.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"browse_prediction_show scenario reported bugs:\n{msg}")
+
+
 def test_import_flow_scenario(userfirst_env):
     from vireo.testing.userfirst.harness import vireo_session
     from vireo.testing.userfirst.scenarios import import_flow

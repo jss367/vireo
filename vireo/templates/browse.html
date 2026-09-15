@@ -890,6 +890,22 @@ body.sidebar-resizing {
   white-space: nowrap;
 }
 .prediction-review-link:hover { filter: brightness(1.1); }
+/* Deliberately quieter than both Accept buttons: this one only looks at
+   photos, and a third button sharing the accept-all chrome would read as a
+   third way to write keywords. */
+.prediction-show {
+  flex-shrink: 0;
+  background: none;
+  color: var(--info);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.prediction-show:hover { background: var(--bg-primary); text-decoration: underline; }
+.prediction-show:disabled { opacity: 0.6; cursor: wait; text-decoration: none; }
 .prediction-status-tag {
   flex-shrink: 0;
   font-size: 11px;
@@ -2573,6 +2589,12 @@ var selectionKeywordNameById = {};
 // drop a stale response rather than paint the previous selection's rows.
 var detailPredictionSeq = 0;
 var selectionPredictionSeq = 0;
+// "Show N photos" fires an out-of-band fetch that outlives the panel repaint
+// counter (which only bumps when the selection changes). Without a dedicated
+// generation, two Show clicks back-to-back on different rows both pass the
+// selection-seq guard, and a slower earlier fetch can paint its lightbox
+// over the later click's.
+var selectionPredictionShowSeq = 0;
 // A photo can carry dozens of low-confidence guesses, and most users never set
 // a confidence floor. Show the strongest few and collapse the tail behind a
 // counted "show all" rather than either flooding the panel or inventing a
@@ -2589,6 +2611,12 @@ var selectionPredictionAcceptableById = {};
 // consensus has drifted from what the panel rendered (see
 // _species_drifted_prediction_ids in app.py).
 var selectionPredictionSpeciesByIdx = {};
+// Also parallel: the photos the row's "Predicted on N of M" counts, so the
+// Show button can open exactly that set in the lightbox. Kept in the side
+// table rather than re-derived from the accept ids because those exclude the
+// ambiguous photos — and the ambiguous ones are precisely the photos a user
+// clicks Show to look at.
+var selectionPredictionPhotoIdsByIdx = {};
 // The single-photo panel's rendered rows, in render order, so its buttons can
 // carry a bare index instead of the row's data. The selection panel has kept
 // its ids and species in a side table since it shipped
@@ -8568,6 +8596,7 @@ function updateSelectionPanel(ids) {
     selectionPredictionKey = '';
     selectionPredictionAcceptableById = {};
     selectionPredictionSpeciesByIdx = {};
+    selectionPredictionPhotoIdsByIdx = {};
     selectionPredictionSeq++;
     var predList = document.getElementById('selectionPredictions');
     if (predList) predList.innerHTML = '';
@@ -8618,6 +8647,7 @@ function updateSelectionPanel(ids) {
     selectionPredictionSeq++;
     selectionPredictionAcceptableById = {};
     selectionPredictionSpeciesByIdx = {};
+    selectionPredictionPhotoIdsByIdx = {};
     var predList = document.getElementById('selectionPredictions');
     if (predList) {
       predList.innerHTML = '<div class="selection-empty">Predictions are available for selections of 1,000 photos or fewer.</div>';
@@ -9875,6 +9905,7 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
   };
   selectionPredictionAcceptableById = {};
   selectionPredictionSpeciesByIdx = {};
+  selectionPredictionPhotoIdsByIdx = {};
   // The floor is the user's own setting, so hidden rows get counted out loud
   // rather than vanishing into an empty-looking panel.
   var hidden = meta.below_threshold_count || 0;
@@ -9921,6 +9952,8 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
     // rendered (another tab ungrouping the burst, per-vote edits shifting
     // the winner). See _species_drifted_prediction_ids in app.py.
     selectionPredictionSpeciesByIdx[idx] = p.species;
+    var predictedPhotos = p.predicted_photo_ids || [];
+    selectionPredictionPhotoIdsByIdx[idx] = predictedPhotos;
 
     var rowMeta = 'Predicted on ' + p.predicted_count + ' of ' + selectedCount;
     if (p.keyworded_count) rowMeta += ', already keyworded on ' + p.keyworded_count;
@@ -9941,6 +9974,21 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
     actions += '<button class="prediction-accept prediction-accept-all" onclick="acceptSelectionPrediction(' + idx +
       ', true, this)" title="Add this species to all ' + selectedCount +
       ' selected photos, including those without this prediction. Existing keywords are kept; conflicts still need review.">Accept on all</button>';
+    // Look before you accept. "Blue-breasted Quail on 2 of 70" is either a
+    // real find or a bad detection, and no count in this row can tell the
+    // user which — only the pixels can. Opens exactly the photos the row's
+    // "Predicted on N" counts, in the lightbox, where 1:1 zoom lives. The
+    // selection is left alone on purpose: the decision this button feeds is
+    // usually "accept the OTHER species on all 70", and narrowing to 2 would
+    // repaint this panel for 2 photos and take that button away.
+    if (predictedPhotos.length) {
+      actions += '<button class="prediction-show" onclick="showSelectionPredictionPhotos(' + idx +
+        ', this)" title="Open the ' + predictedPhotos.length +
+        ' photo' + (predictedPhotos.length === 1 ? '' : 's') +
+        ' predicting this species in the lightbox. Your selection of ' + selectedCount +
+        ' stays as it is.">Show ' + predictedPhotos.length + ' photo' +
+        (predictedPhotos.length === 1 ? '' : 's') + '</button>';
+    }
     var why = '';
     if (ambiguousPhotos.length) {
       why = ambiguousPhotos.length + (ambiguousPhotos.length === 1 ? ' photo needs' : ' photos need') +
@@ -9983,6 +10031,60 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
     html += '<button class="prediction-toggle" onclick="toggleSelectionPredictions()">Show fewer</button>';
   }
   list.innerHTML = html + hiddenNote;
+}
+
+// "Show N photos" — open just the photos a prediction row counts, so the
+// user can judge the detection before accepting anything. Deliberately
+// read-only: nothing here changes the selection, the grid, or any keyword.
+async function showSelectionPredictionPhotos(idx, button) {
+  var ids = (selectionPredictionPhotoIdsByIdx[idx] || []).slice();
+  if (!ids.length) return;
+  // Two pins, because two things can go stale under this fetch. The panel
+  // seq drops responses for a selection the user has already moved off of;
+  // the show seq drops responses for a Show click the user has already
+  // moved off of — a slow fetch on row A must not paint over a faster
+  // fetch on row B that the user clicked afterwards.
+  var seq = selectionPredictionSeq;
+  var showSeq = ++selectionPredictionShowSeq;
+  var label = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Loading…';
+  }
+  var fetched = [];
+  try {
+    // /api/photos/by-ids caps each POST at 500 ids, and a selection can
+    // carry up to 1,000 photos, so chunk rather than silently truncating.
+    for (var offset = 0; offset < ids.length; offset += 500) {
+      var data = await safeFetch('/api/photos/by-ids', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: ids.slice(offset, offset + 500)}),
+      });
+      fetched = fetched.concat(data.photos || []);
+    }
+  } catch (e) {
+    return;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = label;
+    }
+  }
+  if (seq !== selectionPredictionSeq) return;
+  if (showSeq !== selectionPredictionShowSeq) return;
+  if (!fetched.length) {
+    showToast('Could not open those photos — they are no longer in this workspace.', 'warning');
+    return;
+  }
+  // by-ids drops photos that left the workspace between the panel's render
+  // and this click. Say so rather than opening a lightbox whose counter
+  // quietly reads "1 / 1" under a button that promised 2.
+  if (fetched.length < ids.length) {
+    showToast('Showing ' + fetched.length + ' of ' + ids.length +
+      ' photos — the rest are no longer in this workspace.', 'warning');
+  }
+  openLightbox(fetched[0].id, fetched[0].filename || '', fetched);
 }
 
 async function acceptSelectionPrediction(idx, onAll, button) {
