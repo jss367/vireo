@@ -5933,6 +5933,23 @@ class Database:
                             # instead of adding a second catalog row for
                             # the same on-disk destination.
                             staged_normalized_claimed[staged_norm] = pid
+                            # Same-pass update to the collision map: without
+                            # this a subsequent case-alias iteration whose
+                            # hash happens to match the phantom's stale
+                            # ``file_hash`` would compute
+                            # ``real_collision=True`` against a row that no
+                            # longer exists, hand ``_reassign_pending_changes``
+                            # the deleted phantom id, and trip the
+                            # ``pending_changes.photo_id`` FK constraint --
+                            # aborting the whole merge. The survivor is now
+                            # the reparented staged row, so a later real
+                            # collision resolves to it.
+                            existing_by_key[staged_norm] = {
+                                "id": pid,
+                                "filename": staged["filename"],
+                                "file_hash": staged["file_hash"],
+                                "file_size": staged["file_size"],
+                            }
                     to_delete.append(sf["id"])
                     counts["merged_folders"] += 1
                     last_target_parent[target_path] = target["id"]

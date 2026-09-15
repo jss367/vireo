@@ -11984,6 +11984,92 @@ def test_merge_staged_tree_intra_staged_case_alias_collision(
     assert second_pid in counts["dropped_photo_ids"]
 
 
+def test_merge_staged_tree_phantom_alias_updates_collision_map_for_later_iterations(
+    db, tmp_path, monkeypatch,
+):
+    """Regression: after a phantom promotion, ``existing_by_key`` must be
+    updated to point at the surviving staged row before the loop continues.
+
+    Without the fix, a subsequent case-alias staged row whose ``file_hash``
+    happens to match the deleted phantom's ``file_hash`` computes
+    ``real_collision=True`` against the stale entry, hands
+    ``_reassign_pending_changes`` a ``to_photo_id`` that no longer exists
+    in ``photos``, and trips the ``pending_changes.photo_id`` FK check --
+    the whole merge aborts and rolls back, leaving nothing archived.
+
+    Narrow, but not theoretical: two staged files with case-differing
+    names (staged on a case-sensitive disk, archiving to APFS/SMB), the
+    first with fresh bytes replacing a phantom archive row, the second
+    with bytes that happen to hash-match the phantom's stale entry.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # rsync landed the first staged row's bytes over the phantom's empty
+    # slot; a second staged case-alias with a different name would have
+    # been skipped by ``--ignore-existing``.
+    (date_dir / "img.raf").write_bytes(b"first-staged-bytes")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(folder_id=date_id, filename="img.raf",
+                               extension=".raf", file_size=50,
+                               file_mtime=1.0, file_hash="PHANTOMHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # First staged: fresh bytes, hash mismatch with phantom → phantom
+    # branch runs, phantom row is deleted, this row is reparented.
+    first_pid = db.add_photo(folder_id=stage_leaf, filename="IMG.RAF",
+                             extension=".raf", file_size=100,
+                             file_mtime=1.0, file_hash="FIRSTBYTES")
+    # Second staged (case alias): hash HAPPENS to equal phantom's stale
+    # hash. Without the fix, ``real_collision`` in this iteration
+    # compares against the deleted phantom row and resolves the survivor
+    # to the deleted id -- FK violation on the pending_changes update.
+    second_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                              extension=".raf", file_size=50,
+                              file_mtime=2.0, file_hash="PHANTOMHASH")
+    # A queued edit on the second staged row makes ``_reassign_pending_changes``
+    # actually touch a row: an empty update matches zero rows and the FK
+    # check never fires, so the bug is only visible when there is an edit
+    # to move.
+    db.queue_change(second_pid, "keyword_add", "Osprey")
+
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # One survivor in the target folder (the first staged row), the
+    # phantom is gone, the second case-alias was dropped as
+    # ``already_present``, and its queued edit was re-filed onto the
+    # survivor rather than aborting the merge on a stale-id FK.
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ?", (date_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == first_pid
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (phantom_pid,)
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (second_pid,)
+    ).fetchone() is None
+    assert counts["new_photos"] == 1
+    assert counts["already_present"] == 1
+    # The queued edit survives on the surviving staged row.
+    assert db.conn.execute(
+        "SELECT photo_id FROM pending_changes WHERE value = 'Osprey'"
+    ).fetchone()["photo_id"] == first_pid
+
+
 def test_merge_staged_tree_intra_staged_case_alias_case_sensitive_volume(
     db, tmp_path, monkeypatch,
 ):
