@@ -19057,7 +19057,10 @@ def test_browse_reject_predictions_refreshes_collections(app_and_db):
     # a prediction-status filter showing the row that just left it.
     assert (
         "refreshActiveCollectionAfterMembershipChange("
-        "[MUTATION_KEYWORD, MUTATION_PREDICTION])" in body
+        "[MUTATION_PREDICTION])" in body
+    ), (
+        "rejection changes no keywords, so a keyword/species filter cannot "
+        "notice the edit — passing MUTATION_KEYWORD reloads it for nothing"
     )
 
 

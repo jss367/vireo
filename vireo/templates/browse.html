@@ -4300,7 +4300,15 @@ function captureBrowseViewportAnchor() {
   var container = document.getElementById('gridContainer');
   if (!container) return null;
   var containerTop = container.getBoundingClientRect().top;
-  var cards = document.querySelectorAll('#grid .grid-card');
+  // Include ``.browse-stack-member``: an expanded stack tray can be taller
+  // than the viewport, and if the user is scrolled inside it every card on
+  // screen is a member. Skipping those would let the loop drop through to
+  // the first top-level card *below* the tray — off-screen — and after the
+  // reset collapses the tray, restoring that off-screen card at its old
+  // large offset snaps the grid upward (Codex review r4012897730).
+  var cards = document.querySelectorAll(
+    '#grid .grid-card, #grid .browse-stack-member'
+  );
   for (var i = 0; i < cards.length; i++) {
     var rect = cards[i].getBoundingClientRect();
     // First card still on screen: its bottom edge has not passed the top of
@@ -4308,9 +4316,21 @@ function captureBrowseViewportAnchor() {
     if (rect.bottom > containerTop + 1) {
       var id = parseInt(cards[i].dataset.id, 10);
       if (!id) return null;
+      // Anchor on the stack cover, not the member: the reset collapses the
+      // tray, so members no longer exist afterwards and ``photos`` never
+      // held them anyway. The cover sits directly above where the tray
+      // was, so its top after collapse is close to the member's top before.
+      var anchorId = id;
+      if (cards[i].classList.contains('browse-stack-member')) {
+        var tray = cards[i].closest('.browse-stack-tray');
+        var coverId = tray && tray.dataset.stackCoverId
+          ? parseInt(tray.dataset.stackCoverId, 10)
+          : NaN;
+        if (coverId) anchorId = coverId;
+      }
       return {
-        photoId: id,
-        index: photos.findIndex(function(p) { return p.id === id; }),
+        photoId: anchorId,
+        index: photos.findIndex(function(p) { return p.id === anchorId; }),
         topOffset: rect.top - containerTop,
       };
     }
@@ -6607,12 +6627,20 @@ async function resetAndLoad(options) {
   // the default clear below would drop a normal (non-dashboard) collection
   // and send the user back to the unscoped workspace grid.
   var preserveCollection = !!(options && options.preserveCollection);
-  var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
+  var preserveScroll = !!(options && options.preserveScroll);
+  // Try the single-photo anchor whenever a caller has asked us to keep the
+  // user's place — ``preserveAnchor`` (explicit) or ``preserveScroll`` (the
+  // membership-change fallback that has no photo of its own to focus on).
+  // ``captureSelectedPhotoAnchor`` declines when a multi-selection is
+  // active, so the batch-tagging case still falls through to the viewport
+  // anchor below; when a single photo is selected and the edit did not
+  // remove it, restoring the selection and detail panel matches the
+  // documented fallback behavior (Codex review r4012897727).
+  var anchor = (preserveAnchor || preserveScroll)
+    ? captureSelectedPhotoAnchor()
+    : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
-  // ``preserveAnchor`` already restores the scroll position around the
-  // selected photo; the viewport anchor is the fallback for the reloads that
-  // have no single selection to restore (a batch tag, above all).
-  var scrollAnchor = (!anchor && !!(options && options.preserveScroll))
+  var scrollAnchor = (!anchor && preserveScroll)
     ? captureBrowseViewportAnchor()
     : null;
   browseDatasetReady = false;
@@ -9722,7 +9750,12 @@ async function rejectDetailPredictions(predictionIds, photoId) {
   // active collection so the grid and counts don't lag behind the DB.
   // The accept path fans out the same way via _afterPredictionMutation.
   scheduleCollectionCountsRefresh();
-  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD, MUTATION_PREDICTION]);
+  // Rejection changes prediction status but writes no keywords, so a
+  // keyword/species/count filter cannot notice this edit; naming
+  // ``MUTATION_KEYWORD`` here forced ``dependsOnMutation`` to reload those
+  // grids anyway, clearing the selection and detail panel for a result set
+  // that could not have changed.
+  refreshActiveCollectionAfterMembershipChange([MUTATION_PREDICTION]);
 }
 
 async function loadSelectionPredictions(ids) {
