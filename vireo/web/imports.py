@@ -155,6 +155,29 @@ DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS = 0.1
 DUPLICATE_CHECK_PREP_BATCH_SIZE = 100
 
 
+def _folder_ids_under(folders, staging_destination):
+    """Return the ids of ``folders`` that live inside ``staging_destination``.
+
+    Browse badges the sidebar rows for a pending NAS transfer, and the only
+    thing tying a catalog folder to that transfer is its path: an import that
+    was kept locally registers its staging tree as ordinary folders, so the
+    sidebar otherwise shows a bare date leaf (``12``) with nothing saying the
+    files are still in Vireo's staging directory. The staging root itself is
+    included — it is a real folder row when the import wrote photos there.
+    """
+    root = os.path.normpath(staging_destination) if staging_destination else ""
+    # A missing or filesystem-root staging path would badge the whole tree.
+    if root in ("", ".", os.sep, os.path.splitdrive(root)[0] + os.sep):
+        return []
+    prefix = root + os.sep
+    ids = []
+    for folder in folders:
+        path = os.path.normpath(folder["path"]) if folder["path"] else ""
+        if path == root or path.startswith(prefix):
+            ids.append(folder["id"])
+    return ids
+
+
 def create_imports_blueprint(
     get_db,
     json_error,
@@ -193,12 +216,22 @@ def create_imports_blueprint(
             "WHERE a.workspace_id = ? AND a.state != 'complete' ORDER BY a.created_at",
             (db._ws_id(),),
         ).fetchall()
+        # Only pay for the folder read when something is actually pending —
+        # three pages poll this endpoint every 5s with an empty list most of
+        # the time.
+        ws_folders = db.conn.execute(
+            "SELECT f.id, f.path FROM folders f "
+            "JOIN workspace_folders wf ON wf.folder_id = f.id "
+            "WHERE wf.workspace_id = ?",
+            (db._ws_id(),),
+        ).fetchall() if rows else []
         items = []
         for row in rows:
             sending = any(j.get("type") == "send-to-nas"
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
             items.append({
                 "id": row["id"], "destination": row["destination"],
+                "folder_ids": _folder_ids_under(ws_folders, row["staging_destination"]),
                 "source_available": os.path.isdir(row["staging_destination"]),
                 "collection_id": row["review_collection_id"], "name": row["collection_name"] or "Imported photos",
                 "state": "sending" if sending else "waiting" if jobs else "ready",
