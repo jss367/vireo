@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 
@@ -5445,6 +5446,40 @@ def test_pending_archive_reports_edits_that_missed_the_transfer(app_and_db, tmp_
     assert sent["status"] == "completed", sent
     assert sent["result"]["metadata_queued_during_transfer"] == 1
     assert "1 edit queued during the transfer" in sent["summary"]
+
+
+def test_pending_archive_says_so_when_the_residual_recheck_fails(app_and_db, tmp_path, monkeypatch):
+    """A failed re-check reports "unknown", never an affirmative zero.
+
+    The re-read runs after the transfer has already succeeded, so a failure
+    there is not fatal. But reporting 0 would tell the user that nothing
+    missed the transfer -- the one claim this job has just lost the ability
+    to make -- while the edits sit in the queue unmentioned.
+    """
+    import move
+    from db import Database
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+
+    def recheck_explodes(self, photo_ids):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        Database, "staged_sync_scope_by_photos", recheck_explodes)
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+    assert sent["result"]["metadata_queued_during_transfer"] is None
+    assert "Could not re-check the sync queue" in sent["summary"]
+    assert "queued during the transfer and still need a sync" not in sent["summary"]
 
 
 def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_db, tmp_path, monkeypatch):

@@ -338,13 +338,19 @@ def _residual_staged_changes(db, photo_ids, undeliverable):
     destination folder id. A folder-id-scoped re-read would then find
     nothing even if the user queued an edit during the copy. Photo ids are
     captured before the move for this reason.
+
+    Returns ``None`` when the re-read itself fails. The transfer has already
+    succeeded by then, so the failure is not fatal -- but an affirmative
+    ``0`` would be read as "nothing missed the transfer" when the honest
+    answer is "I could not tell", and the edits are still sitting in the
+    queue. The caller says so in the summary.
     """
     try:
         changes, _here, _elsewhere, _overlap = db.staged_sync_scope_by_photos(photo_ids)
         return sum(1 for key, _cid, _pid in changes if key not in undeliverable)
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
-        return 0
+        return None
 
 
 def create_imports_blueprint(
@@ -571,7 +577,17 @@ def create_imports_blueprint(
                                     f"Synced metadata for {synced} photo"
                                     f"{'' if synced == 1 else 's'}. {summary}"
                                 )
-                            if residual:
+                            if residual is None:
+                                # The re-read failed, not the transfer. Saying
+                                # nothing here would read as "nothing missed
+                                # the transfer" -- the one claim this job
+                                # cannot make.
+                                summary += (
+                                    ". Could not re-check the sync queue "
+                                    "afterwards, so whether any edit was "
+                                    "queued during the transfer is unknown"
+                                )
+                            elif residual:
                                 summary += (
                                     f". {residual} edit{'' if residual == 1 else 's'} "
                                     "queued during the transfer and still need a "
