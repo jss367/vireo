@@ -11211,6 +11211,82 @@ def test_merge_staged_tree_materializes_queued_keyword_remove_onto_survivor(
     assert survivor_keywords == [], survivor_keywords
 
 
+def test_merge_staged_tree_keeps_the_stronger_keyword_source(db, tmp_path):
+    """The union must fold provenance, not keep whichever stamp arrived first.
+
+    INSERT OR IGNORE keeps the survivor's existing row untouched, so a
+    hand-added keyword on the staged photo would come out the other side
+    wearing the survivor's weaker stamp -- and a later retirement pass
+    deletes keywords by that stamp.
+    """
+    from db import KEYWORD_SOURCE_UNKNOWN
+
+    ws = db._active_workspace_id
+    archive = tmp_path / "arch"
+    (archive / "USA").mkdir(parents=True)
+    (archive / "USA" / "tern.raf").write_bytes(b"same bytes")
+
+    base_id = db.add_folder(str(archive / "USA"), name="USA")
+    survivor = db.add_photo(folder_id=base_id, filename="tern.raf", extension=".raf",
+                            file_size=40, file_mtime=1.0, file_hash="SAME4")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage_root = db.add_folder(str(tmp_path / "stage" / "USA"), name="USA",
+                               workspace_root=False)
+    dropped = db.add_photo(folder_id=stage_root, filename="tern.raf", extension=".raf",
+                           file_size=40, file_mtime=1.0, file_hash="SAME4")
+    keyword = db.add_keyword("Tern")
+    # Survivor holds it weakly; the staged row is where the user said so.
+    db.tag_photo(survivor, keyword, source=KEYWORD_SOURCE_UNKNOWN)
+    db.tag_photo(dropped, keyword, source="human")
+
+    db.merge_staged_tree_into_archive(stage_root, str(archive / "USA"))
+
+    assert db.conn.execute(
+        "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (survivor, keyword)).fetchone()["source"] == "human"
+
+
+def test_merge_staged_tree_keyword_remove_matches_case_insensitively(db, tmp_path):
+    """The catalog side must fold case the same way the sidecar side does.
+
+    ``_remove_planned_keywords`` matches sidecar entries through
+    ``keyword_match_key``, an ASCII case fold, so a queued remove of
+    ``osprey`` strips a sidecar ``Osprey``. A binary ``=`` on the catalog
+    side would leave the survivor's row in place -- sidecar and catalog
+    disagreeing, which is the one thing this reassignment exists to stop.
+    Every other keyword lookup in db.py already uses COLLATE NOCASE.
+    """
+    ws = db._active_workspace_id
+    archive = tmp_path / "arch"
+    (archive / "USA").mkdir(parents=True)
+    (archive / "USA" / "hawk.raf").write_bytes(b"same bytes")
+
+    base_id = db.add_folder(str(archive / "USA"), name="USA")
+    survivor = db.add_photo(folder_id=base_id, filename="hawk.raf", extension=".raf",
+                            file_size=30, file_mtime=1.0, file_hash="SAME3")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    db.tag_photo(survivor, db.add_keyword("Osprey"))
+
+    stage_root = db.add_folder(str(tmp_path / "stage" / "USA"), name="USA",
+                               workspace_root=False)
+    dropped = db.add_photo(folder_id=stage_root, filename="hawk.raf", extension=".raf",
+                           file_size=30, file_mtime=1.0, file_hash="SAME3")
+    # Queued in a different case than the catalog row carries.
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_remove', 'osprey', 'tok-case', ?)",
+        (dropped, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(archive / "USA"))
+
+    assert db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+        (survivor,)).fetchall() == []
+
+
 def test_merge_staged_tree_phantom_does_not_reassign_pending_edits(db, tmp_path):
     """The phantom row's queued edits belong to a different image (the one
     whose bytes went missing) and must NOT land on the fresh staged bytes

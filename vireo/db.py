@@ -21604,16 +21604,25 @@ class Database:
         Only the edits that ``sync_to_xmp`` actually writes to the sidecar
         are mirrored: rating, flag, keyword add/remove. Keyword rows
         transfer by ``keyword_id`` from the staged photo's own
-        ``photo_keywords`` (INSERT OR IGNORE union), which dodges the
-        ambiguity of resolving keyword names -- ``keywords.UNIQUE(name,
-        parent_id)`` allows the same name under different parents.
-        A queued ``keyword_remove`` matches the survivor's rows by name;
-        that mirrors ``_remove_planned_keywords``, which matches sidecar
-        entries the same way.
+        ``photo_keywords``, which dodges the ambiguity of resolving keyword
+        names -- ``keywords.UNIQUE(name, parent_id)`` allows the same name
+        under different parents. The union goes through the shared
+        provenance fold rather than ``INSERT OR IGNORE``: where both rows
+        exist, IGNORE would keep whichever stamp was already there, so a
+        hand-added keyword on the staged row could come out the other side
+        wearing a weaker source and be deleted by a later retirement pass.
+        A queued ``keyword_remove`` matches the survivor's rows by name,
+        case-insensitively. ``_remove_planned_keywords`` matches sidecar
+        entries through ``keyword_match_key``, an ASCII case fold, so a
+        binary ``=`` here would strip the term from the sidecar and leave it
+        in the catalog -- the divergence this helper exists to prevent.
+        ``COLLATE NOCASE`` is the same fold, and is what every other keyword
+        lookup in this file uses.
         """
         self.conn.execute(
-            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id, source) "
-            "SELECT ?, keyword_id, source FROM photo_keywords WHERE photo_id = ?",
+            "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
+            "SELECT ?, keyword_id, source FROM photo_keywords WHERE photo_id = ? "
+            + KEYWORD_SOURCE_CONFLICT_SQL,
             (to_photo_id, from_photo_id),
         )
         changes = self.conn.execute(
@@ -21646,7 +21655,8 @@ class Database:
                 # earlier state -- delete matching rows so the catalog
                 # matches the sidecar the sync will publish.
                 keyword_rows = self.conn.execute(
-                    "SELECT id FROM keywords WHERE name = ?", (value,),
+                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE",
+                    (value,),
                 ).fetchall()
                 for kw_row in keyword_rows:
                     self.conn.execute(
