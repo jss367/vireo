@@ -825,8 +825,9 @@
     // Only recognize a clause that narrows the other filters. An arbitrary
     // nested rule or a leaf in an OR/NOT root does not have that meaning.
     if (state.root.mode !== 'all') return null;
-    return state.root.rules.find(isMissingTagGroup) ||
-      state.root.rules.find(isMissingTagRule);
+    const nodes = state.root.rules.filter((node) =>
+      isMissingTagGroup(node) || isMissingTagRule(node));
+    return nodes.length === 1 ? nodes[0] : null;
   }
 
   function quickMissingFields() {
@@ -844,7 +845,12 @@
       if (node) removeByReference(state.root, node);
       // Keep existing advanced OR/NOT expressions intact while narrowing
       // their results with the shortcut, just as with the collection scope.
-      if (state.root.mode !== 'all') {
+      // Multiple independent missing-tag clauses are an advanced expression,
+      // not one OR shortcut. Nest them intact so the new shortcut remains
+      // independently recognizable and can be toggled back off.
+      const independentMissing = !node && state.root.rules.some((rule) =>
+        isMissingTagGroup(rule) || isMissingTagRule(rule));
+      if (state.root.mode !== 'all' || independentMissing) {
         state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
       }
       if (fields.size) state.root.rules.unshift({

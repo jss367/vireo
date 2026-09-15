@@ -537,6 +537,41 @@ def test_shortcuts_narrow_collection_with_any_rules(live_server, page, shortcut)
     assert original in page.evaluate("VireoFilter.getUserRules().rules")
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+def test_missing_shortcuts_preserve_multiple_existing_clauses(live_server, page, grouped):
+    """Adding a shortcut must not reduce missing-both rules to missing-either."""
+    db = live_server["db"]
+    photos = live_server["data"]["photos"]
+    place = db.add_keyword("City Park", kw_type="location")
+    db.tag_photo(photos[0], place)
+    db.tag_photo(photos[1], place)
+    _open_browse(page, live_server)
+    missing_species = {"field": "has_species", "op": "is", "value": 0}
+    original = {"mode": "all", "rules": [
+        {"mode": "any", "rules": [missing_species]} if grouped else missing_species,
+        {"field": "has_location_keyword", "op": "is", "value": 0},
+    ]}
+    page.evaluate("rules => VireoFilter.loadExpression(rules)", original)
+    _wait_total(page, 2)
+    species = page.locator('[data-missing="has_species"]')
+    location = page.locator('[data-missing="has_location_keyword"]')
+    expect(species).to_have_attribute("aria-pressed", "false")
+    expect(location).to_have_attribute("aria-pressed", "false")
+    location.click()
+    expect(location).to_have_attribute("aria-pressed", "true")
+    species.click()
+    expect(species).to_have_attribute("aria-pressed", "true")
+    assert original in page.evaluate("VireoFilter.getUserRules().rules")
+    _wait_total(page, 2)
+    # The added shortcut must also remain removable without changing the base.
+    location.click()
+    species.click()
+    expect(location).to_have_attribute("aria-pressed", "false")
+    expect(species).to_have_attribute("aria-pressed", "false")
+    assert page.evaluate("VireoFilter.getUserRules().rules") == [original]
+    _wait_total(page, 2)
+
+
 @pytest.mark.parametrize("mode", ["any", "none"])
 @pytest.mark.parametrize("field,value,selector", [
     ("flag", "flagged", '[data-flag="flagged"]'),
