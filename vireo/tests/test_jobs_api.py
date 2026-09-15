@@ -5718,6 +5718,151 @@ def test_pending_archive_sync_dispatches_by_token_not_reused_id(app_and_db, tmp_
         p.read_text() for p in (tmp_path / "NAS" / "trip").rglob("*.xmp"))
 
 
+def test_keyword_remove_endpoint_skips_cancel_shortcut_during_pretransfer_sync(app_and_db, tmp_path):
+    """Registering the photo must divert ``_queue_keyword_remove`` off its
+    cancel-a-pending-add shortcut and onto the real ``keyword_remove``
+    queue insert.
+
+    Otherwise a remove reached during a running pre-transfer sync would
+    delete the snapshotted ``keyword_add`` before ``clear_pending_by_token``
+    runs, leaving nothing for the sync's drain to pick up -- and the NAS
+    would receive a sidecar carrying a keyword the user had already
+    removed.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    fid = db.add_folder(str(photos_dir), name="photos")
+    db.add_workspace_folder(db._ws_id(), fid, is_root=True)
+    photo_id = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    add_resp = client.post(
+        f"/api/photos/{photo_id}/keywords", json={"name": "Osprey"})
+    assert add_resp.status_code == 200, add_resp.get_json()
+    keyword_id = add_resp.get_json()["keyword_id"]
+    assert [r["change_type"] for r in db.get_pending_changes()] == ["keyword_add"]
+
+    with app._pretransfer_sync_photo_ids_lock:
+        app._pretransfer_sync_photo_ids.add(photo_id)
+    try:
+        del_resp = client.delete(f"/api/photos/{photo_id}/keywords/{keyword_id}")
+        assert del_resp.status_code == 200, del_resp.get_json()
+    finally:
+        with app._pretransfer_sync_photo_ids_lock:
+            app._pretransfer_sync_photo_ids.discard(photo_id)
+
+    types = sorted(r["change_type"] for r in db.get_pending_changes())
+    assert types == ["keyword_add", "keyword_remove"], (
+        f"expected the shortcut to be skipped and a real keyword_remove to be "
+        f"queued; got {types}"
+    )
+
+
+def test_keyword_add_endpoint_skips_cancel_shortcut_during_pretransfer_sync(app_and_db, tmp_path):
+    """Symmetric to the remove-endpoint case: an add reached during a
+    running pre-transfer sync must not cancel the snapshotted
+    ``keyword_remove``, or the sidecar the sync just wrote (with the
+    keyword stripped) would ship to the NAS carrying the user's stale
+    "removed" state.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    fid = db.add_folder(str(photos_dir), name="photos")
+    db.add_workspace_folder(db._ws_id(), fid, is_root=True)
+    photo_id = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    keyword_id = db.add_keyword("Osprey")
+    db.tag_photo(photo_id, keyword_id, source="manual")
+
+    del_resp = client.delete(f"/api/photos/{photo_id}/keywords/{keyword_id}")
+    assert del_resp.status_code == 200, del_resp.get_json()
+    assert [r["change_type"] for r in db.get_pending_changes()] == ["keyword_remove"]
+
+    with app._pretransfer_sync_photo_ids_lock:
+        app._pretransfer_sync_photo_ids.add(photo_id)
+    try:
+        add_resp = client.post(
+            f"/api/photos/{photo_id}/keywords", json={"name": "Osprey"})
+        assert add_resp.status_code == 200, add_resp.get_json()
+    finally:
+        with app._pretransfer_sync_photo_ids_lock:
+            app._pretransfer_sync_photo_ids.discard(photo_id)
+
+    types = sorted(r["change_type"] for r in db.get_pending_changes())
+    assert types == ["keyword_add", "keyword_remove"], (
+        f"expected the shortcut to be skipped and a real keyword_add to be "
+        f"queued; got {types}"
+    )
+
+
+def test_pending_archive_send_registers_and_clears_pretransfer_photos(app_and_db, tmp_path, monkeypatch):
+    """The send job registers staged photos before ``_sync_staged_metadata``
+    starts and clears them once it (and the move) return, so the keyword
+    endpoints only skip their cancel shortcut for the duration of the
+    write window and free the shortcut everywhere else.
+    """
+    import move
+    import sync as sync_mod
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    photo_id = imported["result"]["photo_ids"][0]
+    db.queue_change(photo_id, "keyword_add", "Osprey")
+
+    saw_registered = []
+    real_sync = sync_mod.sync_to_xmp
+
+    def sync_inspect_registry(worker_db, **kwargs):
+        with app._pretransfer_sync_photo_ids_lock:
+            saw_registered.append(set(app._pretransfer_sync_photo_ids))
+        return real_sync(worker_db, **kwargs)
+
+    monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_inspect_registry)
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert sent["status"] == "completed", sent
+
+    assert saw_registered and photo_id in saw_registered[0], (
+        f"pre-transfer sync ran with an unregistered photo id: {saw_registered}"
+    )
+    with app._pretransfer_sync_photo_ids_lock:
+        remaining = set(app._pretransfer_sync_photo_ids)
+    assert not remaining, (
+        f"registry retained photo ids after the send finished: {remaining}"
+    )
+
+
+@pytest.mark.parametrize("raw_body", ['{"sync_first":', "not json at all", "{"])
+def test_pending_archive_send_rejects_malformed_json(app_and_db, tmp_path, monkeypatch, raw_body):
+    """``get_json(silent=True)`` returns ``None`` for both an absent body and a
+    JSON parse failure, so treating ``None`` as "no body" would let a
+    truncated or malformed request start the destructive transfer without the
+    metadata sync the caller intended to select.
+    """
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    response = app.test_client().post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        data=raw_body, content_type="application/json",
+    )
+    assert response.status_code == 400, response.get_json()
+    assert "valid JSON" in response.get_json()["error"]
+
+
 def test_pending_archive_send_rejects_a_conflicting_sync_option(app_and_db, tmp_path, monkeypatch):
     """A plain transfer already in flight cannot be upgraded mid-move."""
     import move

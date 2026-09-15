@@ -368,6 +368,8 @@ def create_imports_blueprint(
     bulk_gps_location_payload,
     guard_move_folder,
     sync_job_lock,
+    pretransfer_sync_photo_ids,
+    pretransfer_sync_photo_ids_lock,
 ):
     """Build the imports blueprint.
 
@@ -447,16 +449,26 @@ def create_imports_blueprint(
         db = get_db()
         runner = get_runner()
         workspace_id = db._ws_id()
-        body = request.get_json(silent=True)
-        # An `or {}` here would swallow falsy JSON literals -- `false`, `0`,
-        # `[]`, `""` -- and hide them behind the dict check below, so a
-        # malformed body would be treated as `sync_first=False` and the
-        # destructive transfer would start without the metadata sync. Default
-        # only when the body is genuinely absent.
-        if body is None:
+        # ``get_json(silent=True)`` returns ``None`` for both an absent body
+        # AND for a JSON parse failure, so a client sending
+        # ``Content-Type: application/json`` with truncated or malformed JSON
+        # would be treated as ``sync_first=False`` and the destructive
+        # transfer would start without the metadata sync. Read the raw body
+        # and default only when it is genuinely empty. An ``or {}`` on the
+        # parsed value would similarly swallow the falsy JSON literals
+        # ``false``, ``0``, ``[]``, ``""``.
+        raw = request.get_data(cache=True, as_text=True)
+        if raw and raw.strip():
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                return json_error("Request body must be valid JSON")
+            if body is None:
+                body = {}
+            elif not isinstance(body, dict):
+                return json_error("Request body must be a JSON object")
+        else:
             body = {}
-        elif not isinstance(body, dict):
-            return json_error("Request body must be a JSON object")
         sync_first = body.get("sync_first", False)
         # Not coerced: "false" and 0 are truthy/falsy in ways a caller does not
         # intend, and this option writes sidecars and can fail a transfer.
@@ -502,10 +514,14 @@ def create_imports_blueprint(
                                 "current": current, "total": total, "current_file": filename, "phase": phase,
                             })
 
-                        # Before the move, while the sidecars are still on
-                        # local disk. Recomputed here rather than trusting the
-                        # count the banner showed, so edits queued between the
-                        # click and the job travel with the transfer too.
+                        # Acquired BEFORE begin_uncancellable so a cancel or
+                        # shutdown during this wait is still honored. Another
+                        # workspace's ``/api/jobs/sync`` can hold the lock for
+                        # minutes, and nothing here has touched the filesystem
+                        # yet -- entering the uncancellable phase first would
+                        # wedge the transfer against a wait a cancel could
+                        # safely have unwound. Mirrors ``/api/jobs/sync``'s
+                        # own cancellable acquire in ``app.py``.
                         if sync_first:
                             folder_ids = _staging_folder_ids(
                                 thread_db, archive["staging_destination"])
@@ -541,6 +557,19 @@ def create_imports_blueprint(
                         else:
                             folder_ids = []
                             staged_photo_ids = []
+                        # Register the staged photos so the keyword add/remove
+                        # endpoints (``_queue_keyword_add`` /
+                        # ``_queue_keyword_remove`` in ``app.py``) skip their
+                        # cancel-a-pending-opposite shortcut for the duration
+                        # of the send: cancelling a row the sync has already
+                        # snapshotted would silently drop it, and the drain
+                        # would find no fresh row to pick up. Set only in the
+                        # ``sync_first`` path; a plain transfer does not read
+                        # or clear the queue, so cancellation is safe.
+                        registered_photo_ids = frozenset(staged_photo_ids) if sync_first else frozenset()
+                        if registered_photo_ids:
+                            with pretransfer_sync_photo_ids_lock:
+                                pretransfer_sync_photo_ids.update(registered_photo_ids)
                         try:
                             # Enter the uninterruptible phase only after the
                             # lock is in hand, so the wait above stayed
@@ -571,6 +600,9 @@ def create_imports_blueprint(
                                     + list(result.get("pending_reassigned_to") or []),
                                     considered)
                         finally:
+                            if registered_photo_ids:
+                                with pretransfer_sync_photo_ids_lock:
+                                    pretransfer_sync_photo_ids.difference_update(registered_photo_ids)
                             if sync_first:
                                 sync_job_lock.release()
                         if sync_first:

@@ -6926,6 +6926,19 @@ class Database:
         switch -- and a switch only happens when the user actually alternated
         between workspaces.
 
+        Also split when the same photo re-appears interleaved with another
+        photo in the same workspace. A RAW and a JPEG with one basename
+        share one ``.xmp`` sidecar, so an interleaved rating sequence like
+        ``RAW=1, JPEG=2, RAW=3`` groups inside ``sync_to_xmp`` as
+        ``{RAW: [1, 3], JPEG: [2]}`` and folds to ``RAW=3, JPEG=2``. Both
+        writes go to one sidecar and the sidecar settles on whichever ran
+        last -- for the shared ``xmp:Rating`` that is ``JPEG=2``, not the
+        newer ``RAW=3``. Splitting the run at ``RAW``'s interleaved reappearance
+        yields ``[RAW=1, JPEG=2]`` then ``[RAW=3]``, so the last write is the
+        newest edit and the sidecar settles on the right value. Repeats of one
+        photo with no other photo in between (``RAW=1, RAW=3``) still coalesce
+        in one run, so the fast case stays fast.
+
         ``change_token`` rides along because ``pending_changes.id`` is a bare
         ``INTEGER PRIMARY KEY``: SQLite hands the rowid straight back out
         after ``clear_pending`` deletes it, so a change queued right after a
@@ -6950,11 +6963,22 @@ class Database:
         # across all of them. Matches get_pending_changes' (created_at, id).
         rows.sort(key=lambda r: (r[0], r[1]))
         runs = []
+        current_photos = set()
+        last_photo = None
         for _created_at, change_id, workspace_id, change_token, photo_id in rows:
-            if runs and runs[-1][0] == workspace_id:
+            same_workspace = bool(runs) and runs[-1][0] == workspace_id
+            interleaved_repeat = (
+                same_workspace
+                and photo_id in current_photos
+                and photo_id != last_photo
+            )
+            if same_workspace and not interleaved_repeat:
                 runs[-1][1].append((change_id, change_token, photo_id))
+                current_photos.add(photo_id)
             else:
                 runs.append((workspace_id, [(change_id, change_token, photo_id)]))
+                current_photos = {photo_id}
+            last_photo = photo_id
         return runs
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL

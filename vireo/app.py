@@ -4995,6 +4995,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # XMP sidecars are read-modify-written files; serialize sync jobs so
     # repeated clicks cannot race while touching the same sidecar.
     app._sync_job_lock = threading.Lock()
+    # Photos currently the target of a pre-transfer NAS sync
+    # (``_sync_staged_metadata``). The keyword add/remove endpoints check
+    # this before their cancel-a-pending-opposite shortcut: if a photo is in
+    # here, the shortcut would silently drop a change the running sync has
+    # already snapshotted, and the drain would find no fresh row to pick up.
+    # Registered on entry and cleared on exit inside the imports blueprint.
+    app._pretransfer_sync_photo_ids = set()
+    app._pretransfer_sync_photo_ids_lock = threading.Lock()
+
+    def _photo_under_pretransfer_sync(photo_id):
+        with app._pretransfer_sync_photo_ids_lock:
+            return photo_id in app._pretransfer_sync_photo_ids
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
@@ -7838,10 +7850,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not keyword_name:
             return
         db = _get_db()
-        removed = db.remove_pending_changes(
-            photo_id, "keyword_remove", keyword_name,
-            workspace_id=workspace_id, _commit=_commit,
-        )
+        # Skip the "cancel a pending opposite" shortcut while a pre-transfer
+        # NAS sync has already snapshotted this photo's queue: cancelling
+        # would drop a row the sync is about to write, leaving the sidecar
+        # with the stale keyword and nothing left in the queue for the
+        # sync's drain to pick up. Queue the real change instead so the
+        # drain re-reads it and reconciles the sidecar before the move.
+        if _photo_under_pretransfer_sync(photo_id):
+            removed = 0
+        else:
+            removed = db.remove_pending_changes(
+                photo_id, "keyword_remove", keyword_name,
+                workspace_id=workspace_id, _commit=_commit,
+            )
         # A migration-generated flat removal is obsolete as soon as the user
         # explicitly re-adds that term. Clear it across every workspace that
         # owns the shared sidecar; otherwise "Use XMP" can filter the term
@@ -7868,10 +7889,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not keyword_name:
             return
         db = _get_db()
-        removed = db.remove_pending_changes(
-            photo_id, "keyword_add", keyword_name,
-            workspace_id=workspace_id, _commit=_commit,
-        )
+        # See _queue_keyword_add: the cancel shortcut would drop a row a
+        # running pre-transfer NAS sync has already snapshotted, and the
+        # drain has no fresh row to pick up.
+        if _photo_under_pretransfer_sync(photo_id):
+            removed = 0
+        else:
+            removed = db.remove_pending_changes(
+                photo_id, "keyword_add", keyword_name,
+                workspace_id=workspace_id, _commit=_commit,
+            )
         if removed == 0:
             db.queue_change(
                 photo_id, "keyword_remove", keyword_name,
@@ -30410,6 +30437,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             bulk_gps_location_payload=_bulk_gps_location_payload,
             guard_move_folder=_move_folder_guard_error,
             sync_job_lock=app._sync_job_lock,
+            pretransfer_sync_photo_ids=app._pretransfer_sync_photo_ids,
+            pretransfer_sync_photo_ids_lock=app._pretransfer_sync_photo_ids_lock,
         )
     )
 

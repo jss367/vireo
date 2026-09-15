@@ -748,6 +748,81 @@ def test_clear_pending_by_token_survives_rowid_reuse(tmp_path):
     assert remaining[0]['change_token'] == replacement_token
 
 
+def test_pending_change_runs_split_at_interleaved_photo_repetition(tmp_path):
+    """Consecutive same-workspace changes split when a photo reappears interleaved.
+
+    A RAW and a JPEG with one basename share one XMP sidecar. An interleaved
+    rating sequence ``RAW=1, JPEG=2, RAW=3`` grouped into a single run gets
+    folded per-photo inside ``sync_to_xmp`` as ``{RAW: [1, 3], JPEG: [2]}``
+    and settles on ``RAW=3, JPEG=2``. Both plans write to the same sidecar and
+    the last write wins, leaving the shared ``xmp:Rating`` at ``JPEG=2`` -- the
+    older of the two edits. Splitting at the interleaved repetition yields
+    ``[RAW=1, JPEG=2]`` then ``[RAW=3]``, so the sidecar's final write is the
+    newest edit and settles on the correct value.
+
+    Repeats with no other photo in between (``RAW=1, RAW=3``) still coalesce
+    into one run: no shared-sidecar collision arises, and splitting there
+    would only re-serialize what ``_plan_photo_sync`` already folds for free.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/photos", name="photos")
+    raw = db.add_photo(folder_id=fid, filename="a.arw", extension=".arw", file_size=100, file_mtime=1.0)
+    jpg = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+
+    # Force a queue order of RAW=1, JPEG=2, RAW=3 with distinct created_at
+    # timestamps so the tie-break on id doesn't muddy the ordering assertion.
+    db.conn.executemany(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'rating', ?, ?, ?, ?)",
+        [
+            (raw, "1", "tok-raw-1", ws, "2026-01-01T10:00:00"),
+            (jpg, "2", "tok-jpg-2", ws, "2026-01-01T10:01:00"),
+            (raw, "3", "tok-raw-3", ws, "2026-01-01T10:02:00"),
+        ],
+    )
+    db.conn.commit()
+
+    runs = db.pending_change_runs_in_folders([fid])
+    # Two runs: [RAW=1, JPEG=2] then [RAW=3]. The last write to the shared
+    # sidecar comes from run 2 and lands on the newer value.
+    assert len(runs) == 2, runs
+    assert [t for _cid, t, _pid in runs[0][1]] == ["tok-raw-1", "tok-jpg-2"]
+    assert [t for _cid, t, _pid in runs[1][1]] == ["tok-raw-3"]
+
+
+def test_pending_change_runs_coalesce_consecutive_same_photo(tmp_path):
+    """A photo repeating with no other photo in between stays in one run.
+
+    ``_plan_photo_sync`` already folds multiple changes per photo into one
+    plan, and there is no shared-sidecar collision when the same photo writes
+    twice in a row -- both writes go to the same file with the newer value.
+    Splitting here would only pay for an extra sidecar round-trip.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/photos", name="photos")
+    raw = db.add_photo(folder_id=fid, filename="a.arw", extension=".arw", file_size=100, file_mtime=1.0)
+
+    db.conn.executemany(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id, created_at) "
+        "VALUES (?, 'rating', ?, ?, ?, ?)",
+        [
+            (raw, "1", "tok-1", ws, "2026-01-01T10:00:00"),
+            (raw, "3", "tok-3", ws, "2026-01-01T10:01:00"),
+        ],
+    )
+    db.conn.commit()
+
+    runs = db.pending_change_runs_in_folders([fid])
+    assert len(runs) == 1, runs
+    assert [t for _cid, t, _pid in runs[0][1]] == ["tok-1", "tok-3"]
+
+
 def test_get_photos_keyword_search(tmp_path):
     """get_photos can filter by keyword name."""
     from db import Database
