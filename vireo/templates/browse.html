@@ -4272,6 +4272,12 @@ function captureSelectedPhotoAnchor() {
     photoId: selectedPhotoId,
     topOffset: cardRect.top - containerRect.top,
     detailVisible: document.getElementById('detailContent').classList.contains('visible'),
+    // Position in ``photos`` at capture time. Bounds the paged rescan below
+    // when a ``preserveScroll`` reload runs after an edit that may have
+    // removed this photo from the filter (Codex review r4013123608): a
+    // 60k-photo library would otherwise walk to ``allLoaded`` — ~1,200
+    // page requests — before giving up.
+    index: photos.findIndex(function(p) { return p.id === selectedPhotoId; }),
   };
 }
 
@@ -4379,9 +4385,16 @@ function anchorSelectionIsCurrent(anchor, restoreEpoch) {
 
 async function loadUntilPhotoRendered(photoId, shouldContinue, options) {
   var resolveStackMember = !!(options && options.resolveStackMember);
+  // Optional cap on how many photos may be paged in while searching.
+  // Callers that know the edit which triggered this scan can have removed
+  // the target (a ``preserveScroll`` membership refresh) pass their own
+  // budget so the scan does not walk the whole catalog looking for a photo
+  // the filter no longer matches.
+  var budget = options && options.budget != null ? options.budget : null;
   var card = getGridCard(photoId);
   var stackCover = resolveStackMember ? loadedBrowseStackCoverForPhoto(photoId) : null;
   while (!card && !stackCover && !allLoaded) {
+    if (budget != null && photos.length > budget) break;
     if (shouldContinue && !shouldContinue()) return null;
     var beforePage = currentPage;
     var beforeLen = photos.length;
@@ -6640,7 +6653,13 @@ async function resetAndLoad(options) {
     ? captureSelectedPhotoAnchor()
     : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
-  var scrollAnchor = (!anchor && preserveScroll)
+  // Membership-change reloads (``preserveScroll``) can arrive after an edit
+  // that removed the selected photo from the filter — untagging its only
+  // matching keyword, say. Capture the viewport anchor alongside the
+  // selected-photo one so that when the paged scan below runs out of
+  // budget without finding the id, we can still hold position instead of
+  // resetting to ``scrollTop = 0`` (Codex review r4013123608).
+  var scrollAnchor = preserveScroll
     ? captureBrowseViewportAnchor()
     : null;
   browseDatasetReady = false;
@@ -6695,21 +6714,34 @@ async function resetAndLoad(options) {
     var initialLoadStatus = await loadPhotos();
     if (initialLoadStatus !== true) return initialLoadStatus;
     if (!resetRequestIsCurrent()) return null;
-    if (scrollAnchor) {
-      await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+    if (!anchor) {
+      if (scrollAnchor) {
+        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+      }
       return true;
     }
-    if (!anchor) return true;
 
+    // When ``preserveScroll`` is set, the edit that triggered this reload
+    // may have removed the anchored photo from the filter. Bound the paged
+    // scan by the anchor's original position + a page (the same budget
+    // shape ``restoreBrowseViewportAnchor`` uses) so we do not walk the
+    // whole catalog looking for a photo that no longer matches; if the
+    // scan exhausts the budget we fall back to the viewport anchor below.
+    var anchorScanBudget = preserveScroll
+      ? Math.max(anchor.index || 0, 0) + perPage
+      : null;
     var card = await loadUntilPhotoRendered(
       anchor.photoId,
       anchorScanShouldContinue,
-      { resolveStackMember: true }
+      { resolveStackMember: true, budget: anchorScanBudget }
     );
     if (!resetRequestIsCurrent()) return null;
     if (!anchorRestoreIsPending(anchor, restoreEpoch)) return true;
     if (!card) {
       clearActiveSelectionAndDetail();
+      if (scrollAnchor) {
+        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+      }
       return true;
     }
 
@@ -6725,6 +6757,9 @@ async function resetAndLoad(options) {
     var anchorIndex = photos.findIndex(function(p) { return p.id === anchorGridId; });
     if (anchorIndex < 0 || !anchorPhoto || !browsePhotoIsAvailable(anchorPhoto)) {
       clearActiveSelectionAndDetail();
+      if (scrollAnchor) {
+        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+      }
       return true;
     }
 

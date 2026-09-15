@@ -42,9 +42,15 @@ MUTATION_PREDICTION = "prediction"    # accept / reject / mark reviewed
 MUTATION_WILDLIFE = "wildlife_excluded"
 MUTATIONS = (MUTATION_KEYWORD, MUTATION_PREDICTION, MUTATION_WILDLIFE)
 
-# Accepting a prediction writes the species keyword too, so anything a tag
-# can move, a prediction can move as well.
-_KEYWORD_DERIVED = [MUTATION_KEYWORD, MUTATION_PREDICTION]
+# Fields whose value only a keyword edit can move. Accepting a prediction
+# writes a species keyword too, but the accept path already fans out
+# ``MUTATION_KEYWORD`` alongside ``MUTATION_PREDICTION``
+# (``_afterPredictionMutation`` in ``vireo/templates/browse.html``), so
+# listing ``MUTATION_PREDICTION`` here would only add false positives on
+# the status-only prediction paths (reject, mark reviewed) that touch no
+# keywords, forcing an unnecessary reset of every keyword-filtered grid
+# (Codex review r4013123596).
+_KEYWORD_DERIVED = [MUTATION_KEYWORD]
 
 
 def _field(label, category, type_, ops, *, changed_by, **extra):

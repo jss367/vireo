@@ -25354,11 +25354,16 @@ def test_registry_declares_mutation_impact_for_every_field():
         "life_list_uncounted", "has_species", "has_subject",
         "has_location_keyword", "has_coord_location_keyword",
     }
-    # Accepting a prediction writes the species keyword, so it moves
-    # everything a tag moves plus the review-only fields.
-    assert moved_by(MUTATION_PREDICTION) == moved_by(MUTATION_KEYWORD) - {
-        "has_location_keyword", "has_coord_location_keyword", "has_subject",
-    } | {"prediction_status", "prediction_confidence", "classifier_model"}
+    # Accepting a prediction writes a species keyword, but the accept path
+    # (`_afterPredictionMutation`) already fans out MUTATION_KEYWORD
+    # alongside MUTATION_PREDICTION, so keyword-derived fields must NOT
+    # list MUTATION_PREDICTION as well: listing it would only fire on the
+    # status-only prediction paths (reject, mark reviewed) that write no
+    # keywords, forcing an unnecessary reset of every keyword-filtered
+    # grid (Codex review r4013123596).
+    assert moved_by(MUTATION_PREDICTION) == {
+        "prediction_status", "prediction_confidence", "classifier_model",
+    }
     assert moved_by(MUTATION_WILDLIFE) == {"wildlife_excluded"}
 
     # A typo in a mutation name must not read as "nothing moves this".
