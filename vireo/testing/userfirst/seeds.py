@@ -126,6 +126,61 @@ def browse_seed(db_path, thumb_dir, photos_root):
     db.conn.close()
 
 
+def prediction_selection_seed(db_path, thumb_dir, photos_root):
+    """``browse_seed`` plus pending predictions, shaped like a real review.
+
+    The five untagged photos all predict one common species; two of them
+    also carry a second detection predicting a rare one. That is the shape
+    the Browse selection panel exists for — a confident bulk row next to a
+    two-photo row that is either a genuine find or a bad detection — and
+    the shape the "Show N photos" button has to open correctly.
+    """
+    browse_seed(db_path, thumb_dir, photos_root)
+
+    from db import Database
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    # browse_seed tags its first five photos with species keywords, which
+    # would make these predictions "already keyworded" and route them to
+    # Review. Use the untagged tail so the panel renders plain accept rows.
+    untagged = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos ORDER BY id"
+        ).fetchall()
+    ][5:]
+
+    for offset, photo_id in enumerate(untagged):
+        boxes = [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
+            "confidence": 0.95,
+            "category": "animal",
+        }]
+        if offset < 2:
+            # A second detection, not a sibling alternative: separate boxes
+            # keep both species unambiguous so each gets its own panel row.
+            boxes.append({
+                "box": {"x": 0.6, "y": 0.6, "w": 0.2, "h": 0.2},
+                "confidence": 0.9,
+                "category": "animal",
+            })
+        # One call per photo: save_detections REPLACES the set for
+        # (photo, detector_model), so a second call would delete the first
+        # box and leave the common species with nothing to predict on.
+        detection_ids = db.save_detections(
+            photo_id, boxes, detector_model="MDV6",
+        )
+        db.add_prediction(detection_ids[0], "Common Gallinule", 0.97, "bioclip")
+        if offset < 2:
+            db.add_prediction(
+                detection_ids[1], "Blue-breasted Quail", 0.93, "bioclip",
+            )
+
+    db.conn.close()
+
+
 def misses_seed(db_path, thumb_dir, photos_root):
     """Seed: three photos pre-flagged as misses (one per category).
 

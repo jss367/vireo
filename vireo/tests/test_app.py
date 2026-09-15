@@ -22092,6 +22092,105 @@ var predictions = Array.from({length: 6}, function(_, idx) {
     assert result["button"] == {"disabled": False, "textContent": "Accept on all"}
 
 
+def test_selection_prediction_show_button_opens_only_that_species_photos(app_and_db):
+    """"Show N photos" is the panel's look-before-you-accept step.
+
+    A row reading "Blue-breasted Quail · predicted on 2 of 70" is either a
+    real find or a bad detection, and no count can settle it — the user has
+    to see the frames. The button therefore opens exactly the photos the
+    row counts, in the lightbox, and touches nothing else: no keyword
+    write, no change to the 70-photo selection the Accept buttons act on.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    source = "\n".join([
+        _PANEL_DOM_STUB.replace("id === 'detailPredictions'", "id === 'selectionPredictions'"),
+        _browse_escape_helpers(),
+        _browse_js_function_body(html, "function formatPredictionConfidence("),
+        _browse_js_function_body(html, "function renderSelectionPredictions("),
+        _browse_js_function_body(html, "async function showSelectionPredictionPhotos("),
+        """
+var selectionPredictionsExpanded = false;
+var selectionPredictionAcceptableById = {};
+var selectionPredictionSpeciesByIdx = {};
+var selectionPredictionSeq = 7;
+var requests = [], opened = [], toasts = [], dropped = [];
+async function safeFetch(url, opts) {
+  var body = JSON.parse(opts.body);
+  requests.push({url: url, count: body.photo_ids.length});
+  return {photos: body.photo_ids.filter(function(id) {
+    return dropped.indexOf(id) === -1;
+  }).map(function(id) { return {id: id, filename: 'IMG_' + id + '.CR3'}; })};
+}
+function openLightbox(id, filename, list) {
+  opened.push({id: id, filename: filename, ids: list.map(function(p) { return p.id; })});
+}
+function showToast(message, kind) { toasts.push({message: message, kind: kind}); }
+var bulk = [];
+for (var i = 0; i < 600; i++) bulk.push(1000 + i);
+var predictions = [
+  {species: 'Blue-breasted Quail', predicted_count: 2, predicted_photo_ids: [11, 12],
+   acceptable_photo_count: 2, acceptable_prediction_ids: [100, 101],
+   ambiguous_photo_ids: [], min_confidence: 0.91, max_confidence: 0.95},
+  {species: 'Common Gallinule', predicted_count: 600, predicted_photo_ids: bulk,
+   acceptable_photo_count: 600, acceptable_prediction_ids: [],
+   ambiguous_photo_ids: [], min_confidence: 0.56, max_confidence: 1.0},
+  {species: 'American Coot', predicted_count: 0, predicted_photo_ids: [],
+   acceptable_photo_count: 0, acceptable_prediction_ids: [],
+   ambiguous_photo_ids: [], min_confidence: 0.3, max_confidence: 0.3},
+];
+(async function() {
+  renderSelectionPredictions(predictions, 70, {});
+  var renderedHTML = __list.innerHTML;
+  var button = {disabled: false, textContent: 'Show 2 photos'};
+  await showSelectionPredictionPhotos(0, button);
+  await showSelectionPredictionPhotos(1, {disabled: false, textContent: 'Show 600 photos'});
+  dropped = [12];
+  await showSelectionPredictionPhotos(0, button);
+  // No ids on this row, so there is no button and nothing to fetch.
+  await showSelectionPredictionPhotos(2, {disabled: false, textContent: ''});
+  process.stdout.write(JSON.stringify({
+    html: renderedHTML, requests: requests, opened: opened,
+    toasts: toasts, button: button,
+  }));
+})();
+""",
+    ])
+    result = _run_node(source, [])
+
+    # The label names the count the button will actually open, and the row
+    # with nothing to show gets no button at all.
+    assert ">Show 2 photos</button>" in result["html"]
+    assert ">Show 600 photos</button>" in result["html"]
+    assert result["html"].count('class="prediction-show"') == 2
+    # Looking comes after the two Accept buttons in the row, so adding it
+    # does not move the primary action out from under the user's cursor.
+    assert result["html"].index("Accept on all") < result["html"].index("Show 2 photos")
+
+    # /api/photos/by-ids caps a POST at 500 ids: the 600-photo row is
+    # chunked rather than truncated to the first 500.
+    assert [r["count"] for r in result["requests"]] == [2, 500, 100, 2]
+    assert {r["url"] for r in result["requests"]} == {"/api/photos/by-ids"}
+
+    # The lightbox opens on the row's own photos, in the row's order.
+    assert result["opened"][0] == {
+        "id": 11, "filename": "IMG_11.CR3", "ids": [11, 12],
+    }
+    assert result["opened"][1]["id"] == 1000
+    assert len(result["opened"][1]["ids"]) == 600
+
+    # A photo that left the workspace between render and click is named,
+    # not silently dropped behind a counter reading "1 / 1".
+    assert result["opened"][2]["ids"] == [11]
+    assert result["toasts"] == [{
+        "message": "Showing 1 of 2 photos — the rest are no longer in this workspace.",
+        "kind": "warning",
+    }]
+
+    # The button is restored, not left stuck on "Loading…".
+    assert result["button"] == {"disabled": False, "textContent": "Show 2 photos"}
+
+
 def _browse_escape_helpers():
     """The real ``escapeHtml`` / ``escapeAttr`` from the shared static file."""
     from pathlib import Path

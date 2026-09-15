@@ -108,6 +108,17 @@ class VireoSession:
                 # Filter out resource-load 404s — those are captured via requestfailed/response
                 if "Failed to load resource" in text:
                     return
+                # Chrome reports a ResizeObserver callback that spilled its
+                # layout work into the next frame as a window ``error``
+                # event, so Playwright surfaces it as console.error even
+                # though nothing threw and nothing is broken — the browser
+                # simply delivers the remaining notifications one frame
+                # later. Every page with a responsive grid emits it under
+                # automation. Keep it visible as a WARN rather than letting
+                # a browser housekeeping message fail an otherwise clean run.
+                if "ResizeObserver loop" in text:
+                    self.report.add(Finding.warn(f"console.{msg.type}: {text}"))
+                    return
                 self.report.add(kind(f"console.{msg.type}: {text}"))
 
         def on_response(resp):
