@@ -892,6 +892,9 @@
   }
 
   function renderQuick() {
+    // Markup starts disabled; only enable once handlers and restored state
+    // are ready, so early clicks cannot be lost or overwritten by init.
+    $$('.vf-shortcuts button').forEach((btn) => { btn.disabled = !state.ready; });
     const missing = quickMissingFields();
     $$('[data-missing]').forEach((btn) => {
       const active = missing.includes(btn.dataset.missing);

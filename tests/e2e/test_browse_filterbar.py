@@ -426,6 +426,36 @@ def test_restored_url_filters_apply_after_pending_folder_click(live_server, page
     _wait_total(page, 0)
 
 
+@pytest.mark.parametrize("registry_fails", [False, True])
+def test_shortcuts_wait_for_initialization(live_server, page, registry_fails):
+    """Visible shortcuts stay disabled while metadata loads or fails."""
+    held_routes = []
+    page.route("**/api/filters/fields", lambda route: held_routes.append(route))
+    page.goto(live_server["url"] + "/browse")
+    page.wait_for_selector("#grid .grid-card", timeout=15000)
+    buttons = page.locator(".vf-shortcuts button")
+    for button in buttons.all():
+        expect(button).to_be_visible()
+        expect(button).to_be_disabled()
+    # A native disabled button does not dispatch a click before handlers exist.
+    page.locator('[data-missing="has_species"]').evaluate("button => button.click()")
+    with page.expect_response("**/api/filters/fields"):
+        if registry_fails:
+            held_routes[0].fulfill(status=503, json={"error": "Metadata unavailable"})
+        else:
+            held_routes[0].continue_()
+    if registry_fails:
+        for button in buttons.all():
+            expect(button).to_be_disabled()
+        assert not page.evaluate("VireoFilter.isReady()")
+    else:
+        for button in buttons.all():
+            expect(button).to_be_enabled()
+        _wait_total(page, 5)
+        page.locator('[data-missing="has_species"]').click()
+        _wait_total(page, 3)
+
+
 def test_quick_rating_filter_and_chip_semantics(live_server, page):
     _open_browse(page, live_server)
     assert _total(page) == 5
