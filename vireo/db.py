@@ -5922,34 +5922,41 @@ class Database:
                             # Without this remap the cascade would silently
                             # discard the edit and the residual re-read
                             # below would find nothing to report.
-                            survivor_id = (
-                                collision["id"] if collision is not None
-                                else None)
-                            # An off-staging survivor (the byte-identical
-                            # archive row) is invisible to a photo-id-scoped
-                            # residual re-read of the pending queue, so the
-                            # caller has to add its remap count separately.
-                            # An in-staging survivor (another staged row
-                            # that already claimed this normalized slot in
-                            # ``target["id"]``) is still in the captured
-                            # ``staged_photo_ids`` and the residual re-read
-                            # already picks its remapped edits up — adding
-                            # the same count again would report one edit as
-                            # two. See ``_residual_staged_changes``.
-                            survivor_off_staging = collision is not None
-                            if survivor_id is None:
-                                # Intra-staged: an earlier staged row in the
-                                # same iteration was reparented into
-                                # ``target["id"]`` under a matching
-                                # case-normalized filename. The tracker
-                                # already knows its ``photos.id`` -- reading
-                                # it there also sidesteps SQLite's
-                                # ASCII-only ``LOWER``, which cannot match
-                                # non-ASCII case aliases like ``Ä.raf`` /
-                                # ``ä.raf`` and would otherwise leave the
-                                # remap unset.
+                            # Prefer the intra-staged winner over a stale
+                            # ``collision`` entry. ``existing_by_key`` is
+                            # built once from the target folder and is not
+                            # refreshed when the phantom-replacement branch
+                            # below deletes ``collision["id"]``. If an
+                            # earlier iteration hit that branch on the same
+                            # case-normalized name, ``existing_by_key[
+                            # staged_norm]`` still points at the deleted
+                            # phantom while ``staged_normalized_claimed[
+                            # staged_norm]`` holds the live winner. Reading
+                            # the tracker first also sidesteps SQLite's
+                            # ASCII-only ``LOWER``, which cannot match
+                            # non-ASCII case aliases like ``Ä.raf`` /
+                            # ``ä.raf`` and would otherwise leave the
+                            # remap unset.
+                            #
+                            # An in-staging survivor is still in the
+                            # captured ``staged_photo_ids`` and the
+                            # residual re-read already picks its remapped
+                            # edits up — adding the same count again would
+                            # report one edit as two. An off-staging
+                            # survivor (the byte-identical archive row) is
+                            # invisible to a photo-id-scoped residual
+                            # re-read, so the caller has to add its remap
+                            # count separately. See
+                            # ``_residual_staged_changes``.
+                            if intra_staged_collision:
                                 survivor_id = staged_normalized_claimed.get(
                                     staged_norm)
+                                survivor_off_staging = False
+                            else:
+                                survivor_id = (
+                                    collision["id"] if collision is not None
+                                    else None)
+                                survivor_off_staging = collision is not None
                             if survivor_id is not None:
                                 # A queued ``location`` change stores its
                                 # coordinates only in the staged photo's
