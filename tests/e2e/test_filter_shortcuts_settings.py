@@ -214,6 +214,24 @@ def test_a_shortcut_narrows_an_exclusion_instead_of_replacing_it(live_server, pa
     assert rules == [{"field": "flag", "op": "not_in", "value": ["rejected"]}]
 
 
+def test_shortcut_finds_its_clause_behind_an_exclusion(live_server, page):
+    """Order must not decide whether a button reads as on."""
+    _open_browse(page, live_server)
+    page.evaluate(
+        "VireoFilter.loadExpression({mode: 'all', rules: ["
+        "  {field: 'flag', op: 'not_in', value: ['rejected']},"
+        "  {field: 'flag', op: 'in', value: ['flagged']}]})"
+    )
+    picked = page.locator('.vf-shortcuts [data-value="flagged"]')
+    expect(picked).to_have_attribute("aria-pressed", "true")
+
+    # Clicking clears its own value out of that clause — no duplicate beside it.
+    picked.click()
+    rules = page.evaluate("VireoFilter.getUserRules()")["rules"]
+    assert rules == [{"field": "flag", "op": "not_in", "value": ["rejected"]}]
+    expect(picked).to_have_attribute("aria-pressed", "false")
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):

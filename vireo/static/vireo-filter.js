@@ -1003,15 +1003,24 @@
     });
   }
 
+  // Index of the clause an enum shortcut owns: the first ``is``/``in`` leaf
+  // for the field. Position alone is not enough — a popover-written
+  // ``not_in`` for the same field can sit ahead of it (toggleQuickEnum keeps
+  // both), and reading that one would report the button off while its value
+  // is applied, so the next click would add a duplicate.
+  function enumClauseIndex(field) {
+    return state.root.rules.findIndex((node) => !isGroup(node) && node.field === field &&
+      (node.op === 'is' || (node.op === 'in' && Array.isArray(node.value))));
+  }
+
   function quickEnumValues(field) {
     // OR/NOT leaves belong to the advanced expression, not an active
     // narrowing shortcut. Clicking a shortcut will AND it with that tree.
     if (state.root.mode !== 'all') return [];
-    const rule = findRootRule(field);
-    if (!rule) return [];
-    if (rule.op === 'in' && Array.isArray(rule.value)) return rule.value;
-    if (rule.op === 'is') return [rule.value];
-    return [];
+    const idx = enumClauseIndex(field);
+    if (idx < 0) return [];
+    const rule = state.root.rules[idx];
+    return rule.op === 'in' ? rule.value : [rule.value];
   }
 
   function toggleQuickEnum(field, value) {
@@ -1020,24 +1029,18 @@
       if (state.root.mode !== 'all') {
         state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
       }
-      const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === field);
+      // Only a compatible clause is this button's to edit. An ``is not`` /
+      // ``not_in`` on the same field is a rule the user built in the
+      // popover: the shortcut narrows it with its own clause rather than
+      // overwriting it, so an exclusion someone wrote is never deleted.
+      const idx = enumClauseIndex(field);
       if (idx < 0) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
       const rule = state.root.rules[idx];
-      let values;
-      if (rule.op === 'in' && Array.isArray(rule.value)) values = rule.value.slice();
-      else if (rule.op === 'is') values = [rule.value];
-      else {
-        // An ``is not``/``not_in`` clause on the same field is a rule the
-        // user built in the popover, not one this button owns. Narrow it
-        // with a separate clause instead of overwriting it — a shortcut
-        // must never silently delete an exclusion someone wrote.
-        state.root.rules.unshift(makeRule(field, 'in', [value]));
-        return;
-      }
-      if (values.includes(value)) values = values.filter((v) => v !== value);
-      else values.push(value);
-      if (!values.length) state.root.rules.splice(idx, 1);
-      else state.root.rules[idx] = makeRule(field, 'in', values);
+      const values = rule.op === 'in' ? rule.value.slice() : [rule.value];
+      const next = values.includes(value)
+        ? values.filter((v) => v !== value) : values.concat([value]);
+      if (!next.length) state.root.rules.splice(idx, 1);
+      else state.root.rules[idx] = makeRule(field, 'in', next);
     });
   }
 
