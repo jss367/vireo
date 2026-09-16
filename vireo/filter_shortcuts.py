@@ -47,6 +47,13 @@ MAX_RULE_DEPTH = 3
 
 GROUP_MODES = ("all", "any", "none")
 
+# What the rule engine's boolean branch accepts (``_truthy``/``_falsey`` in
+# ``Database._build_query_from_rules``). A boolean field has no closed
+# vocabulary, so without this list a stored "yes" would render a button that
+# 400s the query the moment it is clicked.
+BOOLEAN_TRUE = (True, 1, "1", "true")
+BOOLEAN_FALSE = (False, 0, "0", "false")
+
 # ``recent`` carries a {n, unit} window rather than a scalar (see the rule
 # engine's date branch and RECENT_UNITS in vireo-filter.js).
 RECENT_UNITS = ("days", "weeks", "months", "years")
@@ -122,6 +129,15 @@ def _clean_leaf(node):
     if allowed:
         wanted = value if isinstance(value, list) else [value]
         if any(item not in allowed for item in wanted):
+            return None
+    if spec["type"] == "boolean":
+        # Normalize to the 0/1 the defaults use, so ``kind`` and the bar's
+        # active-state matching see one representation of "no".
+        if any(value is v or value == v for v in BOOLEAN_TRUE):
+            value = 1
+        elif any(value is v or value == v for v in BOOLEAN_FALSE):
+            value = 0
+        else:
             return None
     cleaned = {"field": field, "op": op, "value": value}
     # ``keyword_identity`` carries its own display label through the rule.

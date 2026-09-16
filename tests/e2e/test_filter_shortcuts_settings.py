@@ -116,6 +116,25 @@ def test_internal_only_fields_are_not_offered_as_quick_filters(live_server, page
     assert "Rating" in options
 
 
+def test_the_cap_is_visible_and_enforced_before_a_row_is_lost(live_server, page):
+    """The server refuses a longer list, so the form must stop first."""
+    url = live_server["url"]
+    filled = [
+        {"id": f"s{i}", "label": f"S{i}",
+         "rules": {"field": "rating", "op": ">=", "value": 4}}
+        for i in range(24)
+    ]
+    page.request.post(f"{url}/api/config", data={"filter_shortcuts": filled},
+                      headers={"Content-Type": "application/json"})
+    _open_settings(page, live_server)
+    expect(page.locator("#cfgShortcutCount")).to_have_text("24 of 24 quick filters")
+
+    page.select_option("#cfgShortcutField", "rating")
+    page.click("text=+ Add quick filter")
+    expect(page.locator("#cfgFilterShortcutsList [data-shortcut-row]")).to_have_count(24)
+    expect(page.locator("#toastContainer > *").first).to_contain_text("remove one first")
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):

@@ -18745,6 +18745,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if "filter_shortcuts" in body:
                 raw_shortcuts = body["filter_shortcuts"]
                 if isinstance(raw_shortcuts, list):
+                    # Over the cap is refused, not trimmed: a silently dropped
+                    # button looks saved until the page is reloaded.
+                    if len(raw_shortcuts) > filter_shortcuts.MAX_SHORTCUTS:
+                        return json_error(
+                            "filter_shortcuts: at most "
+                            f"{filter_shortcuts.MAX_SHORTCUTS} quick filters",
+                            status=400,
+                        )
                     current["filter_shortcuts"] = filter_shortcuts.for_storage(
                         filter_shortcuts.normalize(raw_shortcuts)
                     )
@@ -19485,6 +19493,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raw_shortcuts = payload["filter_shortcuts"]
             if not isinstance(raw_shortcuts, list):
                 errors["filter_shortcuts"] = "filter_shortcuts must be a JSON array"
+            elif len(raw_shortcuts) > filter_shortcuts.MAX_SHORTCUTS:
+                errors["filter_shortcuts"] = (
+                    f"at most {filter_shortcuts.MAX_SHORTCUTS} quick filters"
+                )
             else:
                 payload["filter_shortcuts"] = filter_shortcuts.for_storage(
                     filter_shortcuts.normalize(raw_shortcuts)

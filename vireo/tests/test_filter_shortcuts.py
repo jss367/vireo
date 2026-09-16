@@ -135,6 +135,23 @@ def test_list_operators_keep_their_usable_values():
     ]
 
 
+@pytest.mark.parametrize("value,expected", [
+    (1, 1), ("1", 1), (True, 1), ("true", 1),
+    (0, 0), ("0", 0), (False, 0), ("false", 0),
+])
+def test_boolean_values_normalize_to_what_the_rule_engine_accepts(value, expected):
+    entries = fs.normalize([{"id": "x", "label": "GPS", "rules": {
+        "field": "has_gps", "op": "is", "value": value}}])
+    assert entries[0]["rules"]["value"] == expected
+
+
+@pytest.mark.parametrize("value", ["yes", "no", 2, -1, "", "maybe"])
+def test_boolean_values_the_rule_engine_rejects_are_dropped(value):
+    """`_boolean_predicate` 400s on anything outside its true/false tokens."""
+    assert fs.normalize([{"id": "x", "label": "GPS", "rules": {
+        "field": "has_gps", "op": "is", "value": value}}]) == []
+
+
 def test_a_group_keeps_only_its_usable_children():
     entries = fs.normalize([{
         "id": "x", "label": "Mixed",
@@ -247,6 +264,41 @@ def test_config_post_ignores_a_non_list_payload(app_and_db):
     client = app.test_client()
     client.post("/api/config", json={"filter_shortcuts": "wat"})
     assert cfg.load()["filter_shortcuts"] == fs.for_storage(fs.normalize(None))
+
+
+def _many_shortcuts(n):
+    return [{"id": f"s{i}", "label": f"S{i}",
+             "rules": {"field": "rating", "op": ">=", "value": 4}} for i in range(n)]
+
+
+def test_writes_past_the_cap_are_refused_not_silently_trimmed(app_and_db):
+    """A dropped button looks saved until the page is reloaded."""
+    import config as cfg
+
+    app, _ = app_and_db
+    client = app.test_client()
+    before = cfg.load()["filter_shortcuts"]
+    resp = client.post("/api/config", json={
+        "filter_shortcuts": _many_shortcuts(fs.MAX_SHORTCUTS + 1),
+    })
+    assert resp.status_code == 400
+    assert str(fs.MAX_SHORTCUTS) in resp.get_json()["error"]
+    assert cfg.load()["filter_shortcuts"] == before
+    assert client.post("/api/config", json={
+        "filter_shortcuts": _many_shortcuts(fs.MAX_SHORTCUTS),
+    }).status_code == 200
+    assert len(cfg.load()["filter_shortcuts"]) == fs.MAX_SHORTCUTS
+
+
+def test_settings_import_rejects_a_list_past_the_cap(app_and_db):
+    import json
+
+    app, _ = app_and_db
+    resp = app.test_client().post("/api/settings/import", json={
+        "json": json.dumps({"filter_shortcuts": _many_shortcuts(fs.MAX_SHORTCUTS + 1)}),
+    })
+    assert resp.status_code == 400
+    assert "filter_shortcuts" in resp.get_json()["errors"]
 
 
 def test_settings_import_rejects_a_malformed_quick_filter_list(app_and_db):

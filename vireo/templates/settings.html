@@ -432,6 +432,7 @@
       <button type="button" onclick="restoreDefaultFilterShortcuts()"
               style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Restore the default buttons</button>
       <span style="font-size:11px;color:var(--text-faint);">Adds back any of the five built-in buttons you removed. Your own stay.</span>
+      <span id="cfgShortcutCount" style="margin-left:auto;font-size:11px;color:var(--text-faint);"></span>
     </div>
   </div>
 
@@ -1866,6 +1867,9 @@ function addExternalEditor() {
 // rule node, the same JSON the filter bar's rule builder and saved collections
 // use. vireo/filter_shortcuts.py validates and normalizes whatever we save.
 var FILTER_SHORTCUT_DEFAULTS = [];   // built-ins, from /api/filters/shortcuts
+// Mirrors filter_shortcuts.MAX_SHORTCUTS: the server refuses a longer list,
+// so the form stops here rather than showing a row that never saves.
+var MAX_FILTER_SHORTCUTS = 24;
 var _filterShortcutsState = [];
 var _filterFieldSpecs = null;      // key -> spec from /api/filters/fields
 var _shortcutLabelEdited = false;  // stop auto-filling once the user types
@@ -1962,6 +1966,11 @@ function shortcutGroupPeers(entry) {
 function renderFilterShortcuts() {
   var container = document.getElementById('cfgFilterShortcutsList');
   if (!container) return;
+  var counter = document.getElementById('cfgShortcutCount');
+  if (counter) {
+    counter.textContent = _filterShortcutsState.length + ' of ' +
+      MAX_FILTER_SHORTCUTS + ' quick filters';
+  }
   container.innerHTML = '';
   if (!_filterShortcutsState.length) {
     var empty = document.createElement('div');
@@ -2191,6 +2200,11 @@ function refreshShortcutPreview() {
 }
 
 function addFilterShortcut() {
+  if (_filterShortcutsState.length >= MAX_FILTER_SHORTCUTS) {
+    showToast('The filter bar holds ' + MAX_FILTER_SHORTCUTS +
+              ' quick filters — remove one first.', 'error');
+    return;
+  }
   var rule = readShortcutForm();
   if (!rule) {
     showToast('Pick a field and fill in a value first.', 'error');
@@ -2217,11 +2231,17 @@ function restoreDefaultFilterShortcuts() {
     return;
   }
   var restored = 0;
+  var skipped = 0;
   FILTER_SHORTCUT_DEFAULTS.forEach(function(entry) {
     if (have[entry.id]) return;
+    if (_filterShortcutsState.length >= MAX_FILTER_SHORTCUTS) { skipped += 1; return; }
     _filterShortcutsState.push(JSON.parse(JSON.stringify(entry)));
     restored += 1;
   });
+  if (skipped) {
+    showToast('Restored ' + restored + ' — no room for ' + skipped +
+              ' more at ' + MAX_FILTER_SHORTCUTS + ' quick filters.', 'info');
+  }
   if (!restored) {
     showToast('Every built-in quick filter is already in the list.', 'info');
     return;
