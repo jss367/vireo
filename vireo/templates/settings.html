@@ -421,6 +421,7 @@
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
         <input type="text" id="cfgShortcutLabel" placeholder="Button text"
+               maxlength="40"
                oninput="_shortcutLabelEdited = true;"
                style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;width:200px;">
         <button type="button" onclick="addFilterShortcut()"
@@ -1870,6 +1871,10 @@ var FILTER_SHORTCUT_DEFAULTS = [];   // built-ins, from /api/filters/shortcuts
 // Mirrors filter_shortcuts.MAX_SHORTCUTS: the server refuses a longer list,
 // so the form stops here rather than showing a row that never saves.
 var MAX_FILTER_SHORTCUTS = 24;
+// Mirrors filter_shortcuts.MAX_LABEL_LEN. Normalization truncates a longer
+// label, so the form has to stop at the same place — otherwise the row keeps
+// showing text the filter bar will never render.
+var MAX_SHORTCUT_LABEL = 40;
 var _filterShortcutsState = [];
 var _filterFieldSpecs = null;      // key -> spec from /api/filters/fields
 var _shortcutLabelEdited = false;  // stop auto-filling once the user types
@@ -1988,6 +1993,7 @@ function renderFilterShortcuts() {
     labelInput.type = 'text';
     labelInput.value = entry.label || '';
     labelInput.placeholder = 'Button text';
+    labelInput.maxLength = MAX_SHORTCUT_LABEL;
     labelInput.setAttribute('aria-label', 'Button text');
     labelInput.style.cssText = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:5px 8px;font-size:12px;width:190px;';
     labelInput.addEventListener('input', function() {
@@ -2196,7 +2202,10 @@ function refreshShortcutPreview() {
   if (!preview) return;
   preview.textContent = rule ? describeShortcutRules(rule) : 'Pick a field and a value.';
   var labelInput = document.getElementById('cfgShortcutLabel');
-  if (rule && labelInput && !_shortcutLabelEdited) labelInput.value = describeShortcutRules(rule);
+  if (rule && labelInput && !_shortcutLabelEdited) {
+    // maxlength only constrains typing, so clamp the derived text too.
+    labelInput.value = describeShortcutRules(rule).slice(0, MAX_SHORTCUT_LABEL);
+  }
 }
 
 function addFilterShortcut() {
@@ -2211,7 +2220,8 @@ function addFilterShortcut() {
     return;
   }
   var labelInput = document.getElementById('cfgShortcutLabel');
-  var label = (labelInput.value || '').trim() || describeShortcutRules(rule);
+  var label = ((labelInput.value || '').trim() ||
+               describeShortcutRules(rule)).slice(0, MAX_SHORTCUT_LABEL);
   var id = 'sc_' + Math.random().toString(36).slice(2, 10);
   _filterShortcutsState.push({id: id, label: label, group: '', rules: rule});
   _shortcutLabelEdited = false;

@@ -135,6 +135,22 @@ def test_the_cap_is_visible_and_enforced_before_a_row_is_lost(live_server, page)
     expect(page.locator("#toastContainer > *").first).to_contain_text("remove one first")
 
 
+def test_button_text_stops_where_the_stored_label_does(live_server, page):
+    """Normalization truncates at 40, so the form must not show more."""
+    status = _open_settings(page, live_server)
+    long_text = "N" * 60
+    row_input = page.locator('[data-shortcut-row="missing_species"] input')
+    _saved(page, status, lambda: row_input.fill(long_text))
+    assert len(row_input.input_value()) == 40
+
+    page.fill("#cfgShortcutLabel", long_text)
+    assert len(page.locator("#cfgShortcutLabel").input_value()) == 40
+
+    # What the bar renders matches what Settings showed.
+    _open_browse(page, live_server)
+    expect(page.locator('.vf-shortcuts [data-field="has_species"]')).to_have_text("N" * 40)
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):
