@@ -6894,6 +6894,98 @@ class Database:
             (self._ws_id(),),
         ).fetchone()[0]
 
+    def staged_sync_scope_by_photos(self, photo_ids):
+        """Photo-id scoped variant of :meth:`staged_sync_scope`.
+
+        Used by the post-transfer residual check for a NAS send: the
+        tracked-merge path in ``send_pending_archive`` reparents each staged
+        photo onto the destination folder id, so a folder-id-scoped re-read
+        would miss any edit queued during the copy and the completed job
+        would falsely claim no metadata missed the transfer. Photo ids
+        survive the reparent, so the caller captures them before the move
+        and passes them here. Return shape matches ``staged_sync_scope``.
+        """
+        here_photos, here_changes, other_photos = set(), [], set()
+        if not photo_ids:
+            return here_changes, 0, 0, 0
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for row in self.conn.execute(
+                f"SELECT id, photo_id, workspace_id, change_token "
+                f"FROM pending_changes "
+                f"WHERE photo_id IN ({placeholders})",
+                tuple(chunk),
+            ):
+                if row["workspace_id"] == self._ws_id():
+                    identity = row["change_token"] or ("id", row["id"])
+                    here_changes.append((identity, row["id"], row["photo_id"]))
+                    here_photos.add(row["photo_id"])
+                else:
+                    other_photos.add(row["photo_id"])
+        return (
+            here_changes,
+            len(here_photos),
+            len(other_photos - here_photos),
+            len(other_photos & here_photos),
+        )
+
+    def staged_sync_scope(self, folder_ids):
+        """Return ``(changes, photos_here, photos_elsewhere, photos_here_with_sibling_edits)``.
+
+        ``changes`` is a list of ``(identity, change_id, photo_id)``, where
+        ``identity`` is the row's ``change_token`` -- a uuid assigned at
+        insert. Callers comparing one read against the next must key on it
+        rather than on the id: ``pending_changes.id`` is a bare rowid SQLite
+        re-issues to the next insert, so a change queued right after a sync
+        cleared one can arrive wearing the id that just left, and look to the
+        caller like a row it has already dealt with. The column is nullable
+        with no backfill, so rows predating it fall back to the id and keep
+        exactly the exposure they have always had.
+
+        ``change_ids`` and ``photos_here`` cover the active workspace only,
+        matching what ``sync.sync_to_xmp`` will actually write: the queue is
+        workspace-scoped by design and the ordinary sync job respects that.
+
+        ``photos_elsewhere`` counts photos whose only queued edits belong to
+        another workspace. The sidecar is global to the photo, so those edits
+        are real and this sync will not write them -- the banner has to say so
+        rather than let a number read as "everything is covered".
+
+        ``photos_here_with_sibling_edits`` counts photos in ``photos_here``
+        that *also* have queued edits in a sibling workspace. Those photos are
+        already promised by the "here" number, so they must not double-count
+        into ``photos_elsewhere`` (which would read as extra photos rather
+        than the same photo carrying two workspaces' edits). The overlap is
+        reported separately so the UI can still warn that the sibling's
+        changes on those photos will remain unwritten after the pre-transfer
+        sync -- the sidecar is shared and only the active workspace's edits
+        travel with it.
+        """
+        here_photos, here_changes, other_photos = set(), [], set()
+        # The photo id rides along so a caller can tell which photos a pass
+        # actually wrote without a second query.
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for row in self.conn.execute(
+                f"SELECT pc.id, pc.photo_id, pc.workspace_id, pc.change_token "
+                f"FROM pending_changes pc "
+                f"JOIN photos p ON p.id = pc.photo_id "
+                f"WHERE p.folder_id IN ({placeholders})",
+                tuple(chunk),
+            ):
+                if row["workspace_id"] == self._ws_id():
+                    identity = row["change_token"] or ("id", row["id"])
+                    here_changes.append((identity, row["id"], row["photo_id"]))
+                    here_photos.add(row["photo_id"])
+                else:
+                    other_photos.add(row["photo_id"])
+        return (
+            here_changes,
+            len(here_photos),
+            len(other_photos - here_photos),
+            len(other_photos & here_photos),
+        )
+
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
     # returns 1 when that pipeline stage has run for the row. Detection and
@@ -21360,6 +21452,7 @@ class Database:
 
     def clear_pending(
         self, change_ids, *, clear_equivalent_flat_removals=False,
+        expected_tokens=None,
     ):
         """Delete pending changes by id.
 
@@ -21369,26 +21462,89 @@ class Database:
         queue is workspace-scoped; leaving migration-generated duplicates in
         sibling queues would let a later sync replay a stale removal after the
         user had re-added the keyword.
+
+        When ``expected_tokens`` is supplied (a list the same length as
+        ``change_ids``), each delete is conditioned on the row's
+        ``change_token`` matching too. That protects a concurrent sync from
+        clobbering a replacement queued mid-run: the edit route deletes the
+        selected pending row inside one transaction and immediately re-inserts,
+        and SQLite reissues the freshly-freed rowid to the new row. A
+        clear-by-id would drop that replacement without it ever being written
+        to XMP -- for the pre-transfer sync, the stale sidecar would then
+        travel to the NAS and the local original be removed. Rows predating
+        the ``change_token`` column have a NULL token with no backfill, and
+        for them the caller passes ``None`` in ``expected_tokens``; those fall
+        back to id-only clearing scoped to null-token rows, so they keep
+        exactly the exposure they always had.
         """
         if not change_ids:
             return
         workspace_id = self._ws_id()
         synced_changes = []
-        for chunk in _chunks(change_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            if clear_equivalent_flat_removals:
-                rows = self.conn.execute(
-                    f"""SELECT photo_id, change_type, value
-                        FROM pending_changes
-                        WHERE id IN ({placeholders}) AND workspace_id = ?
-                          AND change_type = 'keyword_remove_flat'""",
+        if expected_tokens is None:
+            for chunk in _chunks(change_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                if clear_equivalent_flat_removals:
+                    rows = self.conn.execute(
+                        f"""SELECT photo_id, change_type, value
+                            FROM pending_changes
+                            WHERE id IN ({placeholders}) AND workspace_id = ?
+                              AND change_type = 'keyword_remove_flat'""",
+                        [*chunk, workspace_id],
+                    ).fetchall()
+                    synced_changes.extend(rows)
+                self.conn.execute(
+                    f"DELETE FROM pending_changes WHERE id IN ({placeholders}) AND workspace_id = ?",
                     [*chunk, workspace_id],
-                ).fetchall()
-                synced_changes.extend(rows)
-            self.conn.execute(
-                f"DELETE FROM pending_changes WHERE id IN ({placeholders}) AND workspace_id = ?",
-                [*chunk, workspace_id],
-            )
+                )
+        else:
+            if len(expected_tokens) != len(change_ids):
+                raise ValueError(
+                    "expected_tokens must be the same length as change_ids"
+                )
+            tokened = [tok for tok in expected_tokens if tok is not None]
+            legacy_ids = [
+                cid for cid, tok in zip(change_ids, expected_tokens, strict=True)
+                if tok is None
+            ]
+            for chunk in _chunks(tokened):
+                placeholders = ",".join("?" for _ in chunk)
+                if clear_equivalent_flat_removals:
+                    rows = self.conn.execute(
+                        f"""SELECT photo_id, change_type, value
+                            FROM pending_changes
+                            WHERE change_token IN ({placeholders})
+                              AND workspace_id = ?
+                              AND change_type = 'keyword_remove_flat'""",
+                        [*chunk, workspace_id],
+                    ).fetchall()
+                    synced_changes.extend(rows)
+                self.conn.execute(
+                    f"DELETE FROM pending_changes "
+                    f"WHERE change_token IN ({placeholders}) "
+                    f"AND workspace_id = ?",
+                    [*chunk, workspace_id],
+                )
+            for chunk in _chunks(legacy_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                if clear_equivalent_flat_removals:
+                    rows = self.conn.execute(
+                        f"""SELECT photo_id, change_type, value
+                            FROM pending_changes
+                            WHERE id IN ({placeholders})
+                              AND workspace_id = ?
+                              AND change_token IS NULL
+                              AND change_type = 'keyword_remove_flat'""",
+                        [*chunk, workspace_id],
+                    ).fetchall()
+                    synced_changes.extend(rows)
+                self.conn.execute(
+                    f"DELETE FROM pending_changes "
+                    f"WHERE id IN ({placeholders}) "
+                    f"AND workspace_id = ? "
+                    f"AND change_token IS NULL",
+                    [*chunk, workspace_id],
+                )
         if synced_changes:
             self.clear_equivalent_flat_removals(synced_changes, _commit=False)
         self.conn.commit()

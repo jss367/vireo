@@ -339,6 +339,69 @@ def test_sync_to_xmp_clears_edit_recipe_marker(tmp_path):
     assert "vireo:editRecipe" not in open(xmp_path).read()
 
 
+def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch):
+    """A replacement queued mid-run with a reused rowid must survive the clear.
+
+    The edit route deletes the queued pending row and immediately re-inserts
+    in one transaction; SQLite reissues the freshly-freed rowid to the new
+    row. A clear-by-id at the end of sync_to_xmp would delete that
+    replacement without ever writing it -- for the pre-transfer sync, the
+    stale sidecar just published would then travel to the NAS and the local
+    original be removed. sync_to_xmp captures each planned change's
+    ``change_token`` at read time and clears through ``clear_pending_by_token``,
+    so the DELETE only matches the exact uuid the sync selected. The
+    replacement stays queued and the next drain writes it.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    original_token = db.queue_change(pid, "keyword_add", "Osprey")
+    (original_row,) = db.get_pending_changes()
+    original_id = original_row["id"]
+
+    real_clear_by_token = db.clear_pending_by_token
+    injected = []
+
+    def race_replacement_then_clear(change_tokens, **kwargs):
+        # Interject the race at the last possible moment before the sync
+        # clears: delete the row the sync just wrote and reinsert a fresh
+        # change for the same photo. SQLite reissues ``original_id`` to the
+        # replacement, so a clear-by-id would drop it here.
+        if not injected:
+            injected.append(True)
+            db.conn.execute(
+                "DELETE FROM pending_changes WHERE id = ?", (original_id,),
+            )
+            replacement_token = db.queue_change(
+                pid, "keyword_add", "Kestrel",
+            )
+            (replacement_row,) = db.get_pending_changes()
+            assert replacement_row["id"] == original_id
+            assert replacement_row["change_token"] == replacement_token
+            assert replacement_token != original_token
+        return real_clear_by_token(change_tokens, **kwargs)
+
+    monkeypatch.setattr(
+        db, "clear_pending_by_token", race_replacement_then_clear,
+    )
+
+    result = sync_to_xmp(db, change_ids=[original_id])
+    assert result["synced"] == 1
+    assert "Osprey" in read_keywords(xmp_path)
+
+    # The replacement must still be queued -- the fix's whole point.
+    remaining = db.get_pending_changes()
+    assert [(c["change_type"], c["value"]) for c in remaining] == [
+        ("keyword_add", "Kestrel"),
+    ]
+
+
 def test_sync_to_xmp_limits_sync_to_selected_change_ids(tmp_path):
     """sync_to_xmp can write only the checked pending changes."""
     from xml.etree import ElementTree as ET
@@ -902,6 +965,86 @@ def test_sync_to_xmp_location_cleanup_does_not_write_exif_fallback(tmp_path, mon
     assert "GPSLatitude" not in content
     assert "GPSLongitude" not in content
     assert "vireo:gpsSource" not in content
+
+
+def test_sync_to_xmp_location_lookup_bypasses_workspace_membership(tmp_path, monkeypatch):
+    """The pre-transfer sync for a pending NAS archive passes
+    ``require_workspace_membership=False`` because the staged folders may
+    have been unlinked from the workspace that imported them (nothing
+    guards ``pending_archives`` against folder removal). With the default
+    verification on, ``get_assigned_photo_location`` raises "photo not in
+    workspace" and every queued ``location`` change fails -- silently
+    dropping a supported metadata write on files the sync can otherwise
+    reach. Regression for that gap: the flag must actually let the lookup
+    proceed and the write must land.
+    """
+    from xml.etree import ElementTree as ET
+
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Cairo", 30.0444, 31.2357),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+    db.queue_change(pid, "location", "effective")
+
+    # Simulate the unlinked-staging shape: the folder that holds the
+    # photo is no longer linked to any workspace. get_assigned_photo_location
+    # would refuse this photo under its default workspace verification.
+    folder_row = db.conn.execute(
+        "SELECT f.id AS id, f.path AS path FROM photos p "
+        "JOIN folders f ON f.id = p.folder_id "
+        "WHERE p.id = ?", (pid,),
+    ).fetchone()
+    db.conn.execute(
+        "DELETE FROM workspace_folders WHERE folder_id = ?",
+        (folder_row["id"],),
+    )
+    db.conn.commit()
+
+    # Sanity check: the default (verified) lookup does reject this shape.
+    with pytest.raises(ValueError, match="does not belong to the active workspace"):
+        db.get_assigned_photo_location(pid)
+
+    # Pass folder_paths covering the unlinked folder (the pre-transfer
+    # sync does the same via ``_all_folders``): without it, path
+    # resolution would fail first and the location lookup would never
+    # be exercised.
+    folder_paths = {folder_row["id"]: folder_row["path"]}
+
+    # And the pre-transfer sync's flag lets the lookup proceed, so the
+    # location write actually lands in the sidecar.
+    result = sync_to_xmp(
+        db,
+        folder_paths=folder_paths,
+        require_workspace_membership=False,
+    )
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    desc = ET.parse(xmp_path).getroot().find(
+        ".//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description"
+    )
+    assert desc.get("{http://ns.adobe.com/exif/1.0/}GPSLatitude") is not None
+    assert desc.get("{https://vireo.app/ns/1.0/}gpsSource") == "keyword"
 
 
 def test_sync_to_xmp_add_survives_normalized_remove_for_same_photo(tmp_path):

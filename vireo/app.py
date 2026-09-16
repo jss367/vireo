@@ -30422,6 +30422,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             chain_after_move=pipeline_chain.chain_after_move,
             bulk_gps_location_payload=_bulk_gps_location_payload,
             guard_move_folder=_move_folder_guard_error,
+            sync_job_lock=app._sync_job_lock,
         )
     )
 
