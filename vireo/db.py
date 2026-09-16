@@ -940,6 +940,22 @@ class Database:
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
+            -- Sync-only folder grants. Rows here give ``_resolve_xmp_paths``
+            -- a way to find a photo's sidecar for a workspace that owns a
+            -- queued edit on the photo but has no ``workspace_folders`` link
+            -- to its folder. Tracked-merge collision handling adds a row per
+            -- sibling workspace whose ``pending_changes`` were remapped onto
+            -- an archive-side survivor, so the row can sync without the
+            -- workspace gaining library membership on every other photo in
+            -- that folder. Read only by ``get_sync_only_folder_map``; every
+            -- browse/library query stays folder-scoped through
+            -- ``workspace_folders``.
+            CREATE TABLE IF NOT EXISTS workspace_sync_only_folders (
+                workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                folder_id       INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+                PRIMARY KEY (workspace_id, folder_id)
+            );
+
             CREATE TABLE IF NOT EXISTS local_workspaces (
                 workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
                 state        TEXT NOT NULL,
@@ -1455,6 +1471,13 @@ class Database:
                 ON collections(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_pending_workspace
                 ON pending_changes(workspace_id);
+            -- The tracked-merge collision loop probes and remaps
+            -- ``pending_changes`` by ``photo_id`` alone, once per colliding
+            -- staged photo. Without this index each probe scans the whole
+            -- queue, so the cost grows with the pending backlog times the
+            -- collision count.
+            CREATE INDEX IF NOT EXISTS idx_pending_photo
+                ON pending_changes(photo_id);
 
             -- Monotonic observation marker shared by folder-health endpoints.
             -- Clients use it to order responses by the SQLite snapshot they
@@ -2497,6 +2520,32 @@ class Database:
     def _verify_photo_in_workspace(self, photo_id):
         """Raise ValueError if the photo is not in the active workspace."""
         if not self._photo_in_workspace(photo_id):
+            raise ValueError(
+                f"Photo {photo_id} does not belong to the active workspace"
+            )
+
+    def _photo_syncable_in_workspace(self, photo_id):
+        """Return True if the workspace may write this photo's sidecar.
+
+        Library membership, or a ``workspace_sync_only_folders`` grant --
+        the narrow record that tracked-merge collision handling writes so a
+        remapped edit stays syncable without the workspace gaining
+        visibility of every other photo in the folder.
+        """
+        if self._photo_in_workspace(photo_id):
+            return True
+        row = self.conn.execute(
+            """SELECT 1 FROM photos p
+               JOIN workspace_sync_only_folders sof
+                 ON sof.folder_id = p.folder_id
+               WHERE p.id = ? AND sof.workspace_id = ?""",
+            (photo_id, self._ws_id()),
+        ).fetchone()
+        return row is not None
+
+    def _verify_photo_syncable_in_workspace(self, photo_id):
+        """Raise ValueError if the workspace may not write this sidecar."""
+        if not self._photo_syncable_in_workspace(photo_id):
             raise ValueError(
                 f"Photo {photo_id} does not belong to the active workspace"
             )
@@ -5347,6 +5396,472 @@ class Database:
             self._new_images_cache.invalidate_workspaces(
                 self._db_path, [workspace_id])
 
+    def _newest_location_change_key(self, photo_id):
+        """Sort key of the newest queued ``location`` change on ``photo_id``.
+
+        ``None`` when the photo has no queued location change. The key is
+        ``(created_at, id)`` so two changes queued inside the same
+        ``datetime('now')`` second still order by insertion — the merge
+        below decides which of two competing assignments is the user's
+        latest intent, and a same-second tie must not fall back to
+        "whichever row happens to be getting deleted". A NULL
+        ``created_at`` (possible on rows written before the column had a
+        default) sorts as the empty string, i.e. oldest.
+        """
+        row = self.conn.execute(
+            "SELECT id, created_at FROM pending_changes "
+            "WHERE photo_id = ? AND change_type = 'location' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (photo_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return (row["created_at"] or "", row["id"])
+
+    def _move_location_state_for_merge(self, losing_id, surviving_id):
+        """Move ``losing_id``'s location tags onto ``surviving_id`` if newer.
+
+        A queued ``location`` change stores no coordinates: ``sync_to_xmp``
+        derives them at write time from the photo's link to a
+        ``type='location'`` keyword. When the merge deletes one of two rows
+        that both describe the same on-disk file, the survivor's tags are
+        what any remapped queue row will write, so the losing row's
+        location intent has to travel with the remap or the sync silently
+        writes the wrong GPS — or clears it.
+
+        Whose assignment wins is decided by queue chronology, not by which
+        row the merge happens to delete. If the survivor carries a location
+        change queued *later* than the loser's, the survivor's tags already
+        encode the newer intent and are left alone; otherwise the loser's
+        tags replace them. An empty tag list on a winning loser encodes a
+        "clear location" edit and drops the survivor's tag too.
+
+        Chronology is compared across every workspace, not just the active
+        one: ``photo_keywords`` is global, so a location change queued in a
+        sibling workspace describes the same tags this merge is about to
+        rewrite and its timestamp counts the same.
+
+        Returns ``True`` when the survivor's tags were replaced.
+        """
+        loser_key = self._newest_location_change_key(losing_id)
+        if loser_key is None:
+            # Nothing queued on the row being deleted: its tags carry no
+            # pending intent, and the survivor keeps whatever it has.
+            return False
+        survivor_key = self._newest_location_change_key(surviving_id)
+        if survivor_key is not None and survivor_key > loser_key:
+            # The survivor's own queued assignment is the newer one. This is
+            # the replacement-import shape: a stale archive row still holds
+            # an old queued location while the row that will represent the
+            # file has a newer one that the pre-transfer sync may already
+            # have written. Taking the loser's tags here would revert it.
+            return False
+        losing_kw_ids = [
+            r["keyword_id"] for r in self.conn.execute(
+                "SELECT pk.keyword_id FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                "WHERE pk.photo_id = ? AND k.type = 'location'",
+                (losing_id,),
+            ).fetchall()
+        ]
+        self.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id = ? "
+            "AND keyword_id IN ("
+            "  SELECT id FROM keywords WHERE type = 'location')",
+            (surviving_id,),
+        )
+        for kw_id in losing_kw_ids:
+            # Route through tag_photo rather than a raw INSERT so the write
+            # carries the manual provenance stamp and folds against any
+            # existing survivor row through the shared upsert. A raw insert
+            # would land with source = NULL, which retirement passes read as
+            # generated and delete. A queued ``location`` change originates
+            # in set_photo_location, so the intent riding along is
+            # user-authored.
+            self.tag_photo(surviving_id, kw_id, _commit=False)
+        return True
+
+    def _reconcile_conflicting_keyword_edits(self, losing_id, surviving_id):
+        """Drop the older of two opposing keyword edits before a remap.
+
+        The remap lands both rows' queued keyword changes on one photo, and
+        ``sync._plan_photo_sync`` folds a photo's changes into sets. An
+        ``keyword_add`` and a ``keyword_remove`` that share a normalized
+        match key then look exactly like a normalization rename:
+        ``_remove_planned_keywords`` strips the flat entry and
+        ``add_keywords`` writes it straight back, so the keyword survives
+        and BOTH queue rows are cleared as successfully written. A newer
+        removal queued on one row would be silently reversed by an older
+        addition queued on the other.
+
+        Resolved the same way as the location state: the side holding the
+        newer change wins, by ``(created_at, id)``, and the loser's rows for
+        that key are deleted. Scoped per workspace, because only changes in
+        one workspace's queue are ever planned together.
+
+        A photo that already holds BOTH directions for a key is left alone:
+        that is the deliberate rename pair ``_remove_planned_keywords``
+        exists to handle, not an ambiguity this merge is creating.
+
+        The winning side's catalog state travels too. A ``keyword_add`` has
+        already inserted the ``photo_keywords`` row on its photo and a
+        ``keyword_remove`` has already deleted it -- the queue row only
+        records what the sidecar still owes. Remapping the row alone would
+        delete that association with the losing photo and leave the
+        survivor reporting the opposite of what the next sync writes to
+        XMP. ``keyword_remove_flat`` is deliberately excluded: it asks for
+        the stale flat ``dc:subject`` line to go, not the association.
+
+        Returns the number of queue rows dropped.
+        """
+        rows = self.conn.execute(
+            "SELECT id, photo_id, workspace_id, change_type, value, "
+            "       created_at "
+            "FROM pending_changes WHERE photo_id IN (?, ?) "
+            "  AND change_type IN "
+            "      ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
+            (losing_id, surviving_id),
+        ).fetchall()
+        if not rows:
+            return 0
+        by_key = {}
+        for r in rows:
+            if not r["value"]:
+                continue
+            key = (r["workspace_id"], keyword_match_key(r["value"]))
+            side = "add" if r["change_type"] == "keyword_add" else "remove"
+            slot = by_key.setdefault(
+                key, {losing_id: {"add": [], "remove": []},
+                      surviving_id: {"add": [], "remove": []}})
+            slot[r["photo_id"]][side].append(r)
+        dropped = 0
+        for (workspace_id, match_key), slot in by_key.items():
+            loser, survivor = slot[losing_id], slot[surviving_id]
+            if (loser["add"] and loser["remove"]) or (
+                    survivor["add"] and survivor["remove"]):
+                # Already a rename pair on one photo before this merge.
+                continue
+            opposed = (
+                (loser["add"] and survivor["remove"])
+                or (loser["remove"] and survivor["add"])
+            )
+            if not opposed:
+                continue
+
+            def newest(side_rows):
+                return max(
+                    ((r["created_at"] or "", r["id"]) for r in side_rows),
+                    default=("", 0))
+
+            loser_rows = loser["add"] + loser["remove"]
+            survivor_rows = survivor["add"] + survivor["remove"]
+            drop = (survivor_rows if newest(loser_rows) > newest(survivor_rows)
+                    else loser_rows)
+            for r in drop:
+                self.conn.execute(
+                    "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
+                dropped += 1
+            log.info(
+                "Merge reconciled opposing %r edits on photos %s/%s in "
+                "workspace %s: dropped %d older queue row(s)",
+                match_key, losing_id, surviving_id, workspace_id, len(drop),
+            )
+        self._carry_keyword_associations_for_merge(
+            losing_id, surviving_id, by_key)
+        return dropped
+
+    def _carry_keyword_associations_for_merge(
+            self, losing_id, surviving_id, by_key):
+        """Apply the losing row's winning keyword ops to the survivor's tags.
+
+        ``by_key`` is the grouping built by
+        ``_reconcile_conflicting_keyword_edits``; rows it has already
+        deleted are skipped by id. Only keys whose newest surviving change
+        sits on the losing photo are applied -- when the survivor holds the
+        newer change its own association already reflects it.
+        """
+        live = {
+            r["id"] for r in self.conn.execute(
+                "SELECT id FROM pending_changes WHERE photo_id IN (?, ?)",
+                (losing_id, surviving_id),
+            ).fetchall()
+        }
+        for (_workspace_id, match_key), slot in by_key.items():
+            loser = [r for r in slot[losing_id]["add"] + slot[losing_id]["remove"]
+                     if r["id"] in live]
+            if not loser:
+                continue
+            survivor = [
+                r for r in slot[surviving_id]["add"] + slot[surviving_id]["remove"]
+                if r["id"] in live
+            ]
+
+            def key(r):
+                return (r["created_at"] or "", r["id"])
+
+            newest_loser = max(loser, key=key)
+            if survivor and key(max(survivor, key=key)) > key(newest_loser):
+                continue
+            if newest_loser["change_type"] == "keyword_add":
+                # The association the add already wrote is about to be
+                # deleted with the losing photo. Re-point it at the
+                # survivor. If it is somehow absent the catalog is already
+                # inconsistent and there is no id to carry -- leave it to
+                # the sync rather than guessing a keyword by name.
+                for kw_id in self._photo_keyword_ids_matching(
+                        losing_id, match_key):
+                    self.tag_photo(surviving_id, kw_id, _commit=False)
+            elif newest_loser["change_type"] == "keyword_remove":
+                for kw_id in self._photo_keyword_ids_matching(
+                        surviving_id, match_key):
+                    self.untag_photo(surviving_id, kw_id, _commit=False)
+
+    def _photo_keyword_ids_matching(self, photo_id, match_key):
+        """Keyword ids on ``photo_id`` whose name shares ``match_key``.
+
+        Matched in Python rather than SQL: SQLite's ``LOWER`` is ASCII-only,
+        so a case or diacritic variant would slip past a SQL comparison the
+        same way it does in the collision tracker above.
+        """
+        return [
+            r["keyword_id"] for r in self.conn.execute(
+                "SELECT pk.keyword_id AS keyword_id, k.name AS name "
+                "FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                "WHERE pk.photo_id = ?",
+                (photo_id,),
+            ).fetchall()
+            if keyword_match_key(r["name"]) == match_key
+        ]
+
+    def _transfer_review_state_for_merge(self, losing_id, surviving_id):
+        """Carry queued rating / flag state onto the survivor by chronology.
+
+        ``photos.rating`` and ``photos.flag`` are written at edit time and
+        the queue row only records what the sidecar still owes. Remapping
+        the row alone would leave the survivor's catalog columns untouched:
+        the next sync writes the queued value into the sidecar and clears
+        the row, and the catalog is left permanently disagreeing with the
+        file on disk.
+
+        Two rows of the same type in one workspace are also a problem in
+        their own right -- ``sync._plan_photo_sync`` keeps whichever it
+        folds last -- so the older one is dropped per workspace, the same
+        rule the location and keyword paths use. The catalog column then
+        takes the value of the newest queued row across both photos, which
+        is exactly what the sync will write.
+
+        Only queued state is compared. A rating set on the survivor and
+        already synced has no row left to date it, so it loses to a
+        still-queued older edit; the queue is the only evidence of intent
+        that survives a sync.
+
+        Returns the number of queue rows dropped.
+        """
+        dropped = 0
+        for change_type, column in (("rating", "rating"), ("flag", "flag")):
+            rows = self.conn.execute(
+                "SELECT id, photo_id, workspace_id, value, created_at "
+                "FROM pending_changes "
+                "WHERE photo_id IN (?, ?) AND change_type = ?",
+                (losing_id, surviving_id, change_type),
+            ).fetchall()
+            if not any(r["photo_id"] == losing_id for r in rows):
+                # Nothing queued on the row being deleted: the survivor's
+                # own column and queue already agree with each other.
+                continue
+
+            def key(r):
+                return (r["created_at"] or "", r["id"])
+
+            by_ws = {}
+            for r in rows:
+                by_ws.setdefault(r["workspace_id"], []).append(r)
+            for ws_rows in by_ws.values():
+                if len(ws_rows) < 2:
+                    continue
+                winner = max(ws_rows, key=key)
+                for r in ws_rows:
+                    if r["id"] == winner["id"]:
+                        continue
+                    self.conn.execute(
+                        "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
+                    dropped += 1
+            newest = max(rows, key=key)
+            value = newest["value"]
+            if change_type == "rating":
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    # A malformed queue row; ``sync_to_xmp`` skips it too.
+                    continue
+            else:
+                value = value or "none"
+            self.conn.execute(
+                f"UPDATE photos SET {column} = ? WHERE id = ?",
+                (value, surviving_id),
+            )
+        dropped += self._transfer_edit_recipe_for_merge(
+            losing_id, surviving_id)
+        if dropped:
+            log.info(
+                "Merge reconciled queued review state on photos %s/%s: "
+                "dropped %d older queue row(s)",
+                losing_id, surviving_id, dropped,
+            )
+        return dropped
+
+    def _transfer_edit_recipe_for_merge(self, losing_id, surviving_id):
+        """Carry a queued edit recipe's catalog row onto the survivor.
+
+        ``photo_edit_recipes`` is written when the edit is made and the
+        queue row carries the same JSON for the sidecar. The row cascades
+        away with the losing photo, so remapping the queue row alone leaves
+        ``get_photo_edit_recipe`` on the survivor reporting its older
+        recipe -- or none -- while the sync writes the queued one to XMP
+        and clears the row. The UI and any future render then disagree with
+        the sidecar.
+
+        The queue row's ``value`` is the recipe JSON itself, so the catalog
+        row is rebuilt from the newest queued change rather than copied
+        across; an empty value is the "recipe cleared" edit and deletes the
+        survivor's row. Duplicates within one workspace are dropped as
+        elsewhere -- ``_plan_photo_sync`` keeps whichever it folds last.
+
+        Returns the number of queue rows dropped.
+        """
+        rows = self.conn.execute(
+            "SELECT id, photo_id, workspace_id, value, created_at "
+            "FROM pending_changes "
+            "WHERE photo_id IN (?, ?) AND change_type = 'edit_recipe'",
+            (losing_id, surviving_id),
+        ).fetchall()
+        if not any(r["photo_id"] == losing_id for r in rows):
+            return 0
+
+        def key(r):
+            return (r["created_at"] or "", r["id"])
+
+        dropped = 0
+        by_ws = {}
+        for r in rows:
+            by_ws.setdefault(r["workspace_id"], []).append(r)
+        for ws_rows in by_ws.values():
+            if len(ws_rows) < 2:
+                continue
+            winner = max(ws_rows, key=key)
+            for r in ws_rows:
+                if r["id"] == winner["id"]:
+                    continue
+                self.conn.execute(
+                    "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
+                dropped += 1
+        newest = max(rows, key=key)
+        recipe_json = newest["value"] or ""
+        if not recipe_json:
+            self.conn.execute(
+                "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
+                (surviving_id,),
+            )
+        else:
+            self.conn.execute(
+                """INSERT INTO photo_edit_recipes
+                       (photo_id, recipe_json, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(photo_id) DO UPDATE SET
+                       recipe_json = excluded.recipe_json,
+                       updated_at = excluded.updated_at""",
+                (surviving_id, recipe_json),
+            )
+        return dropped
+
+    def _link_survivor_for_sibling_edits(self, workspace_id, photo_id):
+        """Grant a sibling workspace sync-only access to a remapped photo's folder.
+
+        The collision loop remaps ``pending_changes`` by ``photo_id``, which
+        also moves rows owned by workspaces other than the one running the
+        merge. The merge links the destination subtree into the active
+        workspace only, so without this a sibling workspace would be left
+        holding a queued edit on a photo it cannot resolve:
+        ``sync._resolve_xmp_paths`` builds its folder map from that
+        workspace's ``get_folder_tree``, and a missing folder resolves to an
+        empty path and fails every future sync as inaccessible — queued
+        forever, with nothing saying why.
+
+        Recorded in ``workspace_sync_only_folders`` rather than
+        ``workspace_folders``. A ``workspace_folders`` link is library
+        membership: every browse/library query joins on it by folder id
+        alone, so any link -- root or not -- would make every photo sharing
+        the survivor's folder visible in the sibling workspace, and the
+        link would remain after the queued edit was synced. One queued
+        edit on a colliding staged photo would permanently import an
+        archive folder of unrelated photos into a workspace that never
+        asked for it.
+
+        ``workspace_sync_only_folders`` is read only by
+        ``get_sync_only_folder_map``, which the sync engine unions with
+        ``get_folder_tree`` when building its sidecar-path map. Every
+        browse/library query stays folder-scoped through
+        ``workspace_folders`` and sees no change.
+
+        Returns ``True`` when a new grant was written.
+        """
+        row = self.conn.execute(
+            "SELECT folder_id FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        if row is None or row["folder_id"] is None:
+            return False
+        folder_id = row["folder_id"]
+        # Skip if the workspace already resolves this folder through its
+        # normal library membership -- no sync-only grant is needed on top.
+        already_linked = self.conn.execute(
+            "SELECT 1 FROM workspace_folders "
+            "WHERE workspace_id = ? AND folder_id = ?",
+            (workspace_id, folder_id),
+        ).fetchone()
+        if already_linked is not None:
+            return False
+        already_grant = self.conn.execute(
+            "SELECT 1 FROM workspace_sync_only_folders "
+            "WHERE workspace_id = ? AND folder_id = ?",
+            (workspace_id, folder_id),
+        ).fetchone()
+        if already_grant is not None:
+            return False
+        self.conn.execute(
+            "INSERT OR IGNORE INTO workspace_sync_only_folders "
+            "(workspace_id, folder_id) VALUES (?, ?)",
+            (workspace_id, folder_id),
+        )
+        log.info(
+            "Granted workspace %s sync-only access to folder %s so preserved "
+            "edits on photo %s stay syncable after the archive merge",
+            workspace_id, folder_id, photo_id,
+        )
+        return True
+
+    def get_sync_only_folder_map(self, workspace_id=None):
+        """Return ``{folder_id: folders.path}`` for the workspace's sync-only grants.
+
+        The sync engine unions this map with the workspace-scoped folder tree
+        so ``_resolve_xmp_paths`` can resolve sidecar paths for photos whose
+        folder was granted only for sync (see
+        ``_link_survivor_for_sibling_edits``). Absent from every
+        browse/library query, which still joins on ``workspace_folders``
+        alone.
+        """
+        if workspace_id is None:
+            workspace_id = self._ws_id()
+        rows = self.conn.execute(
+            "SELECT f.id AS id, f.path AS path "
+            "FROM workspace_sync_only_folders sof "
+            "JOIN folders f ON f.id = sof.folder_id "
+            "WHERE sof.workspace_id = ? "
+            "  AND f.status IN ('ok', 'partial')",
+            (workspace_id,),
+        ).fetchall()
+        return {r["id"]: r["path"] for r in rows}
+
     def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
         """Fold a staged folder subtree into an existing tracked archive.
 
@@ -5391,6 +5906,56 @@ class Database:
           ``cleanup_cached_files_for_deleted_photos`` so orphaned thumbnail /
           preview / working-copy files can't be inherited by a later import
           that reuses one of the freed SQLite rowids.
+        * ``preserved_edit_count`` — pending edits that were queued against
+          a photo the collision loop is about to delete (either the staged
+          row on a byte-identical collision, or the phantom target row on a
+          replacement) and were reparented onto the surviving row before
+          ON DELETE CASCADE on ``pending_changes.photo_id`` could drop them.
+          Reported up so a NAS transfer's residual check can add them to
+          the "still need a sync" count rather than silently losing them.
+        * ``preserved_off_staging_identities`` — active-workspace subset of
+          the above whose survivor is NOT one of the staged photo ids the
+          caller captured before the merge. Reported as a list of
+          ``staged_sync_scope`` identity keys (``change_token`` or
+          ``("id", id)``) so the caller can filter out edits its pre-transfer
+          drain already classified as undeliverable (a flag under
+          ``sync_flags_to_xmp`` off) and NOT count them as "queued during
+          transfer" — they existed before, were considered, and were
+          deliberately not written to XMP. Sibling-workspace edits are
+          omitted for the same reason: this sync would not have written
+          them either. The remaining in-staging remaps (phantom-target and
+          intra-staged) are already found by the by-photo residual re-read
+          scoped to the captured staged ids, so adding them here as well
+          would report one edit as two.
+
+        Every queued change type has catalog state written at edit time
+        that the queue row does not carry, and all of it has to travel with
+        the remap or the survivor ends up disagreeing with the sidecar the
+        next sync writes:
+
+        * ``location`` -> the photo's ``type='location'`` keyword links
+          (``_move_location_state_for_merge``)
+        * ``keyword_add`` / ``keyword_remove`` -> the ``photo_keywords``
+          association (``_reconcile_conflicting_keyword_edits``);
+          ``keyword_remove_flat`` is sidecar-only and has none
+        * ``rating`` / ``flag`` -> the ``photos`` columns
+          (``_transfer_review_state_for_merge``)
+        * ``edit_recipe`` -> the ``photo_edit_recipes`` row
+          (``_transfer_edit_recipe_for_merge``)
+
+        Each resolves a competing change on the two rows by queue
+        chronology, ``(created_at, id)``, and drops the older row within a
+        workspace so ``_plan_photo_sync`` is not left picking between two
+        rows of the same type at random.
+
+        Side effect worth knowing about: when a remapped pending edit is
+        owned by a workspace other than the active one, the survivor's
+        folder is recorded in ``workspace_sync_only_folders`` for that
+        workspace so the sync engine can resolve the sidecar path.
+        ``workspace_folders`` is not touched -- a real library link would
+        make every other photo in the survivor's folder visible in the
+        sibling workspace and persist past the sync. See
+        ``_link_survivor_for_sibling_edits``.
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
@@ -5398,7 +5963,9 @@ class Database:
         if not staged_root:
             return {"new_photos": 0, "new_folders": 0,
                     "merged_folders": 0, "already_present": 0,
-                    "dropped_photo_ids": []}
+                    "dropped_photo_ids": [],
+                    "preserved_edit_count": 0,
+                    "preserved_off_staging_identities": []}
         staged_root_path = staged_root["path"]
         ws = self._ws_id()
 
@@ -5616,12 +6183,49 @@ class Database:
 
         counts = {"new_photos": 0, "new_folders": 0,
                   "merged_folders": 0, "already_present": 0,
-                  "dropped_photo_ids": []}
+                  "dropped_photo_ids": [],
+                  # Pending edits that were queued against a photo the
+                  # collision loop is about to delete (a staged row on a
+                  # real collision, or the phantom target row on a
+                  # replacement), remapped onto the surviving row before
+                  # ON DELETE CASCADE could drop them. Reported up so the
+                  # NAS transfer's residual check can add them to the
+                  # "still need a sync" count instead of silently losing
+                  # them to the cascade.
+                  "preserved_edit_count": 0,
+                  # Active-workspace identities (``change_token`` or
+                  # ``("id", id)``, matching ``staged_sync_scope``) of the
+                  # off-staging remap subset -- the archive-side survivor
+                  # on a real collision. The caller's residual re-read is
+                  # scoped by the captured staged ids, so only this subset
+                  # is invisible to it and has to be added separately. The
+                  # phantom-target branch (survivor is the staged photo)
+                  # and the intra-staged case (survivor is another staged
+                  # photo already reparented in this pass) are already
+                  # covered by the residual re-read, and counting them
+                  # here as well would report one edit as two. Restricted
+                  # to the active workspace and reported as identities --
+                  # not a raw ``rowcount`` -- so the caller can filter out
+                  # rows its pre-transfer drain already left as
+                  # undeliverable (which are not "queued during transfer",
+                  # only edits this workspace declined to write) and
+                  # exclude sibling-workspace rows (which this sync would
+                  # not have written either).
+                  "preserved_off_staging_identities": []}
         # Staged folders that fold into an existing target row are deleted only
         # after every staged folder has been processed. Deleting eagerly would
         # hit a FK violation when a not-yet-reparented staged child still points
         # at the staged parent we are removing.
         to_delete = []
+        # ``(workspace_id, survivor_photo_id)`` pairs for pending edits the
+        # collision loop remapped out of a workspace other than the one
+        # running the merge. Collected here and applied after every folder
+        # reparent has settled, because the link has to name the survivor's
+        # FINAL folder: an intra-staged or phantom survivor is still sitting
+        # in a staged folder when its remap happens and only lands in the
+        # archive folder later in the loop. A set, so two edits sharing a
+        # survivor write one link.
+        sibling_links = set()
         # Map of target-path -> folder id for folders already processed in this
         # run, so a child can fall back to its parent's id (Fix I2) even if the
         # parent's row isn't yet findable by path lookup.
@@ -5850,7 +6454,16 @@ class Database:
                     # targets ``normalize`` is identity, so different-case
                     # names have different keys and this tracker never
                     # triggers.
-                    staged_normalized_claimed = set()
+                    #
+                    # Mapped to the winning ``photos.id`` so a later
+                    # intra-staged collision remaps its pending edits
+                    # onto that survivor directly, without a follow-up
+                    # ``LOWER(filename) = LOWER(?)`` probe: SQLite's
+                    # built-in ``LOWER`` is ASCII-only, so
+                    # ``LOWER('Ä.raf') != LOWER('ä.raf')`` would leave
+                    # ``survivor_id`` unset and the cascade would drop
+                    # the edit this branch exists to preserve.
+                    staged_normalized_claimed = {}
                     for staged in staged_photos:
                         pid = staged["id"]
                         staged_norm = normalize(staged["filename"])
@@ -5907,6 +6520,145 @@ class Database:
                             # rsync ``--ignore-existing`` skipped this
                             # file), so treating it as ``already_present``
                             # is correct.
+                            #
+                            # Reparent any pending edits queued against the
+                            # staged row onto the surviving photo before the
+                            # DELETE fires the ON DELETE CASCADE on
+                            # ``pending_changes.photo_id`` and drops them.
+                            # An edit queued between the pre-transfer sync's
+                            # last drain and this reconciliation is still a
+                            # write the user asked for: the survivor points
+                            # at the same on-disk file (real-collision → the
+                            # byte-identical archived row; intra-staged →
+                            # the earlier staged twin that already claimed
+                            # the normalized slot in ``target["id"]``), so
+                            # its sidecar is the one the edit was aimed at.
+                            # Without this remap the cascade would silently
+                            # discard the edit and the residual re-read
+                            # below would find nothing to report.
+                            # Prefer the intra-staged winner over a stale
+                            # ``collision`` entry. ``existing_by_key`` is
+                            # built once from the target folder and is not
+                            # refreshed when the phantom-replacement branch
+                            # below deletes ``collision["id"]``. If an
+                            # earlier iteration hit that branch on the same
+                            # case-normalized name, ``existing_by_key[
+                            # staged_norm]`` still points at the deleted
+                            # phantom while ``staged_normalized_claimed[
+                            # staged_norm]`` holds the live winner. Reading
+                            # the tracker first also sidesteps SQLite's
+                            # ASCII-only ``LOWER``, which cannot match
+                            # non-ASCII case aliases like ``Ä.raf`` /
+                            # ``ä.raf`` and would otherwise leave the
+                            # remap unset.
+                            #
+                            # An in-staging survivor is still in the
+                            # captured ``staged_photo_ids`` and the
+                            # residual re-read already picks its remapped
+                            # edits up — adding the same count again would
+                            # report one edit as two. An off-staging
+                            # survivor (the byte-identical archive row) is
+                            # invisible to a photo-id-scoped residual
+                            # re-read, so the caller has to add its remap
+                            # count separately. See
+                            # ``_residual_staged_changes``.
+                            if intra_staged_collision:
+                                survivor_id = staged_normalized_claimed.get(
+                                    staged_norm)
+                                survivor_off_staging = False
+                            else:
+                                survivor_id = (
+                                    collision["id"] if collision is not None
+                                    else None)
+                                survivor_off_staging = collision is not None
+                            if survivor_id is not None:
+                                # A queued ``location`` change stores its
+                                # coordinates only in the deleted photo's
+                                # ``photo_keywords`` link to a
+                                # ``type='location'`` keyword; the delete
+                                # below strips those links and
+                                # ``sync_to_xmp`` would otherwise derive
+                                # coordinates from whatever unrelated
+                                # location keyword (or none) the survivor
+                                # carries, silently writing the wrong GPS
+                                # -- or clearing it -- for the remapped
+                                # row. Move the location state across when
+                                # the staged row holds the newer queued
+                                # assignment; the helper leaves the
+                                # survivor's own tags alone when ITS
+                                # queued change is newer.
+                                self._move_location_state_for_merge(pid, survivor_id)
+                                # Opposing keyword edits on the two rows
+                                # would fold into a rename pair once they
+                                # share a photo and cancel the newer one
+                                # out. Resolve before anything reads the
+                                # queue: the identity capture and the
+                                # sibling-workspace scan below must see the
+                                # rows that actually survive.
+                                self._reconcile_conflicting_keyword_edits(
+                                    pid, survivor_id)
+                                # ``photos.rating`` / ``photos.flag`` live
+                                # outside the queue row, so they have to
+                                # travel with it or the survivor's catalog
+                                # keeps a value the sidecar no longer has.
+                                self._transfer_review_state_for_merge(
+                                    pid, survivor_id)
+                                # Capture the identities of the rows this
+                                # remap is about to move -- restricted to
+                                # the active workspace so sibling-workspace
+                                # edits (which this sync would not have
+                                # written anyway) don't inflate the caller's
+                                # "queued during transfer" count. Read
+                                # before the UPDATE, because after it the
+                                # rows now live on ``survivor_id`` and the
+                                # caller has no way to distinguish them
+                                # from anything the survivor already
+                                # carried.
+                                off_staging_row_identities = []
+                                if survivor_off_staging:
+                                    off_staging_row_identities = [
+                                        (row["change_token"]
+                                         or ("id", row["id"]))
+                                        for row in self.conn.execute(
+                                            "SELECT id, change_token "
+                                            "FROM pending_changes "
+                                            "WHERE photo_id = ? "
+                                            "  AND workspace_id = ?",
+                                            (pid, ws),
+                                        ).fetchall()
+                                    ]
+                                # Sibling workspaces owning rows this remap
+                                # will move. Read before the UPDATE for the
+                                # same reason as above: afterwards these rows
+                                # are indistinguishable from the survivor's
+                                # own. Their folder link is deferred to the
+                                # end of the merge, where the survivor's
+                                # final ``folder_id`` is settled.
+                                sibling_ws_ids = [
+                                    r["workspace_id"] for r in
+                                    self.conn.execute(
+                                        "SELECT DISTINCT workspace_id "
+                                        "FROM pending_changes "
+                                        "WHERE photo_id = ? "
+                                        "  AND workspace_id IS NOT NULL "
+                                        "  AND workspace_id != ?",
+                                        (pid, ws),
+                                    ).fetchall()
+                                ]
+                                for sibling_ws in sibling_ws_ids:
+                                    sibling_links.add(
+                                        (sibling_ws, survivor_id))
+                                remap = self.conn.execute(
+                                    "UPDATE pending_changes "
+                                    "SET photo_id = ? WHERE photo_id = ?",
+                                    (survivor_id, pid),
+                                )
+                                counts["preserved_edit_count"] += (
+                                    remap.rowcount or 0)
+                                if off_staging_row_identities:
+                                    counts[
+                                        "preserved_off_staging_identities"
+                                    ].extend(off_staging_row_identities)
                             self.conn.execute(
                                 "DELETE FROM photo_keywords "
                                 "WHERE photo_id = ?",
@@ -5941,6 +6693,80 @@ class Database:
                                 # the SQL ``filename = ?`` lookup used earlier
                                 # would miss the stale row and leave both
                                 # intact.
+                                #
+                                # Reparent the phantom's pending edits onto
+                                # the staged row that is about to take its
+                                # slot. The staged bytes are what will live
+                                # at that (folder_id, filename), so any
+                                # queued write is aimed at that sidecar --
+                                # letting the cascade drop it would silently
+                                # discard the user's edit.
+                                #
+                                # A queued ``location`` change on the
+                                # phantom stores its coordinates only in
+                                # the phantom's ``photo_keywords`` link to
+                                # a ``type='location'`` keyword; the
+                                # DELETE below strips those links and
+                                # ``sync_to_xmp`` would otherwise derive
+                                # coordinates from whatever unrelated
+                                # location tag (or none) the staged
+                                # survivor carries, silently writing the
+                                # wrong GPS -- or clearing it -- for the
+                                # remapped row. Move the phantom's
+                                # location keyword links onto the survivor
+                                # before the delete so the queued edit's
+                                # intent survives -- unless the survivor
+                                # holds a NEWER queued location change, the
+                                # replacement-import shape where a fresh
+                                # assignment on the staged row would be
+                                # reverted by the stale archive row's. The
+                                # helper resolves that by queue chronology,
+                                # identically in the collision→staged
+                                # branch above.
+                                self._move_location_state_for_merge(
+                                    collision["id"], pid)
+                                # Same reconciliation as the branch above,
+                                # and for the same reason it runs here: an
+                                # older add on one row must not reverse a
+                                # newer remove on the other once the remap
+                                # puts them on one photo.
+                                self._reconcile_conflicting_keyword_edits(
+                                    collision["id"], pid)
+                                # Same carry-over of the catalog columns the
+                                # queue row does not hold.
+                                self._transfer_review_state_for_merge(
+                                    collision["id"], pid)
+                                # Sibling workspaces owning phantom rows this
+                                # remap will move onto the staged survivor.
+                                # Read before the UPDATE; the link itself is
+                                # deferred to the end of the merge, after the
+                                # survivor has been reparented into the
+                                # archive folder.
+                                for sibling_ws in [
+                                    r["workspace_id"] for r in
+                                    self.conn.execute(
+                                        "SELECT DISTINCT workspace_id "
+                                        "FROM pending_changes "
+                                        "WHERE photo_id = ? "
+                                        "  AND workspace_id IS NOT NULL "
+                                        "  AND workspace_id != ?",
+                                        (collision["id"], ws),
+                                    ).fetchall()
+                                ]:
+                                    sibling_links.add((sibling_ws, pid))
+                                remap = self.conn.execute(
+                                    "UPDATE pending_changes "
+                                    "SET photo_id = ? WHERE photo_id = ?",
+                                    (pid, collision["id"]),
+                                )
+                                # No ``preserved_off_staging_identities``
+                                # bump: the survivor is ``pid``, still one
+                                # of the ids the caller captured before
+                                # the merge, so a residual re-read scoped
+                                # by those ids already finds the remapped
+                                # edits.
+                                counts["preserved_edit_count"] += (
+                                    remap.rowcount or 0)
                                 self.conn.execute(
                                     "DELETE FROM photo_keywords "
                                     "WHERE photo_id = ?", (collision["id"],))
@@ -5966,7 +6792,7 @@ class Database:
                             # name is dropped as ``already_present``
                             # instead of adding a second catalog row for
                             # the same on-disk destination.
-                            staged_normalized_claimed.add(staged_norm)
+                            staged_normalized_claimed[staged_norm] = pid
                     to_delete.append(sf["id"])
                     counts["merged_folders"] += 1
                     last_target_parent[target_path] = target["id"]
@@ -5982,6 +6808,16 @@ class Database:
                     "DELETE FROM workspace_folders WHERE folder_id = ?",
                     (fid,))
                 self.conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
+
+            # Last, after every survivor's ``folder_id`` is final and the
+            # staged folder rows (and their workspace links) are gone: give
+            # each sibling workspace whose queued edits were remapped a way
+            # to resolve the survivor. Without it those rows stay queued and
+            # fail every future sync as inaccessible, with nothing reporting
+            # why.
+            for sibling_ws, survivor_photo_id in sorted(sibling_links):
+                self._link_survivor_for_sibling_edits(
+                    sibling_ws, survivor_photo_id)
 
             self.conn.commit()
             self._new_images_cache.invalidate_workspaces(self._db_path, [ws])
@@ -9381,10 +10217,23 @@ class Database:
         """
         return self.conn.execute(query, species_col_params + params).fetchall()
 
-    def get_assigned_photo_location(self, photo_id, verify_workspace=True):
-        """Return linked location-keyword coordinates for one visible photo."""
+    def get_assigned_photo_location(self, photo_id, verify_workspace=True,
+                                    allow_sync_only=False):
+        """Return linked location-keyword coordinates for one visible photo.
+
+        ``allow_sync_only`` accepts a ``workspace_sync_only_folders`` grant
+        as sufficient authorization. The sync engine passes it because that
+        grant exists precisely to let a workspace write the sidecar of a
+        photo it does not carry in its library: without it a remapped
+        sibling-workspace ``location`` change resolves its path through the
+        grant and then fails this check, staying queued on every retry.
+        Browse and library callers keep the strict membership test.
+        """
         if verify_workspace:
-            self._verify_photo_in_workspace(photo_id)
+            if allow_sync_only:
+                self._verify_photo_syncable_in_workspace(photo_id)
+            else:
+                self._verify_photo_in_workspace(photo_id)
 
         row = self.conn.execute(
             """

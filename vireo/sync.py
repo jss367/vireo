@@ -39,11 +39,23 @@ def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
     owning workspace -- the transfer is defined by a path on disk, not by
     workspace membership -- and the ordinary map would resolve it to an empty
     directory and then fail "folder not accessible".
+
+    The default map is unioned with ``get_sync_only_folder_map``: sync-only
+    grants added by tracked-merge collision handling so a sibling
+    workspace's remapped edit can resolve its survivor's sidecar without
+    the workspace gaining library membership on every other photo in that
+    folder. A caller-supplied ``folder_paths`` is trusted as-is and skips
+    the union -- callers who need the sync-only grants pass them in.
     """
     if folder_paths is not None:
         folders = folder_paths
     else:
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        # Sync-only grants live outside ``workspace_folders`` so they never
+        # widen browse/library visibility. Layered under the workspace's
+        # own tree so a real library link wins on any overlap.
+        for fid, path in db.get_sync_only_folder_map().items():
+            folders.setdefault(fid, path)
     paths = {}
     for photo_id, (folder_id, filename) in db.get_photo_filenames(photo_ids).items():
         base = os.path.splitext(filename)[0]
@@ -449,6 +461,11 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 locations[photo_id] = db.get_assigned_photo_location(
                     photo_id,
                     verify_workspace=require_workspace_membership,
+                    # A sync-only grant authorizes writing this sidecar;
+                    # the path map above already honors it, and the
+                    # membership test here would otherwise refuse the same
+                    # photo and leave the edit queued forever.
+                    allow_sync_only=True,
                 )
             except Exception as e:
                 # Historically this lookup ran inside the per-photo try, so a

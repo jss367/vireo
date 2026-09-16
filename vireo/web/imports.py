@@ -565,8 +565,41 @@ def create_imports_blueprint(
                                 # workspace declines to write syncs nothing,
                                 # and an edit made during the copy would then
                                 # go unreported.
+                                #
+                                # ``preserved_off_staging_identities`` covers
+                                # edits the tracked-merge path remapped onto
+                                # a survivor NOT in ``staged_photo_ids`` --
+                                # the archive-side row of a byte-identical
+                                # real collision, whose id the by-photo
+                                # residual re-read below cannot see. The
+                                # phantom-target and intra-staged cases
+                                # leave the survivor inside
+                                # ``staged_photo_ids`` and the residual
+                                # re-read finds them on its own; adding the
+                                # full ``preserved_edit_count`` here would
+                                # double-count those. See
+                                # merge_staged_tree_into_archive.
+                                #
+                                # Reported as identities, not a raw
+                                # rowcount: filtering ``undeliverable``
+                                # here keeps rows the pre-transfer drain
+                                # deliberately did not write (a flag under
+                                # ``sync_flags_to_xmp`` off) out of the
+                                # "queued during transfer" count -- they
+                                # predate the transfer and were considered
+                                # by the sync. Sibling-workspace edits are
+                                # already dropped upstream by
+                                # ``merge_staged_tree_into_archive``.
                                 residual = _residual_staged_changes(
                                     thread_db, staged_photo_ids, undeliverable)
+                                off_staging = result.get(
+                                    "preserved_off_staging_identities", []) or []
+                                off_staging_residual = sum(
+                                    1 for ident in off_staging
+                                    if ident not in undeliverable
+                                )
+                                if residual is not None:
+                                    residual += off_staging_residual
                         finally:
                             if sync_first:
                                 sync_job_lock.release()
