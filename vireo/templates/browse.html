@@ -387,6 +387,32 @@ body.sidebar-resizing {
   cursor: pointer;
   transition: transform 0.1s, border-color 0.15s;
 }
+/* A color label is a property of the photo, not an optional metadata badge, so
+   the card itself carries the color: a colored frame plus a light wash on the
+   info strip, both readable at the smallest thumbnail size. The `color_label`
+   card field (a dot in the info row) remains available for its hover
+   description.
+
+   Frame drawn with `outline`, not `border-color`: the global override in
+   _navbar.html pins `.grid-card` border-color with !important, which is also
+   why `.grid-card.selected` signals selection through its box-shadow ring
+   rather than its border. An inset outline stacks cleanly with that ring, so a
+   selected card still shows both facts. Every tint var carries a fallback so an
+   unrecognized value degrades to the plain card instead of an invalid rule. */
+.grid-card[data-color-label],
+.browse-stack-member[data-color-label] {
+  outline: 2px solid var(--color-label-tint, transparent);
+  outline-offset: -2px;
+}
+.grid-card[data-color-label] .grid-card-info,
+.browse-stack-member[data-color-label] .grid-card-info {
+  background: color-mix(in srgb, var(--color-label-tint, transparent) 16%, transparent);
+}
+.grid-card[data-color-label="red"], .browse-stack-member[data-color-label="red"] { --color-label-tint: #e74c3c; }
+.grid-card[data-color-label="yellow"], .browse-stack-member[data-color-label="yellow"] { --color-label-tint: #f1c40f; }
+.grid-card[data-color-label="green"], .browse-stack-member[data-color-label="green"] { --color-label-tint: #2ecc71; }
+.grid-card[data-color-label="blue"], .browse-stack-member[data-color-label="blue"] { --color-label-tint: #3498db; }
+.grid-card[data-color-label="purple"], .browse-stack-member[data-color-label="purple"] { --color-label-tint: #9b59b6; }
 .grid-card:hover { transform: translateY(-1px); border-color: var(--accent); }
 .grid-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .grid-card.has-browse-stack {
@@ -2651,7 +2677,7 @@ var selectionPredictionPhotoIdsByIdx = {};
 var detailPredictionGroups = [];
 var detailPredictionGroupsPhotoId = null;
 var showDetectionBoxes = false;
-var cardFields = ["filename", "location_status", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
+var cardFields = ["filename", "location_status", "rating", "flag", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 // Which photo ids we've confirmed color-label state for. `colorLabels[id]`
@@ -2660,6 +2686,55 @@ var colorLabels = {};    // {photo_id: color_string}
 // rendering "everything is uncoloured" for a still-loading selection.
 var colorLabelsFetched = new Set();
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
+// Per-id record of the generation each id was last locally edited at, so a
+// slow fetch that started before an edit still cannot overwrite that edit for
+// the specific ids it touched. `colorLabelGen === gen` alone catches only the
+// nothing-changed case; a concurrent edit to one id would otherwise let the
+// stale response's values for every other id overwrite them anyway, and the
+// stale value for the edited id survive.
+var colorLabelEditGen = Object.create(null);
+// Stamp ids at a NEW generation. Called twice per write — once before the POST
+// and once after it lands. The trailing stamp is what covers a fetch that
+// starts while the write is still in flight: it captured the same generation
+// the pre-write stamp wrote, so `>` alone would let its response (read from the
+// server before the write committed) overwrite the fresh local value once it
+// resolves. Re-stamping on completion puts every such fetch strictly behind
+// the write (Codex P2 on PR #1668).
+function _noteColorLabelEdits(ids) {
+  colorLabelGen++;
+  ids.forEach(function(id) { colorLabelEditGen[id] = colorLabelGen; });
+}
+
+// Re-ask the server when a write fails. Without this the failed write leaves
+// the worst of both: its stamp makes any fetch that started before it skip
+// these ids, while that fetch still adds them to colorLabelsFetched — so a
+// labelled photo the user edited before initial hydration finished reads as a
+// definite "no color" until reload (Codex P2 on PR #1668).
+//
+// The refetch alone is the whole repair; the stamp must NOT be cleared. Stamps
+// only ever advance through _noteColorLabelEdits, so a stamp is never greater
+// than the generation this refetch captures and can never block its own
+// response. Clearing it would instead un-guard a *concurrent* write: with
+// overlapping writes on one photo, an earlier request failing after a later one
+// succeeded would drop the successful write's completion stamp, letting a GET
+// issued before either of them overwrite the label the user actually chose
+// (Codex P2, second pass). Dropping the fetched marker is kept — until the
+// refetch lands we genuinely do not know this photo's color, and the batch
+// inspector should say so rather than assert "no color".
+function _recoverColorLabelsAfterFailedWrite(ids) {
+  ids.forEach(function(id) { colorLabelsFetched.delete(id); });
+  return fetchColorLabels(ids).then(function() {
+    refreshGridCards(ids);
+    refreshExpandedBrowseStackMembers(ids);
+    // fetchColorLabels already re-rendered a batch inspector; only the
+    // single-photo panel is left to catch up.
+    var detail = document.getElementById('detailContent');
+    if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1
+        && !(detail && detail.classList.contains('batch-mode'))) {
+      updateDetailColors();
+    }
+  });
+}
 // Generation counter for the grid window (photos/currentPage/earliestPage/
 // allLoaded). Never compare it directly — go through claimBrowseWindow() /
 // observeBrowseWindow() so every async path guards the same way.
@@ -3307,6 +3382,52 @@ function renderCardField(field, p) {
   }
 }
 
+// Color labels live in the async `colorLabels` map rather than on the photo
+// row, so the card tint is stamped as an attribute at render time and
+// re-stamped by refreshCardBadgesAndInfo once /api/photos/color_labels
+// resolves or the user edits a label.
+function cardColorLabel(photoId) {
+  var cl = colorLabels[photoId];
+  if (!cl) return null;
+  if (window.VireoColorLabels && !window.VireoColorLabels.isValid(cl)) return null;
+  return cl;
+}
+
+function cardColorLabelAttr(photoId) {
+  var cl = cardColorLabel(photoId);
+  return cl ? ' data-color-label="' + escapeAttr(cl) + '"' : '';
+}
+
+function applyCardColorLabel(card, photoId) {
+  var cl = cardColorLabel(photoId);
+  if (cl) card.setAttribute('data-color-label', cl);
+  else card.removeAttribute('data-color-label');
+}
+
+// Hydrate color labels for the photos an init response just rendered.
+// /api/browse/init carries no labels, so any path that paints a grid straight
+// from it — bootstrapBrowse() and the ?photo_id=... deep link, which skips
+// bootstrap entirely — has to ask for them, or its cards stay untinted and the
+// detail panel reports "no color" until some later action happens to refetch
+// those ids. loadPhotos()'s paging path does its own fetch and does not use
+// this. `isCurrent` is the caller's own staleness guard: a sort change or
+// folder click during the fetch means these ids are no longer on screen.
+function hydrateColorLabelsForRenderedPage(isCurrent) {
+  if (!photos.length) return;
+  var ids = photos.map(function(p) { return p.id; });
+  return fetchColorLabels(ids).then(function() {
+    if (!isCurrent()) return;
+    refreshGridCards(ids);
+    // fetchColorLabels already re-rendered a batch inspector; only the
+    // single-photo panel is left to catch up.
+    var detail = document.getElementById('detailContent');
+    if (selectedPhotoId != null
+        && !(detail && detail.classList.contains('batch-mode'))) {
+      updateDetailColors();
+    }
+  });
+}
+
 function renderCardInfo(p) {
   var infoHtml = '';
   cardFields.forEach(function(field) {
@@ -3397,7 +3518,8 @@ function renderPhotoCard(p, idx) {
   if (isOffline) {
     return '<div class="grid-card offline" data-id="' + p.id +
       '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) +
-      '" aria-disabled="true" title="This photo\'s folder is offline. Reconnect or relocate the folder to edit it.">' +
+      '"' + cardColorLabelAttr(p.id) +
+      ' aria-disabled="true" title="This photo\'s folder is offline. Reconnect or relocate the folder to edit it.">' +
       '<div class="grid-card-img-wrap">' +
         '<div class="offline-photo-placeholder">' +
           '<span class="offline-icon">\u26d3</span>' +
@@ -3446,7 +3568,7 @@ function renderPhotoCard(p, idx) {
   }
 
   var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
-  return '<div class="grid-card' + stackClass + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
+  return '<div class="grid-card' + stackClass + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '"' + cardColorLabelAttr(p.id) + ' onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
     '<div class="grid-card-img-wrap">' +
       '<img data-thumbnail-src="' + escapeAttr(thumbUrl) + '" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
       renderBrowseStackBadge(p) +
@@ -3481,7 +3603,8 @@ function renderBrowseStackMember(p, coverId) {
     ? window.vireoThumbnailUrl(p)
     : '/thumbnails/' + p.id + '.jpg';
   return '<div class="browse-stack-member' + selectedClass + '" '
-    + 'data-id="' + p.id + '" data-filename="' + escapeAttr(p.filename) + '" '
+    + 'data-id="' + p.id + '" data-filename="' + escapeAttr(p.filename) + '"'
+    + cardColorLabelAttr(p.id) + ' '
     + 'onclick="selectBrowseStackMember(event,' + p.id + ',' + coverId + ')" '
     + 'ondblclick="openBrowseStackMember(event,' + p.id + ',' + coverId + ')">'
     + '<div class="grid-card-img-wrap">'
@@ -4201,6 +4324,7 @@ function updateGridTail() {
 // shape, so both are repainted here rather than re-rendered: the card keeps
 // its <img>, and therefore the thumbnail it has already decoded.
 function refreshCardBadgesAndInfo(card, p) {
+  applyCardColorLabel(card, p.id);
   var info = card.querySelector('.grid-card-info');
   if (info) {
     info.innerHTML = renderCardInfo(p);
@@ -4637,6 +4761,7 @@ async function bootstrapBrowse() {
         updatePreviousPhotosButton();
         browseDatasetReady = true;
         updateFilterSummary();
+        hydrateColorLabelsForRenderedPage(bootstrapWindowIsCurrent);
       }
       loadSummary();
     }
@@ -10765,13 +10890,14 @@ async function batchSetFlag(flag) {
 async function batchSetColorLabel(color) {
   var ids = getActiveSelection();
   if (!ids.length) return;
-  colorLabelGen++;
+  _noteColorLabelEdits(ids);
   try {
     await safeFetch('/api/batch/color_label', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids, color: color}),
     });
-  } catch(e) { return; }
+  } catch(e) { _recoverColorLabelsAfterFailedWrite(ids); return; }
+  _noteColorLabelEdits(ids);
   ids.forEach(function(id) {
     if (color) colorLabels[id] = color;
     else delete colorLabels[id];
@@ -11824,11 +11950,17 @@ async function fetchColorLabels(photoIds) {
     for (var id in data) combined[id] = data[id];
   }
   if (chunkFailed) return;
-  // Only clear stale entries if no local edits happened during the fetch
-  if (colorLabelGen === gen) {
-    photoIds.forEach(function(id) { delete colorLabels[id]; });
+  // Skip per id whose local edit happened after this fetch started: the
+  // delete would drop the fresh value, and the merge would overwrite it with
+  // the older server truth. Ids the user never touched are still applied.
+  photoIds.forEach(function(id) {
+    if ((colorLabelEditGen[id] || 0) > gen) return;
+    delete colorLabels[id];
+  });
+  for (var pid in combined) {
+    if ((colorLabelEditGen[pid] || 0) > gen) continue;
+    colorLabels[pid] = combined[pid];
   }
-  for (var pid in combined) colorLabels[pid] = combined[pid];
   // Mark every requested id as fetched — an absent id in `combined` means
   // "no color set" now that we've asked, so the batch inspector can trust
   // colorLabels[id] === undefined for these ids as a definite value.
@@ -11851,15 +11983,18 @@ async function setColorLabel(color) {
     return;
   }
   if (!selectedPhotoId) return;
-  colorLabelGen++;
   var photoId = selectedPhotoId;
+  _noteColorLabelEdits([photoId]);
   var current = colorLabels[photoId] || null;
   var newColor = (current === color) ? null : color;
-  await safeFetch('/api/photos/' + photoId + '/color_label', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({color: newColor}),
-  });
+  try {
+    await safeFetch('/api/photos/' + photoId + '/color_label', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({color: newColor}),
+    });
+  } catch(e) { _recoverColorLabelsAfterFailedWrite([photoId]); return; }
+  _noteColorLabelEdits([photoId]);
   if (newColor) {
     colorLabels[photoId] = newColor;
   } else {
@@ -13101,13 +13236,14 @@ async function setFlagFor(photoId, flag) {
 }
 
 async function setColorLabelFor(photoId, color) {
-  colorLabelGen++;
+  _noteColorLabelEdits([photoId]);
   try {
     await safeFetch('/api/batch/color_label', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: [photoId], color: color}),
     });
-  } catch(e) { return; }
+  } catch(e) { _recoverColorLabelsAfterFailedWrite([photoId]); return; }
+  _noteColorLabelEdits([photoId]);
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
   colorLabelsFetched.add(photoId);
@@ -13941,6 +14077,9 @@ async function _runPhotoDeepLink(photoId) {
       browseDatasetReady = true;
       document.getElementById('loadingState').style.display = 'none';
       deepLinkLoaded = true;
+      hydrateColorLabelsForRenderedPage(function() {
+        return isDeepLinkHealthCurrent() && isDeepLinkDatasetCurrent();
+      });
     }
 
     // The focused init response normally includes the bounded page containing
