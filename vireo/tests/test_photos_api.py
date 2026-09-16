@@ -11997,6 +11997,9 @@ def test_api_photos_query_stack_badge_is_the_score_that_placed_it(app_and_db):
     assert cover in cards and lead not in cards, "expected the burst to collapse"
     assert cards[cover]["browse_stack"]["count"] == 2
     assert cards[cover]["prediction_confidence"] == 0.9
+    # The card says whose score that is, so the badge's wording never has to
+    # be inferred from the sort dropdown (which a visual clause overrides).
+    assert cards[cover]["prediction_confidence_is_stack_lead"] is True
 
 
 def test_api_photos_query_unsorted_stack_badge_is_the_covers_own_score(app_and_db):
@@ -12023,6 +12026,7 @@ def test_api_photos_query_unsorted_stack_badge_is_the_covers_own_score(app_and_d
 
     cards = {p["id"]: p for p in response.get_json()["photos"]}
     assert cards[cover]["prediction_confidence"] == 0.2
+    assert "prediction_confidence_is_stack_lead" not in cards[cover]
 
 
 def test_api_photos_query_browse_stacks(app_and_db):
@@ -13042,6 +13046,43 @@ def test_api_photos_query_focus_on_visual_stack_member(app_and_db, monkeypatch):
     assert payload["focus_index"] == 0
     assert payload["focus_page"] == 1
     assert [p["id"] for p in payload["photos"]] == [photos["bird2.jpg"]]
+
+
+def test_api_photos_query_visual_stack_never_claims_confidence_order(
+        app_and_db, monkeypatch):
+    """A healthy visual clause keeps results similarity-ranked even while the
+    sort dropdown reads "Prediction confidence", and that path attaches the
+    cover's own score. The card must not then be flagged as showing the
+    stack's leading confidence, or the badge would explain the relevance
+    order with a number that did not produce it (Codex P2 on PR #1670).
+    """
+    app, db = app_and_db
+    photos = _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    cover, other = photos["bird2.jpg"], photos["bird1.jpg"]
+    with db.conn:
+        _seed_browse_burst(db, [cover, other])
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,))
+    for photo_id, confidence in ((cover, 0.2), (other, 0.9)):
+        det_ids = db.save_detections(photo_id, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+            "confidence": 0.9, "category": "animal",
+        }], detector_model="MDV6")
+        db.add_prediction(det_ids[0], "Robin", confidence, "test")
+    db.conn.commit()
+
+    payload = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "stacks": True,
+        "sort": "prediction_confidence",
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+    }).get_json()
+
+    cards = {p["id"]: p for p in payload["photos"]}
+    assert payload["visual"]["status"] == "ok"
+    assert cards[cover]["prediction_confidence"] == 0.2
+    assert "prediction_confidence_is_stack_lead" not in cards[cover]
 
 
 def test_api_photos_query_visual_ranks_by_similarity(app_and_db, monkeypatch):

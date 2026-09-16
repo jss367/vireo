@@ -3361,8 +3361,14 @@ function renderCardField(field, p) {
         // sends that leading score so the badge names the number that put
         // the item where it is. Say whose score it is rather than letting
         // the card imply it belongs to the frame in the thumbnail.
-        var confIsStackLead = p.browse_stack && p.browse_stack.count >= 2
-          && sortRanksOnPredictionConfidence();
+        //
+        // The server flags this per card; do NOT re-derive it from the sort
+        // dropdown. A healthy visual clause keeps the grid similarity-ranked
+        // while the dropdown still reads "Prediction confidence", and that
+        // path sends the cover's own score — so a select-derived label would
+        // claim the relevance order came from a number that did not produce
+        // it (Codex P2 on PR #1670).
+        var confIsStackLead = p.prediction_confidence_is_stack_lead === true;
         var confTitle = confIsStackLead
           ? 'Confidence of the strongest current species prediction on the frame that leads this stack — the score this stack is sorted by'
           : 'Confidence of the strongest current species prediction';
@@ -5896,7 +5902,13 @@ var MUTATION_WILDLIFE = 'wildlife_excluded';
 var PREDICTION_CONFIDENCE_SORTS = ['prediction_confidence',
   'prediction_confidence_asc'];
 
-function sortRanksOnPredictionConfidence() {
+/* Whether the sort DROPDOWN is set to a confidence sort. Deliberately not
+   "the grid is ordered by confidence": a healthy visual clause keeps results
+   similarity-ranked while this still reads prediction_confidence. Only the
+   reload heuristic below may use it — a card that wants to describe its own
+   badge reads the server's per-card
+   ``prediction_confidence_is_stack_lead`` flag instead. */
+function sortSelectRanksOnPredictionConfidence() {
   var el = document.getElementById('sortSelect');
   return !!el && PREDICTION_CONFIDENCE_SORTS.indexOf(el.value) !== -1;
 }
@@ -5950,9 +5962,14 @@ function refreshActiveCollectionAfterMembershipChange(mutations) {
   // and the old score until a manual re-sort (Codex P2 on PR #1670). Same
   // options as onSortChanged(), which is the same situation: the order moved
   // under the photo the user is looking at, so hold onto it.
+  //
+  // Reading the dropdown rather than what the server actually ranked by is
+  // deliberate here: with a healthy visual clause the order will not move,
+  // but every affected card's badge number still did, so the reload is
+  // wanted either way.
   var predictionEdit = !mutations ||
     mutations.indexOf(MUTATION_PREDICTION) !== -1;
-  if (predictionEdit && sortRanksOnPredictionConfidence()) {
+  if (predictionEdit && sortSelectRanksOnPredictionConfidence()) {
     reloadBrowseResults({ preserveAnchor: true, focusAnchor: true });
     return;
   }

@@ -5257,10 +5257,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         attach_detections(db, photo_dicts)
         attach_prediction_confidence(db, photo_dicts)
         for photo in photo_dicts:
-            if photo.get("id") in stack_lead_confidence:
-                photo["prediction_confidence"] = stack_lead_confidence[
-                    photo["id"]
-                ]
+            if photo.get("id") not in stack_lead_confidence:
+                continue
+            photo["prediction_confidence"] = stack_lead_confidence[photo["id"]]
+            # Say, per card, that this number came off the stack's leading
+            # frame rather than the cover in the thumbnail — the client must
+            # not infer it from the sort dropdown. A healthy visual clause
+            # keeps results similarity-ranked no matter what the dropdown
+            # says, and that path builds its stacks in Python with only the
+            # cover's own score, so a select-derived label would explain the
+            # relevance order with a number that did not produce it (Codex
+            # P2 on PR #1670).
+            if (photo.get("browse_stack") or {}).get("count", 0) >= 2:
+                photo["prediction_confidence_is_stack_lead"] = True
         attach_edit_recipes(db, photo_dicts)
         return photo_dicts
 
