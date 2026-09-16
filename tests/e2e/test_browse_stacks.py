@@ -504,6 +504,61 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     assert abs(top_after - top_before) < 4
 
 
+def test_delete_dialog_refuses_a_selection_that_moved_under_it(
+    live_server, page,
+):
+    """The delete dialog has to describe the selection that asked for it.
+
+    Counting companions is a round trip and the grid stays live across it,
+    so the user can select something else before the dialog appears — and
+    the dialog names only a number, so confirming it would delete photos
+    they can no longer see selected. For a disk delete that is not
+    recoverable. The unit coverage in test_app.py drives the function
+    directly; this walks it through the real grid.
+    Codex P1 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    # Select another photo while the companion count is still in flight —
+    # the same window a slow request opens for a real click.
+    outcome = page.evaluate(
+        """async otherId => {
+          var pending = batchDelete();
+          var idx = photos.findIndex(function(p) { return p.id === otherId; });
+          selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+                      otherId, idx);
+          await pending;
+          return {
+            modalOpen: document.getElementById('deleteModal')
+              .classList.contains('open'),
+            active: getActiveSelection(),
+            remaining: photos.length,
+          };
+        }""",
+        other_id,
+    )
+
+    assert outcome["modalOpen"] is False
+    # Nothing was deleted, and the newer selection is untouched.
+    assert outcome["active"] == [other_id]
+    assert outcome["remaining"] == 3
+    expect(page.locator("#toastContainer")).to_contain_text("Selection changed")
+
+
 def test_cancelled_delete_does_not_leave_a_stack_gesture_armed(
     live_server, page,
 ):
@@ -805,7 +860,11 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
         arg=burst_ids,
     )
 
-    # Navigate out of the stack, and the grid follows the user home.
+    # Navigate out of the stack, and the grid follows the user home. The
+    # gesture has to be a fresh one: a double-click over a stack that was
+    # already selected reaffirms that batch rather than creating it, and
+    # batches are preserved (see the Select all case below).
+    page.evaluate("() => clearSelection()")
     cover.dblclick()
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
     page.locator("[title='Next (\u2192)']").click()

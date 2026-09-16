@@ -22662,6 +22662,9 @@ def test_batch_delete_discards_a_companion_count_for_a_stale_selection(
     html = app.test_client().get("/browse").get_data(as_text=True)
     body = _browse_js_function_body(html, "async function batchDelete(")
     source = "\n".join([
+        # The real selection-key helper, not a stand-in: the staleness check
+        # is exactly a comparison of these keys.
+        _browse_js_function_body(html, "function selectionIdsKey("),
         """
 var _batchDeleteRequestSeq = 0;
 var _activeSelection = [1, 2, 3];

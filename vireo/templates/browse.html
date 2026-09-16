@@ -11096,10 +11096,11 @@ async function batchDelete() {
     return;
   }
   if (seq !== _batchDeleteRequestSeq) return;
-  var currentIds = getActiveSelection();
-  var selectionMatches = currentIds.length === capturedIds.length
-    && currentIds.every(function(id) { return capturedIds.indexOf(id) !== -1; });
-  if (!selectionMatches) {
+  // Compared as sorted keys, not by scanning one list for each id of the
+  // other: a Select all can hand this tens of thousands of ids, and the
+  // quadratic version of this check would stall the UI thread on exactly the
+  // selections that most need a delete confirmation.
+  if (selectionIdsKey(getActiveSelection()) !== selectionIdsKey(capturedIds)) {
     showToast(
       'Selection changed while checking for companion files. Click Delete again.',
       'info'
