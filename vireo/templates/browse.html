@@ -9561,7 +9561,7 @@ function renderDetailPredictions(data, photoId) {
     // in app.py), but the panel must not offer the action in the first place.
     var decided = predictionIsDecided(p);
     var displaySpecies = p.consensus_species || p.species || 'Unknown';
-    var key = asciiCaseFoldKey(displaySpecies) + '|' + (decided ? p.status : 'pending');
+    var key = (p.consensus_species_key || asciiCaseFoldKey(displaySpecies)) + '|' + (decided ? p.status : 'pending');
     var g = groupByKey[key];
     if (!g) {
       g = groupByKey[key] = {
@@ -9594,7 +9594,10 @@ function renderDetailPredictions(data, photoId) {
     // ``api_selection_prediction_suggestions``; a bucket with no
     // contributing row keeps ``confidence == null`` and renders as
     // "confidence unknown" via ``formatPredictionConfidence``.
-    if (asciiCaseFoldKey(p.species || '') === asciiCaseFoldKey(g.species)
+    var matchesConsensus = p.species_key && p.consensus_species_key
+      ? p.species_key === p.consensus_species_key
+      : asciiCaseFoldKey(p.species || '') === asciiCaseFoldKey(g.species);
+    if (matchesConsensus
         && p.confidence != null
         && (g.confidence == null || p.confidence > g.confidence)) {
       g.confidence = p.confidence;

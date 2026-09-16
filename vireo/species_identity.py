@@ -165,7 +165,64 @@ class SpeciesResolver:
         source = None
         if row.get("source_taxon_id"):
             source = {"taxon_id": row["source_taxon_id"], "scientific_name": row.get("scientific_name")}
+        if not source and not (native and row.get("scientific_name")):
+            return self.display(row.get("species"))
         return self.resolve(row.get("species"), row.get("scientific_name") if native else None, source)
+
+    def explicit_source(self, name):
+        """Return the ``resolve`` source ``display(name)`` would use, or ``None``.
+
+        A ``Name (scientific)`` or ``Name (taxon N)`` suffix is explicit
+        evidence for a taxon identity. A bare name has none — callers that
+        bind a source-specific keyword must fall back to name lookup so an
+        unlinked same-name row (``mark_species_keywords`` still pending) is
+        reused rather than replaced with a suffixed duplicate.
+        """
+        name = str(name or "").strip()
+        prefix, sep, suffix = name.rpartition(" (")
+        if not sep or not suffix.endswith(")"):
+            return None
+        qualifier = suffix[:-1]
+        if qualifier.startswith("taxon ") and qualifier[6:].isdecimal() and len(qualifier[6:]) <= 19:
+            taxon_id = int(qualifier[6:])
+            if 0 < taxon_id < (1 << 63):
+                return {"taxon_id": taxon_id}
+        return self._lookup(qualifier, scientific=True)
+
+    def display(self, name):
+        """Resolve review labels without treating arbitrary parentheses as aliases."""
+        name = str(name or "").strip()
+        source = self.explicit_source(name)
+        if source is not None:
+            prefix = name.rpartition(" (")[0]
+            return self.resolve(prefix, source=source)
+        return self.resolve(name)
+
+    def consensus(self, row):
+        """Identity the accept action applies, including legacy burst votes.
+
+        A display spelling of the row's own identity retains its source
+        evidence. A vote for another species must not inherit that evidence.
+        """
+        row = dict(row)
+        own = self.prediction(row)
+        species = row.get("species") or ""
+        if row.get("group_id") and row.get("individual"):
+            try:
+                votes = json.loads(row["individual"])
+                if isinstance(votes, dict) and votes:
+                    species = max(votes, key=lambda sp: votes[sp])
+            except (TypeError, ValueError):
+                pass
+        spellings = [row.get("species"), own.display_name]
+        if own.scientific_name:
+            spellings.extend([
+                own.scientific_name,
+                f"{row.get('species')} ({own.scientific_name})",
+            ])
+        if keyword_match_key(species) in {keyword_match_key(s) for s in spellings if s}:
+            return own
+        return self.display(species)
 
 
 def correct_common_name_index(by_common, by_scientific):

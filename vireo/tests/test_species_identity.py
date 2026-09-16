@@ -806,3 +806,30 @@ def test_partially_confirmed_encounter_keeps_a_same_name_taxon_visible(db, tmp_p
     # The untagged frame predicts the other taxon under the same name.
     assert evidence[str(pids[1])]["severity"] == "strong"
     assert evidence[str(pids[0])]["severity"] is None
+
+
+def test_review_consensus_aliases_keep_source_identity_without_taxonomy():
+    resolver = SpeciesResolver()
+    row = {"species": "Towhee", "source_taxon_id": 42,
+           "scientific_name": "Melozone crissalis", "group_id": "burst",
+           "individual": json.dumps({"Towhee (Melozone crissalis)": 2})}
+    assert resolver.consensus(row).key == resolver.prediction(row).key == "taxon:42"
+    # A different winning species must not inherit the minority's source ID.
+    row["individual"] = json.dumps({"Sparrow": 2, "Towhee": 1})
+    assert resolver.consensus(row).key == "name:sparrow"
+
+
+def test_review_display_resolves_science_without_merging_other_qualifiers(db):
+    resolver = SpeciesResolver(db=db)
+    assert resolver.display("Parrot (Amazona finschi)").key == f"taxon:{LILAC['taxon_id']}"
+    assert resolver.display("Parrot (Amazona rhodocorytha)").key == f"taxon:{BROWED['taxon_id']}"
+    assert resolver.display("Parrot (juvenile)").key == "name:parrot (juvenile)"
+    assert resolver.display("Parrot (unknown)").key != resolver.display("Parrot").key
+    assert resolver.display("Parrot (taxon ²)").taxon_id is None
+
+
+@pytest.mark.parametrize("votes", ["broken", "[]", "{}", '{"Parrot": 1, "Other": "two"}'])
+def test_review_consensus_invalid_votes_preserve_prediction_identity(db, votes):
+    row = {"species": "Parrot", "source_taxon_id": LILAC["taxon_id"],
+           "group_id": "burst", "individual": votes}
+    assert SpeciesResolver(db=db).consensus(row).key == f"taxon:{LILAC['taxon_id']}"
