@@ -2,16 +2,14 @@ import re
 
 from playwright.sync_api import expect
 
+from e2e.stack_seed import seed_browse_stack
+
 
 def test_browse_stacks_collapse_expand_and_select(live_server, page):
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'processed-hawk-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -446,12 +444,11 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     """A widening clear expands a new stack rather than dropping its selected member."""
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    # A general keyword narrows the view to one member without splitting the
+    # stack: only species and location keywords are part of a burst's identity.
+    db.tag_photo(burst_ids[0], db.add_keyword("Portfolio", kw_type="general"))
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'filter-clear-anchor-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -461,7 +458,7 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     page.wait_for_function("VireoFilter.isReady()")
     page.locator("#browseStacksToggle").check()
     page.evaluate("updateThumbSize(400)")
-    page.evaluate("VireoFilter.addRule('keyword', 'is', 'Red-tailed Hawk')")
+    page.evaluate("VireoFilter.addRule('keyword', 'is', 'Portfolio')")
     page.wait_for_function("() => photos.length === 1")
 
     selected_id = burst_ids[0]
@@ -503,12 +500,8 @@ def test_expanded_stack_paints_its_members_once(live_server, page):
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
     hidden_member_id = burst_ids[0]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'late-metadata-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -562,12 +555,8 @@ def test_expanded_stack_paints_its_members_once(live_server, page):
 def test_stack_metadata_callbacks_follow_promoted_cover(live_server, page):
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'metadata-race-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -661,12 +650,8 @@ def test_stack_metadata_callbacks_follow_promoted_cover(live_server, page):
 def test_concurrent_stack_hydration_uses_newest_request(live_server, page):
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'concurrent-hydration-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -749,12 +734,8 @@ def test_shift_range_from_stack_member_keeps_selection_honest(live_server, page)
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
     other_ids = live_server["data"]["photos"][3:]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'shift-range-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -829,12 +810,8 @@ def test_stack_edit_during_expansion_outlives_the_pending_response(live_server, 
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'stale-expansion-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -912,12 +889,8 @@ def test_stack_expansion_response_yields_to_fresher_hydration(live_server, page)
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'reconcile-clobber-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -991,12 +964,8 @@ def test_generic_member_edit_invalidates_pending_cover_hydration(live_server, pa
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'hydration-invalidate-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1078,12 +1047,8 @@ def test_cover_hydration_retries_transient_by_ids_failure(live_server, page):
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'hydration-retry-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1140,12 +1105,8 @@ def test_unresolvable_cover_hydration_is_reported_and_recoverable(live_server, p
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'hydration-exhausted-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1213,12 +1174,8 @@ def test_expanding_stack_over_500_chunks_by_ids_requests(live_server, page):
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'over-500-expansion-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1279,12 +1236,8 @@ def test_recollapse_and_reexpand_marks_all_expansion_requests_stale(live_server,
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'recollapse-stale-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1373,12 +1326,8 @@ def test_shift_click_stack_member_from_grid_anchor_range_selects(live_server, pa
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
     other_ids = live_server["data"]["photos"][3:]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'shift-click-member-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1442,12 +1391,8 @@ def test_export_preview_resolves_unloaded_stack_member(live_server, page):
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'export-preview-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         # hawk2 becomes the quality-ranked cover; hawk1/hawk3 stay hidden.
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
@@ -1559,12 +1504,8 @@ def test_export_preview_ignores_response_from_a_closed_modal(live_server, page):
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'export-preview-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1657,12 +1598,8 @@ def test_select_all_matching_puts_stack_cover_first_outside_collections(
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'select-all-order-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         # The middle (not the earliest) frame wins the cover ranking.
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
@@ -1770,12 +1707,8 @@ def test_navbar_undo_restores_stack_cover_and_member_state(live_server, page):
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'navbar-undo-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1856,12 +1789,8 @@ def test_keyword_edit_on_unloaded_members_invalidates_pending_expansion(
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'unloaded-keyword-expansion-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
@@ -1936,12 +1865,8 @@ def test_keyword_edit_on_unloaded_members_invalidates_pending_hydration(
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'unloaded-keyword-hydration-burst' "
-            "WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
