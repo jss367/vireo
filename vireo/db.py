@@ -657,24 +657,33 @@ _PHOTO_DATE_DESC_ORDER = "p.timestamp IS NULL, p.timestamp DESC, p.filename ASC,
 
 # A photo's "prediction confidence" is the score of the one prediction the UI
 # presents as its strongest guess — not "some prediction row exists with this
-# score". Three restrictions make the number mean that:
+# score". The eligibility gates are exactly the ones every other surface that
+# speaks for the *displayed* prediction applies, so the sort key and the badge
+# cannot rank a photo on a guess Browse hides:
 #
 # * ``species IS NOT NULL`` — a detection-only row ("animal", no species) is
 #   not a species guess and has no confidence to rank by.
-# * non-``rejected`` — a guess the user has thrown away must not keep the
+# * ``detector_confidence >= <workspace floor>`` — detections under the
+#   floor are hidden everywhere (``get_detections_for_photos``, the
+#   dashboard counters, ``_prediction_exists``), so their predictions must
+#   not position a card either.
+# * status not ``rejected`` — a guess the user threw away must not keep the
 #   photo at the top of a confidence sort.
+# * status not ``alternative`` — runner-up rows are dropped from top-level
+#   results by ``/api/predictions``, matching ``_prediction_exists``.
 # * newest ``labels_fingerprint`` per (detection, classifier) — the same pin
 #   ``get_top_prediction_for_photo`` and ``_prediction_exists`` use, so a
 #   reclassified photo ranks on its current label set rather than on a
 #   stale row left behind by the previous one.
 #
 # Correlates on the outer ``p.id``, so every caller must expose ``photos``
-# (or a projection carrying ``id``) as ``p``. Takes one parameter: the
-# workspace id. It is deliberately a correlated subquery rather than a
-# grouped CTE: at 88k photos / 192k predictions the CTE form materializes
-# every photo in the catalog (~0.35s even for a 60-photo folder), while the
-# correlated form is index-driven per scoped row — 0.03s on a small
-# workspace and no slower than the CTE on the largest one.
+# (or a projection carrying ``id``) as ``p``. Takes the two parameters
+# ``Database._top_prediction_confidence_params()`` returns, in that order.
+# It is deliberately a correlated subquery rather than a grouped CTE: at 88k
+# photos / 192k predictions the CTE form materializes every photo in the
+# catalog (~0.35s even for a 60-photo folder), while the correlated form is
+# index-driven per scoped row — 0.03s on a small workspace and no slower
+# than the CTE on the largest one.
 _TOP_PREDICTION_CONFIDENCE_EXPR = """(
             SELECT MAX(conf_pr.confidence)
             FROM detections conf_d
@@ -683,8 +692,10 @@ _TOP_PREDICTION_CONFIDENCE_EXPR = """(
                    ON conf_prv.prediction_id = conf_pr.id
                   AND conf_prv.workspace_id = ?
             WHERE conf_d.photo_id = p.id
+              AND conf_d.detector_confidence >= ?
               AND conf_pr.species IS NOT NULL
-              AND COALESCE(conf_prv.status, 'pending') != 'rejected'
+              AND COALESCE(conf_prv.status, 'pending')
+                  NOT IN ('rejected', 'alternative')
               AND conf_pr.labels_fingerprint = (
                   SELECT conf_pr2.labels_fingerprint FROM predictions conf_pr2
                   WHERE conf_pr2.detection_id = conf_pr.detection_id
@@ -19696,7 +19707,7 @@ class Database:
         """
         if not photo_ids:
             return {}
-        ws = self._ws_id()
+        conf_params = self._top_prediction_confidence_params()
         result = {}
         for i in range(0, len(photo_ids), 800):
             chunk = photo_ids[i:i + 800]
@@ -19706,7 +19717,7 @@ class Database:
                            {_TOP_PREDICTION_CONFIDENCE_EXPR} AS confidence
                     FROM photos p
                     WHERE p.id IN ({placeholders})""",
-                (ws, *chunk),
+                (*conf_params, *chunk),
             ).fetchall()
             for row in rows:
                 if row["confidence"] is not None:
@@ -24963,6 +24974,21 @@ class Database:
 
         return folder_join, "", where, params
 
+    def _top_prediction_confidence_params(self):
+        """Bind values for ``_TOP_PREDICTION_CONFIDENCE_EXPR``, in SQL order.
+
+        The detector floor is the workspace-effective ``detector_confidence``
+        — the same read ``_build_query_from_rules`` makes for its prediction
+        predicates. Reading it here rather than baking a constant in keeps
+        the sort, the badge, and the universal filter agreeing about which
+        detections exist after the user moves the slider.
+        """
+        import config as cfg
+        floor = float(
+            self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+        )
+        return [self._ws_id(), floor]
+
     def _photo_sort_clause(self, sort):
         """Return ``(order_by_sql, params)`` for a photo-list sort key.
 
@@ -24988,7 +25014,7 @@ class Database:
                 f"{_TOP_PREDICTION_CONFIDENCE_EXPR} {direction} NULLS LAST, "
                 "p.filename ASC, p.id ASC"
             )
-            return order, [self._ws_id()]
+            return order, self._top_prediction_confidence_params()
         return _PHOTO_SORT_ORDERS.get(sort, _PHOTO_DATE_ASC_ORDER), []
 
     def get_collection_photos(
@@ -25487,7 +25513,7 @@ class Database:
                 f",\n                       {_TOP_PREDICTION_CONFIDENCE_EXPR}"
                 " AS _prediction_confidence"
             )
-            scoped_params = [self._ws_id()]
+            scoped_params = self._top_prediction_confidence_params()
         run_ctes, run_params = self._burst_run_ctes(settings)
         ctes = f"""
             WITH {self._STACK_KEYWORD_SET_CTES}
@@ -25735,18 +25761,32 @@ class Database:
         layer: ``_browse_stack_kind``, ``_browse_stack_count``, and
         ``_browse_stack_member_ids``. Singles carry a null kind and otherwise
         retain the ordinary photo-list shape.
+
+        Under a prediction-confidence sort they carry a fourth,
+        ``_stack_lead_prediction_confidence``: the score that actually
+        positioned the item. A stack is placed by its *leading member* (see
+        ``_STACK_SORT_SPECS``) while its cover is chosen on quality, so those
+        are often different frames — and a badge showing the cover's own
+        score would then name a number that did not decide where the card
+        sits. The HTTP layer prefers this value for the card's
+        ``prediction_confidence`` (Codex P2 on PR #1670).
         """
         ranked, params = self._ranked_stack_query(
             rules, sort=sort, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
             stack_config=stack_config,
         )
+        lead_confidence = (
+            ",\n                   _stack_lead_key"
+            " AS _stack_lead_prediction_confidence"
+            if sort in _PREDICTION_CONFIDENCE_SORTS else ""
+        )
         order = self._stack_sort_clause(sort)
         page = max(1, page)
         offset = (page - 1) * per_page
         query = ranked + f"""
             SELECT ranked.*,
-                   _stack_kind AS _browse_stack_kind
+                   _stack_kind AS _browse_stack_kind{lead_confidence}
             FROM ranked
             WHERE _stack_cover_rank = 1
             ORDER BY {order}

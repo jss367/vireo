@@ -3356,7 +3356,18 @@ function renderCardField(field, p) {
     // off instead of claiming a confidence of zero.
     case 'prediction_confidence':
       if (p.prediction_confidence != null) {
-        return '<span style="font-size:10px;color:var(--text-ghost);" title="Confidence of the strongest current species prediction">'
+        // Under a confidence sort a stack is placed by its leading member,
+        // not by the quality-ranked cover shown on the card, and the server
+        // sends that leading score so the badge names the number that put
+        // the item where it is. Say whose score it is rather than letting
+        // the card imply it belongs to the frame in the thumbnail.
+        var confIsStackLead = p.browse_stack && p.browse_stack.count >= 2
+          && sortRanksOnPredictionConfidence();
+        var confTitle = confIsStackLead
+          ? 'Confidence of the strongest current species prediction on the frame that leads this stack — the score this stack is sorted by'
+          : 'Confidence of the strongest current species prediction';
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="'
+          + escapeAttr(confTitle) + '">'
           + Math.round(p.prediction_confidence * 100) + '%</span>';
       }
       return '';
@@ -5880,6 +5891,16 @@ var MUTATION_KEYWORD = 'keyword';
 var MUTATION_PREDICTION = 'prediction';
 var MUTATION_WILDLIFE = 'wildlife_excluded';
 
+/* Sorts whose key is the photo's top prediction confidence — mirrors
+   _PREDICTION_CONFIDENCE_SORTS in vireo/db.py. */
+var PREDICTION_CONFIDENCE_SORTS = ['prediction_confidence',
+  'prediction_confidence_asc'];
+
+function sortRanksOnPredictionConfidence() {
+  var el = document.getElementById('sortSelect');
+  return !!el && PREDICTION_CONFIDENCE_SORTS.indexOf(el.value) !== -1;
+}
+
 function refreshActiveCollectionAfterMembershipChange(mutations) {
   if (activeCollectionId) {
     filterByCollection(activeCollectionId, { preserveAnchor: false });
@@ -5918,6 +5939,21 @@ function refreshActiveCollectionAfterMembershipChange(mutations) {
         filterByCollection(reopenId, { preserveAnchor: false });
       }
     });
+    return;
+  }
+  // A prediction edit moves a photo under the prediction-confidence sorts
+  // even with no filter active, so the filter-only checks below would skip
+  // the reload the grid needs. Rejecting the top pick promotes the next
+  // guess (or leaves the photo unscored); accepting a runner-up rejects the
+  // old top pick. Either way the photo's sort key AND the number its badge
+  // shows have changed, and without reloading the grid keeps the old order
+  // and the old score until a manual re-sort (Codex P2 on PR #1670). Same
+  // options as onSortChanged(), which is the same situation: the order moved
+  // under the photo the user is looking at, so hold onto it.
+  var predictionEdit = !mutations ||
+    mutations.indexOf(MUTATION_PREDICTION) !== -1;
+  if (predictionEdit && sortRanksOnPredictionConfidence()) {
+    reloadBrowseResults({ preserveAnchor: true, focusAnchor: true });
     return;
   }
   // Collections open into the filter bar now (Phase 5): when a membership

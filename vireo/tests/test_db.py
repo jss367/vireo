@@ -29337,6 +29337,59 @@ def test_prediction_confidence_sort_ignores_rejected_predictions(tmp_path):
     assert db.get_top_prediction_confidences([ids["a.jpg"]]) == {}
 
 
+def test_prediction_confidence_sort_ignores_hidden_detections(tmp_path):
+    """A detection under the workspace detector floor is hidden everywhere
+    else in Browse, so the prediction hanging off it must not position a
+    card either (Codex P2 on PR #1670)."""
+    db, fid = _filter_db(tmp_path)
+    visible = db.add_photo(folder_id=fid, filename='visible.jpg',
+                           extension='.jpg', file_size=1, file_mtime=1.0)
+    hidden = db.add_photo(folder_id=fid, filename='hidden.jpg',
+                          extension='.jpg', file_size=1, file_mtime=1.0)
+    for photo_id, detector_conf, species_conf in (
+            (visible, 0.9, 0.4), (hidden, 0.05, 0.99)):
+        det_ids = db.save_detections(photo_id, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+            "confidence": detector_conf, "category": "animal",
+        }], detector_model="MDV6")
+        db.add_prediction(det_ids[0], "Robin", species_conf, "test")
+    db.conn.commit()
+
+    # Default detector_confidence floor is 0.2, so the 0.05 detection — and
+    # its 0.99 guess — drop out entirely rather than winning the sort.
+    assert db.get_top_prediction_confidences([visible, hidden]) == {
+        visible: 0.4}
+    assert [row["id"] for row in db.query_photos(
+        [], sort="prediction_confidence")] == [visible, hidden]
+
+
+def test_prediction_confidence_sort_ignores_alternative_rows(tmp_path):
+    """Runner-up rows stored as ``alternative`` are dropped from top-level
+    prediction results, so they cannot be the score a card ranks on."""
+    db, fid = _filter_db(tmp_path)
+    photo_id = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                            file_size=1, file_mtime=1.0)
+    det_ids = db.save_detections(photo_id, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.8, "test")
+    db.add_prediction(det_ids[0], "Wren", 0.5, "test")
+    db.conn.commit()
+    top, runner_up = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM predictions ORDER BY confidence DESC")
+    ]
+    db.update_prediction_status(runner_up, "alternative")
+
+    assert db.get_top_prediction_confidences([photo_id]) == {photo_id: 0.8}
+
+    # With the displayed top pick rejected, the photo falls back to nothing
+    # rather than to its hidden runner-up.
+    db.update_prediction_status(top, "rejected")
+    assert db.get_top_prediction_confidences([photo_id]) == {}
+
+
 def test_prediction_confidence_sort_ignores_detection_only_rows(tmp_path):
     """A detection with no species is not a species guess, so a photo that
     has only detections stays unscored rather than borrowing a confidence."""

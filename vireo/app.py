@@ -5204,7 +5204,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stacks_by_cover = {
             item["cover_id"]: item for item in (stack_items or [])
         }
+        # Under a prediction-confidence sort the stacked query reports the
+        # score that positioned each item — read off the stack's *leading*
+        # member, which is usually not the quality-ranked cover. Keep it so
+        # the badge names the number that decided the card's place instead of
+        # the cover's own (Codex P2 on PR #1670). Absent for every other sort
+        # and for unstacked reads, where the card's own score is the one that
+        # positioned it.
+        stack_lead_confidence = {}
         for photo in photo_dicts:
+            if "_stack_lead_prediction_confidence" in photo:
+                stack_lead_confidence[photo.get("id")] = photo[
+                    "_stack_lead_prediction_confidence"
+                ]
             projected = (
                 stack_items is not None
                 or "_browse_stack_kind" in photo
@@ -5244,6 +5256,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         attach_species_representatives(db, photo_dicts)
         attach_detections(db, photo_dicts)
         attach_prediction_confidence(db, photo_dicts)
+        for photo in photo_dicts:
+            if photo.get("id") in stack_lead_confidence:
+                photo["prediction_confidence"] = stack_lead_confidence[
+                    photo["id"]
+                ]
         attach_edit_recipes(db, photo_dicts)
         return photo_dicts
 

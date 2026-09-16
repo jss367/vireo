@@ -11965,6 +11965,66 @@ def _seed_browse_burst(db, photo_ids, folder_id=None):
     return folder_id
 
 
+def test_api_photos_query_stack_badge_is_the_score_that_placed_it(app_and_db):
+    """A stack is positioned by its leading member but covered by its
+    quality-ranked frame. The badge must report the score that decided the
+    card's place, not the cover's own (Codex P2 on PR #1670)."""
+    app, db = app_and_db
+    listed = db.get_photos(sort="name")
+    cover, lead = listed[0]["id"], listed[1]["id"]
+    with db.conn:
+        _seed_browse_burst(db, [cover, lead])
+        # The cover is chosen on quality; the sort's leading member is the
+        # other frame, so the two disagree by construction.
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,))
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.01 WHERE id = ?", (lead,))
+    for photo_id, confidence in ((cover, 0.2), (lead, 0.9)):
+        det_ids = db.save_detections(photo_id, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+            "confidence": 0.9, "category": "animal",
+        }], detector_model="MDV6")
+        db.add_prediction(det_ids[0], "Robin", confidence, "test")
+    db.conn.commit()
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [], "sort": "prediction_confidence", "stacks": True,
+    })
+
+    assert response.status_code == 200
+    cards = {p["id"]: p for p in response.get_json()["photos"]}
+    assert cover in cards and lead not in cards, "expected the burst to collapse"
+    assert cards[cover]["browse_stack"]["count"] == 2
+    assert cards[cover]["prediction_confidence"] == 0.9
+
+
+def test_api_photos_query_unsorted_stack_badge_is_the_covers_own_score(app_and_db):
+    """Under any other sort nothing positioned the stack by confidence, so
+    the badge falls back to describing the frame on the card."""
+    app, db = app_and_db
+    listed = db.get_photos(sort="name")
+    cover, other = listed[0]["id"], listed[1]["id"]
+    with db.conn:
+        _seed_browse_burst(db, [cover, other])
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,))
+    for photo_id, confidence in ((cover, 0.2), (other, 0.9)):
+        det_ids = db.save_detections(photo_id, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+            "confidence": 0.9, "category": "animal",
+        }], detector_model="MDV6")
+        db.add_prediction(det_ids[0], "Robin", confidence, "test")
+    db.conn.commit()
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [], "sort": "name", "stacks": True,
+    })
+
+    cards = {p["id"]: p for p in response.get_json()["photos"]}
+    assert cards[cover]["prediction_confidence"] == 0.2
+
+
 def test_api_photos_query_browse_stacks(app_and_db):
     app, db = app_and_db
     listed = db.get_photos(sort="name")
