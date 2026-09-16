@@ -169,19 +169,33 @@ class SpeciesResolver:
             return self.display(row.get("species"))
         return self.resolve(row.get("species"), row.get("scientific_name") if native else None, source)
 
+    def explicit_source(self, name):
+        """Return the ``resolve`` source ``display(name)`` would use, or ``None``.
+
+        A ``Name (scientific)`` or ``Name (taxon N)`` suffix is explicit
+        evidence for a taxon identity. A bare name has none — callers that
+        bind a source-specific keyword must fall back to name lookup so an
+        unlinked same-name row (``mark_species_keywords`` still pending) is
+        reused rather than replaced with a suffixed duplicate.
+        """
+        name = str(name or "").strip()
+        prefix, sep, suffix = name.rpartition(" (")
+        if not sep or not suffix.endswith(")"):
+            return None
+        qualifier = suffix[:-1]
+        if qualifier.startswith("taxon ") and qualifier[6:].isdecimal() and len(qualifier[6:]) <= 19:
+            taxon_id = int(qualifier[6:])
+            if 0 < taxon_id < (1 << 63):
+                return {"taxon_id": taxon_id}
+        return self._lookup(qualifier, scientific=True)
+
     def display(self, name):
         """Resolve review labels without treating arbitrary parentheses as aliases."""
         name = str(name or "").strip()
-        prefix, sep, suffix = name.rpartition(" (")
-        if sep and suffix.endswith(")"):
-            qualifier = suffix[:-1]
-            if qualifier.startswith("taxon ") and qualifier[6:].isdecimal() and len(qualifier[6:]) <= 19:
-                taxon_id = int(qualifier[6:])
-                if 0 < taxon_id < (1 << 63):
-                    return self.resolve(prefix, source={"taxon_id": taxon_id})
-            taxon = self._lookup(qualifier, scientific=True)
-            if taxon:
-                return self.resolve(prefix, source=taxon)
+        source = self.explicit_source(name)
+        if source is not None:
+            prefix = name.rpartition(" (")[0]
+            return self.resolve(prefix, source=source)
         return self.resolve(name)
 
     def consensus(self, row):

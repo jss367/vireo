@@ -24801,3 +24801,43 @@ def test_accept_legacy_prediction_reuses_unlinked_same_name_keyword(app_and_db):
         "SELECT name FROM keywords WHERE name LIKE 'California Towhee%'"
     ).fetchall()
     assert [r["name"] for r in duplicates] == ["California Towhee"]
+
+
+def test_batch_accept_on_all_bare_name_reuses_unlinked_same_name_keyword(app_and_db):
+    """Bare-name Accept-on-all fallback must not mint a suffixed duplicate.
+
+    When every prediction in the bucket is ambiguous or otherwise unacceptable,
+    ``_batch_accept_under_lock`` falls through to creating a keyword from
+    ``expected_species`` alone. A bare common name is name-only inference, and
+    routing it through ``_add_source_species_keyword`` on a taxonomy-lookup
+    taxon id would refuse to reuse an unlinked same-name keyword the async
+    ``mark_species_keywords`` pass has not touched yet, minting
+    ``California Towhee (taxon 42)`` instead.
+    """
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (42, 'Melozone crissalis', 'California Towhee', 'species')"
+    )
+    db.set_meta("common_name_identity_version", "1")
+    existing_kid = db.conn.execute(
+        "INSERT INTO keywords (name, is_species, type) "
+        "VALUES ('California Towhee', 1, 'general')"
+    ).lastrowid
+    photo, _ = _seed_prediction_photo(db, "towhee-bare.jpg", "California Towhee", .9, status="rejected")
+    db.conn.commit()
+
+    response = app.test_client().post("/api/predictions/batch-accept", json={
+        "photo_ids": [photo], "prediction_ids": [],
+        "expected_species": "California Towhee",
+    })
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.get_json()["accepted"] == 1
+    tagged = db.get_photo_keywords(photo)
+    assert len(tagged) == 1
+    assert tagged[0]["id"] == existing_kid
+    duplicates = db.conn.execute(
+        "SELECT name FROM keywords WHERE name LIKE 'California Towhee%'"
+    ).fetchall()
+    assert [r["name"] for r in duplicates] == ["California Towhee"]

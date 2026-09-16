@@ -16529,10 +16529,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if all_photo_ids is not None:
             if keyword_id is None:
                 from species_identity import SpeciesResolver
-                identity = SpeciesResolver(db=db).display(expected_species)
+                resolver = SpeciesResolver(db=db)
+                identity = resolver.display(expected_species)
+                # Only bind the resolved taxon when ``expected_species``
+                # carried an explicit ``(scientific)``/``(taxon N)``
+                # qualifier. A bare common name is name-only inference,
+                # and routing it through ``_add_source_species_keyword``
+                # refuses to reuse an unlinked same-name keyword the async
+                # ``mark_species_keywords`` pass has not touched yet,
+                # minting a suffixed duplicate such as
+                # ``California Towhee (taxon 42)``. Mirrors the guard in
+                # ``accept_prediction`` so both accept paths behave the
+                # same for a legacy/name-only bucket.
+                explicit = resolver.explicit_source(expected_species) is not None
                 keyword_id = db.add_keyword(
                     identity.display_name, is_species=True, _commit=False,
-                    source_taxon_id=identity.taxon_id,
+                    source_taxon_id=identity.taxon_id if explicit else None,
                 )
                 species = db.conn.execute(
                     "SELECT name FROM keywords WHERE id = ?", (keyword_id,),
