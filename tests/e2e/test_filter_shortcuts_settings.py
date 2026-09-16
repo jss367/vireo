@@ -93,6 +93,29 @@ def test_added_quick_filter_appears_on_the_bar_and_filters(live_server, page):
     expect(page.locator(".vf-chips")).not_to_contain_text("Keepers")
 
 
+def test_renamed_flag_button_names_its_own_chip(live_server, page):
+    """One active enum value is one button, so the chip uses its words."""
+    status = _open_settings(page, live_server)
+    _saved(page, status, lambda: page.fill(
+        '[data-shortcut-row="flag_picked"] input', "Portfolio"
+    ))
+
+    _open_browse(page, live_server)
+    page.locator('.vf-shortcuts [data-value="flagged"]').click()
+    expect(page.locator(".vf-chips")).to_contain_text("Portfolio")
+    # A second value has to name both, so the chip states the full clause.
+    page.locator('.vf-shortcuts [data-value="none"]').click()
+    expect(page.locator(".vf-chips")).to_contain_text("Flag is one of Picked, Unflagged")
+
+
+def test_internal_only_fields_are_not_offered_as_quick_filters(live_server, page):
+    """`life_list_uncounted` takes an encoded token, not typed text."""
+    _open_settings(page, live_server)
+    options = page.locator("#cfgShortcutField option").all_inner_texts()
+    assert "Uncounted identification" not in options
+    assert "Rating" in options
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):

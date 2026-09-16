@@ -1927,6 +1927,27 @@ function shortcutKind(entry) {
   return 'rules';
 }
 
+// Some fields exist only on one page (review-only prediction fields, say),
+// so a button built on them is hidden elsewhere. Name those pages in the row
+// rather than leaving the user to wonder where their button went.
+function shortcutPageScope(entry) {
+  var rules = entry && entry.rules;
+  if (!rules || !_filterFieldSpecs) return '';
+  var fields = rules.field ? [rules.field] : [];
+  if (!fields.length && Array.isArray(rules.rules)) {
+    fields = rules.rules.map(function(r) { return r && r.field; }).filter(Boolean);
+  }
+  var pages = null;
+  fields.forEach(function(key) {
+    var spec = _filterFieldSpecs[key];
+    if (!spec || !Array.isArray(spec.pages)) return;
+    pages = (pages || []).concat(spec.pages);
+  });
+  if (!pages) return '';
+  var unique = pages.filter(function(p, i) { return pages.indexOf(p) === i; });
+  return unique.length ? unique.join(', ') : 'no page';
+}
+
 function shortcutGroupPeers(entry) {
   var kind = shortcutKind(entry);
   if (kind === 'rules') return [];
@@ -1970,6 +1991,13 @@ function renderFilterShortcuts() {
     desc.style.cssText = 'flex:1;min-width:0;font-size:12px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     var peers = shortcutGroupPeers(entry);
     desc.textContent = describeShortcutRules(entry.rules);
+    var only = shortcutPageScope(entry);
+    if (only) {
+      var scope = document.createElement('span');
+      scope.style.cssText = 'color:var(--text-faint);';
+      scope.textContent = ' · only on ' + only;
+      desc.appendChild(scope);
+    }
     if (peers.length) {
       var tag = document.createElement('span');
       tag.style.cssText = 'color:var(--text-faint);';
@@ -2025,6 +2053,10 @@ function buildShortcutFieldSelect() {
     // Fields the add-form cannot build a complete value for are left to the
     // filter bar's own rule builder rather than offered half-working here.
     if (spec.type === 'folder' || !shortcutFieldOptions(spec).length) return;
+    // `pages: []` marks an internal deep-link predicate (its values are
+    // encoded tokens, not text a person types). No page offers it in its own
+    // field picker, so a button built on it could only ever fail.
+    if (Array.isArray(spec.pages) && !spec.pages.length) return;
     (byCategory[spec.category] = byCategory[spec.category] || []).push(key);
   });
   select.innerHTML = '';

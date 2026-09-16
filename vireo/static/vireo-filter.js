@@ -331,7 +331,19 @@
 
   function shortcutLabelFor(node) {
     const match = state.shortcuts.find((s) => sameNode(s.rules, node));
-    return match ? match.label : null;
+    if (match) return match.label;
+    // Clicking an enum shortcut stores ``field in [value]`` so a second value
+    // can merge into the same clause, which no longer matches the stored
+    // ``field is value``. One value is still exactly one button, so the chip
+    // keeps that button's words; two or more have to name every value and
+    // fall through to the generic "is one of" wording.
+    if (!isGroup(node) && node.op === 'in' && Array.isArray(node.value) &&
+        node.value.length === 1) {
+      const single = state.shortcuts.find((s) => s.kind === 'enum' &&
+        s.field === node.field && s.value === node.value[0]);
+      if (single) return single.label;
+    }
+    return null;
   }
 
   // Clone the tree with one leaf dropped from its group — never substitute
@@ -1053,12 +1065,15 @@
   }
 
   // Hide a button the page could never honor: a field this build no longer
-  // has, or a value the page scope excludes (Misses hides rejected photos,
-  // so a "Rejected" shortcut there would only ever return an empty grid).
+  // has, a field this page does not offer (the registry's ``pages``, e.g.
+  // review-only prediction fields), or a value the page scope excludes
+  // (Misses hides rejected photos, so a "Rejected" shortcut there would only
+  // ever return an empty grid).
   function shortcutAvailable(shortcut) {
     const leaves = allLeaves(shortcut.rules);
     if (!leaves.length) return false;
     return leaves.every((leaf) => {
+      if (!fieldAvailable(leaf.field)) return false;
       const spec = fieldSpec(leaf.field);
       if (!spec) return false;
       if (!spec.values || !['is', 'in'].includes(leaf.op)) return true;

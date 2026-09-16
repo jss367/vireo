@@ -106,6 +106,35 @@ def test_recent_windows_survive_and_bad_ones_do_not():
             "field": "timestamp", "op": "recent", "value": bad}}]) == []
 
 
+@pytest.mark.parametrize("rules", [
+    # The rule compiler rejects a list for a scalar operator...
+    {"field": "flag", "op": "is", "value": ["flagged"]},
+    {"field": "rating", "op": ">=", "value": [4]},
+    # ...a scalar where a list operator needs one...
+    {"field": "flag", "op": "in", "value": "flagged"},
+    # ...and `between` with anything other than two bounds.
+    {"field": "rating", "op": "between", "value": [3]},
+    {"field": "rating", "op": "between", "value": [1, 2, 3]},
+    # A list whose items are not storable scalars is not silently shortened.
+    {"field": "flag", "op": "in", "value": ["flagged", {"nested": 1}]},
+])
+def test_list_values_must_match_what_the_operator_can_execute(rules):
+    """A button that 400s the query when clicked is worse than no button."""
+    assert fs.normalize([{"id": "x", "label": "Bad", "rules": rules}]) == []
+
+
+def test_list_operators_keep_their_usable_values():
+    entries = fs.normalize([
+        {"id": "a", "label": "Picked or rejected",
+         "rules": {"field": "flag", "op": "in", "value": ["flagged", "rejected"]}},
+        {"id": "b", "label": "Three to five",
+         "rules": {"field": "rating", "op": "between", "value": [3, 5]}},
+    ])
+    assert [entry["rules"]["value"] for entry in entries] == [
+        ["flagged", "rejected"], [3, 5],
+    ]
+
+
 def test_a_group_keeps_only_its_usable_children():
     entries = fs.normalize([{
         "id": "x", "label": "Mixed",

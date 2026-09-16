@@ -99,9 +99,17 @@ def _clean_leaf(node):
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             return None
         return {"field": field, "op": op, "value": {"n": count, "unit": raw["unit"]}}
-    if isinstance(raw, list):
+    # List vs scalar is not free-form: the rule compiler rejects a list for
+    # ``is``, and ``between`` needs exactly two bounds. An entry that passes
+    # here but 400s the query when clicked is worse than no button at all.
+    wants_list = op in ("in", "not_in", "between")
+    if isinstance(raw, list) != wants_list:
+        return None
+    if wants_list:
         value = [v for v in (_clean_scalar(item) for item in raw) if v is not None]
-        if not value:
+        if not value or len(value) != len(raw):
+            return None
+        if op == "between" and len(value) != 2:
             return None
     else:
         value = _clean_scalar(raw)
