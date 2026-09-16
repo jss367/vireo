@@ -61,6 +61,7 @@ from flask import (
     Flask,
     Response,
     abort,
+    after_this_request,
     g,
     jsonify,
     make_response,
@@ -6918,6 +6919,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sort and paging. Response shape matches /api/photos so pages can
         switch fetch paths without re-plumbing their renderers.
 
+        ``focus_photo_id`` (optional) serves the page holding that photo
+        rather than the requested one and adds ``focus_index`` /
+        ``focus_page`` to the response — what Browse re-sorts around so a
+        change of sort order keeps the user's selected photo on screen
+        without paging forward until it appears. ``page`` reports the page
+        actually served, so it equals ``focus_page`` whenever the photo was
+        found. A photo the query does not match reports ``focus_index:
+        null`` and leaves the requested page alone.
+
         Design: docs/plans/2026-07-19-universal-filters-design.md.
         """
         db = _get_db()
@@ -6965,6 +6975,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             not isinstance(folder_id, int) or isinstance(folder_id, bool)
         ):
             return json_error("folder_id must be an integer", 400)
+        # Browse sends ``focus_photo_id`` when a re-sort has to stay with the
+        # photo the user has selected: serve the page that photo landed on
+        # instead of page 1, and report where it is so the caller can anchor
+        # its loaded window there. A photo that no longer matches reports
+        # ``focus_index: null`` and the requested page — never a silent
+        # substitution the grid would have no way to notice.
+        focus_photo_id = payload.get("focus_photo_id")
+        if focus_photo_id is not None and (
+            not isinstance(focus_photo_id, int) or isinstance(focus_photo_id, bool)
+        ):
+            return json_error("focus_photo_id must be an integer", 400)
         rules = _inject_active_visual_model(rules)
         try:
             visual = _validate_visual_arg(payload.get("visual"))
@@ -6981,6 +7002,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # and bulk actions, so those remain restricted to actionable photos.
         if payload.get("ids_only"):
             include_offline = False
+
+        # Offset pagination is only self-consistent within one snapshot, and
+        # that applies to the visual path too: a deletion landing between the
+        # id ordering and ``get_photos_by_ids`` drops rows out of the page the
+        # focused position described, so the photo Browse is holding onto goes
+        # missing and the selection is cleared. Open the snapshot here — ahead
+        # of the visual clause, which returns before the rules path's ``BEGIN``
+        # — and release it on every exit, error paths included (Codex review on
+        # PR #1658). Reads only; ``rollback`` is what releases it.
+        if focus_photo_id is not None:
+            db.conn.execute("BEGIN")
+
+            @after_this_request
+            def _release_focus_snapshot(response):
+                if db.conn.in_transaction:
+                    db.conn.rollback()
+                return response
 
         visual_info = None
         if visual is not None:
@@ -7066,6 +7104,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     [item["cover_id"] for item in stack_items]
                     if stack_items is not None else ordered_ids
                 )
+                # A healthy visual clause has every matching id in memory
+                # already, so the focused page is a list index rather than
+                # another query.
+                focus_index = None
+                if focus_photo_id is not None:
+                    if stack_items is not None:
+                        for item_index, item in enumerate(stack_items):
+                            if (item["cover_id"] == focus_photo_id
+                                    or focus_photo_id in item["member_ids"]):
+                                focus_index = item_index
+                                break
+                    elif focus_photo_id in logical_ids:
+                        focus_index = logical_ids.index(focus_photo_id)
+                    if focus_index is not None:
+                        page = focus_index // per_page + 1
                 start = (page - 1) * per_page
                 page_ids = logical_ids[start:start + per_page]
                 photos_map = db.get_photos_by_ids(page_ids)
@@ -7102,6 +7155,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "per_page": per_page,
                     "visual": visual_info,
                 }
+                if focus_photo_id is not None:
+                    response["focus_index"] = focus_index
+                    response["focus_page"] = page
                 if stacks:
                     # Availability totals below are photo counts, so the
                     # underlying (unstacked) total is what they must agree
@@ -7138,81 +7194,131 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if visual_info is not None:
                 payload_out["visual"] = visual_info
             return jsonify(payload_out)
+        # A target sitting on a page boundary can move onto the adjacent
+        # page when ingestion or deletion commits between the position lookup
+        # and the page fetch below. The response would still carry a valid
+        # ``focus_page`` while the rows it returns omit the photo — and
+        # Browse deliberately does not page towards a focused target, so it
+        # would clear the very selection this path exists to preserve. Hold
+        # one SQLite read snapshot across the lookup, the counts and the page,
+        # the same guarantee ``/api/browse/init`` gives its focused first
+        # paint. Opt-in, so ordinary Browse paging keeps its
+        # transaction-free behaviour.
+        #
+        # ``try``/``finally`` rather than ``/api/browse/init``'s rollback
+        # before each error return: the enrichers and count queries below can
+        # raise something other than ValueError, and the snapshot has to be
+        # released on those paths too.
+        focus_snapshot = focus_photo_id is not None
+        if focus_snapshot and not db.conn.in_transaction:
+            db.conn.execute("BEGIN")
         try:
-            underlying_total = db.count_photos_for_rules(
-                rules,
-                collection_id=collection_id,
-                folder_id=folder_id,
-                include_offline_folders=include_offline,
-            )
-            if stacks:
-                stack_cfg = db.browse_stack_settings(cfg.load())
-                photos = db.query_browse_stacks(
-                    rules, sort=sort, page=page, per_page=per_page,
-                    collection_id=collection_id, folder_id=folder_id,
-                    include_offline_folders=include_offline,
-                    stack_config=stack_cfg,
-                )
-                total = db.count_browse_stacks(
-                    rules, collection_id=collection_id, folder_id=folder_id,
-                    include_offline_folders=include_offline,
-                    stack_config=stack_cfg,
-                )
-            else:
-                photos = db.query_photos(
-                    rules, sort=sort, page=page, per_page=per_page,
-                    collection_id=collection_id, folder_id=folder_id,
-                    include_offline_folders=include_offline,
-                )
-                total = underlying_total
-        except ValueError as exc:
-            return json_error(str(exc), 400)
-
-        photo_dicts = _prepare_browse_photo_dicts(db, photos)
-
-        response = {
-            "photos": photo_dicts,
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-        }
-        if stacks:
-            response["underlying_total"] = underlying_total
-        if include_offline or include_availability:
-            # Availability is always reported in photos, never in stacks:
-            # the notice reads "N of M photos available", so it has to agree
-            # with the sidebar collection count and with ``underlying_total``
-            # — ``total`` is the logical item count once Stacks collapses it.
+            focus_index = None
             try:
-                inventory_total = (
-                    underlying_total
-                    if include_offline
-                    else db.count_photos_for_rules(
-                        rules,
-                        collection_id=collection_id,
-                        folder_id=folder_id,
-                        include_offline_folders=True,
+                # One stack configuration for the whole request. The position
+                # below has to be read under exactly the grouping the page
+                # fetch uses, or a focused re-sort lands on the wrong page.
+                stack_cfg = db.browse_stack_settings(cfg.load()) if stacks else None
+                if focus_photo_id is not None:
+                    # Stacked Browse pages logical items, so a hidden member
+                    # resolves to the page its cover sits on.
+                    focus_index = (
+                        db.query_browse_stack_position(
+                            rules, focus_photo_id, sort=sort,
+                            collection_id=collection_id, folder_id=folder_id,
+                            include_offline_folders=include_offline,
+                            stack_config=stack_cfg,
+                        )
+                        if stacks
+                        else db.query_photo_position(
+                            rules, focus_photo_id, sort=sort,
+                            collection_id=collection_id, folder_id=folder_id,
+                            include_offline_folders=include_offline,
+                        )
                     )
+                    if focus_index is not None:
+                        page = focus_index // per_page + 1
+                underlying_total = db.count_photos_for_rules(
+                    rules,
+                    collection_id=collection_id,
+                    folder_id=folder_id,
+                    include_offline_folders=include_offline,
                 )
-                available_total = (
-                    db.count_photos_for_rules(
-                        rules,
-                        collection_id=collection_id,
-                        folder_id=folder_id,
+                if stacks:
+                    photos = db.query_browse_stacks(
+                        rules, sort=sort, page=page, per_page=per_page,
+                        collection_id=collection_id, folder_id=folder_id,
+                        include_offline_folders=include_offline,
+                        stack_config=stack_cfg,
                     )
-                    if include_offline
-                    else underlying_total
-                )
+                    total = db.count_browse_stacks(
+                        rules, collection_id=collection_id, folder_id=folder_id,
+                        include_offline_folders=include_offline,
+                        stack_config=stack_cfg,
+                    )
+                else:
+                    photos = db.query_photos(
+                        rules, sort=sort, page=page, per_page=per_page,
+                        collection_id=collection_id, folder_id=folder_id,
+                        include_offline_folders=include_offline,
+                    )
+                    total = underlying_total
             except ValueError as exc:
                 return json_error(str(exc), 400)
-            response.update({
-                "inventory_total": inventory_total,
-                "available_total": available_total,
-                "offline_total": max(0, inventory_total - available_total),
-            })
-        if visual_info is not None:
-            response["visual"] = visual_info
-        return jsonify(response)
+
+            photo_dicts = _prepare_browse_photo_dicts(db, photos)
+
+            response = {
+                "photos": photo_dicts,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            }
+            if focus_photo_id is not None:
+                response["focus_index"] = focus_index
+                response["focus_page"] = page
+            if stacks:
+                response["underlying_total"] = underlying_total
+            if include_offline or include_availability:
+                # Availability is always reported in photos, never in stacks:
+                # the notice reads "N of M photos available", so it has to agree
+                # with the sidebar collection count and with ``underlying_total``
+                # — ``total`` is the logical item count once Stacks collapses it.
+                try:
+                    inventory_total = (
+                        underlying_total
+                        if include_offline
+                        else db.count_photos_for_rules(
+                            rules,
+                            collection_id=collection_id,
+                            folder_id=folder_id,
+                            include_offline_folders=True,
+                        )
+                    )
+                    available_total = (
+                        db.count_photos_for_rules(
+                            rules,
+                            collection_id=collection_id,
+                            folder_id=folder_id,
+                        )
+                        if include_offline
+                        else underlying_total
+                    )
+                except ValueError as exc:
+                    return json_error(str(exc), 400)
+                response.update({
+                    "inventory_total": inventory_total,
+                    "available_total": available_total,
+                    "offline_total": max(0, inventory_total - available_total),
+                })
+            if visual_info is not None:
+                response["visual"] = visual_info
+            return jsonify(response)
+        finally:
+            # rollback(), not commit(): this endpoint is read-only, and the
+            # rollback is what releases the snapshot.
+            if focus_snapshot and db.conn.in_transaction:
+                db.conn.rollback()
 
     @app.route("/api/filters/fields")
     def api_filter_fields():
