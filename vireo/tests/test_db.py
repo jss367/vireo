@@ -13713,6 +13713,238 @@ def test_assigned_location_accepts_sync_only_grant(db, tmp_path):
     db.set_active_workspace(ws)
 
 
+def _photo_keyword_names(db, photo_id):
+    return {
+        r["name"] for r in db.conn.execute(
+            "SELECT k.name AS name FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ?", (photo_id,)).fetchall()
+    }
+
+
+def test_merge_staged_tree_carries_keyword_add_association(db, tmp_path):
+    """A manual ``keyword_add`` has already written the ``photo_keywords``
+    row; the queue row only records what the sidecar still owes. Deleting
+    the losing photo discards the association, so the sync would write the
+    keyword to XMP while the catalog reports the photo untagged."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    kw = db.add_keyword("Birds")
+    db.tag_photo(dup_pid, kw)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', 'Birds', 'tok-add', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert "Birds" in _photo_keyword_names(db, survivor_pid)
+
+
+def test_merge_staged_tree_carries_keyword_remove_association(db, tmp_path):
+    """Mirror: the removal already deleted the association on the losing
+    photo, so the survivor must lose its own tag too -- otherwise the sync
+    strips the keyword from the sidecar and the catalog still claims it."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    kw = db.add_keyword("Birds")
+    db.tag_photo(survivor_pid, kw)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_remove', 'Birds', 'tok-remove', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert "Birds" not in _photo_keyword_names(db, survivor_pid)
+
+
+def test_merge_staged_tree_keyword_association_follows_chronology(
+        db, tmp_path):
+    """The survivor's own newer removal is not undone by the staged row's
+    older addition -- the same chronology rule the queue rows follow."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    kw = db.add_keyword("Birds")
+    db.tag_photo(dup_pid, kw)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, 'keyword_add', 'Birds', 'tok-add', "
+        "'2026-01-01 00:00:00', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, 'keyword_remove', 'Birds', 'tok-remove', "
+        "'2026-01-02 00:00:00', ?)",
+        (survivor_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert "Birds" not in _photo_keyword_names(db, survivor_pid)
+
+
+def test_merge_staged_tree_carries_queued_edit_recipe(db, tmp_path):
+    """``photo_edit_recipes`` cascades away with the losing photo, so the
+    sync would write the queued recipe to XMP while
+    ``get_photo_edit_recipe`` on the survivor still returns its older one --
+    the UI and any future render disagreeing with the sidecar."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    db.conn.execute(
+        "INSERT INTO photo_edit_recipes (photo_id, recipe_json) "
+        "VALUES (?, ?)", (survivor_pid, '{"exposure": 0.1}'))
+    db.conn.execute(
+        "INSERT INTO photo_edit_recipes (photo_id, recipe_json) "
+        "VALUES (?, ?)", (dup_pid, '{"exposure": 0.8}'))
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'edit_recipe', '{\"exposure\": 0.8}', 'tok-recipe', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    row = db.conn.execute(
+        "SELECT recipe_json FROM photo_edit_recipes WHERE photo_id = ?",
+        (survivor_pid,)).fetchone()
+    assert row is not None
+    import json as _json
+    assert _json.loads(row["recipe_json"]) == {"exposure": 0.8}
+
+
+def test_merge_staged_tree_cleared_edit_recipe_clears_survivor_row(
+        db, tmp_path):
+    """An empty queued value is the "recipe cleared" edit: the survivor's
+    row goes too, or the catalog keeps a recipe the sidecar no longer
+    describes."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    db.conn.execute(
+        "INSERT INTO photo_edit_recipes (photo_id, recipe_json) "
+        "VALUES (?, ?)", (survivor_pid, '{"exposure": 0.1}'))
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'edit_recipe', '', 'tok-clear', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_edit_recipes WHERE photo_id = ?",
+        (survivor_pid,)).fetchone() is None
+
+
 def test_merge_staged_tree_links_survivor_into_sibling_workspace(
         db, tmp_path):
     """The remap moves pending rows by ``photo_id`` alone, so it also moves

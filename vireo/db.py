@@ -5503,6 +5503,15 @@ class Database:
         that is the deliberate rename pair ``_remove_planned_keywords``
         exists to handle, not an ambiguity this merge is creating.
 
+        The winning side's catalog state travels too. A ``keyword_add`` has
+        already inserted the ``photo_keywords`` row on its photo and a
+        ``keyword_remove`` has already deleted it -- the queue row only
+        records what the sidecar still owes. Remapping the row alone would
+        delete that association with the losing photo and leave the
+        survivor reporting the opposite of what the next sync writes to
+        XMP. ``keyword_remove_flat`` is deliberately excluded: it asks for
+        the stale flat ``dc:subject`` line to go, not the association.
+
         Returns the number of queue rows dropped.
         """
         rows = self.conn.execute(
@@ -5557,7 +5566,73 @@ class Database:
                 "workspace %s: dropped %d older queue row(s)",
                 match_key, losing_id, surviving_id, workspace_id, len(drop),
             )
+        self._carry_keyword_associations_for_merge(
+            losing_id, surviving_id, by_key)
         return dropped
+
+    def _carry_keyword_associations_for_merge(
+            self, losing_id, surviving_id, by_key):
+        """Apply the losing row's winning keyword ops to the survivor's tags.
+
+        ``by_key`` is the grouping built by
+        ``_reconcile_conflicting_keyword_edits``; rows it has already
+        deleted are skipped by id. Only keys whose newest surviving change
+        sits on the losing photo are applied -- when the survivor holds the
+        newer change its own association already reflects it.
+        """
+        live = {
+            r["id"] for r in self.conn.execute(
+                "SELECT id FROM pending_changes WHERE photo_id IN (?, ?)",
+                (losing_id, surviving_id),
+            ).fetchall()
+        }
+        for (_workspace_id, match_key), slot in by_key.items():
+            loser = [r for r in slot[losing_id]["add"] + slot[losing_id]["remove"]
+                     if r["id"] in live]
+            if not loser:
+                continue
+            survivor = [
+                r for r in slot[surviving_id]["add"] + slot[surviving_id]["remove"]
+                if r["id"] in live
+            ]
+
+            def key(r):
+                return (r["created_at"] or "", r["id"])
+
+            newest_loser = max(loser, key=key)
+            if survivor and key(max(survivor, key=key)) > key(newest_loser):
+                continue
+            if newest_loser["change_type"] == "keyword_add":
+                # The association the add already wrote is about to be
+                # deleted with the losing photo. Re-point it at the
+                # survivor. If it is somehow absent the catalog is already
+                # inconsistent and there is no id to carry -- leave it to
+                # the sync rather than guessing a keyword by name.
+                for kw_id in self._photo_keyword_ids_matching(
+                        losing_id, match_key):
+                    self.tag_photo(surviving_id, kw_id, _commit=False)
+            elif newest_loser["change_type"] == "keyword_remove":
+                for kw_id in self._photo_keyword_ids_matching(
+                        surviving_id, match_key):
+                    self.untag_photo(surviving_id, kw_id, _commit=False)
+
+    def _photo_keyword_ids_matching(self, photo_id, match_key):
+        """Keyword ids on ``photo_id`` whose name shares ``match_key``.
+
+        Matched in Python rather than SQL: SQLite's ``LOWER`` is ASCII-only,
+        so a case or diacritic variant would slip past a SQL comparison the
+        same way it does in the collision tracker above.
+        """
+        return [
+            r["keyword_id"] for r in self.conn.execute(
+                "SELECT pk.keyword_id AS keyword_id, k.name AS name "
+                "FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                "WHERE pk.photo_id = ?",
+                (photo_id,),
+            ).fetchall()
+            if keyword_match_key(r["name"]) == match_key
+        ]
 
     def _transfer_review_state_for_merge(self, losing_id, surviving_id):
         """Carry queued rating / flag state onto the survivor by chronology.
@@ -5626,11 +5701,77 @@ class Database:
                 f"UPDATE photos SET {column} = ? WHERE id = ?",
                 (value, surviving_id),
             )
+        dropped += self._transfer_edit_recipe_for_merge(
+            losing_id, surviving_id)
         if dropped:
             log.info(
                 "Merge reconciled queued review state on photos %s/%s: "
                 "dropped %d older queue row(s)",
                 losing_id, surviving_id, dropped,
+            )
+        return dropped
+
+    def _transfer_edit_recipe_for_merge(self, losing_id, surviving_id):
+        """Carry a queued edit recipe's catalog row onto the survivor.
+
+        ``photo_edit_recipes`` is written when the edit is made and the
+        queue row carries the same JSON for the sidecar. The row cascades
+        away with the losing photo, so remapping the queue row alone leaves
+        ``get_photo_edit_recipe`` on the survivor reporting its older
+        recipe -- or none -- while the sync writes the queued one to XMP
+        and clears the row. The UI and any future render then disagree with
+        the sidecar.
+
+        The queue row's ``value`` is the recipe JSON itself, so the catalog
+        row is rebuilt from the newest queued change rather than copied
+        across; an empty value is the "recipe cleared" edit and deletes the
+        survivor's row. Duplicates within one workspace are dropped as
+        elsewhere -- ``_plan_photo_sync`` keeps whichever it folds last.
+
+        Returns the number of queue rows dropped.
+        """
+        rows = self.conn.execute(
+            "SELECT id, photo_id, workspace_id, value, created_at "
+            "FROM pending_changes "
+            "WHERE photo_id IN (?, ?) AND change_type = 'edit_recipe'",
+            (losing_id, surviving_id),
+        ).fetchall()
+        if not any(r["photo_id"] == losing_id for r in rows):
+            return 0
+
+        def key(r):
+            return (r["created_at"] or "", r["id"])
+
+        dropped = 0
+        by_ws = {}
+        for r in rows:
+            by_ws.setdefault(r["workspace_id"], []).append(r)
+        for ws_rows in by_ws.values():
+            if len(ws_rows) < 2:
+                continue
+            winner = max(ws_rows, key=key)
+            for r in ws_rows:
+                if r["id"] == winner["id"]:
+                    continue
+                self.conn.execute(
+                    "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
+                dropped += 1
+        newest = max(rows, key=key)
+        recipe_json = newest["value"] or ""
+        if not recipe_json:
+            self.conn.execute(
+                "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
+                (surviving_id,),
+            )
+        else:
+            self.conn.execute(
+                """INSERT INTO photo_edit_recipes
+                       (photo_id, recipe_json, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(photo_id) DO UPDATE SET
+                       recipe_json = excluded.recipe_json,
+                       updated_at = excluded.updated_at""",
+                (surviving_id, recipe_json),
             )
         return dropped
 
@@ -5786,6 +5927,26 @@ class Database:
           intra-staged) are already found by the by-photo residual re-read
           scoped to the captured staged ids, so adding them here as well
           would report one edit as two.
+
+        Every queued change type has catalog state written at edit time
+        that the queue row does not carry, and all of it has to travel with
+        the remap or the survivor ends up disagreeing with the sidecar the
+        next sync writes:
+
+        * ``location`` -> the photo's ``type='location'`` keyword links
+          (``_move_location_state_for_merge``)
+        * ``keyword_add`` / ``keyword_remove`` -> the ``photo_keywords``
+          association (``_reconcile_conflicting_keyword_edits``);
+          ``keyword_remove_flat`` is sidecar-only and has none
+        * ``rating`` / ``flag`` -> the ``photos`` columns
+          (``_transfer_review_state_for_merge``)
+        * ``edit_recipe`` -> the ``photo_edit_recipes`` row
+          (``_transfer_edit_recipe_for_merge``)
+
+        Each resolves a competing change on the two rows by queue
+        chronology, ``(created_at, id)``, and drops the older row within a
+        workspace so ``_plan_photo_sync`` is not left picking between two
+        rows of the same type at random.
 
         Side effect worth knowing about: when a remapped pending edit is
         owned by a workspace other than the active one, the survivor's
