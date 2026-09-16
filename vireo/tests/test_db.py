@@ -13756,6 +13756,70 @@ def test_merge_staged_tree_keyword_conflict_spans_workspaces(db, tmp_path):
         ("keyword_remove", "Birds")}
 
 
+def test_merge_staged_tree_drops_older_opposing_row_on_winning_photo(
+        db, tmp_path):
+    """The winning photo may itself carry an older opposing row in a
+    different workspace than the winning row. Choosing a photo as a
+    unit and dropping only the other photo's rows would let that older
+    row survive on the survivor beside the newest add; when its
+    workspace syncs later, it would remove the keyword the newest
+    intent asked to keep. Reconcile every opposing atom -- across both
+    photos and every workspace -- against the newest, so only rows on
+    the winning side of the contest survive."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    sibling_a = db.create_workspace("SiblingA")
+    sibling_b = db.create_workspace("SiblingB")
+    db.set_active_workspace(ws)
+    # Surviving photo already holds contradictory intents in two
+    # workspaces: an OLD remove and the NEWEST add. Before this merge
+    # they lived on the same photo but neither reconciled against the
+    # other -- each named its own sidecar. Once the merge is over the
+    # photo has one sidecar per workspace still, but the sync planner
+    # will read both queue rows for the same file.
+    _queue_keyword_change(db, survivor_pid, "keyword_remove", "Birds",
+                          "2026-01-01 00:00:00", "tok-old-remove",
+                          sibling_a)
+    _queue_keyword_change(db, survivor_pid, "keyword_add", "Birds",
+                          "2026-01-03 00:00:00", "tok-newest-add",
+                          sibling_b)
+    # Losing photo holds a middle-aged remove in a third workspace.
+    _queue_keyword_change(db, dup_pid, "keyword_remove", "Birds",
+                          "2026-01-02 00:00:00", "tok-mid-remove", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    tokens = {r["change_token"] for r in db.conn.execute(
+        "SELECT change_token FROM pending_changes "
+        "WHERE photo_id = ? AND change_type IN "
+        "('keyword_add', 'keyword_remove')",
+        (survivor_pid,)).fetchall()}
+    # The newest add wins; every older opposing remove is dropped,
+    # including the one that was already sitting on the winning photo
+    # in another workspace.
+    assert tokens == {"tok-newest-add"}
+
+
 def test_merge_staged_tree_flat_only_cleanup_does_not_fight_a_keyword_add(
         db, tmp_path):
     """``keyword_remove_flat`` strips a stale flat ``dc:subject`` line and

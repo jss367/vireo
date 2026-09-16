@@ -5593,30 +5593,29 @@ class Database:
         removal queued on one row would be silently reversed by an older
         addition queued on the other.
 
-        Resolved the same way as the location state: the side holding the
-        newer change wins, by ``(created_at, id)``, and the loser's rows for
-        that key are deleted. Resolved across every workspace, not per
-        workspace: ``photo_keywords`` and the sidecar are both global, so
-        once the two rows share a photo an add in one workspace and a remove
-        in another are two intents for one file and only the newer can be
-        honored -- keeping both would just hand the outcome to whichever
-        workspace syncs last.
+        Resolved the same way as the location state: the newest opposing
+        intent wins, by ``(created_at, id)``, and every older opposing row
+        is deleted. Resolved across every workspace AND across both
+        photos, not per workspace or per photo: ``photo_keywords`` and the
+        sidecar are both global, so once the remap lands both rows on one
+        photo an add in workspace A and a remove in workspace B are two
+        intents for one file and only the newer can be honored -- keeping
+        both would just hand the outcome to whichever workspace syncs
+        last. A photo that already holds an add in one workspace and a
+        remove in another before the merge is the same shape once the
+        merge collapses them onto the survivor, so the older row has to
+        go too, not just the losing photo's row for that key.
 
-        A photo that already holds BOTH directions for a key in ONE
-        workspace's queue is the deliberate rename pair
-        ``_remove_planned_keywords`` exists to handle, so its two rows are
-        treated as one presence-asserting intent -- the pair's net effect
-        is "keep the tag with the canonical spelling" -- rather than as
-        opposing halves the merge is creating. When the OTHER photo has a
-        newer standalone remove for the same key, the pair still has to
-        reconcile against it: leaving both would let the sync planner read
-        the survivor's combined queue as a normalization rename that
-        re-adds the keyword after the removal, and the older rename would
-        defeat the newer removal. The pair reconciles or survives as one
-        unit, by the newest row on each side of the merge boundary.
-        The exemption also stays workspace-scoped -- an add in workspace A
-        and a remove in workspace B on the same photo are two intents
-        competing across workspaces, not a rename pair.
+        A photo that holds BOTH directions for a key in ONE workspace's
+        queue is the deliberate rename pair ``_remove_planned_keywords``
+        exists to handle, so its two rows travel as one presence-asserting
+        atom -- the pair's net effect is "keep the tag with the canonical
+        spelling" -- rather than as opposing halves the merge is creating.
+        The pair reconciles or survives as one unit against every other
+        opposing intent, by the pair's newest row. The exemption stays
+        workspace-scoped -- an add in workspace A and a remove in
+        workspace B on the same photo are two intents competing across
+        workspaces, not a rename pair.
 
         The winning side's catalog state travels too. A ``keyword_add`` has
         already inserted the ``photo_keywords`` row on its photo and a
@@ -5662,52 +5661,48 @@ class Database:
                 r["workspace_id"], {"add": [], "remove": []})
             ws_slot[side].append(r)
 
-        def _classify_sides(photo_slot):
-            """Split rows into (keep-asserting, remove-asserting) for a photo.
+        def _row_stamp(row):
+            return (row["created_at"] or "", row["id"])
+
+        def _collect_atoms(slot):
+            """Split every row for one match key into atomic keep/remove units.
 
             A per-workspace rename pair (add + remove for the same key in
-            one workspace's queue) is a normalization rename -- its two
-            rows together assert "keep the tag, canonicalize the spelling."
-            Both rows go into ``keep`` so a standalone remove on the other
-            photo counts as opposition to the whole pair, not just to the
-            pair's add half; a newer remove on the other photo drops the
-            pair as one unit rather than leaving its rows on the survivor
-            for the sync planner to read as a rename that re-adds the tag.
-
-            Non-pair rows in each workspace's queue -- an add without a
-            paired remove or vice versa -- are the ordinary standalone
-            edits that reconcile per-workspace with the other photo.
+            one workspace's queue on ONE photo) is a normalization rename --
+            its two rows together assert "keep the tag, canonicalize the
+            spelling", so they travel as one keep-asserting atom stamped by
+            its newest row. Every other row is a standalone intent and is
+            its own atom on the side its ``change_type`` names. Atoms are
+            pooled across both photos: once the remap lands them on one
+            photo, an add in workspace A and a remove in workspace B are
+            two intents for one global ``photo_keywords`` row and one
+            sidecar, whether they started on the same photo or different
+            photos.
             """
-            keep_rows, remove_rows = [], []
-            for ws_sides in photo_slot.values():
-                if ws_sides["add"] and ws_sides["remove"]:
-                    keep_rows.extend(ws_sides["add"])
-                    keep_rows.extend(ws_sides["remove"])
-                else:
-                    keep_rows.extend(ws_sides["add"])
-                    remove_rows.extend(ws_sides["remove"])
-            return keep_rows, remove_rows
+            keep_atoms, remove_atoms = [], []
+            for photo_slot in slot.values():
+                for ws_sides in photo_slot.values():
+                    if ws_sides["add"] and ws_sides["remove"]:
+                        rows = ws_sides["add"] + ws_sides["remove"]
+                        keep_atoms.append(
+                            (max(_row_stamp(r) for r in rows), rows))
+                    else:
+                        for r in ws_sides["add"]:
+                            keep_atoms.append((_row_stamp(r), [r]))
+                        for r in ws_sides["remove"]:
+                            remove_atoms.append((_row_stamp(r), [r]))
+            return keep_atoms, remove_atoms
 
         dropped = 0
         for match_key, slot in by_key.items():
-            loser_keep, loser_rem = _classify_sides(slot[losing_id])
-            surv_keep, surv_rem = _classify_sides(slot[surviving_id])
-            opposed = (
-                (loser_keep and surv_rem)
-                or (loser_rem and surv_keep)
-            )
-            if not opposed:
+            keep_atoms, remove_atoms = _collect_atoms(slot)
+            if not keep_atoms or not remove_atoms:
                 continue
-
-            def newest(side_rows):
-                return max(
-                    ((r["created_at"] or "", r["id"]) for r in side_rows),
-                    default=("", 0))
-
-            loser_rows = loser_keep + loser_rem
-            survivor_rows = surv_keep + surv_rem
-            drop = (survivor_rows if newest(loser_rows) > newest(survivor_rows)
-                    else loser_rows)
+            newest_keep = max(stamp for stamp, _ in keep_atoms)
+            newest_remove = max(stamp for stamp, _ in remove_atoms)
+            losing_side = (
+                remove_atoms if newest_keep > newest_remove else keep_atoms)
+            drop = [r for _, rows in losing_side for r in rows]
             for r in drop:
                 self.conn.execute(
                     "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
