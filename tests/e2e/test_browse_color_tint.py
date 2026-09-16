@@ -287,3 +287,51 @@ def test_the_photo_deep_link_hydrates_its_page_labels(live_server, page):
     assert _rgba(card.evaluate("el => getComputedStyle(el).outlineColor")) == (
         0.95, 0.77, 0.06, 1.0
     )
+
+
+def test_a_failed_write_restores_the_saved_label(live_server, page):
+    """A write that fails must not leave its id stamped and marked fetched.
+
+    Regression: the pre-write stamp made any fetch that started before the
+    write skip that id, but the fetch still added it to colorLabelsFetched.
+    A photo edited before initial hydration finished therefore read as a
+    definite "no color" — untinted, and reported as unlabelled by the batch
+    inspector — until reload, even though the server still had its label.
+    """
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    assert page.request.post(
+        f"{url}/api/photos/{photo_id}/color_label", data={"color": "purple"}
+    ).ok
+
+    page.goto(f"{url}/browse")
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    card.wait_for(state="visible")
+    expect(card).to_have_attribute("data-color-label", "purple")
+
+    # Drop the hydrated state to stand in for "initial hydration has not
+    # finished yet", then fail the write.
+    page.evaluate(
+        """(pid) => {
+            delete colorLabels[pid];
+            colorLabelsFetched.delete(pid);
+            const orig = window.Vireo.api.json;
+            window.Vireo.api.json = function (u, o) {
+                if (String(u).includes('/color_label')
+                    && o && o.method === 'POST') {
+                    window.Vireo.api.json = orig;   // fail once
+                    return Promise.reject(new Error('boom'));
+                }
+                return orig.apply(window.Vireo.api, arguments);
+            };
+        }""",
+        photo_id,
+    )
+    page.evaluate("(pid) => window.__w = setColorLabelFor(pid, 'green')", photo_id)
+    page.evaluate("() => window.__w")
+
+    # The write failed, so the server's label is still the truth — and the
+    # recovery refetch has to put it back rather than leaving a blank card
+    # that claims to be definitively unlabelled.
+    expect(card).to_have_attribute("data-color-label", "purple")
+    assert page.evaluate("(pid) => colorLabelsFetched.has(pid)", photo_id) is True

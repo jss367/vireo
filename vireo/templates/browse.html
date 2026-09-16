@@ -2700,6 +2700,32 @@ function _noteColorLabelEdits(ids) {
   colorLabelGen++;
   ids.forEach(function(id) { colorLabelEditGen[id] = colorLabelGen; });
 }
+
+// Undo a write's pre-write stamp when the write fails, and re-ask the server.
+// Without this the failed write leaves the worst of both: the stamp makes any
+// fetch that started before it skip these ids, while that fetch still adds them
+// to colorLabelsFetched — so a labelled photo the user edited before initial
+// hydration finished reads as a definite "no color" until reload. Dropping the
+// stamp is safe precisely because the write failed: the server value is still
+// current, so an older in-flight response speaks for these ids correctly
+// (Codex P2 on PR #1668).
+function _recoverColorLabelsAfterFailedWrite(ids) {
+  ids.forEach(function(id) {
+    delete colorLabelEditGen[id];
+    colorLabelsFetched.delete(id);
+  });
+  return fetchColorLabels(ids).then(function() {
+    refreshGridCards(ids);
+    refreshExpandedBrowseStackMembers(ids);
+    // fetchColorLabels already re-rendered a batch inspector; only the
+    // single-photo panel is left to catch up.
+    var detail = document.getElementById('detailContent');
+    if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1
+        && !(detail && detail.classList.contains('batch-mode'))) {
+      updateDetailColors();
+    }
+  });
+}
 // Generation counter for the grid window (photos/currentPage/earliestPage/
 // allLoaded). Never compare it directly — go through claimBrowseWindow() /
 // observeBrowseWindow() so every async path guards the same way.
@@ -10851,7 +10877,7 @@ async function batchSetColorLabel(color) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids, color: color}),
     });
-  } catch(e) { return; }
+  } catch(e) { _recoverColorLabelsAfterFailedWrite(ids); return; }
   _noteColorLabelEdits(ids);
   ids.forEach(function(id) {
     if (color) colorLabels[id] = color;
@@ -11942,11 +11968,13 @@ async function setColorLabel(color) {
   _noteColorLabelEdits([photoId]);
   var current = colorLabels[photoId] || null;
   var newColor = (current === color) ? null : color;
-  await safeFetch('/api/photos/' + photoId + '/color_label', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({color: newColor}),
-  });
+  try {
+    await safeFetch('/api/photos/' + photoId + '/color_label', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({color: newColor}),
+    });
+  } catch(e) { _recoverColorLabelsAfterFailedWrite([photoId]); return; }
   _noteColorLabelEdits([photoId]);
   if (newColor) {
     colorLabels[photoId] = newColor;
@@ -13195,7 +13223,7 @@ async function setColorLabelFor(photoId, color) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: [photoId], color: color}),
     });
-  } catch(e) { return; }
+  } catch(e) { _recoverColorLabelsAfterFailedWrite([photoId]); return; }
   _noteColorLabelEdits([photoId]);
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
