@@ -13608,6 +13608,113 @@ def test_merge_staged_tree_keyword_rename_pair_exemption_is_workspace_scoped(
     assert "tok-new-remove" in tokens
 
 
+def test_merge_staged_tree_rename_pair_reconciles_against_newer_remove_on_other_photo(
+        db, tmp_path):
+    """A rename pair on one pre-merge photo asserts "keep the tag,
+    canonicalize the spelling" as one unit. When the OTHER photo carries a
+    newer standalone remove for the same key, exempting the pair would
+    leave its rows on the survivor for the sync planner to read as a
+    normalization rename that re-adds the tag after the newer remove --
+    the older rename would defeat the newer removal, and the sidecar
+    would end up inconsistent with the catalog. Reconcile the pair
+    against the opposing intent by newest row on each side of the merge
+    boundary."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    # Losing (staged) photo carries a legitimate same-workspace rename pair
+    # on "Birds" -- older than the surviving photo's opposing remove.
+    _queue_keyword_change(db, dup_pid, "keyword_remove", "‘Birds",
+                          "2026-01-01 00:00:00", "tok-pair-remove", ws)
+    _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
+                          "2026-01-01 00:00:01", "tok-pair-add", ws)
+    # Surviving photo carries a newer standalone remove for the same key.
+    _queue_keyword_change(db, survivor_pid, "keyword_remove", "Birds",
+                          "2026-01-02 00:00:00", "tok-newer-remove", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # Only the newer remove survives on the merged photo -- the older
+    # rename pair is dropped as a unit, so the sync planner does not read
+    # its rows alongside the newer remove and re-add the tag.
+    tokens = {r["change_token"] for r in db.conn.execute(
+        "SELECT change_token FROM pending_changes "
+        "WHERE photo_id = ? AND change_type IN "
+        "('keyword_add', 'keyword_remove')",
+        (survivor_pid,)).fetchall()}
+    assert "tok-newer-remove" in tokens
+    assert "tok-pair-add" not in tokens
+    assert "tok-pair-remove" not in tokens
+
+
+def test_merge_staged_tree_rename_pair_wins_over_older_opposing_remove(
+        db, tmp_path):
+    """The reverse polarity: the rename pair is NEWER than the opposing
+    remove on the other photo. Reconciling by newest row still lets the
+    pair survive as a unit; discarding it and keeping the older remove
+    would drop the pair's association carry as well."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    # Older opposing remove on the losing photo.
+    _queue_keyword_change(db, dup_pid, "keyword_remove", "Birds",
+                          "2026-01-01 00:00:00", "tok-older-remove", ws)
+    # Newer rename pair on the surviving photo.
+    _queue_keyword_change(db, survivor_pid, "keyword_remove", "‘Birds",
+                          "2026-01-02 00:00:00", "tok-pair-remove", ws)
+    _queue_keyword_change(db, survivor_pid, "keyword_add", "Birds",
+                          "2026-01-02 00:00:01", "tok-pair-add", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    tokens = {r["change_token"] for r in db.conn.execute(
+        "SELECT change_token FROM pending_changes "
+        "WHERE photo_id = ? AND change_type IN "
+        "('keyword_add', 'keyword_remove')",
+        (survivor_pid,)).fetchall()}
+    assert "tok-pair-remove" in tokens
+    assert "tok-pair-add" in tokens
+    assert "tok-older-remove" not in tokens
+
+
 def test_merge_staged_tree_keyword_conflict_spans_workspaces(db, tmp_path):
     """``photo_keywords`` and the sidecar are both global, so once the remap
     puts the two rows on one photo an add queued in another workspace and a
@@ -14399,14 +14506,14 @@ def test_sync_only_grant_follows_the_photo_across_a_move(db, tmp_path):
     db.set_active_workspace(ws)
     assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is True
     db.conn.commit()
-    assert db.get_sync_only_folder_map(sibling_ws) == {first_id: str(first)}
+    assert db.get_sync_only_photo_paths(sibling_ws) == {pid: str(first)}
 
     # The active workspace moves the survivor afterwards.
     db.conn.execute("UPDATE photos SET folder_id = ? WHERE id = ?",
                     (second_id, pid))
     db.conn.commit()
 
-    assert db.get_sync_only_folder_map(sibling_ws) == {second_id: str(second)}
+    assert db.get_sync_only_photo_paths(sibling_ws) == {pid: str(second)}
     db.set_active_workspace(sibling_ws)
     try:
         assert db._photo_syncable_in_workspace(pid) is True
@@ -14471,8 +14578,8 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
         "WHERE change_token = 'tok-sibling'").fetchone()
     assert row is not None and row["photo_id"] == survivor_pid
     # The sibling workspace's sync can now resolve the survivor -- the
-    # map used by ``_resolve_xmp_paths`` unions the workspace-scoped
-    # folder tree with sync-only grants.
+    # map used by ``_resolve_xmp_paths`` consults sync-only grants one
+    # photo at a time via ``get_sync_only_photo_paths``.
     db.set_active_workspace(sibling_ws)
     try:
         resolved = _resolve_xmp_paths(db, [survivor_pid])
@@ -14486,13 +14593,13 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
             "SELECT COUNT(*) AS n FROM workspace_folders "
             "WHERE workspace_id = ?", (sibling_ws,),
         ).fetchone()["n"] == 0
-        # And the unrelated photo in the same folder stays invisible to
-        # every workspace-scoped browse/library query. A library-membership
-        # link would have exposed it.
+        # And the unrelated photo in the same folder does NOT gain a
+        # resolvable sidecar path from the survivor's grant. The grant
+        # authorizes one photo's sidecar; a folder-scoped union would
+        # widen it to every neighbour, letting a next sync write the
+        # unrelated photo's sidecar without any grant of its own.
         other_resolved = _resolve_xmp_paths(db, [other_pid])
-        assert other_resolved[other_pid] == str(date_dir / "other.xmp")
-        # Resolution succeeds because the folder path is in the sync-only
-        # map, but the photo isn't visible in the browse tree.
+        assert other_resolved[other_pid] == "other.xmp"
     finally:
         db.set_active_workspace(ws)
     # Grant is recorded in the sync-only table, not ``workspace_folders``.
@@ -14575,7 +14682,7 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
         "SELECT COUNT(*) AS n FROM workspace_sync_only_photos "
         "WHERE workspace_id = ? AND photo_id = ?",
         (sibling_ws, new_pid)).fetchone()["n"] == 1
-    assert db.get_sync_only_folder_map(sibling_ws) == {date_id: str(date_dir)}
+    assert db.get_sync_only_photo_paths(sibling_ws) == {new_pid: str(date_dir)}
 
 
 def test_link_survivor_sync_only_grant_is_idempotent(db, tmp_path):
@@ -14627,13 +14734,14 @@ def test_link_survivor_skips_when_workspace_already_owns_folder(
 
 def test_upgrade_migrates_legacy_workspace_sync_only_folders(tmp_path):
     """A database opened by #1661 still carries its folder-keyed grants in
-    ``workspace_sync_only_folders``; this commit's readers query only the
-    new photo-keyed table. Without a migration, the sibling-workspace
-    pending edits that #1661 preserved lose their path grant on upgrade
-    and stay queued as inaccessible with nothing saying why. Rewrite the
-    grant into a photo grant for exactly the photos the sibling has a
-    pending edit on -- the rows the grant was written for -- and drop the
-    legacy table."""
+    ``workspace_sync_only_folders``; this commit's readers prefer the new
+    photo-keyed table. Without a migration, the sibling-workspace pending
+    edits that #1661 preserved lose their path grant on upgrade and stay
+    queued as inaccessible with nothing saying why. Rewrite the grant into
+    a photo grant for exactly the photos the sibling has a pending edit
+    on -- the rows the grant was written for -- and keep the legacy table
+    as a compatibility record so a photo the migration could not identify
+    still resolves through the legacy folder key at read time."""
     from db import Database
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -14690,7 +14798,13 @@ def test_upgrade_migrates_legacy_workspace_sync_only_folders(tmp_path):
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='workspace_sync_only_folders'"
         ).fetchone()
-        assert legacy_present is None
+        # The legacy table stays after upgrade as a compatibility record --
+        # ``move_photos`` can clear ``last_move_source_folder_path``, so a
+        # survivor moved before upgrade might not match either the current
+        # folder or its stale provenance and slip past the migration; the
+        # runtime fallback in ``_photo_syncable_in_workspace`` still needs
+        # the row to find it.
+        assert legacy_present is not None
         granted = {
             (row["workspace_id"], row["photo_id"])
             for row in db.conn.execute(
@@ -14780,7 +14894,9 @@ def test_upgrade_migrates_legacy_grant_for_survivor_moved_before_upgrade(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='workspace_sync_only_folders'"
         ).fetchone()
-        assert legacy_present is None
+        # Retained as a compatibility record -- see the sibling upgrade
+        # test above for why the legacy table stays around.
+        assert legacy_present is not None
         granted = {
             (row["workspace_id"], row["photo_id"])
             for row in db.conn.execute(

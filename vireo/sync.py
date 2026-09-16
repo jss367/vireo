@@ -40,27 +40,31 @@ def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
     workspace membership -- and the ordinary map would resolve it to an empty
     directory and then fail "folder not accessible".
 
-    The default map is unioned with ``get_sync_only_folder_map``: sync-only
-    grants added by tracked-merge collision handling so a sibling
-    workspace's remapped edit can resolve its survivor's sidecar without
-    the workspace gaining library membership on every other photo in that
-    folder. The grants are keyed by photo and resolved to whatever folder
-    the photo is in now, so a later move does not strand them. A caller-supplied ``folder_paths`` is trusted as-is and skips
-    the union -- callers who need the sync-only grants pass them in.
+    Sync-only grants added by tracked-merge collision handling let a
+    sibling workspace's remapped edit resolve its survivor's sidecar
+    without gaining library membership on every other photo in the folder.
+    Kept photo-scoped end-to-end: ``get_sync_only_photo_paths`` returns
+    ``{photo_id: folder_path}``, and only the granted photo's row picks up
+    that path -- an unrelated photo sitting in the same folder with its
+    own inaccessible pending edit resolves to no path and fails
+    "folder not accessible", exactly as it did before the grant. A
+    caller-supplied ``folder_paths`` is trusted as-is and skips both
+    layers -- callers who need the sync-only grants pass them in.
     """
     if folder_paths is not None:
         folders = folder_paths
+        granted_paths = {}
     else:
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
-        # Sync-only grants live outside ``workspace_folders`` so they never
-        # widen browse/library visibility. Layered under the workspace's
-        # own tree so a real library link wins on any overlap.
-        for fid, path in db.get_sync_only_folder_map().items():
-            folders.setdefault(fid, path)
+        # Photo-scoped, never unioned into ``folders``: widening the grant
+        # back to folder scope would let an unrelated photo in the same
+        # folder resolve to a valid sidecar path on the next sync.
+        granted_paths = db.get_sync_only_photo_paths()
     paths = {}
     for photo_id, (folder_id, filename) in db.get_photo_filenames(photo_ids).items():
         base = os.path.splitext(filename)[0]
-        paths[photo_id] = os.path.join(folders.get(folder_id, ""), base + ".xmp")
+        folder_path = folders.get(folder_id) or granted_paths.get(photo_id, "")
+        paths[photo_id] = os.path.join(folder_path, base + ".xmp")
     return paths
 
 
