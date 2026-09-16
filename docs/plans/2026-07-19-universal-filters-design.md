@@ -7,6 +7,17 @@ Amended 2026-08-16 (PR #1465): quick search applies live as you type
 (rating/flag/color) moved out of the popover to sit always-visible under
 the search box; the popover now holds only the rule builder.
 
+Amended 2026-09-16: the always-visible shortcut row is user-configured
+(Settings → Quick filters, stored as `config["filter_shortcuts"]`). A quick
+filter is `{id, label, group, rules}` where `rules` is a node of this same
+rule tree, so a button is a saved expression; `vireo/filter_shortcuts.py`
+holds the defaults (the five buttons the row shipped with), the validation,
+and the combination rule derived from each node's shape — boolean-false
+buttons in one group OR together, single enum values on one field merge into
+an `is one of` clause, anything else ANDs in as its own clause. Rating and
+color stay in the popover's quick section. A chip set by a button carries
+that button's label, so renaming a button renames its chip.
+
 ## Goal
 
 One holistic filter pattern applied identically to every photo-listing surface

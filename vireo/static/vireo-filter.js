@@ -41,6 +41,10 @@
   ];
   // Quick search fans out over these fields as one replaceable any-group.
   const QUICK_SEARCH_FIELDS = ['filename', 'keyword', 'species', 'camera_make', 'camera_model', 'lens'];
+  // Chip wording for the two boolean fields the bar has always shipped a
+  // quick filter for. A configured shortcut's own label wins (see
+  // ``shortcutLabelFor``); this is the fallback for a rule built in the
+  // popover, or after its shortcut was removed from Settings.
   const MISSING_TAG_LABELS = {
     has_species: 'Missing species',
     has_location_keyword: 'Missing location tag',
@@ -65,6 +69,7 @@
     wouldMatch: null,      // count while paused
     advanced: false,
     ready: false,
+    shortcuts: [],       // configured quick filters, rendered as the button row
   };
 
   let rootEl = null;
@@ -242,6 +247,105 @@
     return node.rules.some((child) => removeByReference(child, target));
   }
 
+  // Structural equality for rule nodes. Quick filters are stored expressions,
+  // so "is this shortcut on?" is "is this exact node in the expression?".
+  function sameNode(a, b) {
+    if (a === b) return true;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return a === b;
+    if (Array.isArray(a) || Array.isArray(b)) {
+      return Array.isArray(a) && Array.isArray(b) && a.length === b.length &&
+        a.every((item, i) => sameNode(item, b[i]));
+    }
+    const keys = Object.keys(a).filter((k) => a[k] !== undefined);
+    const otherKeys = Object.keys(b).filter((k) => b[k] !== undefined);
+    if (keys.length !== otherKeys.length) return false;
+    return keys.every((k) => Object.hasOwn(b, k) && sameNode(a[k], b[k]));
+  }
+
+  // ---- configured quick filters ----------------------------------------
+
+  // The button row is whatever Settings → Quick filters holds; see
+  // vireo/filter_shortcuts.py for the entry shape. Buttons are painted as
+  // soon as the list lands — disabled, like the rest of the bar, until the
+  // field registry makes them safe to click.
+  function loadShortcuts() {
+    return fetchJson('/api/filters/shortcuts').then((data) => {
+      state.shortcuts = Array.isArray(data.shortcuts) ? data.shortcuts : [];
+      renderShortcutButtons(Array.isArray(data.groups) ? data.groups : []);
+    }).catch(() => {
+      // A bar without its shortcut row still searches and filters; losing
+      // the whole page over one decoration would be worse.
+      state.shortcuts = [];
+      renderShortcutButtons([]);
+    });
+  }
+
+  function renderShortcutButtons(groups) {
+    const host = $('.vf-shortcuts');
+    const hint = $('.vf-missing-hint');
+    host.querySelectorAll('.vf-shortcut-group').forEach((el) => el.remove());
+    const frag = document.createDocumentFragment();
+    groups.forEach((group) => {
+      const box = document.createElement('div');
+      box.className = 'vf-shortcut-group ' + (group.style === 'segmented'
+        ? 'vf-segmented vf-quick-segment' : 'vf-quick-pills');
+      box.setAttribute('role', 'group');
+      group.shortcuts.forEach((shortcut) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.shortcut = shortcut.id;
+        btn.dataset.kind = shortcut.kind;
+        if (shortcut.field) btn.dataset.field = shortcut.field;
+        if (shortcut.kind === 'enum') btn.dataset.value = String(shortcut.value);
+        if (shortcut.group) btn.dataset.group = shortcut.group;
+        btn.setAttribute('aria-pressed', 'false');
+        // Enabled only by renderQuick, once handlers and restored state are
+        // ready — an early click must not be lost or overwritten by init.
+        btn.disabled = true;
+        btn.textContent = shortcut.label;
+        box.appendChild(btn);
+      });
+      frag.appendChild(box);
+    });
+    host.insertBefore(frag, hint);
+  }
+
+  function shortcutById(id) {
+    return state.shortcuts.find((s) => s.id === id) || null;
+  }
+
+  // Ungrouped shortcuts are their own group: they toggle a standalone clause
+  // instead of merging with a neighbor.
+  function shortcutGroupKey(shortcut) {
+    return shortcut.group || `\u0000${shortcut.id}`;
+  }
+
+  // Fields covered by the missing-tag buttons that share this group — the
+  // set that ORs together into "missing either tag".
+  function missingGroupFields(shortcut) {
+    const key = shortcutGroupKey(shortcut);
+    return state.shortcuts
+      .filter((s) => s.kind === 'missing' && shortcutGroupKey(s) === key)
+      .map((s) => s.field);
+  }
+
+  function shortcutLabelFor(node) {
+    const match = state.shortcuts.find((s) => sameNode(s.rules, node));
+    if (match) return match.label;
+    // Clicking an enum shortcut stores ``field in [value]`` so a second value
+    // can merge into the same clause, which no longer matches the stored
+    // ``field is value``. One value is still exactly one button, so the chip
+    // keeps that button's words; two or more have to name every value and
+    // fall through to the generic "is one of" wording.
+    if (!isGroup(node) && node.op === 'in' && Array.isArray(node.value) &&
+        node.value.length === 1) {
+      const single = state.shortcuts.find((s) => s.kind === 'enum' &&
+        s.field === node.field && s.value === node.value[0]);
+      if (single) return single.label;
+    }
+    return null;
+  }
+
   // Clone the tree with one leaf dropped from its group — never substitute
   // "true", which inverts any/none groups (prototype review finding).
   function rulesWithout(target) {
@@ -277,8 +381,16 @@
     return labels[rule.value] != null ? labels[rule.value] : rule.value;
   }
 
-  function ruleLabel(rule) {
-    if (isMissingTagRule(rule)) return MISSING_TAG_LABELS[rule.field];
+  // ``literal`` describes the rule itself, ignoring any quick-filter label
+  // configured for it — what the Settings list needs while naming a button.
+  function ruleLabel(rule, literal) {
+    // A clause set by a quick filter reads back with that button's words —
+    // the chip must name the thing the user clicked, not a paraphrase.
+    const fromShortcut = literal ? null : shortcutLabelFor(rule);
+    if (fromShortcut) return fromShortcut;
+    if (isMissingTagRule(rule) && MISSING_TAG_LABELS[rule.field]) {
+      return MISSING_TAG_LABELS[rule.field];
+    }
     if (rule.field === 'keyword_identity') return 'Keyword · ' + (rule.label || 'Selected species or place');
     if (rule.field === 'photo_ids') {
       const n = Array.isArray(rule.value) ? rule.value.length : 0;
@@ -298,6 +410,16 @@
     return `${spec.label} ${opLabel} ${valueLabel(spec, rule)}`;
   }
 
+  // Sentence form of a whole node: a leaf reads as one clause, a group as
+  // its children joined by the logic that combines them.
+  function describeNode(node, literal) {
+    if (!isGroup(node)) return ruleLabel(node, literal);
+    const parts = node.rules.map((child) => describeNode(child, literal));
+    if (node.mode === 'none') return `NOT (${parts.join(' OR ')})`;
+    const joined = parts.join(node.mode === 'any' ? ' OR ' : ' AND ');
+    return parts.length > 1 && node.mode === 'any' ? `(${joined})` : joined;
+  }
+
   function quickSearchGroup() {
     return state.root.rules.find((n) => isGroup(n) && n._qs);
   }
@@ -313,10 +435,14 @@
       });
     }
     state.root.rules.forEach((node) => {
+      const fromShortcut = isGroup(node) && !node._qs ? shortcutLabelFor(node) : null;
       if (isGroup(node) && node._qs) {
         entries.push({ node, label: `Search: “${node._qs_text}”`, qs: true });
+      } else if (fromShortcut) {
+        // A grouped expression set by one button removes as one chip.
+        entries.push({ node, label: fromShortcut });
       } else if (isMissingTagGroup(node)) {
-        entries.push({ node, label: node.rules.map(ruleLabel).join(' OR ') });
+        entries.push({ node, label: node.rules.map((rule) => ruleLabel(rule)).join(' OR ') });
       } else {
         allLeaves(node).forEach((leaf) => entries.push({ node: leaf, label: ruleLabel(leaf) }));
       }
@@ -811,8 +937,21 @@
     return state.root.rules.find((n) => !isGroup(n) && n.field === field);
   }
 
+  // "Missing X" shape: a boolean field set to no. Any boolean field can carry
+  // a quick filter, so this is typed off the registry rather than a fixed
+  // list of fields.
+  // Exactly {field, op, value}. A leaf carrying a qualifier (a pinned
+  // ``model``, a ``case`` flag) means something narrower than the button
+  // does, and these toggles rebuild a leaf from its field and value alone —
+  // claiming it would rewrite it without the qualifier.
+  function isPlainLeaf(node) {
+    return Boolean(node) && !isGroup(node) &&
+      Object.keys(node).every((key) => ['field', 'op', 'value'].includes(key));
+  }
+
   function isMissingTagRule(node) {
-    return node && Object.hasOwn(MISSING_TAG_LABELS, node.field) &&
+    const spec = node && !isGroup(node) && state.fields ? state.fields[node.field] : null;
+    return Boolean(spec) && isPlainLeaf(node) && spec.type === 'boolean' &&
       node.op === 'is' && [0, false, '0'].includes(node.value);
   }
 
@@ -821,27 +960,39 @@
       node.rules.every(isMissingTagRule);
   }
 
-  function quickMissingNode() {
+  function quickMissingNode(fields) {
     // Only recognize a clause that narrows the other filters. An arbitrary
     // nested rule or a leaf in an OR/NOT root does not have that meaning.
     if (state.root.mode !== 'all') return null;
+    // Match on shape plus overlap rather than exact membership: a persisted
+    // expression can still hold a field whose button was since removed from
+    // Settings, and the button that remains has to keep controlling that
+    // clause. Requiring every member to be configured would render it
+    // inactive and its next click would add a duplicate clause beside it.
+    const overlaps = (node) =>
+      (isGroup(node) ? node.rules : [node]).some((leaf) => fields.includes(leaf.field));
     const nodes = state.root.rules.filter((node) =>
-      isMissingTagGroup(node) || isMissingTagRule(node));
+      (isMissingTagGroup(node) || isMissingTagRule(node)) && overlaps(node));
     return nodes.length === 1 ? nodes[0] : null;
   }
 
-  function quickMissingFields() {
-    const node = quickMissingNode();
+  function quickMissingFields(fields) {
+    const node = quickMissingNode(fields);
     return node ? (isGroup(node) ? node.rules : [node]).map((rule) => rule.field) : [];
   }
 
-  function toggleQuickMissing(field) {
-    if (!Object.hasOwn(MISSING_TAG_LABELS, field)) return;
+  // ``fields`` is the shortcut group's field set: buttons in one group OR
+  // together into a single clause ("missing either tag"), while a shortcut
+  // that stands alone toggles just its own field.
+  function toggleQuickMissing(field, fields) {
+    if (!fields.includes(field)) return;
     mutate(() => {
-      const node = quickMissingNode();
-      const fields = new Set(quickMissingFields());
-      if (fields.has(field)) fields.delete(field);
-      else fields.add(field);
+      const node = quickMissingNode(fields);
+      // Every member of the matched clause, including any whose button is
+      // gone: toggling one field must not silently drop the others.
+      const active = new Set(quickMissingFields(fields));
+      if (active.has(field)) active.delete(field);
+      else active.add(field);
       if (node) removeByReference(state.root, node);
       // Keep existing advanced OR/NOT expressions intact while narrowing
       // their results with the shortcut, just as with the collection scope.
@@ -849,26 +1000,49 @@
       // not one OR shortcut. Nest them intact so the new shortcut remains
       // independently recognizable and can be toggled back off.
       const independentMissing = !node && state.root.rules.some((rule) =>
-        isMissingTagGroup(rule) || isMissingTagRule(rule));
+        (isGroup(rule) ? isMissingTagGroup(rule) : isMissingTagRule(rule)) &&
+        (isGroup(rule) ? rule.rules : [rule]).some((leaf) => fields.includes(leaf.field)));
       if (state.root.mode !== 'all' || independentMissing) {
         state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
       }
-      if (fields.size) state.root.rules.unshift({
+      if (active.size) state.root.rules.unshift({
         mode: 'any',
-        rules: Array.from(fields, (key) => makeRule(key, 'is', 0)),
+        rules: Array.from(active, (key) => makeRule(key, 'is', 0)),
       });
     });
+  }
+
+  // Clauses an enum shortcut can own: every ``is``/``in`` leaf for the field.
+  // Neither position nor count is fixed — a popover-written ``not_in`` can
+  // sit ahead of them, and a loaded collection can carry more than one — so
+  // the button reconciles against all of them. Reading just the first would
+  // report it off while one of the others still applies its value.
+  function enumClauseIndexes(field) {
+    const out = [];
+    state.root.rules.forEach((node, i) => {
+      if (isPlainLeaf(node) && node.field === field &&
+          (node.op === 'is' || (node.op === 'in' && Array.isArray(node.value)))) out.push(i);
+    });
+    return out;
+  }
+
+  function enumClauseValues(node) {
+    return node.op === 'in' ? node.value : [node.value];
   }
 
   function quickEnumValues(field) {
     // OR/NOT leaves belong to the advanced expression, not an active
     // narrowing shortcut. Clicking a shortcut will AND it with that tree.
     if (state.root.mode !== 'all') return [];
-    const rule = findRootRule(field);
-    if (!rule) return [];
-    if (rule.op === 'in' && Array.isArray(rule.value)) return rule.value;
-    if (rule.op === 'is') return [rule.value];
-    return [];
+    // Owned clauses are ANDed, so a value only filters when every one of
+    // them names it — the intersection, not the union. With
+    // ``flag in [Picked, Rejected]`` AND ``flag is Picked``, Rejected cannot
+    // match anything, and a button reporting it applied would be a lie.
+    const clauses = enumClauseIndexes(field)
+      .map((i) => enumClauseValues(state.root.rules[i]));
+    if (!clauses.length) return [];
+    return clauses[0].filter((value) =>
+      clauses.every((values) => values.includes(value)));
   }
 
   function toggleQuickEnum(field, value) {
@@ -877,42 +1051,142 @@
       if (state.root.mode !== 'all') {
         state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
       }
-      const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === field);
-      if (idx < 0) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
-      const rule = state.root.rules[idx];
-      let values;
-      if (rule.op === 'in' && Array.isArray(rule.value)) values = rule.value.slice();
-      else if (rule.op === 'is') values = [rule.value];
-      else { state.root.rules[idx] = makeRule(field, 'in', [value]); return; }
-      if (values.includes(value)) values = values.filter((v) => v !== value);
-      else values.push(value);
-      if (!values.length) state.root.rules.splice(idx, 1);
-      else state.root.rules[idx] = makeRule(field, 'in', values);
+      // Only a compatible clause is this button's to edit. An ``is not`` /
+      // ``not_in`` on the same field is a rule the user built in the
+      // popover: the shortcut narrows it with its own clause rather than
+      // overwriting it, so an exclusion someone wrote is never deleted.
+      const owned = enumClauseIndexes(field);
+      // Applied means every owned clause names it (they are ANDed); anything
+      // less is a value the expression cannot match, so the click turns it
+      // on rather than off.
+      const applied = owned.length > 0 &&
+        owned.every((i) => enumClauseValues(state.root.rules[i]).includes(value));
+      if (applied) {
+        // Clear the value from every clause naming it. Leaving one behind
+        // would keep filtering on it with the button reading off.
+        const kept = [];
+        state.root.rules.forEach((node, i) => {
+          if (!owned.includes(i)) { kept.push(node); return; }
+          const values = enumClauseValues(node);
+          if (!values.includes(value)) { kept.push(node); return; }
+          const next = values.filter((v) => v !== value);
+          if (next.length) kept.push(makeRule(field, 'in', next));
+        });
+        state.root.rules = kept;
+        return;
+      }
+      if (!owned.length) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
+      // Into every owned clause, not just the first: with two clauses on one
+      // field, adding to one leaves the other excluding the value while the
+      // button reports it applied.
+      owned.forEach((i) => {
+        const values = enumClauseValues(state.root.rules[i]);
+        // A clause that already names it needs no second copy — partial
+        // overlap is exactly when this runs.
+        if (values.includes(value)) return;
+        state.root.rules[i] = makeRule(field, 'in', values.concat([value]));
+      });
     });
+  }
+
+  // A shortcut that is neither a missing-tag nor an enum value is a saved
+  // expression: toggling it adds or removes that exact clause.
+  function toggleQuickRules(shortcut) {
+    mutate(() => {
+      if (state.root.mode === 'all') {
+        const matches = state.root.rules.filter((node) => sameNode(node, shortcut.rules));
+        if (matches.length) {
+          // Every copy, not just the first: an expression can already hold
+          // the same clause twice (two identical rules added in the
+          // popover), and leaving one behind would light the button straight
+          // back up — a toggle that needs a second click to take effect.
+          state.root.rules = state.root.rules.filter((node) => !matches.includes(node));
+          return;
+        }
+      } else {
+        // Narrow the advanced expression instead of flattening it, exactly
+        // as the missing-tag and enum shortcuts do.
+        state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
+      }
+      state.root.rules.unshift(clone(shortcut.rules));
+    });
+  }
+
+  function toggleShortcut(shortcut) {
+    if (shortcut.kind === 'missing') {
+      toggleQuickMissing(shortcut.field, missingGroupFields(shortcut));
+    } else if (shortcut.kind === 'enum') {
+      toggleQuickEnum(shortcut.field, shortcut.value);
+    } else {
+      toggleQuickRules(shortcut);
+    }
+  }
+
+  function shortcutActive(shortcut) {
+    if (shortcut.kind === 'missing') {
+      return quickMissingFields(missingGroupFields(shortcut)).includes(shortcut.field);
+    }
+    if (shortcut.kind === 'enum') {
+      return quickEnumValues(shortcut.field).includes(shortcut.value);
+    }
+    return state.root.mode === 'all' &&
+      state.root.rules.some((node) => sameNode(node, shortcut.rules));
+  }
+
+  // Hide a button the page could never honor: a field this build no longer
+  // has, a field this page does not offer (the registry's ``pages``, e.g.
+  // review-only prediction fields), or a value the page scope excludes
+  // (Misses hides rejected photos, so a "Rejected" shortcut there would only
+  // ever return an empty grid).
+  function shortcutAvailable(shortcut) {
+    const leaves = allLeaves(shortcut.rules);
+    if (!leaves.length) return false;
+    return leaves.every((leaf) => {
+      if (!fieldAvailable(leaf.field)) return false;
+      const spec = fieldSpec(leaf.field);
+      if (!spec) return false;
+      if (!spec.values || !['is', 'in'].includes(leaf.op)) return true;
+      const values = Array.isArray(leaf.value) ? leaf.value : [leaf.value];
+      return values.every((value) => spec.values.includes(value));
+    }) && sanitizeExcludedValues(shortcut.rules) !== null;
+  }
+
+  function renderShortcutHint() {
+    const hint = $('.vf-missing-hint');
+    // Buttons in one group OR together; say so whenever more than one of
+    // them is on, so a widening result set is never a surprise.
+    const groups = new Map();
+    state.shortcuts.forEach((shortcut) => {
+      if (shortcut.kind !== 'missing' || !shortcutActive(shortcut)) return;
+      const key = shortcutGroupKey(shortcut);
+      groups.set(key, (groups.get(key) || []).concat(shortcut.label));
+    });
+    const widest = Array.from(groups.values()).sort((a, b) => b.length - a.length)[0];
+    if (!widest || widest.length < 2) { hint.hidden = true; return; }
+    hint.textContent = widest.length === 2
+      ? `Either ${widest[0]} or ${widest[1]}`
+      : `Any of: ${widest.join(', ')}`;
+    hint.hidden = false;
   }
 
   function renderQuick() {
     // Markup starts disabled; only enable once handlers and restored state
     // are ready, so early clicks cannot be lost or overwritten by init.
     $$('.vf-shortcuts button').forEach((btn) => { btn.disabled = !state.ready; });
-    const missing = quickMissingFields();
-    $$('[data-missing]').forEach((btn) => {
-      const active = missing.includes(btn.dataset.missing);
+    $$('.vf-shortcuts [data-shortcut]').forEach((btn) => {
+      const shortcut = shortcutById(btn.dataset.shortcut);
+      if (!shortcut) { btn.hidden = true; return; }
+      btn.hidden = !shortcutAvailable(shortcut);
+      const active = shortcutActive(shortcut);
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-pressed', String(active));
     });
-    $('.vf-missing-hint').hidden = new Set(missing).size < 2;
+    renderShortcutHint();
     const rating = findRootRule('rating');
     const opSel = $('.vf-quick-rating select');
     if (rating && ['>=', 'is', '<='].includes(rating.op)) opSel.value = rating.op;
     $$('.vf-quick-rating .vf-star').forEach((btn) => {
       btn.classList.toggle('active', Boolean(rating && Number(rating.value) >= Number(btn.dataset.rating)));
-    });
-    const flags = quickEnumValues('flag');
-    $$('.vf-quick-flags button').forEach((btn) => {
-      btn.hidden = !fieldValueAvailable('flag', btn.dataset.flag);
-      btn.classList.toggle('active', flags.includes(btn.dataset.flag));
-      btn.setAttribute('aria-pressed', String(flags.includes(btn.dataset.flag)));
     });
     const colors = quickEnumValues('color_label');
     $$('.vf-quick-colors button').forEach((btn) => btn.classList.toggle('active', colors.includes(btn.dataset.color)));
@@ -1301,9 +1575,10 @@
     });
 
     // Quick filters
-    $('.vf-quick-missing').addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-missing]');
-      if (btn) toggleQuickMissing(btn.dataset.missing);
+    $('.vf-shortcuts').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-shortcut]');
+      const shortcut = btn ? shortcutById(btn.dataset.shortcut) : null;
+      if (shortcut) toggleShortcut(shortcut);
     });
     $('.vf-quick-rating').addEventListener('click', (e) => {
       const btn = e.target.closest('.vf-star');
@@ -1321,10 +1596,6 @@
     $('.vf-quick-rating select').addEventListener('change', (e) => {
       const rating = findRootRule('rating');
       if (rating) mutate(() => { rating.op = e.target.value; });
-    });
-    $('.vf-quick-flags').addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-flag]');
-      if (btn) toggleQuickEnum('flag', btn.dataset.flag);
     });
     $('.vf-quick-colors').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-color]');
@@ -1615,7 +1886,9 @@
       state.excludedValues = options.excludedValues || {};
       rootEl = typeof options.root === 'string' ? document.querySelector(options.root) : options.root;
       if (!rootEl) return Promise.reject(new Error('VireoFilter: missing root element'));
-      return loadRegistry().then(() => {
+      // Both loads run together: the shortcut row paints as soon as its
+      // config lands, without waiting on the (larger) field registry.
+      return Promise.all([loadRegistry(), loadShortcuts()]).then(() => {
         installEvents();
         const urlParams = new URLSearchParams(window.location.search);
         let fromUrl = false;
@@ -1681,6 +1954,16 @@
       });
     },
     getRules() { return effectiveRules(); },
+    // Settings renders the same sentence for a stored shortcut that the bar
+    // will put on its chip, so what you configure is what you will read.
+    // Operator wording, shared with Settings so both name an op the same way.
+    opLabels() { return { ...OP_LABELS }; },
+    describeRule(rule, fields) {
+      const previous = state.fields;
+      if (fields) state.fields = fields;
+      try { return describeNode(rule, true); }
+      finally { state.fields = previous; }
+    },
     getVisual() {
       // Pause disables the visual clause with the rest of the user filters.
       return (state.muted || !state.visual) ? null : clone(state.visual);

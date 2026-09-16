@@ -108,7 +108,7 @@ def test_misses_page_hides_rejected_flag_filter(live_server, page):
 
     page.click(".vf-filters-btn")
     # The rejected flag is hidden because the page scope excludes it.
-    assert page.locator('.vf-quick-flags [data-flag="rejected"]').is_hidden()
+    assert page.locator('.vf-shortcuts [data-value="rejected"]').is_hidden()
     page.click(".vf-add-filter")
     page.fill(".vf-field-search", "flag")
     page.click('[data-add-field="flag"]')
@@ -133,7 +133,7 @@ def test_enum_field_is_unavailable_when_page_excludes_every_value(
 
     page.click(".vf-filters-btn")
     # Quick-flag buttons all hide when no value is available.
-    expect_flag_buttons = page.locator(".vf-quick-flags button")
+    expect_flag_buttons = page.locator(".vf-shortcuts [data-kind='enum']")
     for index in range(expect_flag_buttons.count()):
         assert expect_flag_buttons.nth(index).is_hidden()
     page.click(".vf-add-filter")
