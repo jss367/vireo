@@ -438,7 +438,7 @@ def test_shortcuts_wait_for_initialization(live_server, page, registry_fails):
         expect(button).to_be_visible()
         expect(button).to_be_disabled()
     # A native disabled button does not dispatch a click before handlers exist.
-    page.locator('[data-missing="has_species"]').evaluate("button => button.click()")
+    page.locator('.vf-shortcuts [data-field="has_species"]').evaluate("button => button.click()")
     with page.expect_response("**/api/filters/fields"):
         if registry_fails:
             held_routes[0].fulfill(status=503, json={"error": "Metadata unavailable"})
@@ -452,7 +452,7 @@ def test_shortcuts_wait_for_initialization(live_server, page, registry_fails):
         for button in buttons.all():
             expect(button).to_be_enabled()
         _wait_total(page, 5)
-        page.locator('[data-missing="has_species"]').click()
+        page.locator('.vf-shortcuts [data-field="has_species"]').click()
         _wait_total(page, 3)
 
 
@@ -477,11 +477,11 @@ def test_quick_rating_filter_and_chip_semantics(live_server, page):
 def test_quick_flags_multi_select_combines(live_server, page):
     _open_browse(page, live_server)
     expect(page.locator(".vf-popover")).to_be_hidden()
-    assert page.locator('.vf-quick-flags [data-flag="flagged"]').is_visible()
-    page.click('.vf-quick-flags [data-flag="flagged"]')
+    assert page.locator('.vf-shortcuts [data-value="flagged"]').is_visible()
+    page.click('.vf-shortcuts [data-value="flagged"]')
     _wait_total(page, 0)
-    expect(page.locator('[data-flag="flagged"]')).to_have_attribute("aria-pressed", "true")
-    page.click('.vf-quick-flags [data-flag="none"]')
+    expect(page.locator('.vf-shortcuts [data-value="flagged"]')).to_have_attribute("aria-pressed", "true")
+    page.click('.vf-shortcuts [data-value="none"]')
     # Seed photos have NULL flags — all 5 must count as Unflagged.
     _wait_total(page, 5)
     chips = page.evaluate("document.querySelector('.vf-chips').textContent")
@@ -501,8 +501,8 @@ def test_missing_tag_shortcuts_combine_and_distinguish_gps(live_server, page):
             (photos[2],),
         )
     _open_browse(page, live_server)
-    species = page.locator('[data-missing="has_species"]')
-    location = page.locator('[data-missing="has_location_keyword"]')
+    species = page.locator('.vf-shortcuts [data-field="has_species"]')
+    location = page.locator('.vf-shortcuts [data-field="has_location_keyword"]')
     expect(species).to_be_visible()
     expect(location).to_be_visible()
     expect(page.locator(".vf-popover")).to_be_hidden()
@@ -520,9 +520,9 @@ def test_missing_tag_shortcuts_combine_and_distinguish_gps(live_server, page):
     # Existing search and flag filters still narrow the missing-either set.
     page.locator(".vf-search input").fill("hawk")
     _wait_total(page, 2)
-    page.locator('[data-flag="flagged"]').click()
+    page.locator('.vf-shortcuts [data-value="flagged"]').click()
     _wait_total(page, 0)
-    page.locator('[data-flag="flagged"]').click()
+    page.locator('.vf-shortcuts [data-value="flagged"]').click()
     _wait_total(page, 2)
     page.locator(".vf-search input").fill("")
     _wait_total(page, 4)
@@ -555,8 +555,8 @@ def test_shortcuts_narrow_collection_with_any_rules(live_server, page, shortcut)
     _wait_total(page, 2)
     original = page.evaluate("VireoFilter.getUserRules()")
     url = page.url
-    button = page.locator('[data-missing="has_species"]' if shortcut == "missing"
-                          else '[data-flag="flagged"]')
+    button = page.locator('.vf-shortcuts [data-field="has_species"]' if shortcut == "missing"
+                          else '.vf-shortcuts [data-value="flagged"]')
     button.click()
     _wait_total(page, 1)
     expect(page.locator("#grid .grid-card")).to_have_count(1)
@@ -583,8 +583,8 @@ def test_missing_shortcuts_preserve_multiple_existing_clauses(live_server, page,
     ]}
     page.evaluate("rules => VireoFilter.loadExpression(rules)", original)
     _wait_total(page, 2)
-    species = page.locator('[data-missing="has_species"]')
-    location = page.locator('[data-missing="has_location_keyword"]')
+    species = page.locator('.vf-shortcuts [data-field="has_species"]')
+    location = page.locator('.vf-shortcuts [data-field="has_location_keyword"]')
     expect(species).to_have_attribute("aria-pressed", "false")
     expect(location).to_have_attribute("aria-pressed", "false")
     location.click()
@@ -604,7 +604,7 @@ def test_missing_shortcuts_preserve_multiple_existing_clauses(live_server, page,
 
 @pytest.mark.parametrize("mode", ["any", "none"])
 @pytest.mark.parametrize("field,value,selector", [
-    ("flag", "flagged", '[data-flag="flagged"]'),
+    ("flag", "flagged", '.vf-shortcuts [data-value="flagged"]'),
     ("color_label", "red", '.vf-quick-colors [data-color="red"]'),
 ])
 def test_enum_shortcuts_preserve_advanced_root(live_server, page, mode, field, value, selector):
@@ -637,8 +637,8 @@ def test_enum_shortcuts_preserve_advanced_root(live_server, page, mode, field, v
 
 def test_missing_tag_shortcuts_restore_pause_and_clear(live_server, page):
     _open_browse(page, live_server)
-    species = page.locator('[data-missing="has_species"]')
-    location = page.locator('[data-missing="has_location_keyword"]')
+    species = page.locator('.vf-shortcuts [data-field="has_species"]')
+    location = page.locator('.vf-shortcuts [data-field="has_location_keyword"]')
     species.click()
     _wait_total(page, 3)
     with page.expect_response(lambda response: "/api/workspaces/" in response.url

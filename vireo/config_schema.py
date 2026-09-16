@@ -30,6 +30,10 @@ EXCLUDED = (
     # List of validated {name, settings} dicts — managed by the shared export
     # preset UI and its dedicated API, not the generic settings editor.
     "export_presets",
+    # List of {id, label, group, rules} dicts — the quick-filter row of the
+    # filter bar, managed by the Quick filters section in Settings and
+    # validated by filter_shortcuts.normalize() on write.
+    "filter_shortcuts",
 )
 
 

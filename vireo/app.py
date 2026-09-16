@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import filter_shortcuts
 import id_conflicts
 import location_review
 import places
@@ -7326,6 +7327,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         (labels, categories, types, operators, enum values, suggest flags).
         """
         return jsonify({"fields": fields_for_api()})
+
+    @app.route("/api/filters/shortcuts")
+    def api_filter_shortcuts():
+        """The configured quick-filter buttons for the filter bar's row.
+
+        ``shortcuts`` is the stored list with the behavior the bar needs
+        derived from each rule's shape (see filter_shortcuts.py); ``groups``
+        is the same list split into the containers it renders; ``defaults``
+        backs the Settings "restore the built-in buttons" action, so both
+        sides read one definition of what the built-ins are.
+        """
+        import config as cfg
+
+        shortcuts = filter_shortcuts.from_config(cfg.load())
+        return jsonify({
+            "shortcuts": shortcuts,
+            "groups": filter_shortcuts.grouped(shortcuts),
+            "defaults": filter_shortcuts.DEFAULT_SHORTCUTS,
+        })
 
     @app.route("/api/filters/values")
     def api_filter_values():
@@ -18719,11 +18739,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         normalized.append(coerced)
                 current["remote_targets"] = normalized
 
+            # Quick-filter buttons are rule expressions, so validate them
+            # against the field registry here rather than rendering a button
+            # that could never match anything.
+            if "filter_shortcuts" in body:
+                raw_shortcuts = body["filter_shortcuts"]
+                if isinstance(raw_shortcuts, list):
+                    current["filter_shortcuts"] = filter_shortcuts.for_storage(
+                        filter_shortcuts.normalize(raw_shortcuts)
+                    )
+
             for key in body:
                 # export_presets is validated and written only by the
                 # /api/export/presets endpoints; skip it here so a full-config
                 # snapshot save can't overwrite presets unvalidated.
-                if key in ("keyboard_shortcuts", "remote_targets", "export_presets"):
+                if key in ("keyboard_shortcuts", "remote_targets", "export_presets",
+                           "filter_shortcuts"):
                     continue
                 if key in cfg.DEFAULTS:
                     # Deep-merge for nested-dict config sections so a curated
@@ -19445,6 +19476,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     key=lambda preset: preset["name"].casefold()
                 )
                 payload["export_presets"] = normalized_presets
+
+        # filter_shortcuts is EXCLUDED from SCHEMA (custom Settings UI) but
+        # the filter bar renders it on five pages, so a malformed import must
+        # not reach the template. Normalize like /api/config does: unusable
+        # entries are dropped rather than rendered as dead buttons.
+        if "filter_shortcuts" in payload:
+            raw_shortcuts = payload["filter_shortcuts"]
+            if not isinstance(raw_shortcuts, list):
+                errors["filter_shortcuts"] = "filter_shortcuts must be a JSON array"
+            else:
+                payload["filter_shortcuts"] = filter_shortcuts.for_storage(
+                    filter_shortcuts.normalize(raw_shortcuts)
+                )
 
         if errors:
             return jsonify({"error": "validation failed", "errors": errors}), 400

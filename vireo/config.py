@@ -12,6 +12,8 @@ import tempfile
 import threading
 import time
 
+from filter_shortcuts import DEFAULT_SHORTCUTS
+
 log = logging.getLogger(__name__)
 
 CONFIG_PATH = os.path.expanduser("~/.vireo/config.json")
@@ -100,6 +102,13 @@ DEFAULTS = {
     "browse_card_fields": [
         "filename", "location_status", "rating", "flag", "sharpness"
     ],
+    # Buttons in the always-visible quick-filter row of the universal filter
+    # bar, in render order. Each entry is {"id", "label", "group", "rules"}
+    # where `rules` is an ordinary filter-rule node; `filter_shortcuts.py`
+    # owns the shape, the defaults (the row the bar shipped with), and the
+    # validation. Custom UI in Settings, so it stays out of SCHEMA like
+    # external_editors. An explicit empty list means "no quick filters".
+    "filter_shortcuts": copy.deepcopy(DEFAULT_SHORTCUTS),
     "photos_per_page": 50,
     "thumbnail_size": 400,
     "thumbnail_quality": 85,
