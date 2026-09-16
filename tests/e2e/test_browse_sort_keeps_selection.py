@@ -11,8 +11,8 @@ these tests check that Browse asks the server for that position once and jumps
 straight to the page holding it, rather than paging forward until it appears.
 """
 
+import contextlib
 import json
-import time
 
 from playwright.sync_api import expect
 
@@ -82,18 +82,35 @@ def _select_photo_at(page, index):
 
 
 def _capture_queries(page):
-    """Record every /api/photos/query request body and its response payload."""
+    """Record /api/photos/query calls in the order the browser *issued* them.
+
+    Ordering has to come from the request event, not the response: a
+    non-focused request can start first and finish last, and an
+    "the focused query came first" assertion read off completion order would
+    pass without proving anything (CodeRabbit review on PR #1658). Responses
+    are matched back onto their request entry.
+    """
     calls = []
+
+    def on_request(request):
+        if "/api/photos/query" not in request.url:
+            return
+        try:
+            body = json.loads(request.post_data or "{}")
+        except Exception:
+            return
+        calls.append({"request": body, "response": None, "_req": request})
 
     def on_response(response):
         if "/api/photos/query" not in response.url:
             return
-        try:
-            body = json.loads(response.request.post_data or "{}")
-            calls.append({"request": body, "response": response.json()})
-        except Exception:
-            pass
+        for call in calls:
+            if call["_req"] is response.request:
+                with contextlib.suppress(Exception):
+                    call["response"] = response.json()
+                return
 
+    page.on("request", on_request)
     page.on("response", on_response)
     return calls
 
@@ -103,6 +120,40 @@ def _change_sort(page, value):
     page.wait_for_timeout(600)
     page.wait_for_function(
         "() => !loading && browseDatasetReady", timeout=15000
+    )
+
+
+def _stall_first_focused_query(page, seconds=1.5):
+    """Hold the first focused request open, stalling *in the browser*.
+
+    Must be installed before ``page.goto``. A ``page.route`` handler that
+    sleeps would block the test thread as well, so the first request would
+    finish before the test could issue the second action and the reloads
+    would never actually overlap (CodeRabbit review on PR #1658). Patching
+    ``fetch`` inside the page delays only the page.
+    """
+    page.add_init_script(
+        """
+        (() => {
+          const origFetch = window.fetch;
+          window.__focusStallArmed = true;
+          window.__focusStalled = false;
+          window.fetch = function (input, init) {
+            const body = init && init.body ? String(init.body) : '';
+            if (window.__focusStallArmed && body.includes('focus_photo_id')) {
+              window.__focusStallArmed = false;
+              window.__focusStalled = true;
+              return new Promise((resolve, reject) => {
+                setTimeout(
+                  () => origFetch(input, init).then(resolve, reject),
+                  %d,
+                );
+              });
+            }
+            return origFetch(input, init);
+          };
+        })();
+        """ % int(seconds * 1000)
     )
 
 
@@ -178,22 +229,22 @@ def test_second_sort_change_mid_flight_keeps_the_photo(live_server, page):
     ``<select>`` fires one ``change`` per option (Codex review on PR #1658).
     """
     _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
+    # Must be armed before the first navigation: it is an init script.
+    _stall_first_focused_query(page)
     _open_browse(page, live_server)
     _scroll_until_loaded(page, 100)
     photo_id = _select_photo_at(page, 80)
 
     # Hold the first focused request open so the second sort change is
     # guaranteed to arrive while it is still in flight.
-    held = _stall_first_focused_query(page)
-
     page.select_option("#sortSelect", "name_desc")
     page.wait_for_timeout(150)
     page.select_option("#sortSelect", "rating")
     page.wait_for_timeout(2500)
     page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
-    page.unroute("**/api/photos/query")
-
-    assert held["done"], "the first focused request was never stalled"
+    assert page.evaluate("window.__focusStalled") is True, (
+        "the focused request was never stalled"
+    )
     assert page.evaluate("document.getElementById('sortSelect').value") == "rating"
     assert page.evaluate("selectedPhotoId") == photo_id, (
         "the second sort change dropped the photo the first one was holding"
@@ -201,20 +252,6 @@ def test_second_sort_change_mid_flight_keeps_the_photo(live_server, page):
     expect(
         page.locator(f"#grid .grid-card[data-id='{photo_id}']")
     ).to_be_visible()
-
-
-def _stall_first_focused_query(page, seconds=1.5):
-    """Hold the first focused request open so the next reset lands in flight."""
-    held = {"done": False}
-
-    def handler(route, request):
-        if not held["done"] and "focus_photo_id" in (request.post_data or ""):
-            held["done"] = True
-            time.sleep(seconds)
-        route.continue_()
-
-    page.route("**/api/photos/query", handler)
-    return held
 
 
 def test_health_refresh_mid_sort_keeps_the_photo(live_server, page):
@@ -227,11 +264,12 @@ def test_health_refresh_mid_sort_keeps_the_photo(live_server, page):
     PR #1658).
     """
     _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
+    # Must be armed before the first navigation: it is an init script.
+    _stall_first_focused_query(page)
     _open_browse(page, live_server)
     _scroll_until_loaded(page, 100)
     photo_id = _select_photo_at(page, 80)
 
-    held = _stall_first_focused_query(page)
     page.select_option("#sortSelect", "name_desc")
     page.wait_for_timeout(150)
     # Same scope, different trigger: a folder-health event lands mid-sort.
@@ -241,9 +279,9 @@ def test_health_refresh_mid_sort_keeps_the_photo(live_server, page):
     )
     page.wait_for_timeout(2500)
     page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
-    page.unroute("**/api/photos/query")
-
-    assert held["done"], "the focused request was never stalled"
+    assert page.evaluate("window.__focusStalled") is True, (
+        "the focused request was never stalled"
+    )
     assert page.evaluate("selectedPhotoId") == photo_id, (
         "a health refresh landing mid-sort dropped the photo"
     )
@@ -254,26 +292,38 @@ def test_scope_change_mid_sort_drops_the_photo(live_server, page):
 
     The photo belongs to the view the user left, so resurrecting it would
     re-select something the scope change deliberately cleared.
+
+    Note this one pins behaviour rather than proving the scope-generation
+    guard: it also passes with that guard removed, because the folder it
+    switches to does not contain the photo, so the adopted anchor could not
+    be restored either way. Reproducing the guard's exact failure needs a
+    scope change into a view that still holds the photo. Kept because the
+    user-visible rule — a folder change mid-sort does not hand you back the
+    old scope's selection — is worth a regression test regardless.
     """
     seeded = _seed_sortable_library(
         live_server["db"], live_server["data"]["folders"][0]
     )
     assert seeded
+    # Must be armed before the first navigation: it is an init script.
+    _stall_first_focused_query(page)
     _open_browse(page, live_server)
     _scroll_until_loaded(page, 100)
     photo_id = _select_photo_at(page, 80)
 
-    held = _stall_first_focused_query(page)
     page.select_option("#sortSelect", "name_desc")
     page.wait_for_timeout(150)
-    # A sidebar folder click — this bumps browseScopeGen.
+    # A sidebar folder click — this bumps browseScopeGen — and then another
+    # sort change, which is what reaches the inherit branch at all.
     other_folder = live_server["data"]["folders"][1]
     page.evaluate("id => filterByFolder(id)", other_folder)
+    page.wait_for_timeout(100)
+    page.select_option("#sortSelect", "rating")
     page.wait_for_timeout(2500)
     page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
-    page.unroute("**/api/photos/query")
-
-    assert held["done"], "the focused request was never stalled"
+    assert page.evaluate("window.__focusStalled") is True, (
+        "the focused request was never stalled"
+    )
     assert page.evaluate("selectedPhotoId") != photo_id, (
         "a photo from the scope the user left was resurrected as the selection"
     )
