@@ -7850,7 +7850,7 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
     gestureIds
     && gestureIds.length === selectedPhotos.size
     && gestureIds.every(function(memberId) { return selectedPhotos.has(memberId); })
-  ) ? selectionIdsKey(gestureIds) : null;
+  ) ? { ids: gestureIds.slice(), epoch: anchorRestoreEpoch } : null;
   // Top-level grid cards navigate the grid, matching pre-stacks behaviour;
   // an expanded stack's members live in ``.browse-stack-member`` cards and
   // open against their own member list instead.
@@ -7973,7 +7973,11 @@ function browseKeyMatchesConfiguredShortcut(e) {
 var browseLightboxBoundaryRetry = null;
 var browseLightboxSession = 0;
 // Set by the grid double-click handler when the gesture's own clicks selected
-// the stack it opened; consumed and cleared by the ``lightbox:closed`` handler.
+// the stack it opened: {ids, epoch}. Read by the ``lightbox:closed`` handler,
+// which clears it once it acts on it. ``epoch`` is the selection generation
+// the gesture was made in, so any selection action since — a click, a
+// Select all, a Clear — retires the marker without needing every one of
+// those paths to know it exists.
 var browseLightboxStackGesture = null;
 
 function browseLightboxOwnsLoadedWindow() {
@@ -8334,7 +8338,15 @@ function selectPhoto(e, id, idx, opts) {
     // getActiveSelection() returns the set — so destructive actions
     // (delete/export/develop) would target the set while the user is staring
     // at a different, visibly-focused card. Reconcile by dropping the focus.
-    if (selectedPhotoId !== null && selectedPhotos.size > 0 && !selectedPhotos.has(selectedPhotoId)) {
+    //
+    // The same applies when this toggle empties the set entirely and the
+    // focused photo is one of the ids it just removed: collapsing an expanded
+    // stack pins the focus to its cover, so Cmd-clicking that stack off left
+    // getActiveSelection() falling back to the cover — a stack the user
+    // deselected as a unit coming back as a one-photo partial selection.
+    // Codex P2 on PR #1672.
+    if (selectedPhotoId !== null && !selectedPhotos.has(selectedPhotoId)
+        && (selectedPhotos.size > 0 || clickIds.indexOf(selectedPhotoId) !== -1)) {
       selectedPhotoId = null;
       selectedIndex = -1;
       var detail = document.getElementById('detailContent');
@@ -13172,22 +13184,37 @@ function scrollToCard(idx) {
 // Previous/Next step while the lightbox is still open.
 document.addEventListener('lightbox:closed', function(event) {
   var photoId = event && event.detail ? event.detail.photoId : null;
-  // One marker per open/close pair, whatever the outcome below.
-  var stackGesture = browseLightboxStackGesture;
-  browseLightboxStackGesture = null;
   if (photoId == null) return;
   if (selectedPhotos.size > 0) {
     // Viewing shortcuts can open the lightbox without collapsing an existing
     // batch. Preserve that batch instead of replacing it with the viewed
     // photo — unless this lightbox was opened by a double-click on a stack
-    // card and that gesture's own selection is still untouched, which is the
-    // one "batch" the user did not assemble. Same ids, different provenance:
-    // an intentional stack selection (tray Select all, then E) still reads as
-    // a batch. Codex P2 on PR #1672.
-    if (stackGesture == null
-        || stackGesture !== selectionIdsKey(Array.from(selectedPhotos))) return;
+    // card and the selection is still the one that gesture made, which is the
+    // only "batch" the user did not assemble. Same ids, different provenance:
+    // an intentional stack selection (tray Select all, then E) bumps the
+    // selection epoch and so still reads as a batch.
+    //
+    // "Still the one that gesture made" allows shrinkage: deleting a photo in
+    // the lightbox drops it from the selection, and that is this gesture's
+    // selection mutated, not someone's batch. Without that, deleting a
+    // stack's cover — its only top-level card — left the hidden members
+    // selected with nothing on screen representing them, and the next batch
+    // shortcut would act on photos the user cannot see.
+    // Codex P2 on PR #1672.
+    var gestureIds = browseLightboxStackGesture
+      && browseLightboxStackGesture.epoch === anchorRestoreEpoch
+      ? new Set(browseLightboxStackGesture.ids) : null;
+    if (!gestureIds || !Array.from(selectedPhotos).every(function(id) {
+      return gestureIds.has(id);
+    })) return;
     // Finished inside that stack: the viewing gesture ended where it began,
-    // so the stack stays selected rather than shrinking to one frame.
+    // so the stack stays selected rather than shrinking to one frame. The
+    // marker deliberately survives this: deleting a photo in the lightbox
+    // reports a close for the photo being deleted, on its way to the next
+    // one, and that close looks exactly like this case. Clearing here would
+    // consume the gesture the real close still needs, and the epoch above
+    // already retires the marker the moment anything touches the selection.
+    // Codex P2 on PR #1672.
     if (selectedPhotos.has(photoId)) {
       var stackCoverId = browseStackCoverIdForPhoto(photoId);
       var stackIdx = photos.findIndex(function(photo) {
@@ -13199,16 +13226,20 @@ document.addEventListener('lightbox:closed', function(event) {
       }
       return;
     }
-    // Left the stack, so the gesture's selection is replaced below by the
-    // photo the user actually finished on.
-    selectedPhotos.clear();
   }
   var idx = photos.findIndex(function(photo) { return photo.id === photoId; });
   if (idx < 0) {
     var coverId = browseStackCoverIdForPhoto(photoId);
     idx = photos.findIndex(function(photo) { return photo.id === coverId; });
   }
+  // Nothing to reconcile to — leave every bit of state alone.
   if (idx < 0 || !findBrowsePhoto(photoId)) return;
+  // Past the guard above, so the gesture's selection is replaced by the photo
+  // the user actually finished on.
+  if (selectedPhotos.size > 0) {
+    selectedPhotos.clear();
+    browseLightboxStackGesture = null;
+  }
   // Skip `selectPhoto` when the focused photo is already the one being
   // returned to: it calls `loadDetail`, which refetches and rerenders the
   // detail panel and would silently discard an unsubmitted `#locationInput`
