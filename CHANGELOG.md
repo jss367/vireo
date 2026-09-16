@@ -31,6 +31,16 @@ All notable changes to Vireo are documented in this file.
   list instead of scrolling out of reach.
 
 ### Added
+- **Sort Browse by prediction confidence.** The sort menu gains *Prediction
+  confidence (highest)* and *(lowest)*. Both rank each photo by its strongest
+  current species prediction — the one Vireo would show you — ignoring guesses
+  you have rejected and label sets superseded by a re-run. Lowest-first is the
+  "what should I check" sort: it leads with the frames the classifier was least
+  sure about. Photos the classifier never scored sort last in *both*
+  directions, because no guess is not a low-confidence guess. A new optional
+  card badge, **Prediction confidence** (Settings › Display › Browse card
+  fields), shows the number the sort ranked on. Works with Stacks on, where a
+  stack takes the confidence of the member that would lead the unstacked list.
 - **The Jobs page names the species list a classification ran against.** A
   classify step used to say only which model was running, so a run against
   your active regional lists looked identical to one falling back to the full

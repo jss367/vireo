@@ -2000,6 +2000,10 @@ body.sidebar-resizing {
           <option value="quality">Quality (best)</option>
           <option value="sharpness">Sharpness (sharpest)</option>
           <option value="sharpness_asc">Sharpness (softest)</option>
+          <option value="prediction_confidence"
+                  title="Ranks each photo by its strongest current species prediction that you haven't rejected. Photos with no prediction sort last.">Prediction confidence (highest)</option>
+          <option value="prediction_confidence_asc"
+                  title="Ranks each photo by its strongest current species prediction that you haven't rejected — weakest first, so the guesses worth checking come up front. Photos with no prediction sort last, because no guess is not a low-confidence guess.">Prediction confidence (lowest)</option>
         </select>
         <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
           <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
@@ -3345,6 +3349,33 @@ function renderCardField(field, p) {
       return '';
     case 'quality_score':
       if (p.quality_score != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Quality score">' + p.quality_score.toFixed(2) + '</span>';
+      return '';
+    // The value the "Prediction confidence" sorts rank on, so a card can
+    // explain its own position in the grid. Absent (rather than 0) when the
+    // photo has no current, unrejected species prediction — the badge stays
+    // off instead of claiming a confidence of zero.
+    case 'prediction_confidence':
+      if (p.prediction_confidence != null) {
+        // Under a confidence sort a stack is placed by its leading member,
+        // not by the quality-ranked cover shown on the card, and the server
+        // sends that leading score so the badge names the number that put
+        // the item where it is. Say whose score it is rather than letting
+        // the card imply it belongs to the frame in the thumbnail.
+        //
+        // The server flags this per card; do NOT re-derive it from the sort
+        // dropdown. A healthy visual clause keeps the grid similarity-ranked
+        // while the dropdown still reads "Prediction confidence", and that
+        // path sends the cover's own score — so a select-derived label would
+        // claim the relevance order came from a number that did not produce
+        // it (Codex P2 on PR #1670).
+        var confIsStackLead = p.prediction_confidence_is_stack_lead === true;
+        var confTitle = confIsStackLead
+          ? 'Confidence of the strongest current species prediction on the frame that leads this stack — the score this stack is sorted by'
+          : 'Confidence of the strongest current species prediction';
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="'
+          + escapeAttr(confTitle) + '">'
+          + Math.round(p.prediction_confidence * 100) + '%</span>';
+      }
       return '';
     case 'color_label':
       var cl = colorLabels[p.id];
@@ -5866,6 +5897,22 @@ var MUTATION_KEYWORD = 'keyword';
 var MUTATION_PREDICTION = 'prediction';
 var MUTATION_WILDLIFE = 'wildlife_excluded';
 
+/* Sorts whose key is the photo's top prediction confidence — mirrors
+   _PREDICTION_CONFIDENCE_SORTS in vireo/db.py. */
+var PREDICTION_CONFIDENCE_SORTS = ['prediction_confidence',
+  'prediction_confidence_asc'];
+
+/* Whether the sort DROPDOWN is set to a confidence sort. Deliberately not
+   "the grid is ordered by confidence": a healthy visual clause keeps results
+   similarity-ranked while this still reads prediction_confidence. Only the
+   reload heuristic below may use it — a card that wants to describe its own
+   badge reads the server's per-card
+   ``prediction_confidence_is_stack_lead`` flag instead. */
+function sortSelectRanksOnPredictionConfidence() {
+  var el = document.getElementById('sortSelect');
+  return !!el && PREDICTION_CONFIDENCE_SORTS.indexOf(el.value) !== -1;
+}
+
 function refreshActiveCollectionAfterMembershipChange(mutations) {
   if (activeCollectionId) {
     filterByCollection(activeCollectionId, { preserveAnchor: false });
@@ -5904,6 +5951,26 @@ function refreshActiveCollectionAfterMembershipChange(mutations) {
         filterByCollection(reopenId, { preserveAnchor: false });
       }
     });
+    return;
+  }
+  // A prediction edit moves a photo under the prediction-confidence sorts
+  // even with no filter active, so the filter-only checks below would skip
+  // the reload the grid needs. Rejecting the top pick promotes the next
+  // guess (or leaves the photo unscored); accepting a runner-up rejects the
+  // old top pick. Either way the photo's sort key AND the number its badge
+  // shows have changed, and without reloading the grid keeps the old order
+  // and the old score until a manual re-sort (Codex P2 on PR #1670). Same
+  // options as onSortChanged(), which is the same situation: the order moved
+  // under the photo the user is looking at, so hold onto it.
+  //
+  // Reading the dropdown rather than what the server actually ranked by is
+  // deliberate here: with a healthy visual clause the order will not move,
+  // but every affected card's badge number still did, so the reload is
+  // wanted either way.
+  var predictionEdit = !mutations ||
+    mutations.indexOf(MUTATION_PREDICTION) !== -1;
+  if (predictionEdit && sortSelectRanksOnPredictionConfidence()) {
+    reloadBrowseResults({ preserveAnchor: true, focusAnchor: true });
     return;
   }
   // Collections open into the filter bar now (Phase 5): when a membership
@@ -10356,6 +10423,45 @@ async function rejectDetailPredictions(predictionIds, photoId) {
   // grids anyway, clearing the selection and detail panel for a result set
   // that could not have changed.
   refreshActiveCollectionAfterMembershipChange([MUTATION_PREDICTION]);
+  refreshPredictionConfidenceBadges([photoId]);
+}
+
+/* The reject path's badge refresh. Rejecting writes no keywords, so it
+   deliberately does not go through _refreshBrowseKeywordState — but it does
+   change the photo's top prediction, and with the Prediction confidence card
+   field on, the badge would otherwise keep showing the score the user just
+   threw away (Codex P2 on PR #1670). Accepts get the same value for free
+   from the /by-ids fetch _refreshBrowseKeywordState already makes.
+
+   Skipped when the card field is off (nothing displays the number) and when
+   the active sort ranks on confidence (the caller reloads the whole grid,
+   which replaces these cards outright). */
+async function refreshPredictionConfidenceBadges(photoIds) {
+  if (cardFields.indexOf('prediction_confidence') === -1) return;
+  if (sortSelectRanksOnPredictionConfidence()) return;
+  var ids = Array.from(new Set(photoIds || [])).filter(function(id) {
+    return !!findBrowsePhoto(id);
+  });
+  if (!ids.length) return;
+  try {
+    var data = await safeFetch('/api/photos/by-ids', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    }, {toast: false});
+    var touched = [];
+    (data.photos || []).forEach(function(updated) {
+      var local = findBrowsePhoto(updated.id);
+      if (!local || local.prediction_confidence_is_stack_lead) return;
+      local.prediction_confidence = updated.prediction_confidence === undefined
+        ? null : updated.prediction_confidence;
+      touched.push(updated.id);
+    });
+    if (touched.length) refreshGridCards(touched);
+  } catch (e) {
+    // The reject itself succeeded; a stale badge until the next reload is
+    // not worth a toast on top of the ones _reportSkippedRejects may show.
+  }
 }
 
 async function loadSelectionPredictions(ids) {
@@ -11014,6 +11120,17 @@ async function _refreshBrowseKeywordState(photoIds, opts) {
           ? updated.species_representatives
           : local.life_list;
         local.is_species_representative = !!updated.is_species_representative;
+        // A prediction accept/reject moves this even though no keyword
+        // changed, and the badge would otherwise keep showing the old score
+        // until an unrelated reload (Codex P2 on PR #1670). Skipped for a
+        // stack card whose badge is its leading member's score: /by-ids is
+        // unstacked, so it would answer with the cover's own number. Those
+        // cards only appear under a confidence sort, which reloads the whole
+        // grid on a prediction edit anyway.
+        if (!local.prediction_confidence_is_stack_lead) {
+          local.prediction_confidence = updated.prediction_confidence === undefined
+            ? null : updated.prediction_confidence;
+        }
         var nextRating = updated.rating === undefined ? null : updated.rating;
         var nextFlag = updated.flag === undefined ? null : updated.flag;
         var localRating = local.rating === undefined ? null : local.rating;
