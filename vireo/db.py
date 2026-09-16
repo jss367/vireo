@@ -1824,10 +1824,22 @@ class Database:
         # in this commit queries only the new photo-keyed table. Without
         # this migration the sibling-workspace pending edits that #1661
         # preserved lose their path grant on upgrade and stay queued as
-        # inaccessible with nothing saying why. Narrow the rewrite to
-        # photos that actually have a preserved edit under the folder
-        # grant -- the exact rows the grant was written for -- rather than
-        # authorizing every photo that happens to share the folder.
+        # inaccessible with nothing saying why. Rewrite them into the
+        # photo-keyed table -- every ``workspace_sync_only_folders`` row
+        # was written by ``_link_survivor_for_sibling_edits`` for a
+        # specific survivor whose folder happened to be the grant key at
+        # the time. Any pending edit queued in that workspace is one of
+        # those preserved rows, so a photo-keyed grant for each such
+        # ``(workspace_id, photo_id)`` recovers exactly the authorization
+        # the old table gave, and does so independent of whether the
+        # survivor was moved out of the granted folder between the merge
+        # and this upgrade -- ``move_photos`` rewrites ``photos.folder_id``
+        # and knew nothing about the legacy table, so joining on
+        # ``p.folder_id = sof.folder_id`` would silently drop those
+        # exact rows and the ``DROP TABLE`` below would remove the only
+        # marker. Grants for library-visible photos are inert:
+        # ``_photo_syncable_in_workspace`` short-circuits on library
+        # membership before consulting the grant.
         legacy_sof = self.conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='workspace_sync_only_folders'"
@@ -1838,10 +1850,10 @@ class Database:
                        (workspace_id, photo_id)
                    SELECT DISTINCT pc.workspace_id, pc.photo_id
                    FROM pending_changes pc
-                   JOIN photos p ON p.id = pc.photo_id
-                   JOIN workspace_sync_only_folders sof
-                     ON sof.workspace_id = pc.workspace_id
-                    AND sof.folder_id = p.folder_id"""
+                   WHERE EXISTS (
+                       SELECT 1 FROM workspace_sync_only_folders sof
+                       WHERE sof.workspace_id = pc.workspace_id
+                   )"""
             )
             self.conn.execute("DROP TABLE workspace_sync_only_folders")
         # Migration: working-copy failure markers. Backfill (and the inline

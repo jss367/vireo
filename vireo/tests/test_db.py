@@ -14523,6 +14523,86 @@ def test_upgrade_migrates_legacy_workspace_sync_only_folders(tmp_path):
         db.close()
 
 
+def test_upgrade_migrates_legacy_grant_for_survivor_moved_before_upgrade(
+        tmp_path):
+    """``move_photos`` rewrites ``photos.folder_id`` and knew nothing about
+    the legacy ``workspace_sync_only_folders`` table, so a database opened
+    by #1661 that then moved the granted survivor out of the granted folder
+    before the upgrade left the grant's ``folder_id`` disconnected from the
+    photo's current folder. A migration that joins on
+    ``p.folder_id = sof.folder_id`` silently drops precisely those rows,
+    and the following ``DROP TABLE`` removes the only marker -- the
+    sibling's preserved edit is then permanently unsyncable with nothing
+    saying why. Recover the pending edit independent of the photo's
+    current folder."""
+    from db import Database
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    sibling_ws = db.create_workspace("Sibling")
+    granted_dir = tmp_path / "granted"
+    granted_dir.mkdir()
+    granted_folder = db.add_folder(str(granted_dir), name="granted")
+    moved_dir = tmp_path / "moved"
+    moved_dir.mkdir()
+    moved_folder = db.add_folder(str(moved_dir), name="moved")
+    # The survivor was granted while sitting in ``granted_folder`` and has
+    # since been moved to ``moved_folder``; its ``folder_id`` no longer
+    # matches the legacy grant's ``folder_id``.
+    pid_moved = db.add_photo(
+        folder_id=moved_folder, filename="a.raf", extension=".raf",
+        file_size=1, file_mtime=1.0, file_hash="H1",
+    )
+    db.set_active_workspace(ws)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, 'rating', '5', 'tok', "
+        "'2026-01-01 00:00:00', ?)",
+        (pid_moved, sibling_ws),
+    )
+    db.conn.execute("DROP TABLE workspace_sync_only_photos")
+    db.conn.execute(
+        """CREATE TABLE workspace_sync_only_folders (
+             workspace_id INTEGER NOT NULL REFERENCES workspaces(id)
+                 ON DELETE CASCADE,
+             folder_id    INTEGER NOT NULL REFERENCES folders(id)
+                 ON DELETE CASCADE,
+             PRIMARY KEY (workspace_id, folder_id)
+           )"""
+    )
+    db.conn.execute(
+        "INSERT INTO workspace_sync_only_folders "
+        "(workspace_id, folder_id) VALUES (?, ?)",
+        (sibling_ws, granted_folder),
+    )
+    db.conn.commit()
+    db.close()
+
+    db = Database(db_path)
+    try:
+        legacy_present = db.conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='workspace_sync_only_folders'"
+        ).fetchone()
+        assert legacy_present is None
+        granted = {
+            (row["workspace_id"], row["photo_id"])
+            for row in db.conn.execute(
+                "SELECT workspace_id, photo_id "
+                "FROM workspace_sync_only_photos"
+            )
+        }
+        assert granted == {(sibling_ws, pid_moved)}
+        db.set_active_workspace(sibling_ws)
+        try:
+            assert db._photo_syncable_in_workspace(pid_moved) is True
+        finally:
+            db.set_active_workspace(ws)
+    finally:
+        db.close()
+
+
 def test_merge_staged_tree_off_staging_identities_skip_sibling_workspace(
         db, tmp_path):
     """The off-staging remap count moved through to the caller for
