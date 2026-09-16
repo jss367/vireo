@@ -13404,7 +13404,12 @@ def test_merge_staged_tree_keeps_existing_keyword_rename_pair(db, tmp_path):
     }
 
 
-def test_merge_staged_tree_keyword_conflict_is_workspace_scoped(db, tmp_path):
+def test_merge_staged_tree_keyword_conflict_spans_workspaces(db, tmp_path):
+    """``photo_keywords`` and the sidecar are both global, so once the remap
+    puts the two rows on one photo an add queued in another workspace and a
+    remove queued here are two intents for one file. Keeping both would just
+    hand the result to whichever workspace syncs last; the newer one wins,
+    whoever queued it."""
     ws = db._active_workspace_id
     arch = tmp_path / "arch" / "USA"
     date_dir = arch / "2026-01-01"
@@ -13426,9 +13431,6 @@ def test_merge_staged_tree_keyword_conflict_is_workspace_scoped(db, tmp_path):
         folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
-    """Only one workspace's queue is ever planned together, so an add in
-    another workspace cannot cancel this workspace's removal. Reconciling
-    across workspaces would delete an edit that was never in conflict."""
     sibling_ws = db.create_workspace("Sibling")
     db.set_active_workspace(ws)
     _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
@@ -13440,9 +13442,54 @@ def test_merge_staged_tree_keyword_conflict_is_workspace_scoped(db, tmp_path):
     db.merge_staged_tree_into_archive(stage_root, str(arch))
 
     assert _queued_keyword_changes(db, survivor_pid) == {
+        ("keyword_remove", "Birds")}
+
+
+def test_merge_staged_tree_flat_only_cleanup_does_not_fight_a_keyword_add(
+        db, tmp_path):
+    """``keyword_remove_flat`` strips a stale flat ``dc:subject`` line and
+    deliberately leaves the association alone -- paired with an add, that is
+    the normalization rename working as designed. Treating it as a removal
+    would delete the add and drop the association the add had already
+    written."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    kw = db.add_keyword("Birds")
+    db.tag_photo(dup_pid, kw)
+    _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
+                          "2026-01-01 00:00:00", "tok-add", ws)
+    _queue_keyword_change(db, survivor_pid, "keyword_remove_flat", "Birds",
+                          "2026-01-02 00:00:00", "tok-flat", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # Both rows survive -- the flat cleanup is not a competing intent.
+    assert _queued_keyword_changes(db, survivor_pid) == {
         ("keyword_add", "Birds"),
-        ("keyword_remove", "Birds"),
+        ("keyword_remove_flat", "Birds"),
     }
+    # And the add's association came across with it.
+    assert "Birds" in _photo_keyword_names(db, survivor_pid)
 
 
 def test_merge_staged_tree_newer_keyword_remove_beats_older_phantom_add(
@@ -13701,8 +13748,8 @@ def test_assigned_location_accepts_sync_only_grant(db, tmp_path):
         db.get_assigned_photo_location(pid, allow_sync_only=True)
 
     db.conn.execute(
-        "INSERT INTO workspace_sync_only_folders (workspace_id, folder_id) "
-        "VALUES (?, ?)", (sibling_ws, folder_id))
+        "INSERT INTO workspace_sync_only_photos (workspace_id, photo_id) "
+        "VALUES (?, ?)", (sibling_ws, pid))
     db.conn.commit()
 
     # The grant authorizes the sync path, and only the sync path.
@@ -13945,6 +13992,97 @@ def test_merge_staged_tree_cleared_edit_recipe_clears_survivor_row(
         (survivor_pid,)).fetchone() is None
 
 
+def test_merge_staged_tree_scalar_conflict_spans_workspaces(db, tmp_path):
+    """Both rows write the same sidecar once they share a photo, and
+    ``photos.rating`` is a single global column. Keeping one row per
+    workspace would leave the file's final value to whichever workspace
+    synced last -- and disagreeing with the catalog either way."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    sibling_ws = db.create_workspace("Sibling")
+    db.set_active_workspace(ws)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, 'rating', '2', 'tok-older', "
+        "'2026-01-01 00:00:00', ?)",
+        (survivor_pid, sibling_ws),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, 'rating', '5', 'tok-newer', "
+        "'2026-01-02 00:00:00', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert db.conn.execute(
+        "SELECT rating FROM photos WHERE id = ?",
+        (survivor_pid,)).fetchone()["rating"] == 5
+    tokens = {r["change_token"] for r in db.conn.execute(
+        "SELECT change_token FROM pending_changes "
+        "WHERE change_type = 'rating'").fetchall()}
+    assert tokens == {"tok-newer"}
+
+
+def test_sync_only_grant_follows_the_photo_across_a_move(db, tmp_path):
+    """The grant authorizes one photo's sidecar, so it has to survive that
+    photo moving. ``move_photos`` rewrites ``photos.folder_id`` and knows
+    nothing about the grant table; a folder-keyed grant would stop applying
+    the moment the active workspace moved the survivor, stranding the
+    sibling's preserved edit again."""
+    ws = db._active_workspace_id
+    first = tmp_path / "arch" / "USA"
+    second = tmp_path / "arch" / "Canada"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    first_id = db.add_folder(str(first), name="USA")
+    second_id = db.add_folder(str(second), name="Canada")
+    pid = db.add_photo(
+        folder_id=first_id, filename="a.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="AHASH",
+    )
+    sibling_ws = db.create_workspace("Sibling")
+    db.set_active_workspace(ws)
+    assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is True
+    db.conn.commit()
+    assert db.get_sync_only_folder_map(sibling_ws) == {first_id: str(first)}
+
+    # The active workspace moves the survivor afterwards.
+    db.conn.execute("UPDATE photos SET folder_id = ? WHERE id = ?",
+                    (second_id, pid))
+    db.conn.commit()
+
+    assert db.get_sync_only_folder_map(sibling_ws) == {second_id: str(second)}
+    db.set_active_workspace(sibling_ws)
+    try:
+        assert db._photo_syncable_in_workspace(pid) is True
+    finally:
+        db.set_active_workspace(ws)
+
+
 def test_merge_staged_tree_links_survivor_into_sibling_workspace(
         db, tmp_path):
     """The remap moves pending rows by ``photo_id`` alone, so it also moves
@@ -14028,9 +14166,9 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
         db.set_active_workspace(ws)
     # Grant is recorded in the sync-only table, not ``workspace_folders``.
     assert db.conn.execute(
-        "SELECT COUNT(*) AS n FROM workspace_sync_only_folders "
-        "WHERE workspace_id = ? AND folder_id = ?",
-        (sibling_ws, date_id)).fetchone()["n"] == 1
+        "SELECT COUNT(*) AS n FROM workspace_sync_only_photos "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (sibling_ws, survivor_pid)).fetchone()["n"] == 1
     assert db.conn.execute(
         "SELECT COUNT(*) AS n FROM workspace_folders "
         "WHERE workspace_id = ? AND folder_id = ?",
@@ -14099,12 +14237,14 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
         assert survivor_folder not in {f["id"] for f in db.get_folder_tree()}
     finally:
         db.set_active_workspace(ws)
-    # Grant is on the survivor's FINAL folder (the archive one), not the
-    # staged folder it occupied when the remap happened.
+    # Grant names the survivor itself, so it resolves through whatever
+    # folder the photo is in -- here the archive folder it was reparented
+    # into, and still correct if it is moved again later.
     assert db.conn.execute(
-        "SELECT COUNT(*) AS n FROM workspace_sync_only_folders "
-        "WHERE workspace_id = ? AND folder_id = ?",
-        (sibling_ws, date_id)).fetchone()["n"] == 1
+        "SELECT COUNT(*) AS n FROM workspace_sync_only_photos "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (sibling_ws, new_pid)).fetchone()["n"] == 1
+    assert db.get_sync_only_folder_map(sibling_ws) == {date_id: str(date_dir)}
 
 
 def test_link_survivor_sync_only_grant_is_idempotent(db, tmp_path):
@@ -14124,9 +14264,9 @@ def test_link_survivor_sync_only_grant_is_idempotent(db, tmp_path):
     assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is True
     assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is False
     assert db.conn.execute(
-        "SELECT COUNT(*) AS n FROM workspace_sync_only_folders "
-        "WHERE workspace_id = ? AND folder_id = ?",
-        (sibling_ws, folder_id)).fetchone()["n"] == 1
+        "SELECT COUNT(*) AS n FROM workspace_sync_only_photos "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (sibling_ws, pid)).fetchone()["n"] == 1
 
 
 def test_link_survivor_skips_when_workspace_already_owns_folder(
@@ -14149,7 +14289,7 @@ def test_link_survivor_skips_when_workspace_already_owns_folder(
     db.set_active_workspace(ws)
     assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is False
     assert db.conn.execute(
-        "SELECT COUNT(*) AS n FROM workspace_sync_only_folders "
+        "SELECT COUNT(*) AS n FROM workspace_sync_only_photos "
         "WHERE workspace_id = ?", (sibling_ws,),
     ).fetchone()["n"] == 0
 

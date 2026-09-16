@@ -44,7 +44,8 @@ def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
     grants added by tracked-merge collision handling so a sibling
     workspace's remapped edit can resolve its survivor's sidecar without
     the workspace gaining library membership on every other photo in that
-    folder. A caller-supplied ``folder_paths`` is trusted as-is and skips
+    folder. The grants are keyed by photo and resolved to whatever folder
+    the photo is in now, so a later move does not strand them. A caller-supplied ``folder_paths`` is trusted as-is and skips
     the union -- callers who need the sync-only grants pass them in.
     """
     if folder_paths is not None:

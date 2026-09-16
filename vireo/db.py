@@ -940,20 +940,28 @@ class Database:
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
-            -- Sync-only folder grants. Rows here give ``_resolve_xmp_paths``
+            -- Sync-only photo grants. Rows here give ``_resolve_xmp_paths``
             -- a way to find a photo's sidecar for a workspace that owns a
             -- queued edit on the photo but has no ``workspace_folders`` link
             -- to its folder. Tracked-merge collision handling adds a row per
             -- sibling workspace whose ``pending_changes`` were remapped onto
-            -- an archive-side survivor, so the row can sync without the
-            -- workspace gaining library membership on every other photo in
-            -- that folder. Read only by ``get_sync_only_folder_map``; every
-            -- browse/library query stays folder-scoped through
-            -- ``workspace_folders``.
-            CREATE TABLE IF NOT EXISTS workspace_sync_only_folders (
+            -- a survivor, so the row can sync without the workspace gaining
+            -- library membership on every other photo in that folder.
+            --
+            -- Keyed by photo, not by folder: the grant authorizes one
+            -- photo's sidecar, and ``move_photos`` rewrites
+            -- ``photos.folder_id`` without touching anything here -- a
+            -- folder-keyed grant would silently stop applying the moment the
+            -- active workspace moved the survivor. Resolving the folder at
+            -- read time instead means the grant follows the photo.
+            --
+            -- Read only by ``get_sync_only_folder_map`` and
+            -- ``_photo_syncable_in_workspace``; every browse/library query
+            -- stays folder-scoped through ``workspace_folders``.
+            CREATE TABLE IF NOT EXISTS workspace_sync_only_photos (
                 workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-                folder_id       INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-                PRIMARY KEY (workspace_id, folder_id)
+                photo_id        INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                PRIMARY KEY (workspace_id, photo_id)
             );
 
             CREATE TABLE IF NOT EXISTS local_workspaces (
@@ -2527,7 +2535,7 @@ class Database:
     def _photo_syncable_in_workspace(self, photo_id):
         """Return True if the workspace may write this photo's sidecar.
 
-        Library membership, or a ``workspace_sync_only_folders`` grant --
+        Library membership, or a ``workspace_sync_only_photos`` grant --
         the narrow record that tracked-merge collision handling writes so a
         remapped edit stays syncable without the workspace gaining
         visibility of every other photo in the folder.
@@ -2535,10 +2543,8 @@ class Database:
         if self._photo_in_workspace(photo_id):
             return True
         row = self.conn.execute(
-            """SELECT 1 FROM photos p
-               JOIN workspace_sync_only_folders sof
-                 ON sof.folder_id = p.folder_id
-               WHERE p.id = ? AND sof.workspace_id = ?""",
+            "SELECT 1 FROM workspace_sync_only_photos "
+            "WHERE photo_id = ? AND workspace_id = ?",
             (photo_id, self._ws_id()),
         ).fetchone()
         return row is not None
@@ -5496,8 +5502,12 @@ class Database:
 
         Resolved the same way as the location state: the side holding the
         newer change wins, by ``(created_at, id)``, and the loser's rows for
-        that key are deleted. Scoped per workspace, because only changes in
-        one workspace's queue are ever planned together.
+        that key are deleted. Resolved across every workspace, not per
+        workspace: ``photo_keywords`` and the sidecar are both global, so
+        once the two rows share a photo an add in one workspace and a remove
+        in another are two intents for one file and only the newer can be
+        honored -- keeping both would just hand the outcome to whichever
+        workspace syncs last.
 
         A photo that already holds BOTH directions for a key is left alone:
         that is the deliberate rename pair ``_remove_planned_keywords``
@@ -5515,11 +5525,16 @@ class Database:
         Returns the number of queue rows dropped.
         """
         rows = self.conn.execute(
+            # ``keyword_remove_flat`` is deliberately absent. It asks for a
+            # stale flat ``dc:subject`` line to go without touching the
+            # association, and ``_remove_planned_keywords`` folds it
+            # together with a paired add -- that combination is the
+            # normalization rename working as designed, not two intents
+            # competing.
             "SELECT id, photo_id, workspace_id, change_type, value, "
             "       created_at "
             "FROM pending_changes WHERE photo_id IN (?, ?) "
-            "  AND change_type IN "
-            "      ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
+            "  AND change_type IN ('keyword_add', 'keyword_remove')",
             (losing_id, surviving_id),
         ).fetchall()
         if not rows:
@@ -5528,14 +5543,14 @@ class Database:
         for r in rows:
             if not r["value"]:
                 continue
-            key = (r["workspace_id"], keyword_match_key(r["value"]))
+            key = keyword_match_key(r["value"])
             side = "add" if r["change_type"] == "keyword_add" else "remove"
             slot = by_key.setdefault(
                 key, {losing_id: {"add": [], "remove": []},
                       surviving_id: {"add": [], "remove": []}})
             slot[r["photo_id"]][side].append(r)
         dropped = 0
-        for (workspace_id, match_key), slot in by_key.items():
+        for match_key, slot in by_key.items():
             loser, survivor = slot[losing_id], slot[surviving_id]
             if (loser["add"] and loser["remove"]) or (
                     survivor["add"] and survivor["remove"]):
@@ -5562,9 +5577,9 @@ class Database:
                     "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
                 dropped += 1
             log.info(
-                "Merge reconciled opposing %r edits on photos %s/%s in "
-                "workspace %s: dropped %d older queue row(s)",
-                match_key, losing_id, surviving_id, workspace_id, len(drop),
+                "Merge reconciled opposing %r edits on photos %s/%s: "
+                "dropped %d older queue row(s)",
+                match_key, losing_id, surviving_id, len(drop),
             )
         self._carry_keyword_associations_for_merge(
             losing_id, surviving_id, by_key)
@@ -5586,7 +5601,7 @@ class Database:
                 (losing_id, surviving_id),
             ).fetchall()
         }
-        for (_workspace_id, match_key), slot in by_key.items():
+        for match_key, slot in by_key.items():
             loser = [r for r in slot[losing_id]["add"] + slot[losing_id]["remove"]
                      if r["id"] in live]
             if not loser:
@@ -5644,12 +5659,11 @@ class Database:
         the row, and the catalog is left permanently disagreeing with the
         file on disk.
 
-        Two rows of the same type in one workspace are also a problem in
-        their own right -- ``sync._plan_photo_sync`` keeps whichever it
-        folds last -- so the older one is dropped per workspace, the same
-        rule the location and keyword paths use. The catalog column then
-        takes the value of the newest queued row across both photos, which
-        is exactly what the sync will write.
+        Two rows of the same type on one photo are also a problem in their
+        own right -- ``sync._plan_photo_sync`` keeps whichever it folds
+        last -- so every row but the newest is dropped. The catalog column
+        then takes that row's value, which is exactly what the sync will
+        write.
 
         Only queued state is compared. A rating set on the survivor and
         already synced has no row left to date it, so it loses to a
@@ -5674,20 +5688,28 @@ class Database:
             def key(r):
                 return (r["created_at"] or "", r["id"])
 
-            by_ws = {}
-            for r in rows:
-                by_ws.setdefault(r["workspace_id"], []).append(r)
-            for ws_rows in by_ws.values():
-                if len(ws_rows) < 2:
-                    continue
-                winner = max(ws_rows, key=key)
-                for r in ws_rows:
-                    if r["id"] == winner["id"]:
+            newest = max(rows, key=key)
+            # Only adjudicate competition the merge itself creates: rows on
+            # BOTH photos, which until now described two separate files and
+            # from here describe one. Two rows already sharing a photo were
+            # in that state before the merge and are not its business --
+            # the same line the keyword path draws around a pre-existing
+            # rename pair.
+            #
+            # When they do compete, resolve across every workspace.
+            # ``photos.rating`` and ``photos.flag`` are single-valued global
+            # columns and both rows now write the same sidecar, so keeping
+            # one row per workspace would leave the file's final value to
+            # whichever workspace syncs last -- disagreeing with the catalog
+            # column either way.
+            if len({r["photo_id"] for r in rows}) > 1:
+                for r in rows:
+                    if r["id"] == newest["id"]:
                         continue
                     self.conn.execute(
-                        "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
+                        "DELETE FROM pending_changes WHERE id = ?",
+                        (r["id"],))
                     dropped += 1
-            newest = max(rows, key=key)
             value = newest["value"]
             if change_type == "rating":
                 try:
@@ -5743,20 +5765,18 @@ class Database:
             return (r["created_at"] or "", r["id"])
 
         dropped = 0
-        by_ws = {}
-        for r in rows:
-            by_ws.setdefault(r["workspace_id"], []).append(r)
-        for ws_rows in by_ws.values():
-            if len(ws_rows) < 2:
-                continue
-            winner = max(ws_rows, key=key)
-            for r in ws_rows:
-                if r["id"] == winner["id"]:
+        newest = max(rows, key=key)
+        # Same two conditions as the scalar columns: only rows spanning both
+        # photos are competition this merge created, and when they do
+        # compete it is resolved across every workspace -- one row per photo
+        # in ``photo_edit_recipes``, one sidecar on disk.
+        if len({r["photo_id"] for r in rows}) > 1:
+            for r in rows:
+                if r["id"] == newest["id"]:
                     continue
                 self.conn.execute(
                     "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
                 dropped += 1
-        newest = max(rows, key=key)
         recipe_json = newest["value"] or ""
         if not recipe_json:
             self.conn.execute(
@@ -5788,7 +5808,7 @@ class Database:
         empty path and fails every future sync as inaccessible — queued
         forever, with nothing saying why.
 
-        Recorded in ``workspace_sync_only_folders`` rather than
+        Recorded in ``workspace_sync_only_photos`` rather than
         ``workspace_folders``. A ``workspace_folders`` link is library
         membership: every browse/library query joins on it by folder id
         alone, so any link -- root or not -- would make every photo sharing
@@ -5798,11 +5818,17 @@ class Database:
         archive folder of unrelated photos into a workspace that never
         asked for it.
 
-        ``workspace_sync_only_folders`` is read only by
+        Keyed by photo so the grant survives a later move: ``move_photos``
+        rewrites ``photos.folder_id`` and knows nothing about this table, so
+        a folder-keyed grant would stop applying the moment the active
+        workspace moved the survivor -- the sibling's preserved edit would
+        be unresolvable again, with nothing saying why.
+
+        ``workspace_sync_only_photos`` is read only by
         ``get_sync_only_folder_map``, which the sync engine unions with
-        ``get_folder_tree`` when building its sidecar-path map. Every
-        browse/library query stays folder-scoped through
-        ``workspace_folders`` and sees no change.
+        ``get_folder_tree`` when building its sidecar-path map, and by
+        ``_photo_syncable_in_workspace``. Every browse/library query stays
+        folder-scoped through ``workspace_folders`` and sees no change.
 
         Returns ``True`` when a new grant was written.
         """
@@ -5811,32 +5837,31 @@ class Database:
         ).fetchone()
         if row is None or row["folder_id"] is None:
             return False
-        folder_id = row["folder_id"]
-        # Skip if the workspace already resolves this folder through its
+        # Skip if the workspace already resolves this photo through its
         # normal library membership -- no sync-only grant is needed on top.
         already_linked = self.conn.execute(
             "SELECT 1 FROM workspace_folders "
             "WHERE workspace_id = ? AND folder_id = ?",
-            (workspace_id, folder_id),
+            (workspace_id, row["folder_id"]),
         ).fetchone()
         if already_linked is not None:
             return False
         already_grant = self.conn.execute(
-            "SELECT 1 FROM workspace_sync_only_folders "
-            "WHERE workspace_id = ? AND folder_id = ?",
-            (workspace_id, folder_id),
+            "SELECT 1 FROM workspace_sync_only_photos "
+            "WHERE workspace_id = ? AND photo_id = ?",
+            (workspace_id, photo_id),
         ).fetchone()
         if already_grant is not None:
             return False
         self.conn.execute(
-            "INSERT OR IGNORE INTO workspace_sync_only_folders "
-            "(workspace_id, folder_id) VALUES (?, ?)",
-            (workspace_id, folder_id),
+            "INSERT OR IGNORE INTO workspace_sync_only_photos "
+            "(workspace_id, photo_id) VALUES (?, ?)",
+            (workspace_id, photo_id),
         )
         log.info(
-            "Granted workspace %s sync-only access to folder %s so preserved "
-            "edits on photo %s stay syncable after the archive merge",
-            workspace_id, folder_id, photo_id,
+            "Granted workspace %s sync-only access to photo %s so its "
+            "preserved edits stay syncable after the archive merge",
+            workspace_id, photo_id,
         )
         return True
 
@@ -5854,9 +5879,10 @@ class Database:
             workspace_id = self._ws_id()
         rows = self.conn.execute(
             "SELECT f.id AS id, f.path AS path "
-            "FROM workspace_sync_only_folders sof "
-            "JOIN folders f ON f.id = sof.folder_id "
-            "WHERE sof.workspace_id = ? "
+            "FROM workspace_sync_only_photos sop "
+            "JOIN photos p ON p.id = sop.photo_id "
+            "JOIN folders f ON f.id = p.folder_id "
+            "WHERE sop.workspace_id = ? "
             "  AND f.status IN ('ok', 'partial')",
             (workspace_id,),
         ).fetchall()
@@ -5944,13 +5970,16 @@ class Database:
           (``_transfer_edit_recipe_for_merge``)
 
         Each resolves a competing change on the two rows by queue
-        chronology, ``(created_at, id)``, and drops the older row within a
-        workspace so ``_plan_photo_sync`` is not left picking between two
-        rows of the same type at random.
+        chronology, ``(created_at, id)``, and drops the older row so
+        ``_plan_photo_sync`` is not left picking between two rows of the
+        same type at random. Competition is judged across every workspace:
+        the catalog state and the sidecar are both global, so two opposing
+        intents on one photo cannot both be honored no matter who queued
+        them.
 
         Side effect worth knowing about: when a remapped pending edit is
         owned by a workspace other than the active one, the survivor's
-        folder is recorded in ``workspace_sync_only_folders`` for that
+        photo is recorded in ``workspace_sync_only_photos`` for that
         workspace so the sync engine can resolve the sidecar path.
         ``workspace_folders`` is not touched -- a real library link would
         make every other photo in the survivor's folder visible in the
@@ -10221,7 +10250,7 @@ class Database:
                                     allow_sync_only=False):
         """Return linked location-keyword coordinates for one visible photo.
 
-        ``allow_sync_only`` accepts a ``workspace_sync_only_folders`` grant
+        ``allow_sync_only`` accepts a ``workspace_sync_only_photos`` grant
         as sufficient authorization. The sync engine passes it because that
         grant exists precisely to let a workspace write the sidecar of a
         photo it does not carry in its library: without it a remapped
