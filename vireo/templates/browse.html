@@ -7973,11 +7973,12 @@ function browseKeyMatchesConfiguredShortcut(e) {
 var browseLightboxBoundaryRetry = null;
 var browseLightboxSession = 0;
 // Set by the grid double-click handler when the gesture's own clicks selected
-// the stack it opened: {ids, epoch}. Read by the ``lightbox:closed`` handler,
-// which clears it once it acts on it. ``epoch`` is the selection generation
-// the gesture was made in, so any selection action since — a click, a
-// Select all, a Clear — retires the marker without needing every one of
-// those paths to know it exists.
+// the stack it opened: {ids, epoch}. It is spent by the close of the lightbox
+// it opened, so a later viewing shortcut over the same selection is a viewing
+// shortcut over a batch. ``epoch`` is the selection generation the gesture was
+// made in, so any selection action in between — a click, a Select all, a
+// Clear — also retires it, without every one of those paths having to know
+// this marker exists.
 var browseLightboxStackGesture = null;
 
 function browseLightboxOwnsLoadedWindow() {
@@ -13211,6 +13212,16 @@ function scrollToCard(idx) {
 document.addEventListener('lightbox:closed', function(event) {
   var photoId = event && event.detail ? event.detail.photoId : null;
   if (photoId == null) return;
+  // The lightbox's Delete button sits inside the overlay and does not stop
+  // propagation, so clicking it closes the lightbox on its way to the delete
+  // dialog — which is open over it by now, and which reopens the lightbox on
+  // the next photo once confirmed. That is not the user leaving the photo, so
+  // this close does nothing and the gesture below survives it. Every other
+  // close is the user leaving, and retires the gesture.
+  // Codex P2 on PR #1672.
+  if (document.querySelector('#deleteModal.open')) return;
+  var stackGesture = browseLightboxStackGesture;
+  browseLightboxStackGesture = null;
   if (selectedPhotos.size > 0) {
     // Viewing shortcuts can open the lightbox without collapsing an existing
     // batch. Preserve that batch instead of replacing it with the viewed
@@ -13227,20 +13238,16 @@ document.addEventListener('lightbox:closed', function(event) {
     // selected with nothing on screen representing them, and the next batch
     // shortcut would act on photos the user cannot see.
     // Codex P2 on PR #1672.
-    var gestureIds = browseLightboxStackGesture
-      && browseLightboxStackGesture.epoch === anchorRestoreEpoch
-      ? new Set(browseLightboxStackGesture.ids) : null;
+    var gestureIds = stackGesture && stackGesture.epoch === anchorRestoreEpoch
+      ? new Set(stackGesture.ids) : null;
     if (!gestureIds || !Array.from(selectedPhotos).every(function(id) {
       return gestureIds.has(id);
     })) return;
     // Finished inside that stack: the viewing gesture ended where it began,
     // so the stack stays selected rather than shrinking to one frame. The
-    // marker deliberately survives this: deleting a photo in the lightbox
-    // reports a close for the photo being deleted, on its way to the next
-    // one, and that close looks exactly like this case. Clearing here would
-    // consume the gesture the real close still needs, and the epoch above
-    // already retires the marker the moment anything touches the selection.
-    // Codex P2 on PR #1672.
+    // gesture is spent either way — reopening the same stack with a viewing
+    // shortcut afterwards is a viewing shortcut over a batch, and batches are
+    // preserved. Codex P2 on PR #1672.
     if (selectedPhotos.has(photoId)) {
       var stackCoverId = browseStackCoverIdForPhoto(photoId);
       var stackIdx = photos.findIndex(function(photo) {

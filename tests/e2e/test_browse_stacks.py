@@ -725,6 +725,29 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     )
     expect(page.locator("#detailFilename")).to_have_text("robin1.jpg")
 
+    # The gesture is spent by its own close. Re-opening the same, untouched
+    # stack selection with a viewing shortcut afterwards is a viewing shortcut
+    # over a batch, so the batch is preserved.
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
+    )
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        burst_ids,
+    )
+
     # Same ids, different provenance: a stack the user selected on purpose is
     # a batch, and viewing it with a shortcut leaves it alone even when the
     # user navigates away and closes somewhere else entirely.
