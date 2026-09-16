@@ -3061,6 +3061,19 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # stays a stable dict of display numbers that gets serialized straight
         # into the archive-stage summary/API payload.
         dropped = merge_counts.pop("dropped_photo_ids", None) or []
+        # ``preserved_edit_count`` is likewise a caller-facing signal (the
+        # NAS transfer's residual check adds it to "still need a sync"), not
+        # a user-facing display number, so lift it off ``merge_counts`` too.
+        # ``preserved_off_staging_identities`` is the subset the caller adds
+        # to residual -- see ``merge_staged_tree_into_archive`` for why the
+        # full count would double-report the phantom/intra-staged remaps.
+        # Reported as identities (not a raw rowcount) so the caller can
+        # filter out rows the pre-transfer drain already classified as
+        # undeliverable and rows in sibling workspaces this sync would not
+        # have written anyway.
+        preserved_edits = merge_counts.pop("preserved_edit_count", 0) or 0
+        preserved_off_staging_identities = merge_counts.pop(
+            "preserved_off_staging_identities", None) or []
         result["merge"] = merge_counts
         result["merged_into_existing"] = merge_into_tracked
         # On the merge path ``total_photos`` counts every staged source photo,
@@ -3069,6 +3082,11 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         result["moved"] = merge_counts["new_photos"]
         if dropped:
             result["dropped_photo_ids"] = dropped
+        if preserved_edits:
+            result["preserved_edit_count"] = preserved_edits
+        if preserved_off_staging_identities:
+            result["preserved_off_staging_identities"] = (
+                preserved_off_staging_identities)
     if cleanup_error is not None:
         result["cleanup_error"] = cleanup_error
     return result
