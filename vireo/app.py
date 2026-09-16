@@ -61,6 +61,7 @@ from flask import (
     Flask,
     Response,
     abort,
+    after_this_request,
     g,
     jsonify,
     make_response,
@@ -7002,6 +7003,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if payload.get("ids_only"):
             include_offline = False
 
+        # Offset pagination is only self-consistent within one snapshot, and
+        # that applies to the visual path too: a deletion landing between the
+        # id ordering and ``get_photos_by_ids`` drops rows out of the page the
+        # focused position described, so the photo Browse is holding onto goes
+        # missing and the selection is cleared. Open the snapshot here — ahead
+        # of the visual clause, which returns before the rules path's ``BEGIN``
+        # — and release it on every exit, error paths included (Codex review on
+        # PR #1658). Reads only; ``rollback`` is what releases it.
+        if focus_photo_id is not None:
+            db.conn.execute("BEGIN")
+
+            @after_this_request
+            def _release_focus_snapshot(response):
+                if db.conn.in_transaction:
+                    db.conn.rollback()
+                return response
+
         visual_info = None
         if visual is not None:
             try:
@@ -7192,7 +7210,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # raise something other than ValueError, and the snapshot has to be
         # released on those paths too.
         focus_snapshot = focus_photo_id is not None
-        if focus_snapshot:
+        if focus_snapshot and not db.conn.in_transaction:
             db.conn.execute("BEGIN")
         try:
             focus_index = None

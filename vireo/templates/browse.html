@@ -6739,6 +6739,14 @@ async function resetAndLoad(options) {
   if (focusAnchor) {
     pendingFocusAnchor = anchor;
     focusReloadInFlight++;
+  } else {
+    // A reset that is not a focused re-sort takes ownership of the grid with
+    // a different dataset — a folder click, a filter edit, a collection.
+    // Any anchor a still-in-flight sort was holding belongs to the scope the
+    // user just left, so drop it. Without this, sort → change folder → sort
+    // again resurrects the old scope's photo as the new selection, which the
+    // scope change had deliberately cleared (Codex review on PR #1658).
+    pendingFocusAnchor = null;
   }
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   // Membership-change reloads (``preserveScroll``) can arrive after an edit
@@ -6929,10 +6937,18 @@ function updatePreviousPhotosButton() {
   }
   var textEl = document.getElementById('loadPreviousPhotosText');
   if (textEl) {
-    textEl.textContent = offset === 1
-      ? '1 earlier photo isn’t loaded — this grid starts at #2.'
-      : offset.toLocaleString() + ' earlier photos aren’t loaded — ' +
-        'this grid starts at #' + (offset + 1).toLocaleString() + '.';
+    // With Stacks on the grid pages logical items, not photos, so this
+    // offset counts cards — and a single card can stand for a whole burst.
+    // Calling them photos would undercount, badly: fifty earlier stacks can
+    // be hundreds of frames. Say what the number actually counts (Codex
+    // review on PR #1658; CORE_PHILOSOPHY, "no black boxes").
+    var noun = browseStacksEnabled()
+      ? (offset === 1 ? 'card' : 'cards')
+      : (offset === 1 ? 'photo' : 'photos');
+    var verb = offset === 1 ? 'isn’t' : 'aren’t';
+    textEl.textContent =
+      offset.toLocaleString() + ' earlier ' + noun + ' ' + verb +
+      ' loaded — this grid starts at #' + (offset + 1).toLocaleString() + '.';
   }
   banner.style.display = 'block';
 }

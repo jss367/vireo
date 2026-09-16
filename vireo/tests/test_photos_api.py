@@ -12181,6 +12181,58 @@ def test_api_photos_query_focus_holds_one_read_snapshot(app_and_db, monkeypatch)
     assert inserted[0] not in listed
 
 
+def test_api_photos_query_visual_focus_holds_one_read_snapshot(
+    app_and_db, monkeypatch,
+):
+    """The visual path needs the same snapshot the rules path got.
+
+    A healthy visual clause returns before the rules path opens its
+    transaction, so a deletion landing between the id ordering and
+    ``get_photos_by_ids`` dropped rows out of the very page the focused
+    position described — the photo goes missing and Browse clears the
+    selection (Codex review on PR #1658).
+    """
+    from db import Database
+
+    app, db = app_and_db
+    photos = _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    ws_id = db._ws_id()
+    db_path = app.config["DB_PATH"]
+    target = photos["bird2.jpg"]
+
+    original = Database.get_photos_by_ids
+    deleted = []
+
+    def delete_between(self, ids, *args, **kwargs):
+        if not deleted:
+            # A separate connection — a cull or a scan committing mid-request.
+            writer = Database(db_path)
+            writer.set_active_workspace(ws_id)
+            writer.delete_photos([target])
+            writer.close()
+            deleted.append(target)
+        return original(self, ids, *args, **kwargs)
+
+    monkeypatch.setattr(Database, "get_photos_by_ids", delete_between)
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+        "per_page": 1,
+        "focus_photo_id": target,
+    })
+
+    assert response.status_code == 200
+    assert deleted, "the test must actually commit during the request"
+    payload = response.get_json()
+    assert payload["focus_index"] == 1
+    assert payload["focus_page"] == 2
+    assert [photo["id"] for photo in payload["photos"]] == [target], (
+        "the focused page must still hold the photo its position described"
+    )
+
+
 def test_api_photos_query_focus_photo_id_must_be_an_integer(app_and_db):
     app, _ = app_and_db
     client = app.test_client()

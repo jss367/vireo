@@ -211,6 +211,46 @@ def test_second_sort_change_mid_flight_keeps_the_photo(live_server, page):
     ).to_be_visible()
 
 
+def test_stacked_grid_counts_cards_not_photos_in_the_banner(live_server, page):
+    """With Stacks on the window offset counts cards, so say cards.
+
+    One card can stand for a whole burst, so calling the offset "photos"
+    undercounts — fifty earlier stacks can be hundreds of frames
+    (CORE_PHILOSOPHY, "no black boxes"; Codex review on PR #1658).
+    """
+    _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
+    _open_browse(page, live_server)
+    page.locator("#browseStacksToggle").check()
+    page.wait_for_timeout(600)
+    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    _scroll_until_loaded(page, 100)
+    _select_photo_at(page, 80)
+
+    calls = _capture_queries(page)
+    _change_sort(page, "name_desc")
+    assert calls[0]["request"]["stacks"] is True
+    assert calls[0]["response"]["focus_page"] > 1
+
+    state = page.evaluate("""() => {
+      const banner = document.getElementById('loadPreviousPhotosBanner');
+      return {
+        earliestPage,
+        perPage,
+        shown: banner.style.display !== 'none',
+        text: document.getElementById('loadPreviousPhotosText').textContent,
+      };
+    }""")
+    missing_above = (state["earliestPage"] - 1) * state["perPage"]
+    if missing_above > 0:
+        assert state["shown"]
+        assert "cards aren’t loaded" in state["text"], (
+            f"stacked banner must count cards, got {state['text']!r}"
+        )
+        assert "photos" not in state["text"], (
+            f"stacked banner must not call stack items photos: {state['text']!r}"
+        )
+
+
 def test_sort_change_says_how_much_of_the_grid_is_missing(live_server, page):
     """A grid that does not start at the first photo has to say so.
 
