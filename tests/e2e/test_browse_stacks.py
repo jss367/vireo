@@ -504,6 +504,98 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     assert abs(top_after - top_before) < 4
 
 
+def test_cancelled_delete_does_not_leave_a_stack_gesture_armed(
+    live_server, page,
+):
+    """Cancelling turns the delete's "intermediate" close into the real one.
+
+    Clicking Delete closes the lightbox on its way to the dialog, and a
+    gesture held across that close outlives its lightbox when the user
+    cancels: nothing reopens, and the next viewing shortcut inherits it. The
+    gesture is set aside instead and handed back only by a delete that
+    actually happens. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+
+    page.locator("#lightboxDeleteBtn").click()
+    expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
+    page.locator("#deleteModal button", has_text="Cancel").click()
+    expect(page.locator("#deleteModal")).not_to_have_class("modal-overlay open")
+
+    # The stack is still selected, and the abandoned gesture must not be
+    # inherited by the next viewing session.
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        burst_ids,
+    )
+
+
+def test_badge_double_click_does_not_claim_a_deliberate_batch(live_server, page):
+    """The stack badge's clicks never make a selection.
+
+    Both of them expand/collapse the stack and stop propagating, so they
+    never reach selectPhoto — but the dblclick still bubbles to the grid and
+    opens the lightbox. With an identical id set, that would let a batch the
+    user assembled be claimed by a gesture that did not create it.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+
+    # Select the stack deliberately, from the tray.
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    tray.get_by_role("button", name="Select all").click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+
+    cover.locator(".browse-stack-badge").dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class(
+        re.compile(r"\bactive\b")
+    )
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        burst_ids,
+    )
+
+
 def test_delete_dialog_counts_companions_of_unloaded_stack_members(
     live_server, page,
 ):

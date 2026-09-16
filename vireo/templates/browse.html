@@ -7844,8 +7844,16 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
   // time the lightbox opens — a selection this viewing gesture made, not a
   // batch the user assembled, and the only one the close handler may replace.
   // Recording the opener is the only way to tell those apart: the selected ids
-  // are identical either way. Codex P2 on PR #1672.
-  var gestureIds = browseStackMemberIds(id);
+  // are identical either way.
+  //
+  // Except on the stack badge, whose two clicks expand and collapse the stack
+  // and stop propagating, so they never reach selectPhoto and never make a
+  // selection. The dblclick still bubbles here, and an identical id set would
+  // otherwise let a deliberate batch be claimed by a gesture that did not
+  // create it. Codex P2 on PR #1672.
+  var gestureIds = e.target.closest('.browse-stack-badge')
+    ? null : browseStackMemberIds(id);
+  browseLightboxStackGestureSpent = null;
   browseLightboxStackGesture = (
     gestureIds
     && gestureIds.length === selectedPhotos.size
@@ -7980,6 +7988,10 @@ var browseLightboxSession = 0;
 // Clear — also retires it, without every one of those paths having to know
 // this marker exists.
 var browseLightboxStackGesture = null;
+// The gesture a delete-button close just retired, held only until the delete
+// that caused it either completes (and hands it back) or is cancelled (and
+// never claims it). See the ``lightbox:photodeleted`` listener.
+var browseLightboxStackGestureSpent = null;
 
 function browseLightboxOwnsLoadedWindow() {
   return (
@@ -13209,18 +13221,34 @@ function scrollToCard(idx) {
 // with Browse only when the overlay closes so returning to the grid focuses
 // the photo the user finished on, without reloading the detail panel on every
 // Previous/Next step while the lightbox is still open.
+// A delete that actually happened reopens the lightbox on the next photo, so
+// the gesture the delete-button close set aside continues into that session —
+// but only if this delete is the one it was set aside for. Deleting some other
+// photo later (after a cancel, say) must not inherit it.
+document.addEventListener('lightbox:photodeleted', function(event) {
+  var deletedId = event && event.detail ? event.detail.photoId : null;
+  var spent = browseLightboxStackGestureSpent;
+  browseLightboxStackGestureSpent = null;
+  if (!spent || deletedId == null) return;
+  if (spent.epoch !== anchorRestoreEpoch) return;
+  if (spent.ids.indexOf(deletedId) === -1) return;
+  browseLightboxStackGesture = spent;
+});
+
 document.addEventListener('lightbox:closed', function(event) {
   var photoId = event && event.detail ? event.detail.photoId : null;
   if (photoId == null) return;
-  // The lightbox's Delete button sits inside the overlay and does not stop
-  // propagation, so clicking it closes the lightbox on its way to the delete
-  // dialog — which is open over it by now, and which reopens the lightbox on
-  // the next photo once confirmed. That is not the user leaving the photo, so
-  // this close does nothing and the gesture below survives it. Every other
-  // close is the user leaving, and retires the gesture.
-  // Codex P2 on PR #1672.
-  if (document.querySelector('#deleteModal.open')) return;
+  // Every close retires the gesture — including the one the lightbox's own
+  // Delete button causes on its way to the delete dialog (it sits inside the
+  // overlay and does not stop propagating). That close only looks
+  // intermediate: cancelling the dialog reopens nothing, so a gesture held
+  // across it would outlive its lightbox and be mistaken for the next one. It
+  // is set aside instead, and handed back only by a delete that actually
+  // happens — which reopens the lightbox on the next photo, so there is a
+  // real close still to come. Codex P2 on PR #1672.
   var stackGesture = browseLightboxStackGesture;
+  browseLightboxStackGestureSpent = document.querySelector('#deleteModal.open')
+    ? stackGesture : null;
   browseLightboxStackGesture = null;
   if (selectedPhotos.size > 0) {
     // Viewing shortcuts can open the lightbox without collapsing an existing
