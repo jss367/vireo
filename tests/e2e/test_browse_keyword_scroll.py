@@ -304,3 +304,48 @@ def test_membership_refresh_handles_removing_all_matches(live_server, page):
     assert page.evaluate("getActiveSelection()") == []
     assert page.evaluate("totalPhotos") == 0
     assert page.evaluate("gridContainer.scrollTop") == 0
+
+
+def test_membership_refresh_bounds_pages_when_viewport_is_at_the_top(live_server, page):
+    """A tag at page 1 of a deep-loaded library must not re-query every page.
+
+    Before the bound, ``refreshBrowseWindowInPlace`` issued one sequential
+    ``/api/photos/query`` per page in the loaded window; scrolling through a
+    large library and then tagging from the top turned into hundreds of
+    round trips. The refresh now caps its work to the viewport pages plus a
+    small buffer, so the request count is bounded by what the user actually
+    sees rather than by how far they have scrolled.
+    """
+    _seed_filtered_library(live_server["db"], live_server["data"]["folders"][0], count=1200)
+    _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
+    # Load many pages by scrolling to the bottom, then return to the top.
+    page.evaluate("""async () => {
+      while (!allLoaded) {
+        gridContainer.scrollTop = gridContainer.scrollHeight;
+        await new Promise(r => setTimeout(r, 30));
+      }
+    }""")
+    page.wait_for_function("() => allLoaded && !loading && currentPage > 15", timeout=15000)
+    unbounded_page_count = page.evaluate("currentPage - earliestPage")
+    assert unbounded_page_count > 15, "test needs a deeply-loaded window"
+
+    page.evaluate("gridContainer.scrollTop = 0")
+    page.wait_for_timeout(100)
+    page.locator('#grid .grid-card').first.click()
+    expect(page.locator("#addKeywordInput")).to_be_visible()
+
+    requests = []
+    page.on("request", lambda r: requests.append(r.url) if "/api/photos/query" in r.url else None)
+    _add_keyword_to_selection(page, "American Robin")
+
+    assert requests, "membership refresh must re-query the visible pages"
+    # The bound is viewport + a small buffer, so a page-1 tag should refresh
+    # only a handful of pages — vastly fewer than the full loaded window.
+    assert len(requests) < unbounded_page_count // 2, (
+        f"refresh issued {len(requests)} requests for {unbounded_page_count} loaded pages; "
+        "bounded refresh should keep this proportional to the viewport, not scroll history"
+    )
+    assert page.evaluate("gridContainer.scrollTop") == 0
+    # earliestPage is preserved so the user can still scroll up to nothing;
+    # only trailing pages beyond the viewport buffer are dropped.
+    assert page.evaluate("earliestPage") == 1

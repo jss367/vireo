@@ -372,9 +372,16 @@ body.sidebar-resizing {
 .grid-container {
   flex: 1;
   overflow-y: auto;
-  /* Browse explicitly preserves position when refreshing or prepending. */
-  overflow-anchor: none;
   padding: 16px 20px;
+}
+/* Scoped rather than global: only the operations that already compensate
+   for their own scroll deltas (refreshBrowseWindowInPlace,
+   prependPreviousPhotos) suppress browser anchoring. Other mutations like
+   stack-tray hydration have no explicit compensation and still rely on
+   default anchoring to keep content stable when a tray above the viewport
+   grows or shrinks (Codex review on PR #1671). */
+.grid-container.preserving-scroll {
+  overflow-anchor: none;
 }
 .grid {
   display: grid;
@@ -6710,12 +6717,57 @@ function observeBrowseWindow(epoch) {
   return function() { return loadEpoch === claimedEpoch; };
 }
 
+// Refreshing every historically loaded page in place turned one tag into a
+// query per page: a 60,000-photo library scrolled all the way through then
+// tagged from page 1 hit /api/photos/query roughly 1,200 times, sequentially.
+// Bound the refresh to the pages the user's viewport and selection actually
+// need, and use the normal infinite-scroll extension for the rest. Skip the
+// bound entirely on small windows so short libraries and focused deep-link
+// windows still refresh top-to-bottom with no behaviour change (Codex review
+// on PR #1671).
+var REFRESH_UNBOUNDED_PAGE_LIMIT = 10;
+var REFRESH_VIEWPORT_BUFFER_PAGES = 5;
+
+function computeBoundedRefreshWindow(firstPage, endPage) {
+  if (endPage - firstPage + 1 <= REFRESH_UNBOUNDED_PAGE_LIMIT) return null;
+  var container = document.getElementById('gridContainer');
+  var cards = document.querySelectorAll('#grid .grid-card');
+  if (!container || !cards.length) return null;
+  var scrollTop = container.scrollTop;
+  var viewBottom = scrollTop + container.clientHeight;
+
+  var lastVisibleIdx = -1;
+  for (var i = cards.length - 1; i >= 0; i--) {
+    if (cards[i].offsetTop < viewBottom) { lastVisibleIdx = i; break; }
+  }
+  if (lastVisibleIdx < 0) return null;
+
+  var lastViewportPage = firstPage + Math.floor(lastVisibleIdx / perPage);
+  var boundedEnd = Math.min(endPage, lastViewportPage + REFRESH_VIEWPORT_BUFFER_PAGES);
+
+  // A batch tag can span pages beyond the viewport; extend the bound to
+  // cover those pages so their filter state is re-evaluated too, otherwise
+  // the availableIds check below would drop the selections silently.
+  photos.forEach(function(photo, idx) {
+    if (!selectedPhotos.has(photo.id) && photo.id !== selectedPhotoId) return;
+    var page = firstPage + Math.floor(idx / perPage);
+    if (page > boundedEnd) boundedEnd = page;
+  });
+
+  if (boundedEnd >= endPage) return null;
+  return boundedEnd;
+}
+
 async function refreshBrowseWindowInPlace() {
   var windowIsCurrent = claimBrowseWindow();
   selectAllRequestSeq++;
   loading = true;
+  var container = document.getElementById('gridContainer');
+  if (container) container.classList.add('preserving-scroll');
   var firstPage = earliestPage;
   var endPage = Math.max(firstPage, currentPage - 1);
+  var boundedEnd = computeBoundedRefreshWindow(firstPage, endPage);
+  if (boundedEnd != null) endPage = boundedEnd;
   var nextPhotos = [];
   var data;
   var page = firstPage;
@@ -6785,8 +6837,7 @@ async function refreshBrowseWindowInPlace() {
 
     // Capture position and selection at commit time: scrolling or clicking
     // during the request must not be undone by its eventual response.
-    var container = document.getElementById('gridContainer');
-    var scrollTop = container.scrollTop;
+    var scrollTop = container ? container.scrollTop : 0;
     var stillExpandedIds = expandedMemberIds();
     expandedBrowseStacks.clear();
     nextPhotos.forEach(function(photo) {
@@ -6839,7 +6890,7 @@ async function refreshBrowseWindowInPlace() {
     refreshBrowseLightboxCounter();
     // Setting this synchronously prevents an intermediate frame at the top.
     // The browser only clamps it when the remaining results are too short.
-    container.scrollTop = scrollTop;
+    if (container) container.scrollTop = scrollTop;
     updateScrollPosition();
     var refreshIds = photos.map(function(photo) { return photo.id; });
     loadInatStatus(refreshIds).then(function() {
@@ -6855,6 +6906,7 @@ async function refreshBrowseWindowInPlace() {
     // usable rather than replacing them with a partial response.
     return windowIsCurrent() ? false : null;
   } finally {
+    if (container) container.classList.remove('preserving-scroll');
     if (windowIsCurrent()) {
       loading = false;
       if (succeeded) {
@@ -7203,6 +7255,8 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
 async function prependPreviousPhotos(options) {
   if (loading || earliestPage <= 1) return false;
   loading = true;
+  var container = document.getElementById('gridContainer');
+  if (container) container.classList.add('preserving-scroll');
   var windowIsCurrent = observeBrowseWindow();
   var loadSucceeded = false;
   var requestedPage = earliestPage - 1;
@@ -7278,6 +7332,7 @@ async function prependPreviousPhotos(options) {
   } catch(e) {
     if (!windowIsCurrent()) return null;
   } finally {
+    if (container) container.classList.remove('preserving-scroll');
     if (windowIsCurrent()) {
       loading = false;
       if (loadSucceeded && anchorScanDepth === 0) {
