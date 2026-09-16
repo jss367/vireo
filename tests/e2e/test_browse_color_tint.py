@@ -5,7 +5,24 @@ without depending on the optional `color_label` badge field — which is off by
 default, so a labelled photo used to look identical to an unlabelled one.
 """
 
+import re
+
 from playwright.sync_api import expect
+
+
+def _rgba(value):
+    """Computed color -> (r, g, b, a) with channels on 0-1, rounded to 2dp.
+
+    Accepts both serializations Chromium uses: `rgb()`/`rgba()` with 0-255
+    channels, and the `color(srgb ...)` form that color-mix() produces.
+    """
+    nums = [float(n) for n in re.findall(r"[\d.]+", value)]
+    assert len(nums) in (3, 4), value
+    if not value.startswith("color("):
+        nums[:3] = [n / 255 for n in nums[:3]]
+    if len(nums) == 3:
+        nums.append(1.0)
+    return tuple(round(n, 2) for n in nums)
 
 
 def test_card_carries_its_saved_color_label(live_server, page):
@@ -22,34 +39,28 @@ def test_card_carries_its_saved_color_label(live_server, page):
     card.wait_for(state="visible")
     expect(card).to_have_attribute("data-color-label", "purple")
 
-    # The tint is implemented as an inset outline (the base .grid-card border
-    # is non-transparent, so asserting on borderTopColor would pass even if
-    # every tint rule were deleted). Assert on the outline itself and on the
-    # tinted info-strip background — the two surfaces the tint actually paints.
-    tint = card.evaluate(
-        """el => {
-            const cs = getComputedStyle(el);
-            const info = el.querySelector('.grid-card-info');
-            return {
-                outlineColor: cs.outlineColor,
-                outlineWidth: cs.outlineWidth,
-                outlineStyle: cs.outlineStyle,
-                infoBg: info ? getComputedStyle(info).backgroundColor : '',
-            };
-        }"""
+    # Assert the properties that actually implement the tint. Border color is
+    # useless here: _navbar.html pins .grid-card border-color with !important,
+    # which is why the tint uses `outline` at all, so a border assertion would
+    # pass with every tint rule deleted.
+    outline = card.evaluate(
+        "el => { const s = getComputedStyle(el);"
+        " return [s.outlineColor, s.outlineStyle, s.outlineWidth]; }"
     )
-    assert tint["outlineStyle"] == "solid"
-    assert tint["outlineWidth"] not in ("", "0px")
-    assert tint["outlineColor"] not in ("", "rgba(0, 0, 0, 0)", "transparent")
-    assert tint["infoBg"] not in ("", "rgba(0, 0, 0, 0)", "transparent")
+    assert _rgba(outline[0]) == (0.61, 0.35, 0.71, 1.0), outline
+    assert outline[1:] == ["solid", "2px"], outline
+    strip = card.locator(".grid-card-info").evaluate(
+        "el => getComputedStyle(el).backgroundColor"
+    )
+    # color-mix() serializes as `color(srgb r g b / a)` with 0-1 channels in
+    # Chromium, not `rgba()`, so compare the parsed channels rather than a
+    # serialization this assertion has no business pinning.
+    assert _rgba(strip) == (0.61, 0.35, 0.71, 0.16), strip
 
-    # Unlabelled cards stay untinted: no data attribute, and no outline paint.
+    # Unlabelled cards stay untinted.
     other = page.locator(f'.grid-card:not([data-id="{photo_id}"])').first
     assert other.get_attribute("data-color-label") is None
-    other_outline = other.evaluate(
-        "el => getComputedStyle(el).outlineColor"
-    )
-    assert other_outline in ("", "rgba(0, 0, 0, 0)", "transparent")
+    assert other.evaluate("el => getComputedStyle(el).outlineStyle") == "none"
 
 
 def test_setting_and_clearing_a_color_updates_the_card_live(live_server, page):
@@ -66,8 +77,122 @@ def test_setting_and_clearing_a_color_updates_the_card_live(live_server, page):
     expect(green).to_be_visible()
     green.click()
     expect(card).to_have_attribute("data-color-label", "green")
+    assert _rgba(card.evaluate("el => getComputedStyle(el).outlineColor")) == (
+        0.18, 0.8, 0.44, 1.0
+    )
 
     # Clicking the active color clears it, and the tint goes with it.
     green.click()
     expect(card).not_to_have_attribute("data-color-label", "green")
     assert card.get_attribute("data-color-label") is None
+    assert card.evaluate("el => getComputedStyle(el).outlineStyle") == "none"
+
+
+def test_offline_cards_keep_their_tint_across_a_full_rerender(live_server, page):
+    """renderPhotoCard's offline branch builds its own HTML and must carry the tint.
+
+    Regression: the attribute was added only after the offline early return, so
+    an offline photo lost its tint on any full renderGrid() (Select all, a sort
+    change) and nothing re-fetched labels to put it back.
+    """
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    assert page.request.post(
+        f"{url}/api/photos/{photo_id}/color_label", data={"color": "blue"}
+    ).ok
+
+    page.goto(f"{url}/browse")
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    card.wait_for(state="visible")
+    expect(card).to_have_attribute("data-color-label", "blue")
+
+    page.evaluate(
+        """(pid) => {
+            const p = photos.find(x => x.id === pid);
+            if (!p) throw new Error('seed photo missing from page state');
+            p.folder_status = 'missing';
+            renderGrid();
+        }""",
+        photo_id,
+    )
+
+    offline = page.locator(f'.grid-card.offline[data-id="{photo_id}"]')
+    expect(offline).to_have_attribute("data-color-label", "blue")
+    assert _rgba(offline.evaluate("el => getComputedStyle(el).outlineColor")) == (
+        0.2, 0.6, 0.86, 1.0
+    )
+
+
+def test_a_label_edited_mid_fetch_is_not_restored_by_the_stale_response(
+    live_server, page
+):
+    """An in-flight color-labels GET must not speak for a photo edited since.
+
+    Regression: fetchColorLabels checked the edit generation only when clearing
+    stale entries, then merged every value from the response unconditionally —
+    so a slow bootstrap GET put the pre-edit label back until reload.
+    """
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    other_id = live_server["data"]["photos"][1]
+    assert page.request.post(
+        f"{url}/api/photos/{photo_id}/color_label", data={"color": "red"}
+    ).ok
+    assert page.request.post(
+        f"{url}/api/photos/{other_id}/color_label", data={"color": "green"}
+    ).ok
+
+    page.goto(f"{url}/browse")
+    page.locator(f'.grid-card[data-id="{photo_id}"]').wait_for(state="visible")
+    expect(page.locator(f'.grid-card[data-id="{photo_id}"]')).to_have_attribute(
+        "data-color-label", "red"
+    )
+
+    # Gate the next color-labels GET at Vireo.api.json — vireo-api.js binds
+    # window.fetch at load time, so patching window.fetch would not intercept.
+    page.evaluate(
+        """() => {
+            const orig = window.Vireo.api.json;
+            let release;
+            const gate = new Promise((r) => { release = r; });
+            window.__releaseColorLabels = release;
+            window.Vireo.api.json = function (u) {
+                const args = arguments;
+                if (String(u).includes('/api/photos/color_labels')) {
+                    // Issue the request now, deliver the answer later. Gating
+                    // the request instead would let the clear reach the server
+                    // first, so the response would agree with the edit and the
+                    // test would pass with no fix at all.
+                    const inflight = orig.apply(window.Vireo.api, args);
+                    return Promise.all([inflight, gate]).then((r) => r[0]);
+                }
+                return orig.apply(window.Vireo.api, args);
+            };
+        }"""
+    )
+
+    # Start the stalled fetch, then clear one label while it is in flight.
+    page.evaluate(
+        "(ids) => { window.__pending = fetchColorLabels(ids); }",
+        [photo_id, other_id],
+    )
+    page.evaluate("(pid) => setColorLabelFor(pid, null)", photo_id)
+    expect(page.locator(f'.grid-card[data-id="{photo_id}"]')).not_to_have_attribute(
+        "data-color-label", "red"
+    )
+
+    # Release the now-stale response and let it merge.
+    page.evaluate("() => window.__releaseColorLabels()")
+    page.evaluate("() => window.__pending")
+    page.evaluate("() => refreshGridCards(photos.map(p => p.id))")
+
+    # The edited photo keeps the user's clear; the untouched one still hydrates.
+    assert (
+        page.locator(f'.grid-card[data-id="{photo_id}"]').get_attribute(
+            "data-color-label"
+        )
+        is None
+    )
+    expect(page.locator(f'.grid-card[data-id="{other_id}"]')).to_have_attribute(
+        "data-color-label", "green"
+    )
