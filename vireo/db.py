@@ -1818,6 +1818,32 @@ class Database:
                        ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
                    )"""
             )
+        # Migration: workspace_sync_only_folders -> workspace_sync_only_photos.
+        # #1661 briefly recorded these grants keyed by folder; a database
+        # opened by that parent commit still carries them, and every reader
+        # in this commit queries only the new photo-keyed table. Without
+        # this migration the sibling-workspace pending edits that #1661
+        # preserved lose their path grant on upgrade and stay queued as
+        # inaccessible with nothing saying why. Narrow the rewrite to
+        # photos that actually have a preserved edit under the folder
+        # grant -- the exact rows the grant was written for -- rather than
+        # authorizing every photo that happens to share the folder.
+        legacy_sof = self.conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='workspace_sync_only_folders'"
+        ).fetchone()
+        if legacy_sof is not None:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO workspace_sync_only_photos
+                       (workspace_id, photo_id)
+                   SELECT DISTINCT pc.workspace_id, pc.photo_id
+                   FROM pending_changes pc
+                   JOIN photos p ON p.id = pc.photo_id
+                   JOIN workspace_sync_only_folders sof
+                     ON sof.workspace_id = pc.workspace_id
+                    AND sof.folder_id = p.folder_id"""
+            )
+            self.conn.execute("DROP TABLE workspace_sync_only_folders")
         # Migration: working-copy failure markers. Backfill (and the inline
         # scan extraction) record a failure here when extract_working_copy
         # returns False, gated by file_mtime so a user-replaced file retries

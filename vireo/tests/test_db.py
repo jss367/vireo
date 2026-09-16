@@ -14436,6 +14436,93 @@ def test_link_survivor_skips_when_workspace_already_owns_folder(
     ).fetchone()["n"] == 0
 
 
+def test_upgrade_migrates_legacy_workspace_sync_only_folders(tmp_path):
+    """A database opened by #1661 still carries its folder-keyed grants in
+    ``workspace_sync_only_folders``; this commit's readers query only the
+    new photo-keyed table. Without a migration, the sibling-workspace
+    pending edits that #1661 preserved lose their path grant on upgrade
+    and stay queued as inaccessible with nothing saying why. Rewrite the
+    grant into a photo grant for exactly the photos the sibling has a
+    pending edit on -- the rows the grant was written for -- and drop the
+    legacy table."""
+    from db import Database
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    sibling_ws = db.create_workspace("Sibling")
+    arch = tmp_path / "arch"
+    arch.mkdir()
+    folder_id = db.add_folder(str(arch), name="arch")
+    pid_with_edit = db.add_photo(
+        folder_id=folder_id, filename="a.raf", extension=".raf",
+        file_size=1, file_mtime=1.0, file_hash="H1",
+    )
+    # A neighbour in the same folder that the sibling has no pending edit
+    # on. Its inclusion in the legacy folder grant was an accident of
+    # keying, not something the merge intended to authorize -- so it must
+    # not be authorized after the migration either.
+    pid_neighbour = db.add_photo(
+        folder_id=folder_id, filename="b.raf", extension=".raf",
+        file_size=1, file_mtime=1.0, file_hash="H2",
+    )
+    db.set_active_workspace(ws)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, 'rating', '5', 'tok', "
+        "'2026-01-01 00:00:00', ?)",
+        (pid_with_edit, sibling_ws),
+    )
+    # Simulate the on-disk shape #1661 left behind: drop the new
+    # photo-keyed table, recreate the legacy folder-keyed one, and record
+    # a folder grant for the sibling workspace.
+    db.conn.execute("DROP TABLE workspace_sync_only_photos")
+    db.conn.execute(
+        """CREATE TABLE workspace_sync_only_folders (
+             workspace_id INTEGER NOT NULL REFERENCES workspaces(id)
+                 ON DELETE CASCADE,
+             folder_id    INTEGER NOT NULL REFERENCES folders(id)
+                 ON DELETE CASCADE,
+             PRIMARY KEY (workspace_id, folder_id)
+           )"""
+    )
+    db.conn.execute(
+        "INSERT INTO workspace_sync_only_folders "
+        "(workspace_id, folder_id) VALUES (?, ?)",
+        (sibling_ws, folder_id),
+    )
+    db.conn.commit()
+    db.close()
+
+    # Reopen -- this runs the migration.
+    db = Database(db_path)
+    try:
+        legacy_present = db.conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='workspace_sync_only_folders'"
+        ).fetchone()
+        assert legacy_present is None
+        granted = {
+            (row["workspace_id"], row["photo_id"])
+            for row in db.conn.execute(
+                "SELECT workspace_id, photo_id "
+                "FROM workspace_sync_only_photos"
+            )
+        }
+        assert granted == {(sibling_ws, pid_with_edit)}
+        assert pid_neighbour not in {photo for _, photo in granted}
+        # The preserved edit's sidecar resolves through the migrated
+        # grant, exactly as it did before the upgrade.
+        db.set_active_workspace(sibling_ws)
+        try:
+            assert db._photo_syncable_in_workspace(pid_with_edit) is True
+            assert db._photo_syncable_in_workspace(pid_neighbour) is False
+        finally:
+            db.set_active_workspace(ws)
+    finally:
+        db.close()
+
+
 def test_merge_staged_tree_off_staging_identities_skip_sibling_workspace(
         db, tmp_path):
     """The off-staging remap count moved through to the caller for
