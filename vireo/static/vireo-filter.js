@@ -1003,24 +1003,35 @@
     });
   }
 
-  // Index of the clause an enum shortcut owns: the first ``is``/``in`` leaf
-  // for the field. Position alone is not enough — a popover-written
-  // ``not_in`` for the same field can sit ahead of it (toggleQuickEnum keeps
-  // both), and reading that one would report the button off while its value
-  // is applied, so the next click would add a duplicate.
-  function enumClauseIndex(field) {
-    return state.root.rules.findIndex((node) => !isGroup(node) && node.field === field &&
-      (node.op === 'is' || (node.op === 'in' && Array.isArray(node.value))));
+  // Clauses an enum shortcut can own: every ``is``/``in`` leaf for the field.
+  // Neither position nor count is fixed — a popover-written ``not_in`` can
+  // sit ahead of them, and a loaded collection can carry more than one — so
+  // the button reconciles against all of them. Reading just the first would
+  // report it off while one of the others still applies its value.
+  function enumClauseIndexes(field) {
+    const out = [];
+    state.root.rules.forEach((node, i) => {
+      if (!isGroup(node) && node.field === field &&
+          (node.op === 'is' || (node.op === 'in' && Array.isArray(node.value)))) out.push(i);
+    });
+    return out;
+  }
+
+  function enumClauseValues(node) {
+    return node.op === 'in' ? node.value : [node.value];
   }
 
   function quickEnumValues(field) {
     // OR/NOT leaves belong to the advanced expression, not an active
     // narrowing shortcut. Clicking a shortcut will AND it with that tree.
     if (state.root.mode !== 'all') return [];
-    const idx = enumClauseIndex(field);
-    if (idx < 0) return [];
-    const rule = state.root.rules[idx];
-    return rule.op === 'in' ? rule.value : [rule.value];
+    const values = [];
+    enumClauseIndexes(field).forEach((i) => {
+      enumClauseValues(state.root.rules[i]).forEach((value) => {
+        if (!values.includes(value)) values.push(value);
+      });
+    });
+    return values;
   }
 
   function toggleQuickEnum(field, value) {
@@ -1033,14 +1044,26 @@
       // ``not_in`` on the same field is a rule the user built in the
       // popover: the shortcut narrows it with its own clause rather than
       // overwriting it, so an exclusion someone wrote is never deleted.
-      const idx = enumClauseIndex(field);
-      if (idx < 0) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
-      const rule = state.root.rules[idx];
-      const values = rule.op === 'in' ? rule.value.slice() : [rule.value];
-      const next = values.includes(value)
-        ? values.filter((v) => v !== value) : values.concat([value]);
-      if (!next.length) state.root.rules.splice(idx, 1);
-      else state.root.rules[idx] = makeRule(field, 'in', next);
+      const owned = enumClauseIndexes(field);
+      const applied = owned.some((i) => enumClauseValues(state.root.rules[i]).includes(value));
+      if (applied) {
+        // Clear the value from every clause naming it. Leaving one behind
+        // would keep filtering on it with the button reading off.
+        const kept = [];
+        state.root.rules.forEach((node, i) => {
+          if (!owned.includes(i)) { kept.push(node); return; }
+          const values = enumClauseValues(node);
+          if (!values.includes(value)) { kept.push(node); return; }
+          const next = values.filter((v) => v !== value);
+          if (next.length) kept.push(makeRule(field, 'in', next));
+        });
+        state.root.rules = kept;
+        return;
+      }
+      if (!owned.length) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
+      const first = owned[0];
+      state.root.rules[first] = makeRule(
+        field, 'in', enumClauseValues(state.root.rules[first]).concat([value]));
     });
   }
 

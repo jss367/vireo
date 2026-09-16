@@ -253,6 +253,25 @@ def test_toggling_off_clears_a_duplicated_clause(live_server, page):
     assert page.evaluate("VireoFilter.getUserRules()") == {"mode": "all", "rules": []}
 
 
+def test_shortcut_reconciles_every_clause_naming_its_value(live_server, page):
+    """Two compatible clauses must not leave a filter behind an off button."""
+    _open_browse(page, live_server)
+    page.evaluate(
+        "VireoFilter.loadExpression({mode: 'all', rules: ["
+        "  {field: 'flag', op: 'in', value: ['flagged']},"
+        "  {field: 'flag', op: 'in', value: ['none']}]})"
+    )
+    unflagged = page.locator('.vf-shortcuts [data-value="none"]')
+    # Its value is applied by the second clause, so the button reads on.
+    expect(unflagged).to_have_attribute("aria-pressed", "true")
+
+    unflagged.click()
+    expect(unflagged).to_have_attribute("aria-pressed", "false")
+    assert page.evaluate("VireoFilter.getUserRules()")["rules"] == [
+        {"field": "flag", "op": "in", "value": ["flagged"]}
+    ]
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):
