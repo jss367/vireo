@@ -11891,15 +11891,33 @@ def test_api_photos_query_basic(app_and_db):
     assert "browse_stack" not in data["photos"][0]
 
 
+def _seed_browse_burst(db, photo_ids, folder_id=None):
+    """Make ``photo_ids`` a Browse burst: one folder, one second apart.
+
+    Browse groups bursts by capture-time proximity within a folder, so a
+    fixture that only shares a ``burst_id`` label no longer stacks — that
+    column stopped being a stacking signal when it turned out cameras reuse
+    the value for the life of the body.
+    """
+    photo_ids = list(photo_ids)
+    if folder_id is None:
+        folder_id = db.conn.execute(
+            "SELECT folder_id FROM photos WHERE id = ?", (photo_ids[0],),
+        ).fetchone()["folder_id"]
+    for offset, photo_id in enumerate(photo_ids):
+        db.conn.execute(
+            "UPDATE photos SET folder_id = ?, timestamp = ? WHERE id = ?",
+            (folder_id, f"2024-03-01T12:00:{offset:02d}", photo_id),
+        )
+    return folder_id
+
+
 def test_api_photos_query_browse_stacks(app_and_db):
     app, db = app_and_db
     listed = db.get_photos(sort="name")
     first, second = listed[0]["id"], listed[1]["id"]
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'processed-burst' WHERE id IN (?, ?)",
-            (first, second),
-        )
+        _seed_browse_burst(db, [first, second])
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (second,),
@@ -12013,11 +12031,17 @@ def test_api_photos_query_offline_members_never_join_a_stack(app_and_db):
         file_mtime=1.0,
     )
     with db.conn:
-        # All three share one burst. The offline frame also carries the best
-        # quality score, so it would win the cover if it were allowed in.
+        # The two reachable frames are a burst. The offline frame is an exact
+        # byte-for-byte duplicate of one of them — the one stack kind that can
+        # span folders — and carries the best quality score, so it would claim
+        # ``online_a`` out of the burst and win the cover if it were allowed
+        # in. Bursts themselves never span folders, and folder status is what
+        # makes a photo offline, so a duplicate is the reachable shape of
+        # "an offline frame tries to join a stack".
+        _seed_browse_burst(db, [online_a, online_b])
         db.conn.execute(
-            "UPDATE photos SET burst_id = 'mixed-burst' WHERE id IN (?, ?, ?)",
-            (online_a, online_b, offline_id),
+            "UPDATE photos SET file_hash = 'same-bytes' WHERE id IN (?, ?)",
+            (online_a, offline_id),
         )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.5 WHERE id = ?", (online_b,),
@@ -12038,8 +12062,11 @@ def test_api_photos_query_offline_members_never_join_a_stack(app_and_db):
     data = shown.get_json()
     by_id = {photo["id"]: photo for photo in data["photos"]}
 
-    # The stack holds only the two reachable frames, and the offline frame
-    # did not take the cover despite the best quality score.
+    # The stack holds only the two reachable frames: the offline duplicate
+    # never counted toward its own hash's tally, so ``online_a`` stayed in
+    # the burst instead of being pulled into a one-photo duplicate stack,
+    # and the offline frame did not take a cover despite the best quality
+    # score.
     stack = next(photo for photo in data["photos"] if photo["browse_stack"])
     assert stack["id"] == online_b
     assert stack["browse_stack"] == {
@@ -12090,10 +12117,7 @@ def test_collapse_browse_stack_photo_ids_keeps_standalone_ids_singular(app_and_d
     listed = db.get_photos(sort="name")
     first, second, third = (photo["id"] for photo in listed[:3])
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'mixed-burst' WHERE id IN (?, ?, ?)",
-            (first, second, third),
-        )
+        _seed_browse_burst(db, [first, second, third])
 
     grouped = db.collapse_browse_stack_photo_ids([first, second, third])
     assert len(grouped) == 1
@@ -12568,10 +12592,7 @@ def test_api_photos_query_visual_ranks_by_similarity(app_and_db, monkeypatch):
     # A quality-ranked stack cover can differ from the most relevant member;
     # the visible score must still describe the stack's relevance ordering.
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'visual-burst' WHERE id IN (?, ?)",
-            (photos["bird1.jpg"], photos["bird2.jpg"]),
-        )
+        _seed_browse_burst(db, [photos["bird1.jpg"], photos["bird2.jpg"]])
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (photos["bird2.jpg"],),

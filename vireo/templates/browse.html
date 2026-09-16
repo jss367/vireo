@@ -1982,7 +1982,7 @@ body.sidebar-resizing {
                  oninput="updateThumbSize(this.value)">
           <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
         </label>
-        <label class="browse-stack-toggle" title="Collapse exact duplicates and camera bursts (photos sharing an EXIF burst id)">
+        <label class="browse-stack-toggle" title="Collapse exact duplicates and camera bursts. A burst is a run of consecutive frames from one folder taken within the burst time gap that share the same species and location keywords — an untagged frame inside a tagged run stays its own item. Gap and keyword handling are in Settings › Display.">
           <input type="checkbox" id="browseStacksToggle"
                  data-view-preference="vireo.browse.stacks"
                  onchange="toggleBrowseStacks()">

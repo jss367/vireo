@@ -5568,12 +5568,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         else:
             try:
                 if stacks:
+                    stack_cfg = db.browse_stack_settings(cfg.load())
                     photos = db.query_browse_stacks(
                         [], folder_id=folder_id, collection_id=collection_id,
                         page=page, per_page=per_page, sort=sort,
+                        stack_config=stack_cfg,
                     )
                     total = db.count_browse_stacks(
                         [], folder_id=folder_id, collection_id=collection_id,
+                        stack_config=stack_cfg,
                     )
                     underlying_total = db.count_photos_for_rules(
                         [], folder_id=folder_id, collection_id=collection_id,
@@ -7021,6 +7024,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         # P2 on PR #1561).
                         stack_items = db.collapse_browse_stack_photo_ids(
                             ordered_ids,
+                            stack_config=db.browse_stack_settings(cfg.load()),
                         )
                         stacked_ids = []
                         seen_ids = set()
@@ -7054,6 +7058,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 stack_items = (
                     db.collapse_browse_stack_photo_ids(
                         ordered_ids, standalone_ids=offline_ids,
+                        stack_config=db.browse_stack_settings(cfg.load()),
                     )
                     if stacks else None
                 )
@@ -7122,6 +7127,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     ids = db.query_photo_ids_stacked(
                         rules, sort=sort,
                         collection_id=collection_id, folder_id=folder_id,
+                        stack_config=db.browse_stack_settings(cfg.load()),
                     )
                 else:
                     ids = db.query_photo_ids(rules, sort=sort, collection_id=collection_id,
@@ -7140,14 +7146,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 include_offline_folders=include_offline,
             )
             if stacks:
+                stack_cfg = db.browse_stack_settings(cfg.load())
                 photos = db.query_browse_stacks(
                     rules, sort=sort, page=page, per_page=per_page,
                     collection_id=collection_id, folder_id=folder_id,
                     include_offline_folders=include_offline,
+                    stack_config=stack_cfg,
                 )
                 total = db.count_browse_stacks(
                     rules, collection_id=collection_id, folder_id=folder_id,
                     include_offline_folders=include_offline,
+                    stack_config=stack_cfg,
                 )
             else:
                 photos = db.query_photos(
@@ -12909,11 +12918,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             underlying_total = db.count_collection_photos(collection_id)
             if stacks:
+                stack_cfg = db.browse_stack_settings(cfg.load())
                 photos = db.query_browse_stacks(
                     [], collection_id=collection_id, sort=sort,
-                    page=page, per_page=per_page,
+                    page=page, per_page=per_page, stack_config=stack_cfg,
                 )
-                total = db.count_browse_stacks([], collection_id=collection_id)
+                total = db.count_browse_stacks(
+                    [], collection_id=collection_id, stack_config=stack_cfg,
+                )
             else:
                 photos = db.get_collection_photos(
                     collection_id, page=page, per_page=per_page, sort=sort,
@@ -12960,6 +12972,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if stacks:
                 photo_ids = db.get_collection_photo_ids_stacked(
                     collection_id, sort=sort,
+                    stack_config=db.browse_stack_settings(cfg.load()),
                 )
             else:
                 photo_ids = db.get_collection_photo_ids(collection_id, sort=sort)
