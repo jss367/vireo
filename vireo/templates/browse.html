@@ -3359,6 +3359,30 @@ function applyCardColorLabel(card, photoId) {
   else card.removeAttribute('data-color-label');
 }
 
+// Hydrate color labels for the photos an init response just rendered.
+// /api/browse/init carries no labels, so any path that paints a grid straight
+// from it — bootstrapBrowse() and the ?photo_id=... deep link, which skips
+// bootstrap entirely — has to ask for them, or its cards stay untinted and the
+// detail panel reports "no color" until some later action happens to refetch
+// those ids. loadPhotos()'s paging path does its own fetch and does not use
+// this. `isCurrent` is the caller's own staleness guard: a sort change or
+// folder click during the fetch means these ids are no longer on screen.
+function hydrateColorLabelsForRenderedPage(isCurrent) {
+  if (!photos.length) return;
+  var ids = photos.map(function(p) { return p.id; });
+  return fetchColorLabels(ids).then(function() {
+    if (!isCurrent()) return;
+    refreshGridCards(ids);
+    // fetchColorLabels already re-rendered a batch inspector; only the
+    // single-photo panel is left to catch up.
+    var detail = document.getElementById('detailContent');
+    if (selectedPhotoId != null
+        && !(detail && detail.classList.contains('batch-mode'))) {
+      updateDetailColors();
+    }
+  });
+}
+
 function renderCardInfo(p) {
   var infoHtml = '';
   cardFields.forEach(function(field) {
@@ -4692,24 +4716,7 @@ async function bootstrapBrowse() {
         updatePreviousPhotosButton();
         browseDatasetReady = true;
         updateFilterSummary();
-        // /api/browse/init carries no color labels, and unlike the paging
-        // path in loadPhotos() this branch never asked for them — so the
-        // first page's cards and the detail panel both showed "no color"
-        // until an unrelated page load happened to hydrate them.
-        if (photos.length > 0) {
-          var bootstrapIds = photos.map(function(p) { return p.id; });
-          fetchColorLabels(bootstrapIds).then(function() {
-            if (!bootstrapWindowIsCurrent()) return;
-            refreshGridCards(bootstrapIds);
-            // fetchColorLabels already re-rendered a batch inspector; only the
-            // single-photo panel is left to catch up.
-            var detail = document.getElementById('detailContent');
-            if (selectedPhotoId != null
-                && !(detail && detail.classList.contains('batch-mode'))) {
-              updateDetailColors();
-            }
-          });
-        }
+        hydrateColorLabelsForRenderedPage(bootstrapWindowIsCurrent);
       }
       loadSummary();
     }
@@ -14023,6 +14030,9 @@ async function _runPhotoDeepLink(photoId) {
       browseDatasetReady = true;
       document.getElementById('loadingState').style.display = 'none';
       deepLinkLoaded = true;
+      hydrateColorLabelsForRenderedPage(function() {
+        return isDeepLinkHealthCurrent() && isDeepLinkDatasetCurrent();
+      });
     }
 
     // The focused init response normally includes the bounded page containing

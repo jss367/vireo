@@ -255,3 +255,35 @@ def test_a_fetch_started_during_a_pending_write_cannot_undo_it(live_server, page
 
     assert card.get_attribute("data-color-label") is None
     assert page.evaluate("(pid) => colorLabels[pid] || null", photo_id) is None
+
+
+def test_the_photo_deep_link_hydrates_its_page_labels(live_server, page):
+    """?photo_id=... skips bootstrapBrowse and renders its own init response.
+
+    Regression: the hydration added for the bootstrap path lived inside
+    bootstrapBrowse(), which returns immediately when the URL carries a
+    photo_id. The deep-link loader then painted the focused page from its own
+    /api/browse/init call with no label fetch at all, so the target's card
+    stayed untinted until some unrelated action happened to refetch those ids.
+    """
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    assert page.request.post(
+        f"{url}/api/photos/{photo_id}/color_label", data={"color": "yellow"}
+    ).ok
+
+    page.goto(f"{url}/browse?photo_id={photo_id}")
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    card.wait_for(state="visible")
+    expect(card).to_have_attribute("data-color-label", "yellow")
+
+    # The deep link flashes an inline accent outline on the target for 2s;
+    # once it clears, the tint's own outline must be what remains.
+    page.wait_for_function(
+        "(pid) => !document.querySelector(`.grid-card[data-id='${pid}']`).style.outline",
+        arg=photo_id,
+        timeout=5000,
+    )
+    assert _rgba(card.evaluate("el => getComputedStyle(el).outlineColor")) == (
+        0.95, 0.77, 0.06, 1.0
+    )
