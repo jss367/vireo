@@ -274,6 +274,33 @@ def test_a_pinned_visual_model_survives_normalization():
     ) is None
 
 
+def test_a_qualified_leaf_toggles_as_its_own_clause():
+    """The missing-tag and enum rebuilds would drop the qualifier."""
+    pinned = fs.normalize([{"id": "a", "label": "No legacy index", "rules": {
+        "field": "has_visual_index", "op": "is", "value": 0,
+        "model": "legacy-model"}}])[0]
+    assert pinned["kind"] == "rules"
+    assert pinned["rules"]["model"] == "legacy-model"
+    cased = fs.normalize([{"id": "b", "label": "Exact", "rules": {
+        "field": "filename", "op": "is", "value": "IMG.JPG", "case": True}}])[0]
+    assert cased["kind"] == "rules"
+    # Without a qualifier the ordinary classification still applies.
+    assert fs.normalize([{"id": "c", "label": "No index", "rules": {
+        "field": "has_visual_index", "op": "is", "value": 0}}])[0]["kind"] == "missing"
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("2026-01-01 12:00", "2026-01-01T12:00"),
+    ("2026-01-01T12:00", "2026-01-01T12:00"),
+    ("2026-01-01", "2026-01-01"),
+])
+def test_timestamps_are_stored_with_the_scanner_separator(value, expected):
+    """A space sorts before "T", so it would sweep in earlier photos."""
+    entries = fs.normalize([{"id": "x", "label": "Since", "rules": {
+        "field": "timestamp", "op": ">=", "value": value}}])
+    assert entries[0]["rules"]["value"] == expected
+
+
 def test_a_group_keeps_only_its_usable_children():
     entries = fs.normalize([{
         "id": "x", "label": "Mixed",

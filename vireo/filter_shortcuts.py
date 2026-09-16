@@ -177,9 +177,15 @@ def _clean_leaf(node):
             numbers.append(int(number) if number.is_integer() else number)
         value = numbers if isinstance(value, list) else numbers[0]
     elif spec["type"] == "date" and op != "recent":
-        if not all(_is_date(item)
-                   for item in (value if isinstance(value, list) else [value])):
+        items = value if isinstance(value, list) else [value]
+        if not all(_is_date(item) for item in items):
             return None
+        # Scanned timestamps are stored with a "T" and compared lexically, so
+        # "2026-01-01 12:00" (a space sorts before "T") would also match
+        # photos from earlier that day. Store the separator the data uses.
+        items = [item[:10] + "T" + item[11:] if len(item) > 10 and item[10] == " "
+                 else item for item in items]
+        value = items if isinstance(value, list) else items[0]
     if spec["type"] == "boolean":
         # Normalize to the 0/1 the defaults use, so ``kind`` and the bar's
         # active-state matching see one representation of "no".
@@ -234,6 +240,12 @@ def clean_rules(node, depth=0):
 def _kind(rules):
     """Classify a cleaned rule node into how the bar must combine it."""
     if _is_group(rules):
+        return "rules", None, None
+    # A leaf carrying qualifiers beyond field/op/value (a pinned ``model``, a
+    # ``case`` flag) is not the plain shape the missing-tag and enum toggles
+    # rebuild — those would drop the qualifier and quietly filter on
+    # something else. It toggles as the exact clause it is.
+    if set(rules) - {"field", "op", "value"}:
         return "rules", None, None
     spec = FILTER_FIELDS[rules["field"]]
     if spec["type"] == "boolean" and rules["op"] == "is" and not rules["value"]:

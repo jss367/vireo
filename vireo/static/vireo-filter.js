@@ -1025,13 +1025,15 @@
     // OR/NOT leaves belong to the advanced expression, not an active
     // narrowing shortcut. Clicking a shortcut will AND it with that tree.
     if (state.root.mode !== 'all') return [];
-    const values = [];
-    enumClauseIndexes(field).forEach((i) => {
-      enumClauseValues(state.root.rules[i]).forEach((value) => {
-        if (!values.includes(value)) values.push(value);
-      });
-    });
-    return values;
+    // Owned clauses are ANDed, so a value only filters when every one of
+    // them names it — the intersection, not the union. With
+    // ``flag in [Picked, Rejected]`` AND ``flag is Picked``, Rejected cannot
+    // match anything, and a button reporting it applied would be a lie.
+    const clauses = enumClauseIndexes(field)
+      .map((i) => enumClauseValues(state.root.rules[i]));
+    if (!clauses.length) return [];
+    return clauses[0].filter((value) =>
+      clauses.every((values) => values.includes(value)));
   }
 
   function toggleQuickEnum(field, value) {
@@ -1045,7 +1047,11 @@
       // popover: the shortcut narrows it with its own clause rather than
       // overwriting it, so an exclusion someone wrote is never deleted.
       const owned = enumClauseIndexes(field);
-      const applied = owned.some((i) => enumClauseValues(state.root.rules[i]).includes(value));
+      // Applied means every owned clause names it (they are ANDed); anything
+      // less is a value the expression cannot match, so the click turns it
+      // on rather than off.
+      const applied = owned.length > 0 &&
+        owned.every((i) => enumClauseValues(state.root.rules[i]).includes(value));
       if (applied) {
         // Clear the value from every clause naming it. Leaving one behind
         // would keep filtering on it with the button reading off.
@@ -1065,8 +1071,11 @@
       // field, adding to one leaves the other excluding the value while the
       // button reports it applied.
       owned.forEach((i) => {
-        state.root.rules[i] = makeRule(
-          field, 'in', enumClauseValues(state.root.rules[i]).concat([value]));
+        const values = enumClauseValues(state.root.rules[i]);
+        // A clause that already names it needs no second copy — partial
+        // overlap is exactly when this runs.
+        if (values.includes(value)) return;
+        state.root.rules[i] = makeRule(field, 'in', values.concat([value]));
       });
     });
   }

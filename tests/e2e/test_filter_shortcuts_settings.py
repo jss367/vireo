@@ -254,7 +254,7 @@ def test_toggling_off_clears_a_duplicated_clause(live_server, page):
 
 
 def test_shortcut_reconciles_every_clause_naming_its_value(live_server, page):
-    """Two compatible clauses must not leave a filter behind an off button."""
+    """Two compatible clauses are ANDed, so neither value is really applied."""
     _open_browse(page, live_server)
     page.evaluate(
         "VireoFilter.loadExpression({mode: 'all', rules: ["
@@ -262,11 +262,18 @@ def test_shortcut_reconciles_every_clause_naming_its_value(live_server, page):
         "  {field: 'flag', op: 'in', value: ['none']}]})"
     )
     unflagged = page.locator('.vf-shortcuts [data-value="none"]')
-    # Its value is applied by the second clause, so the button reads on.
-    expect(unflagged).to_have_attribute("aria-pressed", "true")
-
-    unflagged.click()
     expect(unflagged).to_have_attribute("aria-pressed", "false")
+
+    # Turning it on reaches both clauses, so the value can actually match...
+    unflagged.click()
+    expect(unflagged).to_have_attribute("aria-pressed", "true")
+    assert page.evaluate("VireoFilter.getUserRules()")["rules"] == [
+        {"field": "flag", "op": "in", "value": ["flagged", "none"]},
+        {"field": "flag", "op": "in", "value": ["none"]},
+    ]
+
+    # ...and turning it off clears it from both, never leaving one behind.
+    unflagged.click()
     assert page.evaluate("VireoFilter.getUserRules()")["rules"] == [
         {"field": "flag", "op": "in", "value": ["flagged"]}
     ]
@@ -298,6 +305,28 @@ def test_turning_a_value_on_reaches_every_clause_for_its_field(live_server, page
     rejected = page.locator('.vf-shortcuts [data-value="rejected"]')
     expect(rejected).to_have_attribute("aria-pressed", "false")
 
+    rejected.click()
+    expect(rejected).to_have_attribute("aria-pressed", "true")
+    rules = page.evaluate("VireoFilter.getUserRules()")["rules"]
+    assert all("rejected" in rule["value"] for rule in rules)
+
+
+def test_a_value_only_reads_as_on_when_every_clause_allows_it(live_server, page):
+    """Owned clauses are ANDed, so partial membership is not applied."""
+    _open_browse(page, live_server)
+    page.evaluate(
+        "VireoFilter.loadExpression({mode: 'all', rules: ["
+        "  {field: 'flag', op: 'in', value: ['flagged', 'rejected']},"
+        "  {field: 'flag', op: 'is', value: 'flagged'}]})"
+    )
+    rejected = page.locator('.vf-shortcuts [data-value="rejected"]')
+    picked = page.locator('.vf-shortcuts [data-value="flagged"]')
+    # Rejected is in one clause but excluded by the other, so it filters
+    # nothing and must not claim to be on.
+    expect(rejected).to_have_attribute("aria-pressed", "false")
+    expect(picked).to_have_attribute("aria-pressed", "true")
+
+    # One click turns it on for real — into every clause.
     rejected.click()
     expect(rejected).to_have_attribute("aria-pressed", "true")
     rules = page.evaluate("VireoFilter.getUserRules()")["rules"]
