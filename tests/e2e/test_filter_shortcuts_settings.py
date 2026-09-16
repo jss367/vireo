@@ -232,6 +232,27 @@ def test_shortcut_finds_its_clause_behind_an_exclusion(live_server, page):
     expect(picked).to_have_attribute("aria-pressed", "false")
 
 
+def test_toggling_off_clears_a_duplicated_clause(live_server, page):
+    """One click means off, even if the expression held the clause twice."""
+    url = live_server["url"]
+    page.request.post(f"{url}/api/config", data={"filter_shortcuts": [
+        {"id": "keepers", "label": "Keepers",
+         "rules": {"field": "rating", "op": ">=", "value": 4}},
+    ]}, headers={"Content-Type": "application/json"})
+    _open_browse(page, live_server)
+    page.evaluate(
+        "VireoFilter.loadExpression({mode: 'all', rules: ["
+        "  {field: 'rating', op: '>=', value: 4},"
+        "  {field: 'rating', op: '>=', value: 4}]})"
+    )
+    keepers = page.locator('.vf-shortcuts button', has_text="Keepers")
+    expect(keepers).to_have_attribute("aria-pressed", "true")
+
+    keepers.click()
+    expect(keepers).to_have_attribute("aria-pressed", "false")
+    assert page.evaluate("VireoFilter.getUserRules()") == {"mode": "all", "rules": []}
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):

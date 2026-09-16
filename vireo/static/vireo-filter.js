@@ -1049,8 +1049,15 @@
   function toggleQuickRules(shortcut) {
     mutate(() => {
       if (state.root.mode === 'all') {
-        const idx = state.root.rules.findIndex((node) => sameNode(node, shortcut.rules));
-        if (idx >= 0) { state.root.rules.splice(idx, 1); return; }
+        const matches = state.root.rules.filter((node) => sameNode(node, shortcut.rules));
+        if (matches.length) {
+          // Every copy, not just the first: an expression can already hold
+          // the same clause twice (two identical rules added in the
+          // popover), and leaving one behind would light the button straight
+          // back up — a toggle that needs a second click to take effect.
+          state.root.rules = state.root.rules.filter((node) => !matches.includes(node));
+          return;
+        }
       } else {
         // Narrow the advanced expression instead of flattening it, exactly
         // as the missing-tag and enum shortcuts do.
