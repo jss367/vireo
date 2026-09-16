@@ -6749,6 +6749,16 @@ async function resetAndLoad(options) {
   if (pendingFocusAnchor && pendingFocusAnchorScopeGen !== browseScopeGen) {
     pendingFocusAnchor = null;
   }
+  // A reset that isn't focused and asks for no preservation is an intentional
+  // selection clear — applying or narrowing a filter, for example. That path
+  // does not bump ``browseScopeGen`` (the folder/collection are unchanged),
+  // so the scope-generation guard above cannot see it; without dropping the
+  // holder here, a following focused sort would adopt the stale anchor and
+  // resurrect a selection the intervening reset just cleared, whenever the
+  // photo still matched the new filter (Codex review r4021838076).
+  if (!focusAnchor && !preserveAnchor && !preserveScroll) {
+    pendingFocusAnchor = null;
+  }
   if (!anchor && (focusAnchor || preserveAnchor) && pendingFocusAnchor) {
     anchor = pendingFocusAnchor;
   }

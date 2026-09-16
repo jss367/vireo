@@ -329,6 +329,44 @@ def test_scope_change_mid_sort_drops_the_photo(live_server, page):
     )
 
 
+def test_filter_change_mid_sort_drops_the_pending_anchor(live_server, page):
+    """A non-preserving filter reset must clear the in-flight sort's anchor.
+
+    Applying (or narrowing) a filter calls ``resetAndLoad()`` without a
+    preservation flag but does not bump ``browseScopeGen`` — the folder is
+    unchanged. Without also dropping ``pendingFocusAnchor`` a following sort
+    change would adopt the stale anchor and resurrect the photo whenever it
+    still matched the new filter, undoing the selection clear the filter
+    reset intended (Codex review r4021838076).
+    """
+    _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
+    # Must be armed before the first navigation: it is an init script.
+    _stall_first_focused_query(page)
+    _open_browse(page, live_server)
+    _scroll_until_loaded(page, 100)
+    photo_id = _select_photo_at(page, 80)
+
+    page.select_option("#sortSelect", "name_desc")
+    page.wait_for_timeout(150)
+    # A filename filter that still matches every seeded photo. The bug would
+    # resurrect ``photo_id`` when the second sort adopts the pending anchor;
+    # the fix drops the anchor so the second sort resets cleanly instead.
+    page.evaluate(
+        "() => VireoFilter.addRule('filename', 'contains', 'bird')"
+    )
+    page.wait_for_timeout(100)
+    page.select_option("#sortSelect", "rating")
+    page.wait_for_timeout(2500)
+    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    assert page.evaluate("window.__focusStalled") is True, (
+        "the focused request was never stalled"
+    )
+    assert page.evaluate("selectedPhotoId") != photo_id, (
+        "a filter change mid-sort left the pending anchor behind and the "
+        "next sort resurrected the cleared selection"
+    )
+
+
 def test_stacked_grid_counts_cards_not_photos_in_the_banner(live_server, page):
     """With Stacks on the window offset counts cards, so say cards.
 
