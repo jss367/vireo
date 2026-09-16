@@ -2689,7 +2689,15 @@ var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch re
 // stale response's values for every other id overwrite them anyway, and the
 // stale value for the edited id survive.
 var colorLabelEditGen = Object.create(null);
+// Stamp ids at a NEW generation. Called twice per write — once before the POST
+// and once after it lands. The trailing stamp is what covers a fetch that
+// starts while the write is still in flight: it captured the same generation
+// the pre-write stamp wrote, so `>` alone would let its response (read from the
+// server before the write committed) overwrite the fresh local value once it
+// resolves. Re-stamping on completion puts every such fetch strictly behind
+// the write (Codex P2 on PR #1668).
 function _noteColorLabelEdits(ids) {
+  colorLabelGen++;
   ids.forEach(function(id) { colorLabelEditGen[id] = colorLabelGen; });
 }
 // Generation counter for the grid window (photos/currentPage/earliestPage/
@@ -10830,7 +10838,6 @@ async function batchSetFlag(flag) {
 async function batchSetColorLabel(color) {
   var ids = getActiveSelection();
   if (!ids.length) return;
-  colorLabelGen++;
   _noteColorLabelEdits(ids);
   try {
     await safeFetch('/api/batch/color_label', {
@@ -10838,6 +10845,7 @@ async function batchSetColorLabel(color) {
       body: JSON.stringify({photo_ids: ids, color: color}),
     });
   } catch(e) { return; }
+  _noteColorLabelEdits(ids);
   ids.forEach(function(id) {
     if (color) colorLabels[id] = color;
     else delete colorLabels[id];
@@ -11923,7 +11931,6 @@ async function setColorLabel(color) {
     return;
   }
   if (!selectedPhotoId) return;
-  colorLabelGen++;
   var photoId = selectedPhotoId;
   _noteColorLabelEdits([photoId]);
   var current = colorLabels[photoId] || null;
@@ -11933,6 +11940,7 @@ async function setColorLabel(color) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({color: newColor}),
   });
+  _noteColorLabelEdits([photoId]);
   if (newColor) {
     colorLabels[photoId] = newColor;
   } else {
@@ -13174,7 +13182,6 @@ async function setFlagFor(photoId, flag) {
 }
 
 async function setColorLabelFor(photoId, color) {
-  colorLabelGen++;
   _noteColorLabelEdits([photoId]);
   try {
     await safeFetch('/api/batch/color_label', {
@@ -13182,6 +13189,7 @@ async function setColorLabelFor(photoId, color) {
       body: JSON.stringify({photo_ids: [photoId], color: color}),
     });
   } catch(e) { return; }
+  _noteColorLabelEdits([photoId]);
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
   colorLabelsFetched.add(photoId);

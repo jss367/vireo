@@ -196,3 +196,62 @@ def test_a_label_edited_mid_fetch_is_not_restored_by_the_stale_response(
     expect(page.locator(f'.grid-card[data-id="{other_id}"]')).to_have_attribute(
         "data-color-label", "green"
     )
+
+
+def test_a_fetch_started_during_a_pending_write_cannot_undo_it(live_server, page):
+    """The generations tie when a fetch starts while the label POST is in flight.
+
+    Regression: the per-id stamp was written once, before the POST. A fetch
+    starting after that stamp captured the *same* generation, so `stamp > gen`
+    was false — and its response, read from the server before the write
+    committed, put the old color back. Re-stamping when the write lands puts
+    such a fetch strictly behind it.
+    """
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    assert page.request.post(
+        f"{url}/api/photos/{photo_id}/color_label", data={"color": "red"}
+    ).ok
+
+    page.goto(f"{url}/browse")
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    card.wait_for(state="visible")
+    expect(card).to_have_attribute("data-color-label", "red")
+
+    # Stub the color-labels GET to answer with the pre-write server truth,
+    # delivered only when released. Stubbing the body rather than racing the
+    # real endpoint is what makes the interleaving deterministic — the point
+    # under test is what the client does with a response it already knows how
+    # to produce, not whether SQLite commits in time.
+    page.evaluate(
+        """(pid) => {
+            const orig = window.Vireo.api.json;
+            let release;
+            const gate = new Promise((r) => { release = r; });
+            window.__releaseColorLabels = release;
+            window.Vireo.api.json = function (u) {
+                if (String(u).includes('/api/photos/color_labels')) {
+                    const stale = {}; stale[pid] = 'red';
+                    return gate.then(() => stale);
+                }
+                return orig.apply(window.Vireo.api, arguments);
+            };
+        }""",
+        photo_id,
+    )
+
+    # Write, then start a fetch while that write is still in flight.
+    page.evaluate(
+        "(pid) => { window.__write = setColorLabelFor(pid, null); }", photo_id
+    )
+    page.evaluate("(pid) => { window.__pending = fetchColorLabels([pid]); }", photo_id)
+    page.evaluate("() => window.__write")
+    expect(card).not_to_have_attribute("data-color-label", "red")
+
+    # Let the stale response land on the completed write.
+    page.evaluate("() => window.__releaseColorLabels()")
+    page.evaluate("() => window.__pending")
+    page.evaluate("(pid) => refreshGridCards([pid])", photo_id)
+
+    assert card.get_attribute("data-color-label") is None
+    assert page.evaluate("(pid) => colorLabels[pid] || null", photo_id) is None
