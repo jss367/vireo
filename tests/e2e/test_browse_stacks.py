@@ -504,6 +504,57 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     assert abs(top_after - top_before) < 4
 
 
+def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
+    """A double-click on a stack card is a viewing gesture, not a batch.
+
+    Its two clicks run through ``selectPhoto`` before the lightbox opens, so
+    they leave the stack selected. The close handler preserves an existing
+    batch rather than replacing it with the viewed photo — correct for a
+    batch the user assembled card by card, wrong for the selection the
+    opening gesture itself just made, which would strand the grid on the
+    stack after the user navigated away and closed. A selection that is
+    exactly one stack may be replaced; finishing inside that same stack
+    leaves it alone rather than shrinking it to one frame.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    expect(cover).to_be_visible()
+
+    # Close on the frame the gesture opened: the stack stays selected.
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
+    )
+
+    # Navigate out of the stack, and the grid follows the user home.
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "photoId => selectedPhotoId === photoId && selectedPhotos.size === 0",
+        arg=other_id,
+    )
+    expect(page.locator("#detailFilename")).to_have_text("robin1.jpg")
+
+
 def test_clearing_the_selection_scrubs_a_stack_cards_partial_mark(
     live_server, page,
 ):

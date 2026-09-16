@@ -3397,6 +3397,21 @@ function browseCardSelectionClass(photo) {
   return chosen ? ' stack-partial' : '';
 }
 
+// True when the selection is exactly one stack's frames — the state a single
+// click on a stack card produces. Distinguishing that from a batch the user
+// assembled card by card is what lets lightbox navigation replace the former
+// and preserve the latter. A selection this cannot recognize (an unusual
+// insertion order, members with no loaded cover) reads as a batch, which is
+// the safe answer: batches are preserved.
+function browseSelectionIsOneStack() {
+  if (!selectedPhotos.size) return false;
+  var first = selectedPhotos.values().next().value;
+  var members = browseStackMemberIds(first)
+    || browseStackMemberIds(browseStackCoverIdForPhoto(first));
+  return !!members && members.length === selectedPhotos.size
+    && members.every(function(id) { return selectedPhotos.has(id); });
+}
+
 // "12 photos selected · 2 stacks" — the sentence a stack click has to be able
 // to answer, since one click now moves the count by more than one. It is only
 // printable when the stacks and singles currently in the grid account for
@@ -13157,9 +13172,34 @@ function scrollToCard(idx) {
 // Previous/Next step while the lightbox is still open.
 document.addEventListener('lightbox:closed', function(event) {
   var photoId = event && event.detail ? event.detail.photoId : null;
-  // Viewing shortcuts can open the lightbox without collapsing an existing
-  // batch. Preserve that batch instead of replacing it with the viewed photo.
-  if (photoId == null || selectedPhotos.size > 0) return;
+  if (photoId == null) return;
+  if (selectedPhotos.size > 0) {
+    // Viewing shortcuts can open the lightbox without collapsing an existing
+    // batch. Preserve that batch instead of replacing it with the viewed
+    // photo — unless the "batch" is exactly one stack, which is the state a
+    // single card click produces rather than one the user assembled. A
+    // double-click on a stack card runs its own two clicks through
+    // selectPhoto first, so without this the guard would see that stack and
+    // refuse to follow the user to the photo they finished on.
+    // Codex P2 on PR #1672.
+    if (!browseSelectionIsOneStack()) return;
+    // Finished inside that stack: the viewing gesture ended where it began,
+    // so the stack stays selected rather than shrinking to one frame.
+    if (selectedPhotos.has(photoId)) {
+      var stackCoverId = browseStackCoverIdForPhoto(photoId);
+      var stackIdx = photos.findIndex(function(photo) {
+        return photo.id === photoId || photo.id === stackCoverId;
+      });
+      if (stackIdx >= 0) {
+        selectedIndex = stackIdx;
+        scrollToCard(stackIdx);
+      }
+      return;
+    }
+    // Left the stack, so the gesture's selection is replaced below by the
+    // photo the user actually finished on.
+    selectedPhotos.clear();
+  }
   var idx = photos.findIndex(function(photo) { return photo.id === photoId; });
   if (idx < 0) {
     var coverId = browseStackCoverIdForPhoto(photoId);
