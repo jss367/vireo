@@ -1974,6 +1974,10 @@ body.sidebar-resizing {
           <option value="quality">Quality (best)</option>
           <option value="sharpness">Sharpness (sharpest)</option>
           <option value="sharpness_asc">Sharpness (softest)</option>
+          <option value="prediction_confidence"
+                  title="Ranks each photo by its strongest current species prediction that you haven't rejected. Photos with no prediction sort last.">Prediction confidence (highest)</option>
+          <option value="prediction_confidence_asc"
+                  title="Ranks each photo by its strongest current species prediction that you haven't rejected — weakest first, so the guesses worth checking come up front. Photos with no prediction sort last, because no guess is not a low-confidence guess.">Prediction confidence (lowest)</option>
         </select>
         <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
           <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
@@ -3270,6 +3274,16 @@ function renderCardField(field, p) {
       return '';
     case 'quality_score':
       if (p.quality_score != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Quality score">' + p.quality_score.toFixed(2) + '</span>';
+      return '';
+    // The value the "Prediction confidence" sorts rank on, so a card can
+    // explain its own position in the grid. Absent (rather than 0) when the
+    // photo has no current, unrejected species prediction — the badge stays
+    // off instead of claiming a confidence of zero.
+    case 'prediction_confidence':
+      if (p.prediction_confidence != null) {
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="Confidence of the strongest current species prediction">'
+          + Math.round(p.prediction_confidence * 100) + '%</span>';
+      }
       return '';
     case 'color_label':
       var cl = colorLabels[p.id];

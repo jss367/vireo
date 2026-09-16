@@ -84,6 +84,22 @@ def attach_detections(db, photo_dicts):
         p["detections"] = det_map.get(p["id"], [])
     return photo_dicts
 
+def attach_prediction_confidence(db, photo_dicts):
+    """Attach the top prediction's confidence to photo dicts (in-place).
+
+    Each photo gets ``prediction_confidence``: a float in [0, 1], or None
+    when the photo has no current, unrejected species prediction. This is
+    the same value the ``prediction_confidence`` Browse sorts order by, so a
+    card showing it explains its own position in the grid.
+    """
+    if not photo_dicts:
+        return photo_dicts
+    ids = [p["id"] for p in photo_dicts]
+    conf_map = db.get_top_prediction_confidences(ids)
+    for p in photo_dicts:
+        p["prediction_confidence"] = conf_map.get(p["id"])
+    return photo_dicts
+
 def attach_edit_recipes(db, photo_dicts):
     """Attach non-destructive edit recipes to photo dicts (in-place)."""
     if not photo_dicts:

@@ -655,6 +655,69 @@ def _rule_upper_bound(value):
 _PHOTO_DATE_ASC_ORDER = "p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC"
 _PHOTO_DATE_DESC_ORDER = "p.timestamp IS NULL, p.timestamp DESC, p.filename ASC, p.id ASC"
 
+# A photo's "prediction confidence" is the score of the one prediction the UI
+# presents as its strongest guess — not "some prediction row exists with this
+# score". Three restrictions make the number mean that:
+#
+# * ``species IS NOT NULL`` — a detection-only row ("animal", no species) is
+#   not a species guess and has no confidence to rank by.
+# * non-``rejected`` — a guess the user has thrown away must not keep the
+#   photo at the top of a confidence sort.
+# * newest ``labels_fingerprint`` per (detection, classifier) — the same pin
+#   ``get_top_prediction_for_photo`` and ``_prediction_exists`` use, so a
+#   reclassified photo ranks on its current label set rather than on a
+#   stale row left behind by the previous one.
+#
+# Correlates on the outer ``p.id``, so every caller must expose ``photos``
+# (or a projection carrying ``id``) as ``p``. Takes one parameter: the
+# workspace id. It is deliberately a correlated subquery rather than a
+# grouped CTE: at 88k photos / 192k predictions the CTE form materializes
+# every photo in the catalog (~0.35s even for a 60-photo folder), while the
+# correlated form is index-driven per scoped row — 0.03s on a small
+# workspace and no slower than the CTE on the largest one.
+_TOP_PREDICTION_CONFIDENCE_EXPR = """(
+            SELECT MAX(conf_pr.confidence)
+            FROM detections conf_d
+            JOIN predictions conf_pr ON conf_pr.detection_id = conf_d.id
+            LEFT JOIN prediction_review conf_prv
+                   ON conf_prv.prediction_id = conf_pr.id
+                  AND conf_prv.workspace_id = ?
+            WHERE conf_d.photo_id = p.id
+              AND conf_pr.species IS NOT NULL
+              AND COALESCE(conf_prv.status, 'pending') != 'rejected'
+              AND conf_pr.labels_fingerprint = (
+                  SELECT conf_pr2.labels_fingerprint FROM predictions conf_pr2
+                  WHERE conf_pr2.detection_id = conf_pr.detection_id
+                    AND conf_pr2.classifier_model = conf_pr.classifier_model
+                  ORDER BY conf_pr2.created_at DESC, conf_pr2.id DESC
+                  LIMIT 1
+              )
+        )"""
+
+# Sorts whose ORDER BY reads only ``photos`` columns, so they need no params.
+_PHOTO_SORT_ORDERS = {
+    "date": _PHOTO_DATE_ASC_ORDER,
+    "date_desc": _PHOTO_DATE_DESC_ORDER,
+    "name": "p.filename ASC, p.id ASC",
+    "name_desc": "p.filename DESC, p.id ASC",
+    "rating": "p.rating DESC, p.filename ASC, p.id ASC",
+    "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
+    "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
+    "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
+}
+
+# Photos the classifier has never scored are unscored, not unconfident, so
+# they sort last in *both* directions — "Prediction confidence (lowest)" is
+# read as "the guesses Vireo is least sure of", and answering it with
+# thousands of frames that carry no guess at all would bury exactly the
+# photos the sort exists to surface. ``NULLS LAST`` rather than the
+# ``expr IS NULL, expr`` idiom used for plain columns above: repeating the
+# key here would mean evaluating the correlated subquery twice per row.
+_PREDICTION_CONFIDENCE_SORTS = {
+    "prediction_confidence": "DESC",
+    "prediction_confidence_asc": "ASC",
+}
+
 
 class Database:
     """Local SQLite database that caches photo metadata from XMP sidecars.
@@ -9902,20 +9965,11 @@ class Database:
 
         where = "WHERE " + " AND ".join(conditions)
 
-        sort_map = {
-            "date": _PHOTO_DATE_ASC_ORDER,
-            "date_desc": _PHOTO_DATE_DESC_ORDER,
-            "name": "p.filename ASC, p.id ASC",
-            "name_desc": "p.filename DESC, p.id ASC",
-            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
-            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
-            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
-            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
-        }
-        order = sort_map.get(sort, _PHOTO_DATE_ASC_ORDER)
+        order, order_params = self._photo_sort_clause(sort)
 
         page = max(1, page)
         offset = (page - 1) * per_page
+        params.extend(order_params)
         params.extend([per_page, offset])
 
         pcols = ", ".join(f"p.{c.strip()}" for c in self.PHOTO_COLS.split(","))
@@ -10000,17 +10054,8 @@ class Database:
         params = join_params + where_params
         where = "WHERE " + " AND ".join(conditions)
 
-        sort_map = {
-            "date": _PHOTO_DATE_ASC_ORDER,
-            "date_desc": _PHOTO_DATE_DESC_ORDER,
-            "name": "p.filename ASC, p.id ASC",
-            "name_desc": "p.filename DESC, p.id ASC",
-            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
-            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
-            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
-            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
-        }
-        order = sort_map.get(sort, _PHOTO_DATE_ASC_ORDER)
+        order, order_params = self._photo_sort_clause(sort)
+        params = params + order_params
         distinct = "DISTINCT " if keyword is not None else ""
         query = f"""
             SELECT {distinct}p.id FROM photos p
@@ -10048,18 +10093,11 @@ class Database:
             conditions.append(f"p.id IN ({coll_subquery})")
             params.extend(coll_params)
 
-        sort_map = {
-            "date": _PHOTO_DATE_ASC_ORDER,
-            "date_desc": _PHOTO_DATE_DESC_ORDER,
-            "name": "p.filename ASC, p.id ASC",
-            "name_desc": "p.filename DESC, p.id ASC",
-            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
-            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
-            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
-            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
-        }
-        order = sort_map.get(sort, _PHOTO_DATE_ASC_ORDER)
+        order, order_params = self._photo_sort_clause(sort)
         where = "WHERE " + " AND ".join(conditions)
+        # The ORDER BY lives inside the select list here, so its parameters
+        # bind *before* the WHERE's — unlike the paged reads above, where the
+        # clause trails the WHERE.
         row = self.conn.execute(
             f"""
             SELECT position
@@ -10074,7 +10112,7 @@ class Database:
             ) ordered_photos
             WHERE id = ?
             """,
-            params + [photo_id],
+            order_params + params + [photo_id],
         ).fetchone()
         return int(row["position"]) if row is not None else None
 
@@ -19643,6 +19681,38 @@ class Database:
             (self._ws_id(), photo_id, min_detector_confidence),
         ).fetchone()
 
+    def get_top_prediction_confidences(self, photo_ids):
+        """Map photo id → the confidence the Browse sorts rank on.
+
+        Built from the same ``_TOP_PREDICTION_CONFIDENCE_EXPR`` the
+        ``prediction_confidence`` sorts order by, so the number a card shows
+        is by construction the number that put it where it is — a card badge
+        computed from a second, nearly-identical query is exactly the kind of
+        cheap proxy CORE_PHILOSOPHY's "no black boxes" rule rules out.
+
+        Photos with no current, unrejected species prediction are absent from
+        the mapping rather than present with a 0.0, which would read as "the
+        classifier is certain this is nothing".
+        """
+        if not photo_ids:
+            return {}
+        ws = self._ws_id()
+        result = {}
+        for i in range(0, len(photo_ids), 800):
+            chunk = photo_ids[i:i + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT p.id AS photo_id,
+                           {_TOP_PREDICTION_CONFIDENCE_EXPR} AS confidence
+                    FROM photos p
+                    WHERE p.id IN ({placeholders})""",
+                (ws, *chunk),
+            ).fetchall()
+            for row in rows:
+                if row["confidence"] is not None:
+                    result[row["photo_id"]] = row["confidence"]
+        return result
+
     def get_prediction_for_photo(self, photo_id, model, labels_fingerprint=None):
         """Return species, confidence, and detection_id for a photo's prediction.
 
@@ -24893,17 +24963,33 @@ class Database:
 
         return folder_join, "", where, params
 
-    def _collection_sort_clause(self, sort):
-        return {
-            "date": _PHOTO_DATE_ASC_ORDER,
-            "date_desc": _PHOTO_DATE_DESC_ORDER,
-            "name": "p.filename ASC, p.id ASC",
-            "name_desc": "p.filename DESC, p.id ASC",
-            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
-            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
-            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
-            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
-        }.get(sort, _PHOTO_DATE_ASC_ORDER)
+    def _photo_sort_clause(self, sort):
+        """Return ``(order_by_sql, params)`` for a photo-list sort key.
+
+        One definition for every unstacked photo list — the legacy
+        ``/api/photos`` reads, the universal-filter reads, the collection
+        reads, and the position probes that must rank the same order those
+        page through. They used to carry six copies of the same dict; a sort
+        added to one of them and missed in another silently degrades to
+        capture-date in whichever query the caller happened to hit.
+
+        Unknown keys fall back to capture-date ascending, matching the
+        previous ``.get(sort, _PHOTO_DATE_ASC_ORDER)`` behaviour.
+
+        Callers must splice ``params`` in at the ORDER BY's *textual*
+        position: after the WHERE parameters for an ordinary
+        ``... WHERE ... ORDER BY ...`` query, but before them when the
+        clause sits inside a ``ROW_NUMBER() OVER (ORDER BY ...)`` in the
+        select list.
+        """
+        direction = _PREDICTION_CONFIDENCE_SORTS.get(sort)
+        if direction is not None:
+            order = (
+                f"{_TOP_PREDICTION_CONFIDENCE_EXPR} {direction} NULLS LAST, "
+                "p.filename ASC, p.id ASC"
+            )
+            return order, [self._ws_id()]
+        return _PHOTO_SORT_ORDERS.get(sort, _PHOTO_DATE_ASC_ORDER), []
 
     def get_collection_photos(
         self,
@@ -24944,9 +25030,9 @@ class Database:
             params.extend(narrowed_ids)
         page = max(1, page)
         offset = (page - 1) * per_page
+        order, order_params = self._photo_sort_clause(sort)
+        params.extend(order_params)
         params.extend([per_page, offset])
-
-        order = self._collection_sort_clause(sort)
 
         pcols = ", ".join(f"p.{c.strip()}" for c in self.PHOTO_COLS.split(","))
         if include_offline_folders:
@@ -24976,7 +25062,7 @@ class Database:
             return []
 
         folder_join, join_clause, where, params = parts
-        order = self._collection_sort_clause(sort)
+        order, order_params = self._photo_sort_clause(sort)
         query = f"""
             SELECT DISTINCT p.id FROM photos p
             {folder_join}
@@ -24984,6 +25070,7 @@ class Database:
             {where}
             ORDER BY {order}
         """
+        params = [*params, *order_params]
         return [row["id"] for row in self.conn.execute(query, params).fetchall()]
 
     def count_collection_photos(
@@ -25173,17 +25260,7 @@ class Database:
             include_offline_folders=include_offline_folders,
         )
         where, params = self._append_folder_restriction(folder_id, where, params)
-        sort_map = {
-            "date": _PHOTO_DATE_ASC_ORDER,
-            "date_desc": _PHOTO_DATE_DESC_ORDER,
-            "name": "p.filename ASC, p.id ASC",
-            "name_desc": "p.filename DESC, p.id ASC",
-            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
-            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
-            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
-            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
-        }
-        order = sort_map.get(sort, _PHOTO_DATE_ASC_ORDER)
+        order, order_params = self._photo_sort_clause(sort)
         page = max(1, page)
         offset = (page - 1) * per_page
         pcols = ", ".join(f"p.{c.strip()}" for c in self.PHOTO_COLS.split(","))
@@ -25197,7 +25274,9 @@ class Database:
             ORDER BY {order}
             LIMIT ? OFFSET ?
         """
-        return self.conn.execute(query, [*params, per_page, offset]).fetchall()
+        return self.conn.execute(
+            query, [*params, *order_params, per_page, offset]
+        ).fetchall()
 
     # Species / location keyword sets, folded to one stable string per photo
     # so two frames compare equal exactly when they carry the same keywords
@@ -25321,8 +25400,16 @@ class Database:
 
     def _browse_stack_query_parts(self, rules, collection_id=None, folder_id=None,
                                   include_offline_folders=False,
-                                  stack_config=None):
+                                  stack_config=None, sort=None):
         """Build the scoped CTE shared by stacked Browse list/count queries.
+
+        ``sort`` is the sort the caller will order by. It only matters for
+        the prediction-confidence sorts, which rank on a value that is not a
+        ``photos`` column: for those the per-photo score is projected into
+        ``scoped`` as ``_prediction_confidence`` so the window functions
+        downstream can read it. Every other sort (and ``count_browse_stacks``,
+        which does not sort at all) leaves the column — and its correlated
+        subquery — out entirely.
 
         Stacks are a presentation of the current result set, not durable
         catalog state: filters apply to members first, then exact duplicates
@@ -25393,13 +25480,21 @@ class Database:
             )
         else:
             offline_expr = "0"
+        scoped_extra = ""
+        scoped_params = []
+        if sort in _PREDICTION_CONFIDENCE_SORTS:
+            scoped_extra = (
+                f",\n                       {_TOP_PREDICTION_CONFIDENCE_EXPR}"
+                " AS _prediction_confidence"
+            )
+            scoped_params = [self._ws_id()]
         run_ctes, run_params = self._burst_run_ctes(settings)
         ctes = f"""
             WITH {self._STACK_KEYWORD_SET_CTES}
             , scoped AS (
                 SELECT DISTINCT {pcols},
                        p.file_hash AS _stack_file_hash,
-                       {offline_expr} AS _stack_offline
+                       {offline_expr} AS _stack_offline{scoped_extra}
                 FROM photos p
                 {folder_join}
                 {join_clause}
@@ -25446,7 +25541,10 @@ class Database:
                        ON burst_sizes._burst_key = burst_keys._burst_key
             )
         """
-        return ctes, [*params, *run_params]
+        # ``scoped``'s select list precedes its FROM/JOIN/WHERE, and the
+        # keyword-set CTEs ahead of it are parameterless, so the optional
+        # confidence parameter binds before the scope's.
+        return ctes, [*scoped_params, *params, *run_params]
 
     _STACK_COVER_ORDER = """
         CASE COALESCE(flag, 'none')
@@ -25540,6 +25638,33 @@ class Database:
                 "_stack_lead_id ASC"
             ),
         },
+        # ``_prediction_confidence`` is not a photos column — it is projected
+        # into ``scoped`` by ``_browse_stack_query_parts`` only for these two
+        # sorts, so the correlated subquery behind it never runs for a grid
+        # ordered by anything else. ``NULLS LAST`` mirrors the unstacked
+        # clause in ``_photo_sort_clause``: a stack whose leading member
+        # carries no prediction sinks to the end in both directions rather
+        # than heading up the "lowest" list.
+        "prediction_confidence": {
+            "member": (
+                "_prediction_confidence DESC NULLS LAST, filename ASC, id ASC"
+            ),
+            "key": "_prediction_confidence",
+            "order": (
+                "_stack_lead_key DESC NULLS LAST, _stack_lead_filename ASC, "
+                "_stack_lead_id ASC"
+            ),
+        },
+        "prediction_confidence_asc": {
+            "member": (
+                "_prediction_confidence ASC NULLS LAST, filename ASC, id ASC"
+            ),
+            "key": "_prediction_confidence",
+            "order": (
+                "_stack_lead_key ASC NULLS LAST, _stack_lead_filename ASC, "
+                "_stack_lead_id ASC"
+            ),
+        },
     }
 
     def _stack_sort_spec(self, sort):
@@ -25562,7 +25687,7 @@ class Database:
         ctes, params = self._browse_stack_query_parts(
             rules, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
-            stack_config=stack_config,
+            stack_config=stack_config, sort=sort,
         )
         cover_order = self._STACK_COVER_ORDER
         spec = self._stack_sort_spec(sort)
@@ -25945,16 +26070,7 @@ class Database:
             include_offline_folders=include_offline_folders,
         )
         where, params = self._append_folder_restriction(folder_id, where, params)
-        order = {
-            "date": _PHOTO_DATE_ASC_ORDER,
-            "date_desc": _PHOTO_DATE_DESC_ORDER,
-            "name": "p.filename ASC, p.id ASC",
-            "name_desc": "p.filename DESC, p.id ASC",
-            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
-            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
-            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
-            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
-        }.get(sort, _PHOTO_DATE_ASC_ORDER)
+        order, order_params = self._photo_sort_clause(sort)
         query = f"""
             SELECT DISTINCT p.id FROM photos p
             {folder_join}
@@ -25962,7 +26078,10 @@ class Database:
             {where}
             ORDER BY {order}
         """
-        return [row["id"] for row in self.conn.execute(query, params).fetchall()]
+        return [
+            row["id"]
+            for row in self.conn.execute(query, [*params, *order_params]).fetchall()
+        ]
 
     def query_photo_position(
         self,
@@ -25997,16 +26116,7 @@ class Database:
             include_offline_folders=include_offline_folders,
         )
         where, params = self._append_folder_restriction(folder_id, where, params)
-        order = {
-            "date": _PHOTO_DATE_ASC_ORDER,
-            "date_desc": _PHOTO_DATE_DESC_ORDER,
-            "name": "p.filename ASC, p.id ASC",
-            "name_desc": "p.filename DESC, p.id ASC",
-            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
-            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
-            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
-            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
-        }.get(sort, _PHOTO_DATE_ASC_ORDER)
+        order, order_params = self._photo_sort_clause(sort)
         # Rank exactly the row set ``query_photos`` pages through, DISTINCT
         # included. Today every rule predicate compiles to an EXISTS subquery
         # so nothing fans out, but a window function is evaluated *before*
@@ -26020,8 +26130,10 @@ class Database:
         # so de-duplicating on those is identical to de-duplicating on the
         # whole row, and the narrower projection is measurably cheaper to
         # materialize (~30% on a 74k-photo workspace) than ``PHOTO_COLS``.
-        # A new entry in the sort map above whose ORDER BY reads another
+        # A new entry in ``_PHOTO_SORT_ORDERS`` whose ORDER BY reads another
         # column has to be listed here too, or this query cannot resolve it.
+        # The prediction-confidence sorts need nothing extra: they correlate
+        # on ``p.id``, which the projection already carries.
         position_cols = (
             "p.id, p.timestamp, p.filename, p.rating, "
             "p.sharpness, p.quality_score"
@@ -26038,7 +26150,11 @@ class Database:
             ) ordered_photos
             WHERE id = ?
         """
-        row = self.conn.execute(query, [*params, photo_id]).fetchone()
+        # ORDER BY sits in the outer select list, ahead of the inner
+        # subquery's WHERE, so its parameters bind first.
+        row = self.conn.execute(
+            query, [*order_params, *params, photo_id]
+        ).fetchone()
         return int(row["position"]) if row is not None else None
 
     _SUGGEST_VALUE_EXPRS = {

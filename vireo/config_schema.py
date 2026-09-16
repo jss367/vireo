@@ -192,7 +192,7 @@ SCHEMA = {
         "items_enum": [
             "filename", "location_status", "rating", "flag", "sharpness", "species",
             "dimensions", "file_size", "capture_date", "extension",
-            "quality_score",
+            "quality_score", "prediction_confidence",
         ],
         "category": "Display", "scope": "global",
         "label": "Browse card fields",

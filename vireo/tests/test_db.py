@@ -1256,13 +1256,18 @@ def test_query_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path):
 _BROWSE_SORTS = (
     'date', 'date_desc', 'name', 'name_desc',
     'rating', 'sharpness', 'sharpness_asc', 'quality',
+    'prediction_confidence', 'prediction_confidence_asc',
 )
 
 
 def _seed_position_photos(db, folder_id, count=9):
-    """Photos whose name, date, rating, sharpness and quality orders all
-    disagree, so a position that silently used the wrong ORDER BY cannot
-    coincidentally match the right one."""
+    """Photos whose name, date, rating, sharpness, quality and prediction
+    confidence orders all disagree, so a position that silently used the
+    wrong ORDER BY cannot coincidentally match the right one.
+
+    Two photos are deliberately left without a prediction: the confidence
+    sorts rank those last in *both* directions, which is the one place the
+    prediction sorts do not mirror the sharpness pair."""
     ids = []
     for index in range(count):
         photo_id = db.add_photo(
@@ -1279,6 +1284,15 @@ def _seed_position_photos(db, folder_id, count=9):
             (index % 5, (index * 5 % count) * 1.5, (index * 7 % count) / 10.0,
              photo_id),
         )
+        if index % 4 != 3:
+            det_ids = db.save_detections(photo_id, [{
+                "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+                "confidence": 0.9, "category": "animal",
+            }], detector_model="MDV6")
+            db.add_prediction(
+                det_ids[0], f'Species {index}',
+                round(0.05 + (index * 4 % count) / 20.0, 4), 'test',
+            )
         ids.append(photo_id)
     db.conn.commit()
     return ids
@@ -29039,9 +29053,20 @@ def _metric_sort_db(tmp_path, column, specs):
             file_size=1, file_mtime=1.0,
         )
         ids[filename] = photo_id
-        db.conn.execute(
-            f"UPDATE photos SET {column} = ? WHERE id = ?", (value, photo_id),
-        )
+        if column == "prediction_confidence":
+            # Not a photos column: the sort reads the photo's top current
+            # prediction, so seed one (or none, for a NULL spec).
+            if value is not None:
+                det_ids = db.save_detections(photo_id, [{
+                    "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+                    "confidence": 0.9, "category": "animal",
+                }], detector_model="MDV6")
+                db.add_prediction(det_ids[0], "Robin", value, "test")
+        else:
+            db.conn.execute(
+                f"UPDATE photos SET {column} = ? WHERE id = ?",
+                (value, photo_id),
+            )
         if column != "timestamp":
             db.conn.execute(
                 "UPDATE photos SET timestamp = ? WHERE id = ?",
@@ -29168,6 +29193,16 @@ _STACK_TIEBREAK_CASES = [
         ("z-burst.jpg", 0.9, "shared-burst"),
         ("m-single.jpg", 0.9, None),
     ]),
+    ("prediction_confidence", "prediction_confidence", [
+        ("a-burst.jpg", 0.2, "shared-burst"),
+        ("z-burst.jpg", 0.9, "shared-burst"),
+        ("m-single.jpg", 0.9, None),
+    ]),
+    ("prediction_confidence_asc", "prediction_confidence", [
+        ("a-burst.jpg", 0.9, "shared-burst"),
+        ("z-burst.jpg", 0.2, "shared-burst"),
+        ("m-single.jpg", 0.2, None),
+    ]),
 ]
 
 
@@ -29234,6 +29269,149 @@ def test_browse_stack_name_sorts_mirror_unstacked_order(tmp_path, sort):
     stacked_ids, expected_ids, _ = _stacked_vs_unstacked_order(db, sort)
 
     assert stacked_ids == expected_ids
+
+
+def _confidence_sort_db(tmp_path):
+    """Four photos whose top prediction confidence is the only thing that
+    separates them, seeded in an order no other sort would reproduce."""
+    db, fid = _filter_db(tmp_path)
+    ids = {}
+    for index, (name, confidence) in enumerate(
+            [("a.jpg", 0.9), ("b.jpg", 0.3), ("c.jpg", None), ("d.jpg", 0.6)]):
+        photo_id = db.add_photo(
+            folder_id=fid, filename=name, extension='.jpg',
+            file_size=1, file_mtime=1.0,
+            timestamp=f"2024-01-0{index + 1}T00:00:00",
+        )
+        ids[name] = photo_id
+        if confidence is not None:
+            det_ids = db.save_detections(photo_id, [{
+                "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+                "confidence": 0.9, "category": "animal",
+            }], detector_model="MDV6")
+            db.add_prediction(det_ids[0], "Robin", confidence, "test")
+    db.conn.commit()
+    return db, ids
+
+
+def _sorted_names(db, ids, sort):
+    by_id = {photo_id: name for name, photo_id in ids.items()}
+    return [by_id[row["id"]] for row in db.query_photos([], sort=sort)]
+
+
+def test_prediction_confidence_sorts_rank_by_top_prediction(tmp_path):
+    db, ids = _confidence_sort_db(tmp_path)
+
+    assert _sorted_names(db, ids, "prediction_confidence") == [
+        "a.jpg", "d.jpg", "b.jpg", "c.jpg"]
+    assert _sorted_names(db, ids, "prediction_confidence_asc") == [
+        "b.jpg", "d.jpg", "a.jpg", "c.jpg"]
+
+
+def test_prediction_confidence_sorts_put_unscored_photos_last_both_ways(tmp_path):
+    """A photo the classifier never scored is unscored, not unconfident.
+
+    Softest-first sharpness leads with its NULLs, but "Prediction confidence
+    (lowest)" is read as "the guesses Vireo is least sure of" — answering it
+    with every frame that carries no guess at all would bury exactly the
+    photos the sort exists to surface.
+    """
+    db, ids = _confidence_sort_db(tmp_path)
+
+    for sort in ("prediction_confidence", "prediction_confidence_asc"):
+        assert _sorted_names(db, ids, sort)[-1] == "c.jpg", sort
+
+
+def test_prediction_confidence_sort_ignores_rejected_predictions(tmp_path):
+    """A guess the user threw away must not keep its photo at the top."""
+    db, ids = _confidence_sort_db(tmp_path)
+    top = db.conn.execute(
+        "SELECT pr.id FROM predictions pr JOIN detections d"
+        " ON d.id = pr.detection_id WHERE d.photo_id = ?",
+        (ids["a.jpg"],),
+    ).fetchone()["id"]
+    db.update_prediction_status(top, "rejected")
+
+    assert _sorted_names(db, ids, "prediction_confidence") == [
+        "d.jpg", "b.jpg", "a.jpg", "c.jpg"]
+    assert db.get_top_prediction_confidences([ids["a.jpg"]]) == {}
+
+
+def test_prediction_confidence_sort_ignores_detection_only_rows(tmp_path):
+    """A detection with no species is not a species guess, so a photo that
+    has only detections stays unscored rather than borrowing a confidence."""
+    db, fid = _filter_db(tmp_path)
+    scored = db.add_photo(folder_id=fid, filename='scored.jpg',
+                          extension='.jpg', file_size=1, file_mtime=1.0)
+    bare = db.add_photo(folder_id=fid, filename='bare.jpg', extension='.jpg',
+                        file_size=1, file_mtime=1.0)
+    for photo_id in (scored, bare):
+        det_ids = db.save_detections(photo_id, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+            "confidence": 0.99, "category": "animal",
+        }], detector_model="MDV6")
+        if photo_id == scored:
+            db.add_prediction(det_ids[0], "Robin", 0.4, "test")
+    db.conn.commit()
+
+    assert db.get_top_prediction_confidences([scored, bare]) == {scored: 0.4}
+    assert [row["id"] for row in db.query_photos(
+        [], sort="prediction_confidence")] == [scored, bare]
+
+
+def test_prediction_confidence_sort_reads_the_current_label_set(tmp_path):
+    """A reclassified photo ranks on its current label set, not on the
+    higher-scoring row the previous one left behind — the same fingerprint
+    pin ``get_top_prediction_for_photo`` applies."""
+    db, fid = _filter_db(tmp_path)
+    stale = db.add_photo(folder_id=fid, filename='stale.jpg', extension='.jpg',
+                         file_size=1, file_mtime=1.0)
+    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+                         file_size=1, file_mtime=1.0)
+    det_ids = db.save_detections(stale, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test",
+                      labels_fingerprint="old")
+    db.add_prediction(det_ids[0], "Wren", 0.10, "test",
+                      labels_fingerprint="new")
+    other_det = db.save_detections(other, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(other_det[0], "Finch", 0.50, "test",
+                      labels_fingerprint="new")
+    db.conn.commit()
+
+    assert db.get_top_prediction_confidences([stale]) == {stale: 0.10}
+    assert [row["id"] for row in db.query_photos(
+        [], sort="prediction_confidence")] == [other, stale]
+
+
+def test_prediction_confidence_rejection_is_workspace_scoped(tmp_path):
+    """``prediction_review`` is per-workspace, so rejecting a guess in one
+    workspace must not drop the photo's confidence in another."""
+    db, fid = _filter_db(tmp_path)
+    photo_id = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                            file_size=1, file_mtime=1.0)
+    det_ids = db.save_detections(photo_id, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.9, "test")
+    db.conn.commit()
+    home = db._ws_id()
+    other_ws = db.create_workspace("Other")
+    db.add_workspace_folder(other_ws, fid)
+    db.set_active_workspace(other_ws)
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions").fetchone()["id"]
+    db.update_prediction_status(prediction_id, "rejected")
+
+    assert db.get_top_prediction_confidences([photo_id]) == {}
+    db.set_active_workspace(home)
+    assert db.get_top_prediction_confidences([photo_id]) == {photo_id: 0.9}
 
 
 def test_get_filter_field_values_counts_respect_rules(tmp_path):

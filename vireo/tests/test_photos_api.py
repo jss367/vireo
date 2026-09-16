@@ -437,6 +437,8 @@ def test_browse_init_focus_on_later_requested_page_returns_target_page(app_and_d
         "sharpness",
         "sharpness_asc",
         "quality",
+        "prediction_confidence",
+        "prediction_confidence_asc",
     ],
 )
 def test_photo_position_matches_photo_id_order(app_and_db, sort):
@@ -11889,6 +11891,57 @@ def test_api_photos_query_basic(app_and_db):
     # species attachment matches /api/photos behavior
     assert "species" in data["photos"][0]
     assert "browse_stack" not in data["photos"][0]
+
+
+def _seed_prediction_confidences(db, by_filename):
+    """Give each named photo a single species prediction at that confidence."""
+    for photo in db.get_photos(sort="name"):
+        confidence = by_filename.get(photo["filename"])
+        if confidence is None:
+            continue
+        det_ids = db.save_detections(photo["id"], [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+            "confidence": 0.9, "category": "animal",
+        }], detector_model="MDV6")
+        db.add_prediction(det_ids[0], "Robin", confidence, "test")
+    db.conn.commit()
+
+
+def test_api_photos_query_sorts_by_prediction_confidence(app_and_db):
+    """The Browse sort orders on the top current prediction, strongest first,
+    and photos with no prediction land last rather than at either extreme."""
+    app, db = app_and_db
+    _seed_prediction_confidences(db, {"bird1.jpg": 0.4, "bird2.jpg": 0.8})
+
+    client = app.test_client()
+    resp = client.post("/api/photos/query", json={
+        "rules": [], "sort": "prediction_confidence",
+    })
+
+    assert resp.status_code == 200
+    assert [p["filename"] for p in resp.get_json()["photos"]] == [
+        "bird2.jpg", "bird1.jpg", "bird3.jpg"]
+
+    resp = client.post("/api/photos/query", json={
+        "rules": [], "sort": "prediction_confidence_asc",
+    })
+    assert [p["filename"] for p in resp.get_json()["photos"]] == [
+        "bird1.jpg", "bird2.jpg", "bird3.jpg"]
+
+
+def test_api_photos_query_exposes_the_confidence_it_sorted_on(app_and_db):
+    """The card badge has to be the number that decided the order, not a
+    second opinion computed some other way — a status badge that can disagree
+    with what the user is looking at is the "no black boxes" failure case."""
+    app, db = app_and_db
+    _seed_prediction_confidences(db, {"bird1.jpg": 0.4, "bird2.jpg": 0.8})
+
+    resp = app.test_client().post("/api/photos/query", json={
+        "rules": [], "sort": "prediction_confidence",
+    })
+
+    photos = resp.get_json()["photos"]
+    assert [p["prediction_confidence"] for p in photos] == [0.8, 0.4, None]
 
 
 def _seed_browse_burst(db, photo_ids, folder_id=None):

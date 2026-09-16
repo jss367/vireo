@@ -77,6 +77,7 @@ from photo_payload import (
     attach_edit_recipes,
     attach_location_statuses,
     attach_nested_edit_recipes,
+    attach_prediction_confidence,
     attach_species,
     attach_species_representatives,
 )
@@ -5242,6 +5243,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         attach_species(db, photo_dicts)
         attach_species_representatives(db, photo_dicts)
         attach_detections(db, photo_dicts)
+        attach_prediction_confidence(db, photo_dicts)
         attach_edit_recipes(db, photo_dicts)
         return photo_dicts
 
@@ -7639,6 +7641,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         attach_species(db, photos)
         attach_species_representatives(db, photos)
         attach_detections(db, photos)
+        attach_prediction_confidence(db, photos)
         attach_edit_recipes(db, photos)
         return jsonify({"photos": photos})
 
