@@ -12046,6 +12046,106 @@ def test_merge_staged_tree_intra_staged_case_alias_case_sensitive_volume(
     assert counts["new_photos"] == 2
 
 
+def test_merge_staged_tree_intra_staged_after_phantom_replacement_case_alias(
+    db, tmp_path, monkeypatch,
+):
+    """Regression: on a case-insensitive volume with a phantom archive row
+    and two case-alias staged filenames, the phantom-replacement branch
+    deletes ``collision["id"]`` on the first iteration but does NOT refresh
+    ``existing_by_key``. The second iteration then reads a stale
+    ``collision`` pointing at the just-deleted phantom while also seeing
+    ``intra_staged_collision``. Without preferring the intra-staged winner,
+    the remap targets the dead phantom id and the ``pending_changes.photo_id``
+    FK raises, aborting catalog reconciliation after the files were copied.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # Phantom archive row: catalog claims ``Collide.raf`` under this folder,
+    # but the on-disk file is missing — rsync would have written the staged
+    # bytes into the slot (any staged case-alias would resolve to the same
+    # on-disk name on a case-folding volume).
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(folder_id=date_id, filename="Collide.raf",
+                               extension=".raf", file_size=999,
+                               file_mtime=1.0, file_hash="STALE_HASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # Two staged rows whose filenames only differ by case; both differ
+    # from the phantom row's recorded ``Collide.raf`` filename, so both
+    # collide with the phantom via case-normalization. Different recorded
+    # hashes model the realistic case where the two source files carry
+    # distinct bytes -- rsync writes only one of them and the other
+    # describes bytes that never landed.
+    first_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+                             extension=".raf", file_size=100,
+                             file_mtime=2.0, file_hash="STAGED_A")
+    second_pid = db.add_photo(folder_id=stage_leaf, filename="COLLIDE.raf",
+                              extension=".raf", file_size=200,
+                              file_mtime=3.0, file_hash="STAGED_B")
+    # A pending edit on the second staged row makes the FK violation
+    # deterministic: without the fix, the remap
+    # ``UPDATE pending_changes SET photo_id = <dead phantom>``
+    # trips ``pending_changes.photo_id``'s foreign key.
+    db.queue_change(second_pid, "keyword_add", "Owl")
+
+    # Force the merge to treat the target volume as case-insensitive so
+    # the case-alias collision path fires regardless of the CI host's
+    # actual filesystem (Linux ext4 is case-sensitive).
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
+
+    # Do NOT create the on-disk file: the first iteration must take the
+    # phantom-replacement branch (``real_collision`` is False because the
+    # recorded hashes differ), which is what leaves ``existing_by_key``
+    # stale for iteration two.
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # Iteration 1 replaced the phantom with the first staged row.
+    # Iteration 2 hit the intra-staged branch with a stale ``collision``
+    # entry -- the fix reads the survivor from
+    # ``staged_normalized_claimed`` so the remap targets the live winner
+    # (``first_pid``) instead of the deleted phantom.
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ?", (date_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == first_pid
+    assert rows[0]["filename"] == "collide.raf"
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (phantom_pid,)
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (second_pid,)
+    ).fetchone() is None
+    assert counts["already_present"] == 1
+    # ``phantom_pid`` (iteration 1) and ``second_pid`` (iteration 2) are
+    # both freed and reported for cache cleanup.
+    assert phantom_pid in counts["dropped_photo_ids"]
+    assert second_pid in counts["dropped_photo_ids"]
+
+    # The pending edit followed the survivor. An in-staging remap is
+    # visible to the by-photo residual re-read, so
+    # ``preserved_off_staging_identities`` must NOT carry it (otherwise
+    # the caller would double-count).
+    remapped = db.conn.execute(
+        "SELECT photo_id, change_type, value FROM pending_changes "
+        "WHERE change_type = 'keyword_add' AND value = 'Owl'",
+    ).fetchall()
+    assert [(r["photo_id"], r["change_type"], r["value"]) for r in remapped] \
+        == [(first_pid, "keyword_add", "Owl")]
+    assert counts["preserved_edit_count"] == 1
+    assert counts["preserved_off_staging_identities"] == []
+
+
 def test_merge_staged_tree_rolls_back_on_error(db, monkeypatch):
     """Regression: ``merge_staged_tree_into_archive`` runs a long sequence of
     UPDATE/DELETE statements before a single final commit. An exception
