@@ -1,5 +1,7 @@
 """Quick-filter (filter-bar shortcut) configuration: shape, validation, API."""
 
+import json
+
 import filter_shortcuts as fs
 import pytest
 
@@ -193,6 +195,18 @@ def test_non_finite_numbers_are_dropped(value):
     """They serialize as tokens no JSON parser accepts, losing the whole row."""
     assert fs.normalize([{"id": "x", "label": "N", "rules": {
         "field": "rating", "op": ">=", "value": value}}]) == []
+
+
+@pytest.mark.parametrize("rules", [
+    {"field": "filename", "op": "contains", "value": float("nan")},
+    {"field": "flag", "op": "in", "value": ["flagged", float("inf")]},
+    {"field": "file_size", "op": "between", "value": [0, float("inf")]},
+])
+def test_non_finite_values_are_dropped_whatever_the_field(rules):
+    """One of these anywhere in the list costs the bar its whole row."""
+    entries = fs.normalize([{"id": "x", "label": "N", "rules": rules}])
+    assert entries == []
+    assert "Infinity" not in json.dumps(entries) and "NaN" not in json.dumps(entries)
 
 
 @pytest.mark.parametrize("value", ["2026-99-99", "2026-02-31", "2026-13-01", "20260101"])

@@ -108,6 +108,12 @@ def _clean_scalar(value):
     """Return ``value`` if it can round-trip through the stored JSON."""
     if isinstance(value, bool):
         return int(value)
+    # NaN/Infinity reach here from a hand-written config or an API write
+    # (Python's json accepts those tokens) and serialize back out as tokens
+    # no browser JSON parser accepts — one of them anywhere in the list costs
+    # the bar its whole shortcut row, whatever the field's type.
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if value is None or isinstance(value, (str, int, float)):
         return value
     return None
