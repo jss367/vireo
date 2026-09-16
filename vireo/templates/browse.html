@@ -11392,9 +11392,11 @@ function clearSelection() {
   // batch inspector — clicking it would apply A's EXIF place to every
   // selected photo. Codex P2 on PR #1097 (17:04Z follow-up).
   window._detailPhotoId = null;
-  document.querySelectorAll('.grid-card, .browse-stack-member').forEach(function(el) {
-    el.classList.remove('selected');
-  });
+  // Repaint from the (now empty) selection rather than stripping one class by
+  // hand: a stack card can also be carrying the dashed partial mark, and a
+  // hand-rolled scrub that only knew about `selected` left that mark on a
+  // cleared grid. One rule, one function. Codex P2 on PR #1672.
+  refreshCardSelectionVisuals();
   // If the detail panel is still open after clearing, its actions (setFlag,
   // setColorLabel, addKeyword, etc.) early-return on the null selectedPhotoId
   // and silently do nothing. Hide it so there is no ghost UI to interact with.

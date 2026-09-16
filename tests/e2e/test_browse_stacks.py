@@ -504,6 +504,46 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     assert abs(top_after - top_before) < 4
 
 
+def test_clearing_the_selection_scrubs_a_stack_cards_partial_mark(
+    live_server, page,
+):
+    """Clear has to repaint from the selection, not strip one class by hand.
+
+    A frame picked out of a tray leaves its collapsed cover carrying the
+    dashed partial mark. A hand-rolled scrub that only knew about
+    ``selected`` left that mark on a grid with nothing selected — a card
+    still claiming a selection the batch bar had already dropped.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    expect(cover).to_be_visible()
+
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    expect(tray.locator(".browse-stack-member")).to_have_count(3)
+    tray.locator(f'.browse-stack-member[data-id="{burst_ids[2]}"]').click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+    expect(cover).to_have_class("grid-card has-browse-stack stack-partial")
+
+    page.locator("#batchBar button", has_text="Clear").click()
+    expect(page.locator("#batchBar")).to_be_hidden()
+    expect(cover).to_have_class("grid-card has-browse-stack")
+
+
 def test_expanded_stack_paints_its_members_once(live_server, page):
     """A tray's members are rendered once, not again per metadata response.
 
