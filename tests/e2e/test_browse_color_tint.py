@@ -335,3 +335,71 @@ def test_a_failed_write_restores_the_saved_label(live_server, page):
     # that claims to be definitively unlabelled.
     expect(card).to_have_attribute("data-color-label", "purple")
     assert page.evaluate("(pid) => colorLabelsFetched.has(pid)", photo_id) is True
+
+
+def test_recovery_keeps_a_concurrent_writes_stamp(live_server, page):
+    """Recovery must not un-guard a newer write that already succeeded.
+
+    Regression: recovery cleared the failed write's stamp unconditionally. With
+    two overlapping writes on one photo, an earlier request failing *after* a
+    later one succeeded dropped the later write's completion stamp too — so a
+    GET issued before either write could then pass the generation check and
+    repaint the card with the pre-write color the user had already replaced.
+    """
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    assert page.request.post(
+        f"{url}/api/photos/{photo_id}/color_label", data={"color": "red"}
+    ).ok
+
+    page.goto(f"{url}/browse")
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    card.wait_for(state="visible")
+    expect(card).to_have_attribute("data-color-label", "red")
+
+    # First color-labels GET answers with the pre-write value, held until
+    # released. Later GETs (the recovery refetch) hit the real server. The
+    # first label POST rejects on demand; the second is real.
+    page.evaluate(
+        """(pid) => {
+            const orig = window.Vireo.api.json;
+            let releaseGet, failWriteA;
+            const getGate = new Promise((r) => { releaseGet = r; });
+            const writeA = new Promise((_, rej) => { failWriteA = rej; });
+            window.__releaseGet = releaseGet;
+            window.__failWriteA = () => failWriteA(new Error('boom'));
+            let gets = 0, posts = 0;
+            window.Vireo.api.json = function (u, o) {
+                const isPost = o && o.method === 'POST';
+                if (!isPost && String(u).includes('/api/photos/color_labels')) {
+                    if (++gets === 1) {
+                        const stale = {}; stale[pid] = 'red';
+                        return getGate.then(() => stale);
+                    }
+                }
+                if (isPost && String(u).includes('color_label') && ++posts === 1) {
+                    return writeA;
+                }
+                return orig.apply(window.Vireo.api, arguments);
+            };
+        }""",
+        photo_id,
+    )
+
+    # GET first (so it captures a generation older than both writes), then the
+    # write that will fail, then the write that succeeds.
+    page.evaluate("(pid) => { window.__get = fetchColorLabels([pid]); }", photo_id)
+    page.evaluate("(pid) => { window.__a = setColorLabelFor(pid, 'blue'); }", photo_id)
+    page.evaluate("(pid) => { window.__b = setColorLabelFor(pid, 'green'); }", photo_id)
+    page.evaluate("() => window.__b")
+    expect(card).to_have_attribute("data-color-label", "green")
+
+    # Now fail the earlier write, so its recovery runs after the later success.
+    page.evaluate("() => window.__failWriteA()")
+    page.evaluate("() => window.__a")
+    page.evaluate("() => window.__releaseGet()")
+    page.evaluate("() => window.__get")
+    page.evaluate("(pid) => refreshGridCards([pid])", photo_id)
+
+    expect(card).to_have_attribute("data-color-label", "green")
+    assert page.evaluate("(pid) => colorLabels[pid]", photo_id) == "green"
