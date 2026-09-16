@@ -12,6 +12,7 @@ straight to the page holding it, rather than paging forward until it appears.
 """
 
 import json
+import time
 
 from playwright.sync_api import expect
 
@@ -37,11 +38,18 @@ def _seed_sortable_library(db, folder_id, count=160):
 
 
 def _open_browse(page, live_server):
+    # The sort control is a persisted view preference
+    # (data-view-preference="vireo.browse.sort"), and the server's ephemeral
+    # port can repeat between tests — so without this, a sort left behind by an
+    # earlier test becomes this one's starting order and its expected pages
+    # move. Start every test from the stored-preference-free default.
+    page.add_init_script("try { localStorage.clear(); } catch (e) {}")
     page.goto(live_server["url"] + "/browse")
     page.wait_for_selector("#grid .grid-card", timeout=15000)
     page.wait_for_function(
         "() => photos.length > 0 && !loading && browseDatasetReady", timeout=15000
     )
+    assert page.evaluate("document.getElementById('sortSelect').value") == "date"
 
 
 def _scroll_until_loaded(page, wanted):
@@ -71,6 +79,23 @@ def _select_photo_at(page, index):
     photo_id = page.evaluate("selectedPhotoId")
     assert photo_id is not None
     return photo_id
+
+
+def _capture_queries(page):
+    """Record every /api/photos/query request body and its response payload."""
+    calls = []
+
+    def on_response(response):
+        if "/api/photos/query" not in response.url:
+            return
+        try:
+            body = json.loads(response.request.post_data or "{}")
+            calls.append({"request": body, "response": response.json()})
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+    return calls
 
 
 def _change_sort(page, value):
@@ -116,63 +141,121 @@ def test_sort_change_asks_where_the_photo_went_instead_of_walking_to_it(
 
     A re-sort gives the old position no bearing on the new one, so a paged
     scan would walk the catalog a page at a time. One focused request
-    replaces it: nothing below the page the photo landed on is ever fetched.
-    Ordinary forward hydration of the viewport still happens and is fine.
+    replaces it, and it is the *first* query the re-sort issues — nothing is
+    fetched on the way to the photo. (Browse still hydrates the window
+    upward afterwards once the viewport sits near the top of the page it
+    landed on; that is ordinary lazy paging, not a search.)
     """
     _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
     _open_browse(page, live_server)
     _scroll_until_loaded(page, 100)
     photo_id = _select_photo_at(page, 80)
 
-    queries = []
-    page.on(
-        "request",
-        lambda r: queries.append(json.loads(r.post_data))
-        if "/api/photos/query" in r.url and r.post_data else None,
-    )
+    calls = _capture_queries(page)
     _change_sort(page, "name_desc")
 
-    assert queries, "the re-sort must re-query"
-    focused = [q for q in queries if "focus_photo_id" in q]
-    assert len(focused) == 1, (
-        f"expected exactly one focused query, got {len(focused)}: {queries}"
+    assert calls, "the re-sort must re-query"
+    first = calls[0]
+    assert first["request"].get("focus_photo_id") == photo_id, (
+        f"the re-sort's first query was not the focused one: {first['request']}"
     )
-    assert focused[0]["focus_photo_id"] == photo_id
-    assert focused[0]["sort"] == "name_desc"
-
-    landed_on = page.evaluate("earliestPage")
-    assert landed_on > 1, "test needs the photo to land past the first page"
-    walked = [
-        q for q in queries
-        if "focus_photo_id" not in q and q["page"] < landed_on
-    ]
-    assert not walked, f"re-sort paged towards the photo: {walked}"
+    assert first["request"]["sort"] == "name_desc"
+    # The server really did jump: the photo was not on page 1 of the new order.
+    landed_on = first["response"]["focus_page"]
+    assert landed_on > 1, (
+        "test needs a photo that lands past the first page after the re-sort"
+    )
+    assert first["response"]["focus_index"] >= 0
+    assert photo_id in [photo["id"] for photo in first["response"]["photos"]]
 
 
-def test_sort_change_says_how_much_of_the_grid_is_missing(live_server, page):
-    """Landing mid-dataset is stated, not hidden.
+def test_second_sort_change_mid_flight_keeps_the_photo(live_server, page):
+    """Changing the sort again before the first load lands must not lose it.
 
-    The grid no longer starts at the first photo, and Browse's existing
-    banner is what says so — leaving it out would make the re-sort look like
-    the library had shrunk (CORE_PHILOSOPHY, "no black boxes").
+    ``resetAndLoad`` clears the selection before its focused load returns, so
+    a second sort change has nothing left to capture and would reset to the
+    top. Not an exotic race: a keyboard user arrowing through the sort
+    ``<select>`` fires one ``change`` per option (Codex review on PR #1658).
     """
     _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
     _open_browse(page, live_server)
     _scroll_until_loaded(page, 100)
-    _select_photo_at(page, 80)
+    photo_id = _select_photo_at(page, 80)
 
+    # Hold the first focused request open so the second sort change is
+    # guaranteed to arrive while it is still in flight.
+    held = {"done": False}
+
+    def stall_first_focused(route, request):
+        if not held["done"] and "focus_photo_id" in (request.post_data or ""):
+            held["done"] = True
+            time.sleep(1.5)
+        route.continue_()
+
+    page.route("**/api/photos/query", stall_first_focused)
+
+    page.select_option("#sortSelect", "name_desc")
+    page.wait_for_timeout(150)
+    page.select_option("#sortSelect", "rating")
+    page.wait_for_timeout(2500)
+    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    page.unroute("**/api/photos/query")
+
+    assert held["done"], "the first focused request was never stalled"
+    assert page.evaluate("document.getElementById('sortSelect').value") == "rating"
+    assert page.evaluate("selectedPhotoId") == photo_id, (
+        "the second sort change dropped the photo the first one was holding"
+    )
+    expect(
+        page.locator(f"#grid .grid-card[data-id='{photo_id}']")
+    ).to_be_visible()
+
+
+def test_sort_change_says_how_much_of_the_grid_is_missing(live_server, page):
+    """A grid that does not start at the first photo has to say so.
+
+    Landing mid-dataset is the price of keeping the user's photo; leaving it
+    unsaid would make the re-sort look like the library had shrunk
+    (CORE_PHILOSOPHY, "no black boxes"). Browse hydrates the window upward
+    once you are near the top of where it landed, so the offset moves —
+    assert the invariant rather than one snapshot of it: the banner is shown
+    exactly when rows are missing above, and it names the right number.
+    """
+    _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
+    _open_browse(page, live_server)
+    _scroll_until_loaded(page, 100)
+    photo_id = _select_photo_at(page, 80)
+
+    calls = _capture_queries(page)
     _change_sort(page, "name_desc")
 
-    earliest_page = page.evaluate("earliestPage")
-    assert earliest_page > 1, (
+    assert calls[0]["response"]["focus_page"] > 1, (
         "test needs a photo that lands past the first page after the re-sort"
     )
-    banner = page.locator("#loadPreviousPhotosBanner")
-    expect(banner).to_be_visible()
-    offset = (earliest_page - 1) * page.evaluate("perPage")
-    expect(page.locator("#loadPreviousPhotosText")).to_contain_text(
-        f"this grid starts at #{offset + 1:,}"
-    )
+
+    # Read the window and the banner in one go — upward hydration can advance
+    # the window between two separate evaluates.
+    state = page.evaluate("""() => {
+      const banner = document.getElementById('loadPreviousPhotosBanner');
+      const text = document.getElementById('loadPreviousPhotosText');
+      return {
+        earliestPage,
+        perPage,
+        shown: banner.style.display !== 'none',
+        text: text.textContent,
+      };
+    }""")
+    missing_above = (state["earliestPage"] - 1) * state["perPage"]
+    if missing_above > 0:
+        assert state["shown"], (
+            f"{missing_above} rows are missing above the grid with no banner"
+        )
+        assert f"this grid starts at #{missing_above + 1:,}" in state["text"], (
+            f"banner text {state['text']!r} does not match offset {missing_above}"
+        )
+    else:
+        assert not state["shown"], "banner shown while the grid starts at #1"
+    assert page.evaluate("selectedPhotoId") == photo_id
 
 
 def test_sort_change_without_a_selection_still_starts_at_the_top(live_server, page):
