@@ -458,6 +458,53 @@ _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE = """
 # - general: catch-all/free-form tag (the legacy default)
 KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "general"})
 
+# --- Browse stacks -----------------------------------------------------
+# Defaults for the Stacks toggle's burst grouping, mirroring
+# ``config.DEFAULTS``. Duplicated rather than imported so a Database built
+# without any config (tests, background jobs) still groups the same way the
+# app does instead of silently picking a different gap.
+BROWSE_STACK_TIME_GAP_DEFAULT = 3.0
+BROWSE_STACK_SPLIT_MODE_DEFAULT = "break"
+BROWSE_STACK_SPLIT_MODES = ("break", "partition")
+
+# ``julianday`` returns days as a double, so differencing two modern dates
+# leaves roughly 0.05 ms of resolution once the result is scaled back to
+# seconds. Without a tolerance, frames spaced exactly at the configured gap
+# fall on either side of the comparison depending on that noise — one pair of
+# 3.000s-apart frames stacks while the next does not. A millisecond is far
+# below any capture-time resolution EXIF records and puts the boundary where
+# the setting says it is: a gap *equal* to the setting is inside the burst.
+BURST_GAP_TOLERANCE_SECONDS = 0.001
+
+
+def normalize_browse_stack_config(config=None):
+    """Return ``{"time_gap", "split_mode"}`` for Browse's stack projection.
+
+    Accepts either an already-normalized stack dict or a full (effective)
+    config dict, so callers can pass ``db.get_effective_config(cfg.load())``
+    straight through. Anything unreadable falls back to the default rather
+    than raising: a malformed setting must not take Browse down, and the
+    default is the behaviour the settings UI describes.
+    """
+    gap = BROWSE_STACK_TIME_GAP_DEFAULT
+    mode = BROWSE_STACK_SPLIT_MODE_DEFAULT
+    if isinstance(config, dict):
+        raw_gap = config.get("time_gap", config.get("browse_stack_time_gap", gap))
+        try:
+            gap = float(raw_gap)
+        except (TypeError, ValueError):
+            gap = BROWSE_STACK_TIME_GAP_DEFAULT
+        if not (gap >= 0.0):  # also catches NaN
+            gap = BROWSE_STACK_TIME_GAP_DEFAULT
+        raw_mode = config.get(
+            "split_mode", config.get("browse_stack_split_mode", mode)
+        )
+        mode = raw_mode if raw_mode in BROWSE_STACK_SPLIT_MODES else (
+            BROWSE_STACK_SPLIT_MODE_DEFAULT
+        )
+    return {"time_gap": gap, "split_mode": mode}
+
+
 _LOCATION_COMPONENT_RANKS = {
     "country": 10,
     "administrative_area_level_1": 20,
@@ -2541,6 +2588,20 @@ class Database:
             return _deep_merge(global_config, overrides)
         except (json.JSONDecodeError, TypeError):
             return global_config
+
+    def browse_stack_settings(self, global_config=None):
+        """Resolve Browse's stack settings for the active workspace.
+
+        Reads through ``get_effective_config`` so a per-workspace override of
+        ``browse_stack_time_gap`` / ``browse_stack_split_mode`` applies — a
+        workspace of 20fps flight sequences and one of hand-held portraits
+        want different gaps.
+        """
+        if global_config is None:
+            return normalize_browse_stack_config(None)
+        return normalize_browse_stack_config(
+            self.get_effective_config(global_config)
+        )
 
     def min_detector_confidence_across_workspaces(self, global_config):
         """Return the minimum effective ``detector_confidence`` across all
@@ -23918,28 +23979,172 @@ class Database:
         """
         return self.conn.execute(query, [*params, per_page, offset]).fetchall()
 
+    # Species / location keyword sets, folded to one stable string per photo
+    # so two frames compare equal exactly when they carry the same keywords
+    # of that kind. A photo with no keyword of that kind has no row here at
+    # all and reads as NULL (compared as '' below), so two untagged frames
+    # match each other.
+    #
+    # One grouped pass over ``photo_keywords`` rather than a correlated
+    # subquery per photo: at catalog scale the correlated form cost ~20s on
+    # an unfiltered workspace, because it re-ran for all 63k scoped rows.
+    #
+    # ``GROUP_CONCAT`` has no guaranteed order, but it does not need one
+    # here: every photo's fold is produced by the same scan of the same
+    # subquery within a single execution, so two photos carrying the same
+    # keywords always concatenate them the same way — which is the only
+    # property the equality comparison below relies on. The inner ORDER BY
+    # additionally makes that order ascending-by-id in practice, which keeps
+    # the folds readable when debugging a stack boundary.
+    #
+    # ``taxonomy OR is_species`` mirrors the predicate used everywhere else a
+    # species keyword is identified (see ``remove_auto_keywords``): the
+    # background ``mark_species_keywords`` pass sets ``is_species`` on
+    # taxonomy keywords, and a keyword added between scans can be typed
+    # before it is flagged.
+    _STACK_KEYWORD_SET_CTES = """
+        photo_stack_species AS (
+            SELECT photo_id, GROUP_CONCAT(keyword_id) AS keyword_set
+            FROM (
+                SELECT pk.photo_id, pk.keyword_id
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE k.type = 'taxonomy' OR k.is_species = 1
+                ORDER BY pk.photo_id, pk.keyword_id
+            )
+            GROUP BY photo_id
+        ), photo_stack_location AS (
+            SELECT photo_id, GROUP_CONCAT(keyword_id) AS keyword_set
+            FROM (
+                SELECT pk.photo_id, pk.keyword_id
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE k.type = 'location'
+                ORDER BY pk.photo_id, pk.keyword_id
+            )
+            GROUP BY photo_id
+        )
+    """
+
+    # Attaches the two folds to a row set exposing ``id``.
+    _STACK_KEYWORD_JOINS = """
+        LEFT JOIN photo_stack_species
+               ON photo_stack_species.photo_id = {alias}.id
+        LEFT JOIN photo_stack_location
+               ON photo_stack_location.photo_id = {alias}.id
+    """
+
+    # Ordering that defines "consecutive frames" for burst detection. Bursts
+    # never span folders, so the sequence restarts per folder.
+    _STACK_RUN_WINDOW = "PARTITION BY folder_id ORDER BY timestamp, id"
+
+    def _burst_run_ctes(self, settings):
+        """Return the CTE chain that turns a ``burst_candidates`` CTE into one
+        ``_burst_key`` per photo plus a ``burst_sizes`` tally, and the params
+        it consumes.
+
+        Shared verbatim by the stacked Browse SQL and by the visual-search
+        collapse path, so the metadata grid and a relevance-ordered result
+        can never disagree about where a burst starts and ends. The caller
+        supplies a ``burst_candidates`` CTE exposing ``id``, ``folder_id``,
+        ``timestamp``, ``_stack_species`` and ``_stack_location``, left open
+        (this fragment closes it).
+        """
+        window = self._STACK_RUN_WINDOW
+        # In ``break`` mode a keyword change ends the run, so the run number
+        # alone identifies the stack and an A/B/A run stays in shooting order
+        # as three stacks. In ``partition`` mode the run is purely temporal
+        # and the keyword sets join the key instead, which regroups the same
+        # run into two stacks rather than fragmenting it.
+        if settings["split_mode"] == "partition":
+            keyword_break = ""
+            burst_key = (
+                "'burst:' || folder_id || ':' || _run"
+                " || ':s' || COALESCE(_stack_species, '')"
+                " || ':l' || COALESCE(_stack_location, '')"
+            )
+        else:
+            keyword_break = f"""
+                                 OR COALESCE(_stack_species, '') <> COALESCE(
+                                        LAG(_stack_species) OVER ({window}), '')
+                                 OR COALESCE(_stack_location, '') <> COALESCE(
+                                        LAG(_stack_location) OVER ({window}), '')"""
+            burst_key = "'burst:' || folder_id || ':' || _run"
+        # An unparseable capture time yields a NULL julianday, and a NULL
+        # comparison is not "within the gap" — it starts a new run, so a bad
+        # timestamp can only ever under-stack, never glue unrelated frames.
+        fragment = f"""
+            ), burst_starts AS (
+                SELECT id, folder_id, timestamp, _stack_species, _stack_location,
+                       CASE WHEN LAG(timestamp) OVER ({window}) IS NULL
+                                 OR julianday(timestamp) IS NULL
+                                 OR julianday(LAG(timestamp) OVER ({window})) IS NULL
+                                 OR (julianday(timestamp)
+                                     - julianday(LAG(timestamp) OVER ({window})))
+                                    * 86400.0 > ?{keyword_break}
+                            THEN 1 ELSE 0 END AS _run_start
+                FROM burst_candidates
+            ), burst_runs AS (
+                SELECT id, folder_id, _stack_species, _stack_location,
+                       SUM(_run_start) OVER (
+                           {window}
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                       ) AS _run
+                FROM burst_starts
+            ), burst_keys AS (
+                SELECT id, {burst_key} AS _burst_key FROM burst_runs
+            ), burst_sizes AS (
+                SELECT _burst_key, COUNT(*) AS _burst_count
+                FROM burst_keys GROUP BY _burst_key
+            )"""
+        return fragment, [settings["time_gap"] + BURST_GAP_TOLERANCE_SECONDS]
+
     def _browse_stack_query_parts(self, rules, collection_id=None, folder_id=None,
-                                  include_offline_folders=False):
+                                  include_offline_folders=False,
+                                  stack_config=None):
         """Build the scoped CTE shared by stacked Browse list/count queries.
 
         Stacks are a presentation of the current result set, not durable
         catalog state: filters apply to members first, then exact duplicates
         and camera bursts collapse only when at least two matching photos
         remain. Exact duplicates claim their members before bursts so one
-        photo can never appear in two Browse items.
+        photo can never appear in two Browse items. Because the burst run is
+        computed over the *matching* photos, a filter that removes the middle
+        of a run can split it — that is the same "stacks describe what you
+        are looking at" rule, applied to time instead of membership.
 
-        "Camera burst" here means photos that share an EXIF ImageUniqueID —
-        the only value the scanner writes to ``photos.burst_id`` (see
-        ``scanner.py``). The pipeline's time/embedding-derived burst groups
-        live in ``pipeline_results_ws*.json`` and are not persisted to
-        ``burst_id``, so they intentionally do not participate in Browse
-        stacking today; the pipeline review page is where users see those.
+        A burst is a run of frames from one folder whose consecutive capture
+        times are no more than ``browse_stack_time_gap`` seconds apart and
+        which carry the same species and location keywords. Frames without a
+        capture time never join a burst — there is nothing to measure them
+        against — and offline frames are excluded as described below.
+
+        Keyword agreement is part of the burst identity on purpose. An
+        untagged frame sitting inside an otherwise-tagged run breaks out as
+        its own item rather than hiding behind a tagged cover, which is what
+        makes the remaining tagging work visible while culling; as those
+        frames are tagged they rejoin the run. ``browse_stack_split_mode``
+        chooses how a mid-run change is resolved: ``break`` (the default)
+        starts a new stack at every change, so a run tagged A, B, A yields
+        three stacks in shooting order, while ``partition`` groups the run by
+        keyword set and yields two.
+
+        Earlier versions keyed bursts on ``photos.burst_id`` (EXIF
+        ImageUniqueID, the only value the scanner writes there). That is not
+        a burst identifier: the cameras that write it at all reuse the value
+        across the life of the body, so it produced a handful of enormous
+        false stacks spanning years while every real burst — from cameras
+        that omit the tag entirely, which is most of them — stayed unstacked.
+        The column is still filterable; it is no longer a stacking signal.
 
         ``include_offline_folders`` is the opt-in offline collection view
         (PR #1563). Photos whose folder is offline are *shown* — they render
         as read-only placeholders — but they never join a stack: each one
         keeps its own ``photo:<id>`` key and is left out of every duplicate /
-        burst tally. Two reasons, both about not lying to the user:
+        burst tally. They are also left out of the run sequence entirely, so
+        an offline frame in the middle of a burst neither splits it nor
+        contributes its keywords to it. Three reasons, all about not lying to
+        the user:
 
         * A stack's cover is its only interactive card, and
           ``_STACK_COVER_ORDER`` ranks on quality alone. An offline member
@@ -23948,7 +24153,10 @@ class Database:
         * The stack badge reads as "N photos here to cull". Counting frames
           the user cannot rate, flag, or delete would make that count a
           proxy rather than an answer (CORE_PHILOSOPHY, "no black boxes").
+        * A frame that is not shown as part of the stack must not silently
+          decide where the stack ends.
         """
+        settings = normalize_browse_stack_config(stack_config)
         folder_join, join_clause, where, params = self._build_query_from_rules(
             rules, include_offline_folders=include_offline_folders,
         )
@@ -23965,9 +24173,11 @@ class Database:
             )
         else:
             offline_expr = "0"
+        run_ctes, run_params = self._burst_run_ctes(settings)
         ctes = f"""
-            WITH scoped AS (
-                SELECT DISTINCT {pcols}, p.burst_id AS _stack_burst_id,
+            WITH {self._STACK_KEYWORD_SET_CTES}
+            , scoped AS (
+                SELECT DISTINCT {pcols},
                        p.file_hash AS _stack_file_hash,
                        {offline_expr} AS _stack_offline
                 FROM photos p
@@ -23982,33 +24192,41 @@ class Database:
                            OVER (PARTITION BY _stack_file_hash)
                        END AS _duplicate_count
                 FROM scoped
-            ), stack_counts AS (
-                SELECT duplicate_counts.*,
-                       CASE WHEN _stack_offline = 1
-                                 OR NULLIF(_stack_burst_id, '') IS NULL THEN 0 ELSE
-                           SUM(CASE WHEN _duplicate_count < 2 AND _stack_offline = 0
-                                    THEN 1 ELSE 0 END)
-                           OVER (PARTITION BY _stack_burst_id)
-                       END AS _burst_count
+            ), burst_candidates AS (
+                -- Only photos a burst could actually claim take part in the
+                -- sequence, so members lost to a duplicate stack (or to the
+                -- offline rule) neither split a run nor pad its count.
+                SELECT duplicate_counts.id, duplicate_counts.folder_id,
+                       duplicate_counts.timestamp,
+                       photo_stack_species.keyword_set AS _stack_species,
+                       photo_stack_location.keyword_set AS _stack_location
                 FROM duplicate_counts
-            ), keyed AS (
-                SELECT stack_counts.*,
+                {self._STACK_KEYWORD_JOINS.format(alias="duplicate_counts")}
+                WHERE _stack_offline = 0
+                  AND _duplicate_count < 2
+                  AND timestamp IS NOT NULL
+            {run_ctes}
+            , keyed AS (
+                SELECT duplicate_counts.*,
                        CASE
                          WHEN _duplicate_count >= 2
                            THEN 'duplicate:' || _stack_file_hash
-                         WHEN _duplicate_count < 2 AND _burst_count >= 2
-                           THEN 'burst:' || _stack_burst_id
-                         ELSE 'photo:' || id
+                         WHEN burst_sizes._burst_count >= 2
+                           THEN burst_keys._burst_key
+                         ELSE 'photo:' || duplicate_counts.id
                        END AS _stack_key,
                        CASE
                          WHEN _duplicate_count >= 2 THEN 'duplicate'
-                         WHEN _duplicate_count < 2 AND _burst_count >= 2 THEN 'burst'
+                         WHEN burst_sizes._burst_count >= 2 THEN 'burst'
                          ELSE NULL
                        END AS _stack_kind
-                FROM stack_counts
+                FROM duplicate_counts
+                LEFT JOIN burst_keys ON burst_keys.id = duplicate_counts.id
+                LEFT JOIN burst_sizes
+                       ON burst_sizes._burst_key = burst_keys._burst_key
             )
         """
-        return ctes, params
+        return ctes, [*params, *run_params]
 
     _STACK_COVER_ORDER = """
         CASE COALESCE(flag, 'none')
@@ -24111,7 +24329,8 @@ class Database:
         return self._stack_sort_spec(sort)["order"]
 
     def _ranked_stack_query(self, rules, sort="date", collection_id=None,
-                            folder_id=None, include_offline_folders=False):
+                            folder_id=None, include_offline_folders=False,
+                            stack_config=None):
         """Return the CTE + ``ranked`` window-function block shared by every
         stack-projected query. Callers append their own outer SELECT (with
         ORDER BY and optional LIMIT/OFFSET).
@@ -24123,6 +24342,7 @@ class Database:
         ctes, params = self._browse_stack_query_parts(
             rules, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
+            stack_config=stack_config,
         )
         cover_order = self._STACK_COVER_ORDER
         spec = self._stack_sort_spec(sort)
@@ -24163,7 +24383,7 @@ class Database:
 
     def query_browse_stacks(self, rules, sort="date", page=1, per_page=50,
                             collection_id=None, folder_id=None,
-                            include_offline_folders=False):
+                            include_offline_folders=False, stack_config=None):
         """Return one representative row per exact-duplicate or burst stack.
 
         The returned rows have three private columns consumed by the HTTP
@@ -24174,6 +24394,7 @@ class Database:
         ranked, params = self._ranked_stack_query(
             rules, sort=sort, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
+            stack_config=stack_config,
         )
         order = self._stack_sort_clause(sort)
         page = max(1, page)
@@ -24189,11 +24410,12 @@ class Database:
         return self.conn.execute(query, [*params, per_page, offset]).fetchall()
 
     def count_browse_stacks(self, rules, collection_id=None, folder_id=None,
-                            include_offline_folders=False):
+                            include_offline_folders=False, stack_config=None):
         """Count logical Browse items after stack projection."""
         ctes, params = self._browse_stack_query_parts(
             rules, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
+            stack_config=stack_config,
         )
         row = self.conn.execute(
             ctes + " SELECT COUNT(DISTINCT _stack_key) AS n FROM keyed",
@@ -24202,7 +24424,8 @@ class Database:
         return int(row["n"] or 0)
 
     def _stacked_photo_ids(self, rules, sort="date",
-                           collection_id=None, folder_id=None):
+                           collection_id=None, folder_id=None,
+                           stack_config=None):
         """Shared cover-first stacked ID projection used by every select-all
         endpoint that honors Stacks. For each stack (in the same order
         ``query_browse_stacks`` places covers) emits the cover ID first, then
@@ -24211,6 +24434,7 @@ class Database:
         """
         ranked, params = self._ranked_stack_query(
             rules, sort=sort, collection_id=collection_id, folder_id=folder_id,
+            stack_config=stack_config,
         )
         order = self._stack_sort_clause(sort)
         query = ranked + f"""
@@ -24241,7 +24465,8 @@ class Database:
                 seen.add(member_id)
         return photo_ids
 
-    def get_collection_photo_ids_stacked(self, collection_id, sort="date"):
+    def get_collection_photo_ids_stacked(self, collection_id, sort="date",
+                                         stack_config=None):
         """Return every photo ID matching a collection, in stack-projected
         order. See ``_stacked_photo_ids``.
 
@@ -24252,10 +24477,12 @@ class Database:
         """
         return self._stacked_photo_ids(
             [], sort=sort, collection_id=collection_id,
+            stack_config=stack_config,
         )
 
     def query_photo_ids_stacked(self, rules, sort="date",
-                                collection_id=None, folder_id=None):
+                                collection_id=None, folder_id=None,
+                                stack_config=None):
         """Return every photo ID matching a universal-filter rule tree, in
         stack-projected order — the rules analog of
         ``get_collection_photo_ids_stacked``.
@@ -24268,15 +24495,68 @@ class Database:
         """
         return self._stacked_photo_ids(
             rules, sort=sort, collection_id=collection_id, folder_id=folder_id,
+            stack_config=stack_config,
         )
 
-    def collapse_browse_stack_photo_ids(self, photo_ids, standalone_ids=None):
+    def _burst_keys_for_ids(self, photo_ids, stack_config=None):
+        """Return ``{photo_id: burst_key}`` for the ids that land in a burst
+        of two or more, using the same CTE chain as the stacked Browse SQL.
+
+        The candidate ids go through a TEMP table rather than an ``IN (...)``
+        list: the burst key depends on each frame's neighbours in capture
+        order, so chunking the ids would invent a run boundary wherever a
+        real burst happened to straddle a chunk.
+        """
+        ids = list(dict.fromkeys(photo_ids or ()))
+        if len(ids) < 2:
+            return {}
+        settings = normalize_browse_stack_config(stack_config)
+        run_ctes, run_params = self._burst_run_ctes(settings)
+        self.conn.execute("DROP TABLE IF EXISTS temp._burst_scope")
+        self.conn.execute(
+            "CREATE TEMP TABLE _burst_scope (id INTEGER PRIMARY KEY)"
+        )
+        try:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO _burst_scope (id) VALUES (?)",
+                [(pid,) for pid in ids],
+            )
+            query = f"""
+                WITH {self._STACK_KEYWORD_SET_CTES}
+                , burst_candidates AS (
+                    SELECT p.id, p.folder_id, p.timestamp,
+                           photo_stack_species.keyword_set AS _stack_species,
+                           photo_stack_location.keyword_set AS _stack_location
+                    FROM photos p
+                    JOIN _burst_scope scope ON scope.id = p.id
+                    {self._STACK_KEYWORD_JOINS.format(alias="p")}
+                    WHERE p.timestamp IS NOT NULL
+                {run_ctes}
+                SELECT burst_keys.id AS id, burst_keys._burst_key AS burst_key
+                FROM burst_keys
+                JOIN burst_sizes
+                  ON burst_sizes._burst_key = burst_keys._burst_key
+                WHERE burst_sizes._burst_count >= 2
+            """
+            return {
+                row["id"]: row["burst_key"]
+                for row in self.conn.execute(query, run_params).fetchall()
+            }
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS temp._burst_scope")
+
+    def collapse_browse_stack_photo_ids(self, photo_ids, standalone_ids=None,
+                                        stack_config=None):
         """Collapse an already ordered ID result, preserving group order.
 
         Visual search has already materialized its relevance-ordered IDs, so
         re-running the metadata SQL would lose that order. This bounded helper
-        applies the same duplicate-first overlap rule in Python and selects a
-        quality-ranked cover for each logical item.
+        applies the same duplicate-first overlap rule, then selects a
+        quality-ranked cover for each logical item. Group *identity* comes
+        from the shared projection (exact-duplicate hash, then
+        ``_burst_keys_for_ids``) so a relevance-ordered result and the
+        metadata grid always draw the same stack boundaries; only group
+        *order* follows the relevance ranking, by first appearance.
 
         ``standalone_ids`` are photos that must never join a stack — the
         offline members of the opt-in offline collection view. They keep
@@ -24290,7 +24570,7 @@ class Database:
             return []
         rows_by_id = {}
         columns = (
-            "id, file_hash, burst_id, flag, quality_score, subject_sharpness, "
+            "id, file_hash, flag, quality_score, subject_sharpness, "
             "sharpness, rating, width, height, file_size"
         )
         for chunk in _chunks(ordered_ids):
@@ -24309,19 +24589,22 @@ class Database:
             file_hash = row["file_hash"] if row else None
             if file_hash:
                 duplicate_counts[file_hash] = duplicate_counts.get(file_hash, 0) + 1
-        burst_counts = {}
-        for pid in ordered_ids:
-            if pid in standalone:
-                continue
-            row = rows_by_id.get(pid)
-            if not row:
-                continue
-            file_hash = row["file_hash"]
-            if file_hash and duplicate_counts.get(file_hash, 0) >= 2:
-                continue
-            burst_id = row["burst_id"]
-            if burst_id:
-                burst_counts[burst_id] = burst_counts.get(burst_id, 0) + 1
+        # Bursts are resolved in SQL over exactly the frames a burst could
+        # still claim, so a member already lost to a duplicate stack (or held
+        # out as offline) neither splits a run nor pads its count — the same
+        # ordering the metadata projection applies.
+        burst_candidates = [
+            pid for pid in ordered_ids
+            if pid not in standalone
+            and rows_by_id.get(pid) is not None
+            and not (
+                rows_by_id[pid]["file_hash"]
+                and duplicate_counts.get(rows_by_id[pid]["file_hash"], 0) >= 2
+            )
+        ]
+        burst_key_by_id = self._burst_keys_for_ids(
+            burst_candidates, stack_config=stack_config,
+        )
 
         groups = {}
         group_order = []
@@ -24330,13 +24613,12 @@ class Database:
             if not row:
                 continue
             file_hash = row["file_hash"]
-            burst_id = row["burst_id"]
             if pid in standalone:
                 key = (None, pid)
             elif file_hash and duplicate_counts.get(file_hash, 0) >= 2:
                 key = ("duplicate", file_hash)
-            elif burst_id and burst_counts.get(burst_id, 0) >= 2:
-                key = ("burst", burst_id)
+            elif pid in burst_key_by_id:
+                key = ("burst", burst_key_by_id[pid])
             else:
                 key = (None, pid)
             if key not in groups:

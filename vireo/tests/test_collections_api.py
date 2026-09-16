@@ -258,8 +258,12 @@ def test_collection_photo_ids_stacks_query_puts_cover_first(app_and_db):
     p2_id = db.conn.execute(
         "SELECT id FROM photos WHERE filename = 'bird2.jpg'"
     ).fetchone()["id"]
+    # Browse groups bursts by capture-time proximity within a folder, so
+    # put the pair a second apart in one folder. ``bird2`` keeps its own
+    # folder and capture time and stays a single.
     db.conn.execute(
-        "UPDATE photos SET burst_id = 'B1' WHERE id IN (?, ?)",
+        "UPDATE photos SET folder_id = (SELECT folder_id FROM photos WHERE id = ?), "
+        "timestamp = '2024-01-15T10:00:01' WHERE id = ?",
         (p1_id, p3_id),
     )
     db.conn.commit()

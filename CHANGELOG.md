@@ -5,6 +5,22 @@ All notable changes to Vireo are documented in this file.
 ## Unreleased
 
 ### Changed
+- **Browse's Stacks toggle now finds your bursts.** Stacks used to group
+  camera bursts by the EXIF "image unique ID" tag. Most cameras never write
+  that tag, and the ones that do reuse the same value for the life of the
+  body — so on a typical catalog the toggle collapsed almost nothing, and
+  where it did fire it could bundle frames taken years apart into a single
+  card. A burst is now what it sounds like: a run of consecutive frames from
+  one folder taken within a few seconds of each other. On a 63,000-photo
+  workspace that turns the grid into about 4,900 items instead of leaving it
+  unchanged. Frames must also share the same species and location keywords,
+  so an untagged frame sitting inside a tagged run stays its own item instead
+  of hiding behind a tagged cover — the tagging you still owe stays visible
+  while you cull, and the frame rejoins the run once you tag it. Two new
+  settings under Display control it: **Stacks: burst time gap** (3 seconds by
+  default) and **Stacks: keyword changes**, which chooses whether a change
+  part-way through a run breaks it in shooting order or regroups it by
+  keyword set. Both can be overridden per workspace.
 - **ID Conflicts loads a page at a time.** The page used to fetch every photo
   in the collection and render every matching row at once — on a large
   catalog that meant a 159 MB response and tens of thousands of table rows,
