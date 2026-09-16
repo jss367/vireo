@@ -184,15 +184,7 @@ def test_second_sort_change_mid_flight_keeps_the_photo(live_server, page):
 
     # Hold the first focused request open so the second sort change is
     # guaranteed to arrive while it is still in flight.
-    held = {"done": False}
-
-    def stall_first_focused(route, request):
-        if not held["done"] and "focus_photo_id" in (request.post_data or ""):
-            held["done"] = True
-            time.sleep(1.5)
-        route.continue_()
-
-    page.route("**/api/photos/query", stall_first_focused)
+    held = _stall_first_focused_query(page)
 
     page.select_option("#sortSelect", "name_desc")
     page.wait_for_timeout(150)
@@ -209,6 +201,82 @@ def test_second_sort_change_mid_flight_keeps_the_photo(live_server, page):
     expect(
         page.locator(f"#grid .grid-card[data-id='{photo_id}']")
     ).to_be_visible()
+
+
+def _stall_first_focused_query(page, seconds=1.5):
+    """Hold the first focused request open so the next reset lands in flight."""
+    held = {"done": False}
+
+    def handler(route, request):
+        if not held["done"] and "focus_photo_id" in (request.post_data or ""):
+            held["done"] = True
+            time.sleep(seconds)
+        route.continue_()
+
+    page.route("**/api/photos/query", handler)
+    return held
+
+
+def test_health_refresh_mid_sort_keeps_the_photo(live_server, page):
+    """A folder-health refresh must not orphan an in-flight sort's anchor.
+
+    The refresh asks to keep the user's place (``preserveAnchor``) but lands
+    while the sort has already torn down the cards, so it captures nothing.
+    It then invalidates the sort's request — losing the selection for good
+    unless it can inherit the anchor the sort was holding (Codex review on
+    PR #1658).
+    """
+    _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
+    _open_browse(page, live_server)
+    _scroll_until_loaded(page, 100)
+    photo_id = _select_photo_at(page, 80)
+
+    held = _stall_first_focused_query(page)
+    page.select_option("#sortSelect", "name_desc")
+    page.wait_for_timeout(150)
+    # Same scope, different trigger: a folder-health event lands mid-sort.
+    page.evaluate(
+        "() => document.dispatchEvent("
+        "  new CustomEvent('vireo:folder-health-changed', {detail: {}}))"
+    )
+    page.wait_for_timeout(2500)
+    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    page.unroute("**/api/photos/query")
+
+    assert held["done"], "the focused request was never stalled"
+    assert page.evaluate("selectedPhotoId") == photo_id, (
+        "a health refresh landing mid-sort dropped the photo"
+    )
+
+
+def test_scope_change_mid_sort_drops_the_photo(live_server, page):
+    """The other half: a real scope change must NOT inherit the anchor.
+
+    The photo belongs to the view the user left, so resurrecting it would
+    re-select something the scope change deliberately cleared.
+    """
+    seeded = _seed_sortable_library(
+        live_server["db"], live_server["data"]["folders"][0]
+    )
+    assert seeded
+    _open_browse(page, live_server)
+    _scroll_until_loaded(page, 100)
+    photo_id = _select_photo_at(page, 80)
+
+    held = _stall_first_focused_query(page)
+    page.select_option("#sortSelect", "name_desc")
+    page.wait_for_timeout(150)
+    # A sidebar folder click — this bumps browseScopeGen.
+    other_folder = live_server["data"]["folders"][1]
+    page.evaluate("id => filterByFolder(id)", other_folder)
+    page.wait_for_timeout(2500)
+    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    page.unroute("**/api/photos/query")
+
+    assert held["done"], "the focused request was never stalled"
+    assert page.evaluate("selectedPhotoId") != photo_id, (
+        "a photo from the scope the user left was resurrected as the selection"
+    )
 
 
 def test_stacked_grid_counts_cards_not_photos_in_the_banner(live_server, page):

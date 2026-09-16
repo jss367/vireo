@@ -2532,6 +2532,10 @@ var anchorScanDepth = 0;
 // focused reload can pick up the older one's anchor (Codex review
 // r4021334323). Cleared once every in-flight focused reload has settled.
 var pendingFocusAnchor = null;
+// The scope the pending anchor belongs to. Sidebar folder/keyword/collection
+// clicks bump ``browseScopeGen``; the photo then belongs to the view the user
+// left, so the anchor must not survive into the new one.
+var pendingFocusAnchorScopeGen = -1;
 var focusReloadInFlight = 0;
 var selectedPhotos = new Set(); // multi-select
 var expandedBrowseStacks = new Set();
@@ -6727,26 +6731,31 @@ async function resetAndLoad(options) {
   var anchor = (preserveAnchor || preserveScroll)
     ? captureSelectedPhotoAnchor()
     : null;
-  // A newer focused reload arriving while an older one is still in flight
-  // has nothing to capture from the DOM — the older reload cleared the
-  // selection and tore down the cards synchronously before its await. The
-  // target the older reload was aiming at is still the target, so forward
-  // it to this call rather than dropping back to page 1 (Codex review
-  // r4021334323).
-  if (!anchor && focusAnchor && pendingFocusAnchor) {
+  // A reload arriving while a focused one is still in flight has nothing to
+  // capture from the DOM — the older reload cleared the selection and tore
+  // down the cards synchronously before its await. The target it was aiming
+  // at is still the target, so forward it rather than dropping back to page 1
+  // (Codex review r4021334323).
+  //
+  // What decides whether the anchor may be forwarded is the *scope*, not who
+  // is asking. A sidebar folder/keyword/collection click bumps
+  // ``browseScopeGen``, and the photo then belongs to the view the user left
+  // — keeping it there would resurrect a selection the scope change
+  // deliberately cleared. Everything else is the same dataset: a second sort
+  // change, and equally a folder-health refresh or a cleared quick search,
+  // both of which ask to keep the user's place via ``preserveAnchor`` and
+  // would otherwise invalidate the in-flight sort and lose its selection for
+  // good (Codex reviews on PR #1658).
+  if (pendingFocusAnchor && pendingFocusAnchorScopeGen !== browseScopeGen) {
+    pendingFocusAnchor = null;
+  }
+  if (!anchor && (focusAnchor || preserveAnchor) && pendingFocusAnchor) {
     anchor = pendingFocusAnchor;
   }
   if (focusAnchor) {
     pendingFocusAnchor = anchor;
+    pendingFocusAnchorScopeGen = browseScopeGen;
     focusReloadInFlight++;
-  } else {
-    // A reset that is not a focused re-sort takes ownership of the grid with
-    // a different dataset — a folder click, a filter edit, a collection.
-    // Any anchor a still-in-flight sort was holding belongs to the scope the
-    // user just left, so drop it. Without this, sort → change folder → sort
-    // again resurrects the old scope's photo as the new selection, which the
-    // scope change had deliberately cleared (Codex review on PR #1658).
-    pendingFocusAnchor = null;
   }
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   // Membership-change reloads (``preserveScroll``) can arrive after an edit
