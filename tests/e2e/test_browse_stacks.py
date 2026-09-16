@@ -504,6 +504,89 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     assert abs(top_after - top_before) < 4
 
 
+def test_delete_dialog_counts_companions_of_unloaded_stack_members(
+    live_server, page,
+):
+    """A stack selected by one click holds frames Browse never loaded.
+
+    Their metadata is not in any member cache, so counting companions in the
+    browser saw only the cover: the "Also delete N companion files" checkbox
+    never appeared and a disk delete would have left the hidden frames'
+    companions on disk. The count comes from the server, which can see every
+    row in the selection. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+        # The companion belongs to a hidden frame, not the cover.
+        db.conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            ("hawk3.nef", burst_ids[2]),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+
+    page.locator("#batchBar button", has_text="Delete").click()
+    expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
+    expect(page.locator("#deleteCompanionRow")).to_be_visible()
+    expect(page.locator("#deleteCompanionLabel")).to_have_text(
+        "Also delete 1 companion file"
+    )
+    page.locator("#deleteModal button", has_text="Cancel").click()
+
+
+def test_undo_keeps_a_whole_stack_selected(live_server, page):
+    """Undo reloads the grid, and the selection has to survive it whole.
+
+    Restoring a selection drops ids the refreshed query no longer has, which
+    it decides with ``findBrowsePhoto``. For a stack selected by one click on
+    its collapsed card, the hidden frames are in no member cache, so that
+    lookup failed for all but the cover and the stack quietly shrank to one
+    frame — the next rating or flag would then hit one photo instead of
+    three. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    # A colour label edits every frame without moving any of them between
+    # stacks, so the reload that follows the undo must hand the whole
+    # selection back.
+    page.evaluate("() => batchSetColorLabel('red')")
+    page.wait_for_function(
+        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        arg=burst_ids,
+    )
+    page.evaluate("() => doUndo()")
+    page.wait_for_function(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
+    )
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+
 def test_cmd_clicking_a_selected_stack_deselects_it_as_a_unit(live_server, page):
     """Toggling a stack off has to take its focus with it.
 

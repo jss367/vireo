@@ -7642,6 +7642,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         attach_edit_recipes(db, photos)
         return jsonify({"photos": photos})
 
+    @app.route("/api/photos/companion-count", methods=["POST"])
+    def api_photos_companion_count():
+        """How many of these photos have a companion file.
+
+        The delete dialog's "Also delete N companion files" checkbox is a
+        claim about the whole selection, and Browse can hold ids it has never
+        loaded — every frame of a collapsed stack, or a Select all that
+        reaches past the loaded page. Counting client-side over the loaded
+        ones only hid the checkbox and left those companions on disk, so the
+        count is taken here instead, against the same rows the delete will
+        resolve.
+        """
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list):
+            return json_error("photo_ids must be a list", 400)
+        photo_ids = []
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers", 400)
+            photo_ids.append(raw)
+        return jsonify({"count": db.count_photos_with_companions(photo_ids)})
+
     @app.route("/api/capture-time/preview", methods=["POST"])
     def api_capture_time_preview():
         """Preview a capture-time correction for selected photos."""

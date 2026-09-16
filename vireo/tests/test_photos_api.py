@@ -1233,6 +1233,52 @@ def test_api_photos_by_ids_validates_payload(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_photos_companion_count_sees_photos_browse_never_loaded(app_and_db):
+    """The delete dialog's companion checkbox is a claim about the selection.
+
+    Browse can hold ids it has never loaded — every frame of a collapsed
+    stack, or a Select all past the loaded page — so counting companions in
+    the browser hid the checkbox and left those files on disk. The count is
+    taken here, where every row is known, against the same rows the delete
+    resolves.
+    """
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    by_name = {p["filename"]: p["id"] for p in photos}
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            ("bird1.nef", by_name["bird1.jpg"]),
+        )
+        # An empty string is not a companion, the same way the delete
+        # resolver reads it.
+        db.conn.execute(
+            "UPDATE photos SET companion_path = '' WHERE id = ?",
+            (by_name["bird2.jpg"],),
+        )
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/photos/companion-count",
+        json={"photo_ids": [
+            by_name["bird1.jpg"], by_name["bird2.jpg"], by_name["bird3.jpg"],
+        ]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"count": 1}
+    # Ids that no longer exist simply do not count.
+    assert client.post(
+        "/api/photos/companion-count", json={"photo_ids": [999999]},
+    ).get_json() == {"count": 0}
+    assert client.post(
+        "/api/photos/companion-count", json={"photo_ids": []},
+    ).get_json() == {"count": 0}
+    assert client.post(
+        "/api/photos/companion-count", json={"photo_ids": ["1"]},
+    ).status_code == 400
+
+
 def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
     """Browse-selected review should return the same rich result shape as Pipeline Review."""
     app, db = app_and_db

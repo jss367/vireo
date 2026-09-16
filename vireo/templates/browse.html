@@ -9995,7 +9995,15 @@ window.afterHistoryChange = async function() {
   var windowIsCurrent = observeBrowseWindow();
   for (var cover of photos.slice()) {
     var memberIds = cover.browse_stack && cover.browse_stack.photo_ids;
-    if (memberIds && memberIds.some(function(id) { return cachedMemberIds.has(id); })) {
+    // Selected members count as much as cached ones. A stack selected by a
+    // click on its collapsed card has never been expanded, so its hidden
+    // frames are in `previousSelection` and in no member cache; without
+    // hydrating them, the restore below finds only the cover and the whole
+    // stack quietly shrinks to one frame across an undo.
+    // Codex P2 on PR #1672.
+    if (memberIds && memberIds.some(function(id) {
+      return cachedMemberIds.has(id) || previousSelection.has(id);
+    })) {
       var status = await hydrateBrowseStackCoverMembers(cover, windowIsCurrent);
       if (!windowIsCurrent()) return;
       if (status === 'unresolved') throw new Error('Could not reload stack members');
@@ -10995,14 +11003,32 @@ async function confirmBatchKeyword() {
   showUndoToast();
 }
 
-function batchDelete() {
+async function batchDelete() {
   var ids = getActiveSelection();
   if (ids.length === 0) return;
-  var companionCount = 0;
-  ids.forEach(function(id) {
-    var p = findBrowsePhoto(id);
-    if (p && p.companion_path) companionCount++;
-  });
+  // Ask the server how many of these carry a companion file. A selection can
+  // hold photos Browse has never loaded — every frame of a collapsed stack,
+  // or a Select all that reaches past the loaded page — and counting the
+  // loaded ones only hides the "Also delete N companion files" checkbox, so a
+  // disk delete silently leaves those companions behind. Refuse to open the
+  // dialog rather than open it with a count that cannot be trusted: a wrong
+  // number here is a file left on disk. Codex P2 on PR #1672.
+  var companionCount;
+  try {
+    var counted = await safeFetch('/api/photos/companion-count', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    }, { toast: false });
+    companionCount = counted.count || 0;
+  } catch (e) {
+    showToast(
+      'Could not check these photos for companion files, so nothing was '
+        + 'deleted. Try again: ' + (e.message || e),
+      'error'
+    );
+    return;
+  }
   showDeleteDialog(ids, companionCount, function(data) {
     // The server may have retained rows whose Trash step failed (and the
     // user declined the permanent-delete fallback). Keep those rows visible
