@@ -151,6 +151,50 @@ def test_button_text_stops_where_the_stored_label_does(live_server, page):
     expect(page.locator('.vf-shortcuts [data-field="has_species"]')).to_have_text("N" * 40)
 
 
+def test_clearing_a_label_shows_the_text_that_will_be_stored(live_server, page):
+    """An empty label is replaced on save, so Settings must not stay blank."""
+    status = _open_settings(page, live_server)
+    row_input = page.locator('[data-shortcut-row="missing_species"] input')
+    row_input.fill("")
+    _saved(page, status, lambda: page.locator("#cfgShortcutLabel").click())
+    expect(row_input).to_have_value("Missing species")
+
+    _open_browse(page, live_server)
+    expect(page.locator('.vf-shortcuts [data-field="has_species"]')).to_have_text(
+        "Missing species"
+    )
+
+
+def test_removing_one_of_a_pair_keeps_the_other_in_control(live_server, page):
+    """A persisted OR clause outlives the button that helped build it."""
+    _open_browse(page, live_server)
+    page.locator('.vf-shortcuts [data-field="has_species"]').click()
+    page.locator('.vf-shortcuts [data-field="has_location_keyword"]').click()
+    expect(page.locator(".vf-chips")).to_contain_text(
+        "Missing species OR Missing location tag"
+    )
+    # The bar persists the expression on an 800 ms debounce; navigating
+    # before it lands would leave nothing to restore.
+    page.wait_for_timeout(1500)
+
+    status = _open_settings(page, live_server)
+    _saved(page, status, lambda: page.click(
+        '[data-shortcut-row="missing_location"] button[title="Remove this button"]'
+    ))
+
+    _open_browse(page, live_server)
+    species = page.locator('.vf-shortcuts [data-field="has_species"]')
+    # The persisted clause still contains this field, so the button is on.
+    expect(species).to_have_attribute("aria-pressed", "true")
+    species.click()
+    # Its field leaves the clause; the orphaned one stays, and nothing is
+    # duplicated beside it.
+    expect(species).to_have_attribute("aria-pressed", "false")
+    expect(page.locator(".vf-chips")).to_contain_text("Missing location tag")
+    expect(page.locator(".vf-chips")).not_to_contain_text("Missing species")
+    assert page.evaluate("VireoFilter.getUserRules()")["rules"].__len__() == 1
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):

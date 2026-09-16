@@ -1998,6 +1998,16 @@ function renderFilterShortcuts() {
     labelInput.style.cssText = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:5px 8px;font-size:12px;width:190px;';
     labelInput.addEventListener('input', function() {
       _filterShortcutsState[i].label = labelInput.value;
+      // An empty label is not stored as empty — normalization swaps in the
+      // rule's own wording — so hold the write until blur resolves what the
+      // button will actually say.
+      if (labelInput.value.trim()) saveConfig();
+    });
+    labelInput.addEventListener('blur', function() {
+      if (labelInput.value.trim()) return;
+      labelInput.value = describeShortcutRules(_filterShortcutsState[i].rules)
+        .slice(0, MAX_SHORTCUT_LABEL);
+      _filterShortcutsState[i].label = labelInput.value;
       saveConfig();
     });
     row.appendChild(labelInput);

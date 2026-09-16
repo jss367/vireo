@@ -955,10 +955,15 @@
     // Only recognize a clause that narrows the other filters. An arbitrary
     // nested rule or a leaf in an OR/NOT root does not have that meaning.
     if (state.root.mode !== 'all') return null;
-    const covered = (rule) => isMissingTagRule(rule) && fields.includes(rule.field);
+    // Match on shape plus overlap rather than exact membership: a persisted
+    // expression can still hold a field whose button was since removed from
+    // Settings, and the button that remains has to keep controlling that
+    // clause. Requiring every member to be configured would render it
+    // inactive and its next click would add a duplicate clause beside it.
+    const overlaps = (node) =>
+      (isGroup(node) ? node.rules : [node]).some((leaf) => fields.includes(leaf.field));
     const nodes = state.root.rules.filter((node) =>
-      (isGroup(node) && node.mode === 'any' && node.rules.length > 0 &&
-        node.rules.every(covered)) || covered(node));
+      (isMissingTagGroup(node) || isMissingTagRule(node)) && overlaps(node));
     return nodes.length === 1 ? nodes[0] : null;
   }
 
@@ -974,6 +979,8 @@
     if (!fields.includes(field)) return;
     mutate(() => {
       const node = quickMissingNode(fields);
+      // Every member of the matched clause, including any whose button is
+      // gone: toggling one field must not silently drop the others.
       const active = new Set(quickMissingFields(fields));
       if (active.has(field)) active.delete(field);
       else active.add(field);
