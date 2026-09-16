@@ -1455,6 +1455,13 @@ class Database:
                 ON collections(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_pending_workspace
                 ON pending_changes(workspace_id);
+            -- The tracked-merge collision loop probes and remaps
+            -- ``pending_changes`` by ``photo_id`` alone, once per colliding
+            -- staged photo. Without this index each probe scans the whole
+            -- queue, so the cost grows with the pending backlog times the
+            -- collision count.
+            CREATE INDEX IF NOT EXISTS idx_pending_photo
+                ON pending_changes(photo_id);
 
             -- Monotonic observation marker shared by folder-health endpoints.
             -- Clients use it to order responses by the SQLite snapshot they
@@ -5347,6 +5354,138 @@ class Database:
             self._new_images_cache.invalidate_workspaces(
                 self._db_path, [workspace_id])
 
+    def _newest_location_change_key(self, photo_id):
+        """Sort key of the newest queued ``location`` change on ``photo_id``.
+
+        ``None`` when the photo has no queued location change. The key is
+        ``(created_at, id)`` so two changes queued inside the same
+        ``datetime('now')`` second still order by insertion — the merge
+        below decides which of two competing assignments is the user's
+        latest intent, and a same-second tie must not fall back to
+        "whichever row happens to be getting deleted". A NULL
+        ``created_at`` (possible on rows written before the column had a
+        default) sorts as the empty string, i.e. oldest.
+        """
+        row = self.conn.execute(
+            "SELECT id, created_at FROM pending_changes "
+            "WHERE photo_id = ? AND change_type = 'location' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (photo_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return (row["created_at"] or "", row["id"])
+
+    def _move_location_state_for_merge(self, losing_id, surviving_id):
+        """Move ``losing_id``'s location tags onto ``surviving_id`` if newer.
+
+        A queued ``location`` change stores no coordinates: ``sync_to_xmp``
+        derives them at write time from the photo's link to a
+        ``type='location'`` keyword. When the merge deletes one of two rows
+        that both describe the same on-disk file, the survivor's tags are
+        what any remapped queue row will write, so the losing row's
+        location intent has to travel with the remap or the sync silently
+        writes the wrong GPS — or clears it.
+
+        Whose assignment wins is decided by queue chronology, not by which
+        row the merge happens to delete. If the survivor carries a location
+        change queued *later* than the loser's, the survivor's tags already
+        encode the newer intent and are left alone; otherwise the loser's
+        tags replace them. An empty tag list on a winning loser encodes a
+        "clear location" edit and drops the survivor's tag too.
+
+        Chronology is compared across every workspace, not just the active
+        one: ``photo_keywords`` is global, so a location change queued in a
+        sibling workspace describes the same tags this merge is about to
+        rewrite and its timestamp counts the same.
+
+        Returns ``True`` when the survivor's tags were replaced.
+        """
+        loser_key = self._newest_location_change_key(losing_id)
+        if loser_key is None:
+            # Nothing queued on the row being deleted: its tags carry no
+            # pending intent, and the survivor keeps whatever it has.
+            return False
+        survivor_key = self._newest_location_change_key(surviving_id)
+        if survivor_key is not None and survivor_key > loser_key:
+            # The survivor's own queued assignment is the newer one. This is
+            # the replacement-import shape: a stale archive row still holds
+            # an old queued location while the row that will represent the
+            # file has a newer one that the pre-transfer sync may already
+            # have written. Taking the loser's tags here would revert it.
+            return False
+        losing_kw_ids = [
+            r["keyword_id"] for r in self.conn.execute(
+                "SELECT pk.keyword_id FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                "WHERE pk.photo_id = ? AND k.type = 'location'",
+                (losing_id,),
+            ).fetchall()
+        ]
+        self.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id = ? "
+            "AND keyword_id IN ("
+            "  SELECT id FROM keywords WHERE type = 'location')",
+            (surviving_id,),
+        )
+        for kw_id in losing_kw_ids:
+            # Route through tag_photo rather than a raw INSERT so the write
+            # carries the manual provenance stamp and folds against any
+            # existing survivor row through the shared upsert. A raw insert
+            # would land with source = NULL, which retirement passes read as
+            # generated and delete. A queued ``location`` change originates
+            # in set_photo_location, so the intent riding along is
+            # user-authored.
+            self.tag_photo(surviving_id, kw_id, _commit=False)
+        return True
+
+    def _link_survivor_for_sibling_edits(self, workspace_id, photo_id):
+        """Link a remapped photo's folder into a non-active workspace.
+
+        The collision loop remaps ``pending_changes`` by ``photo_id``, which
+        also moves rows owned by workspaces other than the one running the
+        merge. The merge links the destination subtree to the active
+        workspace only, so without this a sibling workspace would be left
+        holding a queued edit on a photo it cannot resolve:
+        ``sync._resolve_xmp_paths`` builds its folder map from that
+        workspace's ``get_folder_tree``, and a missing folder resolves to an
+        empty path and fails every future sync as inaccessible — queued
+        forever, with nothing saying why.
+
+        Linked non-root and one folder at a time: ``add_workspace_folder``
+        materializes the whole path-prefixed subtree, which would pull the
+        archive's unrelated siblings into a workspace that never asked for
+        them. ``get_folder_tree`` includes any linked folder, root or not,
+        so a single non-root link is all the sibling needs to resolve the
+        photo.
+
+        Returns ``True`` when a new link was written.
+        """
+        row = self.conn.execute(
+            "SELECT folder_id FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        if row is None or row["folder_id"] is None:
+            return False
+        folder_id = row["folder_id"]
+        already = self.conn.execute(
+            "SELECT 1 FROM workspace_folders "
+            "WHERE workspace_id = ? AND folder_id = ?",
+            (workspace_id, folder_id),
+        ).fetchone()
+        if already is not None:
+            return False
+        self.conn.execute(
+            "INSERT OR IGNORE INTO workspace_folders "
+            "(workspace_id, folder_id, is_root) VALUES (?, ?, 0)",
+            (workspace_id, folder_id),
+        )
+        log.info(
+            "Linked folder %s into workspace %s so preserved edits on "
+            "photo %s stay syncable after the archive merge",
+            folder_id, workspace_id, photo_id,
+        )
+        return True
+
     def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
         """Fold a staged folder subtree into an existing tracked archive.
 
@@ -5412,6 +5551,14 @@ class Database:
           intra-staged) are already found by the by-photo residual re-read
           scoped to the captured staged ids, so adding them here as well
           would report one edit as two.
+
+        Side effect worth knowing about: when a remapped pending edit is
+        owned by a workspace other than the active one, the survivor's
+        folder is linked (non-root) into that workspace so the edit stays
+        resolvable there. Without it the preserved row would be queued
+        against a photo that workspace cannot see, and every future sync
+        would fail it as inaccessible. See
+        ``_link_survivor_for_sibling_edits``.
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
@@ -5673,6 +5820,15 @@ class Database:
         # hit a FK violation when a not-yet-reparented staged child still points
         # at the staged parent we are removing.
         to_delete = []
+        # ``(workspace_id, survivor_photo_id)`` pairs for pending edits the
+        # collision loop remapped out of a workspace other than the one
+        # running the merge. Collected here and applied after every folder
+        # reparent has settled, because the link has to name the survivor's
+        # FINAL folder: an intra-staged or phantom survivor is still sitting
+        # in a staged folder when its remap happens and only lands in the
+        # archive folder later in the loop. A set, so two edits sharing a
+        # survivor write one link.
+        sibling_links = set()
         # Map of target-path -> folder id for folders already processed in this
         # run, so a child can fall back to its parent's id (Fix I2) even if the
         # parent's row isn't yet findable by path lookup.
@@ -6020,7 +6176,7 @@ class Database:
                                 survivor_off_staging = collision is not None
                             if survivor_id is not None:
                                 # A queued ``location`` change stores its
-                                # coordinates only in the staged photo's
+                                # coordinates only in the deleted photo's
                                 # ``photo_keywords`` link to a
                                 # ``type='location'`` keyword; the delete
                                 # below strips those links and
@@ -6029,58 +6185,12 @@ class Database:
                                 # location keyword (or none) the survivor
                                 # carries, silently writing the wrong GPS
                                 # -- or clearing it -- for the remapped
-                                # row. Move the staged photo's location
-                                # keyword links onto the survivor so the
-                                # queued edit's intent survives the delete.
-                                has_location_change = self.conn.execute(
-                                    "SELECT 1 FROM pending_changes "
-                                    "WHERE photo_id = ? "
-                                    "AND change_type = 'location' LIMIT 1",
-                                    (pid,),
-                                ).fetchone() is not None
-                                if has_location_change:
-                                    staged_location_kw_ids = [
-                                        r["keyword_id"] for r in
-                                        self.conn.execute(
-                                            "SELECT pk.keyword_id "
-                                            "FROM photo_keywords pk "
-                                            "JOIN keywords k "
-                                            "  ON k.id = pk.keyword_id "
-                                            "WHERE pk.photo_id = ? "
-                                            "  AND k.type = 'location'",
-                                            (pid,),
-                                        ).fetchall()
-                                    ]
-                                    # Replace survivor's existing location
-                                    # tag: the queued edit is the user's
-                                    # chosen assignment for this on-disk
-                                    # file, and the survivor's earlier
-                                    # location keyword predates that
-                                    # intent. An empty staged list encodes
-                                    # a "clear location" edit and drops
-                                    # the survivor's tag too.
-                                    self.conn.execute(
-                                        "DELETE FROM photo_keywords "
-                                        "WHERE photo_id = ? "
-                                        "AND keyword_id IN ("
-                                        "  SELECT id FROM keywords "
-                                        "  WHERE type = 'location')",
-                                        (survivor_id,),
-                                    )
-                                    for kw_id in staged_location_kw_ids:
-                                        # Route through tag_photo so the
-                                        # write carries the manual
-                                        # provenance stamp and folds
-                                        # against any survivor row via the
-                                        # shared upsert. A queued
-                                        # `location` change originates in
-                                        # set_photo_location (manual), so
-                                        # the intent moving with it is a
-                                        # user-authored assignment.
-                                        self.tag_photo(
-                                            survivor_id, kw_id,
-                                            _commit=False,
-                                        )
+                                # row. Move the location state across when
+                                # the staged row holds the newer queued
+                                # assignment; the helper leaves the
+                                # survivor's own tags alone when ITS
+                                # queued change is newer.
+                                self._move_location_state_for_merge(pid, survivor_id)
                                 # Capture the identities of the rows this
                                 # remap is about to move -- restricted to
                                 # the active workspace so sibling-workspace
@@ -6105,6 +6215,27 @@ class Database:
                                             (pid, ws),
                                         ).fetchall()
                                     ]
+                                # Sibling workspaces owning rows this remap
+                                # will move. Read before the UPDATE for the
+                                # same reason as above: afterwards these rows
+                                # are indistinguishable from the survivor's
+                                # own. Their folder link is deferred to the
+                                # end of the merge, where the survivor's
+                                # final ``folder_id`` is settled.
+                                sibling_ws_ids = [
+                                    r["workspace_id"] for r in
+                                    self.conn.execute(
+                                        "SELECT DISTINCT workspace_id "
+                                        "FROM pending_changes "
+                                        "WHERE photo_id = ? "
+                                        "  AND workspace_id IS NOT NULL "
+                                        "  AND workspace_id != ?",
+                                        (pid, ws),
+                                    ).fetchall()
+                                ]
+                                for sibling_ws in sibling_ws_ids:
+                                    sibling_links.add(
+                                        (sibling_ws, survivor_id))
                                 remap = self.conn.execute(
                                     "UPDATE pending_changes "
                                     "SET photo_id = ? WHERE photo_id = ?",
@@ -6172,68 +6303,34 @@ class Database:
                                 # remapped row. Move the phantom's
                                 # location keyword links onto the survivor
                                 # before the delete so the queued edit's
-                                # intent survives. Symmetric to the same
-                                # handling in the collision→staged branch
-                                # above.
-                                has_phantom_location_change = (
+                                # intent survives -- unless the survivor
+                                # holds a NEWER queued location change, the
+                                # replacement-import shape where a fresh
+                                # assignment on the staged row would be
+                                # reverted by the stale archive row's. The
+                                # helper resolves that by queue chronology,
+                                # identically in the collision→staged
+                                # branch above.
+                                self._move_location_state_for_merge(
+                                    collision["id"], pid)
+                                # Sibling workspaces owning phantom rows this
+                                # remap will move onto the staged survivor.
+                                # Read before the UPDATE; the link itself is
+                                # deferred to the end of the merge, after the
+                                # survivor has been reparented into the
+                                # archive folder.
+                                for sibling_ws in [
+                                    r["workspace_id"] for r in
                                     self.conn.execute(
-                                        "SELECT 1 FROM pending_changes "
+                                        "SELECT DISTINCT workspace_id "
+                                        "FROM pending_changes "
                                         "WHERE photo_id = ? "
-                                        "AND change_type = 'location' "
-                                        "LIMIT 1",
-                                        (collision["id"],),
-                                    ).fetchone() is not None
-                                )
-                                if has_phantom_location_change:
-                                    phantom_location_kw_ids = [
-                                        r["keyword_id"] for r in
-                                        self.conn.execute(
-                                            "SELECT pk.keyword_id "
-                                            "FROM photo_keywords pk "
-                                            "JOIN keywords k "
-                                            "  ON k.id = pk.keyword_id "
-                                            "WHERE pk.photo_id = ? "
-                                            "  AND k.type = 'location'",
-                                            (collision["id"],),
-                                        ).fetchall()
-                                    ]
-                                    # Replace the staged survivor's
-                                    # existing location tag: the queued
-                                    # edit on the phantom is the user's
-                                    # chosen assignment for the on-disk
-                                    # file that ``pid`` will represent,
-                                    # and the survivor's earlier location
-                                    # keyword predates that intent. An
-                                    # empty phantom list encodes a "clear
-                                    # location" edit and drops the
-                                    # survivor's tag too.
-                                    self.conn.execute(
-                                        "DELETE FROM photo_keywords "
-                                        "WHERE photo_id = ? "
-                                        "AND keyword_id IN ("
-                                        "  SELECT id FROM keywords "
-                                        "  WHERE type = 'location')",
-                                        (pid,),
-                                    )
-                                    for kw_id in phantom_location_kw_ids:
-                                        # Route through tag_photo (same
-                                        # reason as the collision→staged
-                                        # branch above): a raw INSERT
-                                        # would land with source = NULL,
-                                        # which retirement passes read
-                                        # as generated and delete, and
-                                        # would skip the shared
-                                        # provenance-fold contract every
-                                        # photo_keywords writer honors.
-                                        # A queued ``location`` change
-                                        # originates in set_photo_location
-                                        # -- a user-authored assignment --
-                                        # so KEYWORD_SOURCE_MANUAL is the
-                                        # right stamp for the intent
-                                        # riding along.
-                                        self.tag_photo(
-                                            pid, kw_id, _commit=False,
-                                        )
+                                        "  AND workspace_id IS NOT NULL "
+                                        "  AND workspace_id != ?",
+                                        (collision["id"], ws),
+                                    ).fetchall()
+                                ]:
+                                    sibling_links.add((sibling_ws, pid))
                                 remap = self.conn.execute(
                                     "UPDATE pending_changes "
                                     "SET photo_id = ? WHERE photo_id = ?",
@@ -6288,6 +6385,16 @@ class Database:
                     "DELETE FROM workspace_folders WHERE folder_id = ?",
                     (fid,))
                 self.conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
+
+            # Last, after every survivor's ``folder_id`` is final and the
+            # staged folder rows (and their workspace links) are gone: give
+            # each sibling workspace whose queued edits were remapped a way
+            # to resolve the survivor. Without it those rows stay queued and
+            # fail every future sync as inaccessible, with nothing reporting
+            # why.
+            for sibling_ws, survivor_photo_id in sorted(sibling_links):
+                self._link_survivor_for_sibling_edits(
+                    sibling_ws, survivor_photo_id)
 
             self.conn.commit()
             self._new_images_cache.invalidate_workspaces(self._db_path, [ws])

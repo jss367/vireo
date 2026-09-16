@@ -12826,6 +12826,355 @@ def test_merge_staged_tree_preserves_location_on_phantom_target(db, tmp_path):
     assert row["photo_id"] == new_pid
 
 
+def test_merge_staged_tree_keeps_newer_survivor_location_on_real_collision(
+        db, tmp_path):
+    """Whose location assignment survives the merge is decided by queue
+    chronology, not by which row the merge happens to delete. When the
+    archive survivor carries a location change queued AFTER the staged
+    row's, taking the staged row's tag would revert an assignment the user
+    made later -- and ``sync_to_xmp`` would then clear both queue rows as
+    successfully written, so nothing would ever say the newer one was
+    lost."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    older_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Denali', 'location', 63.069, -151.007) RETURNING id"
+    ).fetchone()["id"]
+    newer_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Yosemite', 'location', 37.865, -119.538) RETURNING id"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (dup_pid, older_kw))
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (survivor_pid, newer_kw))
+    # The staged row's assignment is the OLDER of the two.
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) "
+        "VALUES (?, 'location', 'Denali', 'tok-old', "
+        "'2026-01-01 00:00:00', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) "
+        "VALUES (?, 'location', 'Yosemite', 'tok-new', "
+        "'2026-01-02 00:00:00', ?)",
+        (survivor_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    linked = [
+        r["keyword_id"] for r in db.conn.execute(
+            "SELECT pk.keyword_id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (survivor_pid,)).fetchall()
+    ]
+    assert linked == [newer_kw]
+    # Both queue rows survive and now share the survivor; the sidecar they
+    # write carries the newer assignment.
+    rows = {
+        r["change_token"]: r["photo_id"] for r in db.conn.execute(
+            "SELECT change_token, photo_id FROM pending_changes "
+            "WHERE change_type = 'location'").fetchall()
+    }
+    assert rows == {"tok-old": survivor_pid, "tok-new": survivor_pid}
+
+
+def test_merge_staged_tree_keeps_newer_survivor_location_on_phantom_target(
+        db, tmp_path):
+    """Same chronology rule on the phantom branch. A replacement import
+    brings a fresh location assignment on the staged row while a stale
+    archive row still holds an older queued one; deleting the phantom must
+    not drag its older assignment onto the row that will represent the
+    file."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"fresh-staged-bytes")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=100, file_mtime=1.0, file_hash="STALEHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=200, file_mtime=2.0, file_hash="NEWHASH",
+    )
+    older_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Denali', 'location', 63.069, -151.007) RETURNING id"
+    ).fetchone()["id"]
+    newer_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Yosemite', 'location', 37.865, -119.538) RETURNING id"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (phantom_pid, older_kw))
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (new_pid, newer_kw))
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) "
+        "VALUES (?, 'location', 'Denali', 'tok-phantom-old', "
+        "'2026-01-01 00:00:00', ?)",
+        (phantom_pid, ws),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) "
+        "VALUES (?, 'location', 'Yosemite', 'tok-staged-new', "
+        "'2026-01-02 00:00:00', ?)",
+        (new_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    linked = [
+        r["keyword_id"] for r in db.conn.execute(
+            "SELECT pk.keyword_id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (new_pid,)).fetchall()
+    ]
+    assert linked == [newer_kw]
+
+
+def test_merge_staged_tree_location_same_second_prefers_later_queue_row(
+        db, tmp_path):
+    """``created_at`` has one-second resolution, so two assignments made in
+    the same second tie on time. The tiebreak is insertion order (the
+    ``pending_changes`` rowid), not "the row being deleted wins" -- without
+    it a same-second pair would silently fall back to the old arbitrary
+    rule."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    survivor_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Denali', 'location', 63.069, -151.007) RETURNING id"
+    ).fetchone()["id"]
+    staged_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Yosemite', 'location', 37.865, -119.538) RETURNING id"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (dup_pid, staged_kw))
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (survivor_pid, survivor_kw))
+    # Same timestamp; the SURVIVOR's change is queued second, so it is the
+    # later intent even though the staged row is the one being deleted.
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) "
+        "VALUES (?, 'location', 'Yosemite', 'tok-first', "
+        "'2026-01-01 00:00:00', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) "
+        "VALUES (?, 'location', 'Denali', 'tok-second', "
+        "'2026-01-01 00:00:00', ?)",
+        (survivor_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    linked = [
+        r["keyword_id"] for r in db.conn.execute(
+            "SELECT pk.keyword_id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (survivor_pid,)).fetchall()
+    ]
+    assert linked == [survivor_kw]
+
+
+def test_merge_staged_tree_links_survivor_into_sibling_workspace(
+        db, tmp_path):
+    """The remap moves pending rows by ``photo_id`` alone, so it also moves
+    rows owned by a workspace other than the one running the merge. That
+    workspace never linked the archive folder, and
+    ``sync._resolve_xmp_paths`` builds its map from ``get_folder_tree`` --
+    so without a link the preserved row would stay queued and fail every
+    future sync as inaccessible, with nothing saying why. Link the
+    survivor's folder into the owning workspace instead."""
+    ws = db._active_workspace_id
+    sibling_ws = db.create_workspace("Sibling")
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.set_active_workspace(ws)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '4', 'tok-sibling', ?)",
+        (dup_pid, sibling_ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    row = db.conn.execute(
+        "SELECT photo_id FROM pending_changes "
+        "WHERE change_token = 'tok-sibling'").fetchone()
+    assert row is not None and row["photo_id"] == survivor_pid
+    # The sibling workspace can now resolve the survivor: its folder is in
+    # that workspace's tree, which is the map ``_resolve_xmp_paths`` uses.
+    db.set_active_workspace(sibling_ws)
+    try:
+        assert date_id in {f["id"] for f in db.get_folder_tree()}
+    finally:
+        db.set_active_workspace(ws)
+    # Linked non-root: the sibling gains the one folder its edit needs, not
+    # a second workspace root over the whole archive.
+    link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id = ? AND folder_id = ?",
+        (sibling_ws, date_id)).fetchone()
+    assert link is not None and link["is_root"] == 0
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM workspace_folders "
+        "WHERE workspace_id = ? AND folder_id = ?",
+        (sibling_ws, base_id)).fetchone()["n"] == 0
+
+
+def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
+        db, tmp_path):
+    """Phantom-branch counterpart: here the survivor is the staged row,
+    which only lands in the archive folder later in the merge, so the link
+    has to name its final folder rather than the staged one it occupied
+    when its edits were remapped."""
+    ws = db._active_workspace_id
+    sibling_ws = db.create_workspace("Sibling")
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"fresh-staged-bytes")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=100, file_mtime=1.0, file_hash="STALEHASH",
+    )
+    db.set_active_workspace(ws)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=200, file_mtime=2.0, file_hash="NEWHASH",
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '4', 'tok-sibling-phantom', ?)",
+        (phantom_pid, sibling_ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    row = db.conn.execute(
+        "SELECT photo_id FROM pending_changes "
+        "WHERE change_token = 'tok-sibling-phantom'").fetchone()
+    assert row is not None and row["photo_id"] == new_pid
+    survivor_folder = db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?",
+        (new_pid,)).fetchone()["folder_id"]
+    assert survivor_folder == date_id
+    db.set_active_workspace(sibling_ws)
+    try:
+        assert survivor_folder in {f["id"] for f in db.get_folder_tree()}
+    finally:
+        db.set_active_workspace(ws)
+
+
 def test_merge_staged_tree_off_staging_identities_skip_sibling_workspace(
         db, tmp_path):
     """The off-staging remap count moved through to the caller for
