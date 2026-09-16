@@ -53,6 +53,7 @@ GET          /api/embedding-matrix
 GET          /api/exiftool/status
 GET          /api/export/presets
 GET          /api/filters/fields
+GET          /api/filters/shortcuts
 GET          /api/filters/values
 GET          /api/folders
 GET          /api/folders/<int:folder_id>

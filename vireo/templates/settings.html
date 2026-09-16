@@ -1970,7 +1970,6 @@ function renderFilterShortcuts() {
     desc.style.cssText = 'flex:1;min-width:0;font-size:12px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     var peers = shortcutGroupPeers(entry);
     desc.textContent = describeShortcutRules(entry.rules);
-    desc.title = desc.textContent;
     if (peers.length) {
       var tag = document.createElement('span');
       tag.style.cssText = 'color:var(--text-faint);';
@@ -1979,6 +1978,8 @@ function renderFilterShortcuts() {
       }).join(', ');
       desc.appendChild(tag);
     }
+    // The row truncates; the tooltip carries the whole sentence.
+    desc.title = desc.textContent;
     row.appendChild(desc);
 
     [['↑', -1, 'Move up'], ['↓', 1, 'Move down']].forEach(function(spec) {
