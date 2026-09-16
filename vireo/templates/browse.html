@@ -372,6 +372,8 @@ body.sidebar-resizing {
 .grid-container {
   flex: 1;
   overflow-y: auto;
+  /* Browse explicitly preserves position when refreshing or prepending. */
+  overflow-anchor: none;
   padding: 16px 20px;
 }
 .grid {
@@ -6708,7 +6710,168 @@ function observeBrowseWindow(epoch) {
   return function() { return loadEpoch === claimedEpoch; };
 }
 
+async function refreshBrowseWindowInPlace() {
+  var windowIsCurrent = claimBrowseWindow();
+  selectAllRequestSeq++;
+  loading = true;
+  var firstPage = earliestPage;
+  var endPage = Math.max(firstPage, currentPage - 1);
+  var nextPhotos = [];
+  var data;
+  var page = firstPage;
+  var succeeded = false;
+  try {
+    // Stage only the window already loaded, including focused windows that
+    // start deep in a library. Do not expose partially refreshed pages.
+    while (page <= endPage) {
+      var request = buildBrowsePageRequest(page, perPage);
+      data = await safeFetch(request.url, request.options);
+      if (!windowIsCurrent()) return null;
+      if (data.total === 0) {
+        firstPage = 1;
+        page = 1;
+        nextPhotos = [];
+        break;
+      }
+      // A batch removal may have eliminated the entire focused window.
+      // Fetch the new last page instead of leaving a nonempty library blank.
+      if (page === firstPage && page > 1 && !data.photos.length && data.total > 0) {
+        firstPage = Math.max(1, Math.ceil(data.total / perPage));
+        page = firstPage;
+        endPage = firstPage;
+        continue;
+      }
+      nextPhotos = nextPhotos.concat(data.photos);
+      page++;
+      if ((page - 1) * perPage >= data.total || !data.photos.length) break;
+    }
+
+    // Keep expanded stacks open when their surviving members still form a
+    // stack, even if its cover changed. Hydrate them before the atomic paint
+    // so a loading tray cannot temporarily shrink the grid under the user.
+    function expandedMemberIds() {
+      var ids = new Set();
+      photos.forEach(function(photo) {
+        if (expandedBrowseStacks.has(photo.id) && photo.browse_stack) {
+          photo.browse_stack.photo_ids.forEach(function(id) { ids.add(id); });
+        }
+      });
+      return ids;
+    }
+    var nextMembers = {};
+    while (true) {
+      // Recheck after each request so opening another stack while waiting
+      // doesn't cause that newly opened tray to collapse on commit.
+      var expandedIds = expandedMemberIds();
+      var photo = nextPhotos.find(function(candidate) {
+        return candidate.browse_stack && !nextMembers[candidate.id]
+          && candidate.browse_stack.photo_ids.some(function(id) { return expandedIds.has(id); });
+      });
+      if (!photo) break;
+      var memberIds = photo.browse_stack.photo_ids;
+      var members = [];
+      for (var offset = 0; offset < memberIds.length; offset += 500) {
+        var memberData = await safeFetch('/api/photos/by-ids', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: memberIds.slice(offset, offset + 500)}),
+        });
+        if (!windowIsCurrent()) return null;
+        members = members.concat(memberData.photos || []);
+      }
+      nextMembers[photo.id] = members.map(function(member) {
+        return member.id === photo.id ? photo : member;
+      });
+    }
+
+    // Capture position and selection at commit time: scrolling or clicking
+    // during the request must not be undone by its eventual response.
+    var container = document.getElementById('gridContainer');
+    var scrollTop = container.scrollTop;
+    var stillExpandedIds = expandedMemberIds();
+    expandedBrowseStacks.clear();
+    nextPhotos.forEach(function(photo) {
+      if (photo.similarity != null) photo._similarity = photo.similarity;
+      if (nextMembers[photo.id] && photo.browse_stack.photo_ids.some(function(id) {
+        return stillExpandedIds.has(id);
+      })) expandedBrowseStacks.add(photo.id);
+    });
+    browseStackMembers = nextMembers;
+    browseStackErrors = {};
+    browseStackHydrationRequests = {};
+    browseStackExpansionRequests = {};
+    browseStackCoverRecheck.clear();
+    // The lightbox shares this array; retain its identity across the refresh.
+    photos.length = 0;
+    nextPhotos.forEach(function(photo) { photos.push(photo); });
+    earliestPage = firstPage;
+    currentPage = page;
+    setBrowseTotals(data);
+    allLoaded = loadedWindowOffset() + photos.length >= totalPhotos;
+    syncBrowseAvailableLightboxPhotos();
+
+    var availableIds = new Set();
+    photos.forEach(function(photo) {
+      if (!browsePhotoIsAvailable(photo)) return;
+      availableIds.add(photo.id);
+      if (photo.browse_stack) photo.browse_stack.photo_ids.forEach(function(id) {
+        availableIds.add(id);
+      });
+    });
+    selectedPhotos.forEach(function(id) {
+      if (!availableIds.has(id)) selectedPhotos.delete(id);
+    });
+    if (selectedPhotoId != null && !availableIds.has(selectedPhotoId)) closeDetail();
+    var selectedCover = loadedBrowseStackCoverForPhoto(selectedPhotoId);
+    selectedIndex = photos.findIndex(function(photo) {
+      return photo.id === selectedPhotoId || (selectedCover && photo.id === selectedCover.id);
+    });
+    if (selectedPhotoId == null && selectedPhotos.size === 0) hideDetailPanel();
+
+    renderGrid({ preserveThumbnails: true });
+    updateGridTail();
+    updatePreviousPhotosButton();
+    updateOfflineCollectionState(data);
+    if (window.VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(totalUnderlyingPhotos);
+    if (window.VireoFilter && VireoFilter.setVisualInfo) VireoFilter.setVisualInfo(data.visual || null);
+    updateFilterSummary();
+    updateBatchBar();
+    _refreshBatchInspectorIfActive();
+    refreshBrowseLightboxCounter();
+    // Setting this synchronously prevents an intermediate frame at the top.
+    // The browser only clamps it when the remaining results are too short.
+    container.scrollTop = scrollTop;
+    updateScrollPosition();
+    var refreshIds = photos.map(function(photo) { return photo.id; });
+    loadInatStatus(refreshIds).then(function() {
+      if (windowIsCurrent()) refreshGridCards(refreshIds);
+    });
+    fetchColorLabels(refreshIds).then(function() {
+      if (windowIsCurrent()) refreshGridCards(refreshIds);
+    });
+    succeeded = true;
+    return true;
+  } catch (e) {
+    // safeFetch reports the error. Leave the existing grid and selection
+    // usable rather than replacing them with a partial response.
+    return windowIsCurrent() ? false : null;
+  } finally {
+    if (windowIsCurrent()) {
+      loading = false;
+      if (succeeded) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
+}
+
 async function resetAndLoad(options) {
+  // Membership edits keep the current window on screen until its replacement
+  // is complete. A reset followed by anchor restoration still paints page 1
+  // while the remaining pages load, even if the final position is correct.
+  if (options && options.preserveScroll && photos.length && browseDatasetReady) {
+    return refreshBrowseWindowInPlace();
+  }
   var preserveAnchor = !!(options && options.preserveAnchor);
   // Callers that need the current collection scope to survive a reset
   // (folder-health refresh) pass ``preserveCollection: true``. Without it
@@ -7679,10 +7842,25 @@ function batchSubmitInat() {
 }
 
 /* ---------- Grid Rendering ---------- */
-function renderGrid() {
+function renderGrid(options) {
   var grid = document.getElementById('grid');
   var empty = document.getElementById('emptyState');
   var welcome = document.getElementById('welcomeState');
+  var thumbnails = new Map();
+  var trayScroll = new Map();
+  function thumbnailKey(img) {
+    var card = img.closest('.grid-card, .browse-stack-member');
+    return card && (card.classList.contains('grid-card') ? 'cover:' : 'member:') + card.dataset.id;
+  }
+  if (options && options.preserveThumbnails) {
+    grid.querySelectorAll('img[data-thumbnail-src]').forEach(function(img) {
+      thumbnails.set(thumbnailKey(img), img);
+    });
+    grid.querySelectorAll('.browse-stack-tray').forEach(function(tray) {
+      var members = tray.querySelector('.browse-stack-members');
+      if (members) trayScroll.set(tray.dataset.stackCoverId, members.scrollLeft);
+    });
+  }
 
   if (photos.length === 0) {
     grid.innerHTML = '';
@@ -7707,6 +7885,20 @@ function renderGrid() {
   updateGridTail();
   refreshColorLabelControlsIn(grid);
   restoreExpandedBrowseStacks();
+  if (thumbnails.size) {
+    grid.querySelectorAll('img[data-thumbnail-src]').forEach(function(img) {
+      var previous = thumbnails.get(thumbnailKey(img));
+      if (previous && previous.dataset.thumbnailSrc === img.dataset.thumbnailSrc) {
+        img.replaceWith(previous);
+      }
+    });
+    grid.querySelectorAll('.browse-stack-tray').forEach(function(tray) {
+      var members = tray.querySelector('.browse-stack-members');
+      if (members && trayScroll.has(tray.dataset.stackCoverId)) {
+        members.scrollLeft = trayScroll.get(tray.dataset.stackCoverId);
+      }
+    });
+  }
 }
 
 /* ---------- Grid dblclick delegation (XSS-safe) ---------- */
@@ -8053,6 +8245,7 @@ function focusedCardBox() {
 }
 
 var gridViewportSize = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
+var gridSyncBannerHeight = document.getElementById('syncBanner').offsetHeight;
 var focusedCardWasOnScreen = false;
 
 // Whether the focused card was on screen *before* the reflow. A ResizeObserver
@@ -8087,11 +8280,22 @@ if (window.ResizeObserver) {
   // in the same frame as the reflow — the card never visibly jumps away.
   new ResizeObserver(function() {
     var size = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
+    var bannerHeight = document.getElementById('syncBanner').offsetHeight;
+    var previousSize = gridViewportSize.split('x').map(Number);
+    // Saving the first edit reveals the sync banner. That reduces the
+    // viewport height, but must not recenter a partly visible selected photo
+    // while its filter membership is being refreshed. Actual window/sidebar
+    // resizes still keep the focused photo visible as before.
+    var onlySyncBannerChanged = bannerHeight !== gridSyncBannerHeight
+      && gridContainer.clientWidth === previousSize[0]
+      && Math.abs(gridContainer.clientHeight + bannerHeight
+        - previousSize[1] - gridSyncBannerHeight) <= 1;
+    gridSyncBannerHeight = bannerHeight;
     // A scrollbar appearing counts (it reflows the columns); anything that
     // leaves the viewport box alone cannot have moved the card out of view.
     if (size === gridViewportSize) return;
     gridViewportSize = size;
-    keepFocusedCardVisible();
+    if (!onlySyncBannerChanged) keepFocusedCardVisible();
     noteFocusedCardVisibility();
   }).observe(gridContainer);
 
