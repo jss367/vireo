@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 _SYNC_MAX_WORKERS = 8
 
 
-def _resolve_xmp_paths(db, photo_ids):
+def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
     """Map photo ids to sidecar paths with two queries instead of 2N.
 
     Resolving one photo at a time ran the recursive folder-tree CTE and a
@@ -32,8 +32,18 @@ def _resolve_xmp_paths(db, photo_ids):
     active workspace keeps the historical behaviour of resolving against an
     empty folder path, so it fails the accessibility check rather than
     silently writing somewhere else.
+
+    ``folder_paths`` overrides the workspace-scoped folder map. The
+    pre-transfer sync for a pending NAS archive passes one built from every
+    catalog folder because the staging tree may have been unlinked from its
+    owning workspace -- the transfer is defined by a path on disk, not by
+    workspace membership -- and the ordinary map would resolve it to an empty
+    directory and then fail "folder not accessible".
     """
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    if folder_paths is not None:
+        folders = folder_paths
+    else:
+        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     paths = {}
     for photo_id, (folder_id, filename) in db.get_photo_filenames(photo_ids).items():
         base = os.path.splitext(filename)[0]
@@ -210,7 +220,7 @@ def _remove_planned_keywords(editor, plan):
         )
 
 
-def _write_photo_sync(xmp_path, plan, assigned_location=None):
+def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sidecars=False):
     """Apply a ``_PhotoSyncPlan`` to the photo's sidecar, in dependency order.
 
     Every mutation lands in one ``SidecarEditor``, so the sidecar is parsed
@@ -221,6 +231,10 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None):
     ``assigned_location`` is passed in rather than looked up here because the
     writers run on a pool thread and the SQLite connection belongs to the
     caller's thread.
+
+    ``create_missing_sidecars`` only affects a rating-only photo, the one
+    mutation that otherwise declines to create a sidecar; see
+    ``SidecarEditor.set_rating``.
     """
     editor = SidecarEditor(xmp_path)
     _remove_planned_keywords(editor, plan)
@@ -258,7 +272,7 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None):
     # selected keyword, flag, location, or edit write should make the
     # same-photo rating persist rather than silently clear it.
     if plan.rating is not None:
-        editor.set_rating(plan.rating)
+        editor.set_rating(plan.rating, create=create_missing_sidecars)
 
     # One publish for the whole photo. Nothing is written when no mutation
     # changed anything -- re-syncing an already-correct sidecar costs a read.
@@ -323,7 +337,8 @@ def _sync_result(synced, failures):
     }
 
 
-def sync_to_xmp(db, progress_callback=None, change_ids=None):
+def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
+                folder_paths=None, require_workspace_membership=True):
     """Write pending changes to XMP sidecars.
 
     Args:
@@ -331,6 +346,29 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
         progress_callback: optional callable(current, total)
         change_ids: optional pending_changes ids to sync. When provided, any
             other queued changes are left pending.
+        create_missing_sidecars: write a sidecar for a rating-only photo
+            instead of skipping it. Off for the ordinary sync job, which
+            would otherwise litter a sidecar beside every rated photo and
+            can retry later anyway. On for the sync that runs before a NAS
+            transfer, where "later" does not exist: the transfer deletes the
+            local originals, and a cleared-but-unwritten rating is gone.
+        folder_paths: optional ``{folder_id: path}`` map used to resolve
+            sidecar paths in place of the active workspace's folder tree.
+            The pre-transfer sync for a pending NAS archive passes one
+            covering every catalog folder because the staging tree may have
+            been unlinked from its owning workspace -- membership is not
+            what defines the transfer, the path is -- and the workspace-
+            scoped map would otherwise fail every photo as "folder not
+            accessible".
+        require_workspace_membership: gate the assigned-location lookup on
+            the photo being visible in the active workspace. Off for the
+            pre-transfer sync of a pending NAS archive: the same
+            unlinked-staging shape that ``folder_paths`` covers for path
+            resolution also breaks ``get_assigned_photo_location``, whose
+            default verification would refuse an unlinked photo and fail
+            every queued ``location`` change with "photo not in workspace"
+            -- another way "Sync metadata and send to NAS" would silently
+            miss a supported change on files it can otherwise reach.
 
     Returns:
         dict with synced, failed, failures counts
@@ -351,7 +389,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
     # Everything that needs the database happens here, on the caller's
     # thread: the sidecar writers below run on a pool and must not touch the
     # connection.
-    xmp_paths = _resolve_xmp_paths(db, list(by_photo))
+    xmp_paths = _resolve_xmp_paths(db, list(by_photo), folder_paths=folder_paths)
     prepare_failures = {}
     plans = {}
     folder_accessible = {}
@@ -408,7 +446,10 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
             if not plan.sync_location:
                 continue
             try:
-                locations[photo_id] = db.get_assigned_photo_location(photo_id)
+                locations[photo_id] = db.get_assigned_photo_location(
+                    photo_id,
+                    verify_workspace=require_workspace_membership,
+                )
             except Exception as e:
                 # Historically this lookup ran inside the per-photo try, so a
                 # photo the workspace can no longer see failed alone rather
@@ -486,6 +527,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                 with lock_for(xmp_path):
                     _write_photo_sync(
                         xmp_path, plans[photo_id], locations.get(photo_id),
+                        create_missing_sidecars=create_missing_sidecars,
                     )
             except Exception as e:  # recorded per photo, as before
                 outcomes[photo_id] = e

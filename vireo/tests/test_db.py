@@ -677,6 +677,183 @@ def test_pending_changes_queue(tmp_path):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
+    """After tracked-merge reparents a staged photo, its edits still count.
+
+    ``send_pending_archive`` takes the tracked-merge path when the NAS
+    destination is already represented in the catalog, and that reparents
+    each staged photo onto the existing destination folder id. A folder-id
+    scoped re-read would then miss any edit the user queued during the
+    copy, so the completed job would falsely claim no metadata missed the
+    transfer. Photo ids survive the reparent -- ``staged_sync_scope_by_photos``
+    is called with the ids captured before the move so the count is honest.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    staging = db.add_folder('/staging/trip', name='trip')
+    destination = db.add_folder('/nas/trip', name='trip')
+    pid = db.add_photo(
+        folder_id=staging, filename='bird.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+
+    # Snapshot the photo id here -- this is what the send handler captures
+    # before invoking send_pending_archive.
+    staged_photo_ids = [pid]
+
+    # Simulate the tracked-merge reparent that move_folder performs on a
+    # merge into an existing destination folder.
+    db.conn.execute(
+        "UPDATE photos SET folder_id = ? WHERE id = ?", (destination, pid),
+    )
+    db.conn.commit()
+    # An edit queued during the copy still needs to be reported: it will
+    # now be over the NAS connection.
+    db.queue_change(pid, "keyword_add", "Osprey")
+
+    # A folder-id scan of the ORIGINAL staging folder now misses the edit
+    # entirely -- this is the bug the photo-id variant fixes.
+    folder_scoped, _here, _else, _overlap = db.staged_sync_scope([staging])
+    assert folder_scoped == []
+
+    changes, here, elsewhere, overlap = db.staged_sync_scope_by_photos(
+        staged_photo_ids,
+    )
+    assert len(changes) == 1
+    assert changes[0][2] == pid
+    assert here == 1 and elsewhere == 0 and overlap == 0
+
+
+def test_staged_sync_scope_by_photos_separates_sibling_workspaces(tmp_path):
+    """Same shape as staged_sync_scope: here/elsewhere/overlap counts match."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    ws2 = db.create_workspace('sibling')
+    db.set_active_workspace(ws1)
+    fid = db.add_folder('/photos', name='photos')
+    shared = db.add_photo(
+        folder_id=fid, filename='a.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    other_only = db.add_photo(
+        folder_id=fid, filename='b.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    db.queue_change(shared, "keyword_add", "Osprey")
+    db.queue_change(shared, "keyword_add", "Kestrel", workspace_id=ws2)
+    db.queue_change(other_only, "keyword_add", "Egret", workspace_id=ws2)
+
+    changes, here, elsewhere, overlap = db.staged_sync_scope_by_photos(
+        [shared, other_only],
+    )
+    active_photos = {row[2] for row in changes}
+    assert active_photos == {shared}
+    assert here == 1
+    assert elsewhere == 1
+    assert overlap == 1
+
+
+def test_staged_sync_scope_by_photos_empty_input_is_a_no_op(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    assert db.staged_sync_scope_by_photos([]) == ([], 0, 0, 0)
+
+
+def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
+    """A replacement queued during a sync must not be dropped without a write.
+
+    The edit route deletes the queued pending row and immediately re-inserts
+    inside one transaction; SQLite reissues the freshly-freed rowid to the
+    new row, so a clear-by-id would delete the replacement -- for a
+    pre-transfer sync, the stale sidecar would then travel to the NAS and
+    the local original be removed. Passing the change's token as
+    ``expected_tokens`` conditions the DELETE on both id and token, so the
+    replacement survives and the next drain writes it.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(
+        folder_id=fid, filename='a.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+
+    original_token = db.queue_change(pid, 'keyword_add', 'Osprey')
+    (original_row,) = db.get_pending_changes()
+    original_id = original_row['id']
+    assert original_row['change_token'] == original_token
+
+    # Stand in for the edit route rewriting the queue while sync is running:
+    # delete-and-reinsert in one transaction reuses ``original_id`` for the
+    # new row on SQLite. Verify that first so the test asserts the actual
+    # bug shape, not a hypothetical one.
+    db.conn.execute(
+        "DELETE FROM pending_changes WHERE id = ?", (original_id,),
+    )
+    replacement_token = db.queue_change(pid, 'keyword_add', 'Kestrel')
+    (replacement_row,) = db.get_pending_changes()
+    assert replacement_row['id'] == original_id, (
+        "test premise: SQLite must reissue the rowid to the replacement"
+    )
+    assert replacement_row['change_token'] == replacement_token
+    assert replacement_token != original_token
+
+    # The sync captured (id, token) for the original -- clearing by both
+    # leaves the replacement in place.
+    db.clear_pending([original_id], expected_tokens=[original_token])
+    remaining = db.get_pending_changes()
+    assert len(remaining) == 1
+    assert remaining[0]['change_token'] == replacement_token
+    assert remaining[0]['value'] == 'Kestrel'
+
+    # Clearing with the replacement's own token drops it as expected.
+    db.clear_pending([original_id], expected_tokens=[replacement_token])
+    assert db.get_pending_changes() == []
+
+
+def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
+    """Rows predating change_token (nullable, no backfill) keep their exposure.
+
+    The pre-transfer sync passes ``None`` in ``expected_tokens`` for such
+    rows, and the delete falls back to id-conditioned clearing scoped to
+    null-token rows so the historical behaviour is preserved. A separate
+    tokened row must not be swept along with it.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(
+        folder_id=fid, filename='a.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', 'Legacy', NULL, ?)",
+        (pid, ws_id),
+    )
+    db.conn.commit()
+    (legacy,) = db.get_pending_changes()
+    tokened_token = db.queue_change(pid, 'keyword_add', 'Fresh')
+    tokened_id = next(
+        row['id'] for row in db.get_pending_changes()
+        if row['change_token'] == tokened_token
+    )
+
+    db.clear_pending([legacy['id']], expected_tokens=[None])
+
+    remaining = db.get_pending_changes()
+    assert [row['id'] for row in remaining] == [tokened_id]
+    assert remaining[0]['change_token'] == tokened_token
+
+
 def test_clear_pending_chunks_large_change_sets(tmp_path):
     """Clearing a large sync batch stays below SQLite's bind limit."""
     from db import _SQLITE_PARAM_CHUNK_SIZE, Database
@@ -964,20 +1141,20 @@ def test_collection_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path)
     burst_cover = db.add_photo(
         folder_id=fid, filename='burst-b.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
-        timestamp='2024-01-02T00:00:00',
+        timestamp='2024-01-01T00:00:01',
     )
     single_later = db.add_photo(
         folder_id=fid, filename='zebra.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
         timestamp='2024-06-01T00:00:00',
     )
+    # One second apart, so the pair is a burst; ``zebra.jpg`` months later
+    # stands alone.
     db.conn.execute(
-        "UPDATE photos SET burst_id='burst-1', quality_score=0.1 WHERE id=?",
-        (burst_soft,),
+        "UPDATE photos SET quality_score=0.1 WHERE id=?", (burst_soft,),
     )
     db.conn.execute(
-        "UPDATE photos SET burst_id='burst-1', quality_score=0.95 WHERE id=?",
-        (burst_cover,),
+        "UPDATE photos SET quality_score=0.95 WHERE id=?", (burst_cover,),
     )
     db.conn.commit()
 
@@ -1035,20 +1212,20 @@ def test_query_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path):
     burst_cover = db.add_photo(
         folder_id=fid, filename='burst-b.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
-        timestamp='2024-01-02T00:00:00',
+        timestamp='2024-01-01T00:00:01',
     )
     single_later = db.add_photo(
         folder_id=fid, filename='zebra.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
         timestamp='2024-06-01T00:00:00',
     )
+    # One second apart, so the pair is a burst; ``zebra.jpg`` months later
+    # stands alone.
     db.conn.execute(
-        "UPDATE photos SET burst_id='burst-1', quality_score=0.1 WHERE id=?",
-        (burst_soft,),
+        "UPDATE photos SET quality_score=0.1 WHERE id=?", (burst_soft,),
     )
     db.conn.execute(
-        "UPDATE photos SET burst_id='burst-1', quality_score=0.95 WHERE id=?",
-        (burst_cover,),
+        "UPDATE photos SET quality_score=0.95 WHERE id=?", (burst_cover,),
     )
     db.conn.commit()
 
@@ -1172,12 +1349,16 @@ def test_query_browse_stack_position_agrees_with_the_stacked_grid(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     ids = _seed_position_photos(db, fid)
     hidden, cover = ids[3], ids[4]
+    # Browse stacks on capture-time proximity within a folder; these two are
+    # seeded a day apart like the rest, so pull them together.
     db.conn.execute(
-        "UPDATE photos SET burst_id='b1', quality_score=0.01 WHERE id=?",
+        "UPDATE photos SET timestamp='2024-02-01T12:00:00', quality_score=0.01"
+        " WHERE id=?",
         (hidden,),
     )
     db.conn.execute(
-        "UPDATE photos SET burst_id='b1', quality_score=0.99 WHERE id=?",
+        "UPDATE photos SET timestamp='2024-02-01T12:00:01', quality_score=0.99"
+        " WHERE id=?",
         (cover,),
     )
     db.conn.commit()
@@ -25726,18 +25907,24 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
             file_size=100, file_mtime=1.0,
         )
 
+    # Three consecutive frames: the first two are byte-identical, so the
+    # duplicate stack claims them and the third is left to stand alone
+    # rather than becoming a one-photo burst.
+    for name, when in (
+        ("duplicate-a.jpg", "2024-01-01T09:00:00"),
+        ("duplicate-best.jpg", "2024-01-01T09:00:01"),
+        ("overlap-single.jpg", "2024-01-01T09:00:02"),
+        # A separate burst an hour later, then a lone frame after that.
+        ("burst-a.jpg", "2024-01-01T10:00:00"),
+        ("burst-best.jpg", "2024-01-01T10:00:01"),
+        ("single.jpg", "2024-01-01T11:00:00"),
+    ):
+        db.conn.execute(
+            "UPDATE photos SET timestamp = ? WHERE id = ?", (when, ids[name]),
+        )
     db.conn.execute(
-        "UPDATE photos SET file_hash = 'same-bytes', burst_id = 'overlap' "
-        "WHERE id IN (?, ?)",
+        "UPDATE photos SET file_hash = 'same-bytes' WHERE id IN (?, ?)",
         (ids["duplicate-a.jpg"], ids["duplicate-best.jpg"]),
-    )
-    db.conn.execute(
-        "UPDATE photos SET burst_id = 'overlap' WHERE id = ?",
-        (ids["overlap-single.jpg"],),
-    )
-    db.conn.execute(
-        "UPDATE photos SET burst_id = 'burst-2' WHERE id IN (?, ?)",
-        (ids["burst-a.jpg"], ids["burst-best.jpg"]),
     )
     db.conn.execute(
         "UPDATE photos SET quality_score = 0.95 WHERE id IN (?, ?)",
@@ -25759,8 +25946,9 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
     assert set(map(int, grouped["burst"]["_browse_stack_member_ids"].split(","))) == {
         ids["burst-a.jpg"], ids["burst-best.jpg"],
     }
-    # The duplicate group claims its members first, so a third photo sharing
-    # one member's burst does not become a one-photo pseudo-stack.
+    # The duplicate group claims its members first, so the third frame of
+    # that run is the only burst candidate left and does not become a
+    # one-photo pseudo-stack.
     overlap = next(row for row in rows if row["id"] == ids["overlap-single.jpg"])
     assert overlap["_browse_stack_kind"] is None
 
@@ -25775,6 +25963,282 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
     assert filtered[0]["_browse_stack_kind"] is None
 
 
+def _timed_photo(db, folder_id, filename, timestamp, *keyword_ids):
+    """Add a photo with a capture time and optional keyword links."""
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename=filename, extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp = ? WHERE id = ?", (timestamp, photo_id),
+    )
+    for keyword_id in keyword_ids:
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
+            "VALUES (?, ?, 'manual')",
+            (photo_id, keyword_id),
+        )
+    return photo_id
+
+
+def _stack_shape(db, stack_config=None, sort="name"):
+    """Return ``[(kind, sorted_member_ids), ...]`` for the stacked grid."""
+    shape = []
+    for row in db.query_browse_stacks([], sort=sort, stack_config=stack_config):
+        raw = row["_browse_stack_member_ids"]
+        members = sorted(int(part) for part in str(raw).split(",") if part)
+        shape.append((row["_browse_stack_kind"], members))
+    return shape
+
+
+def test_browse_stacks_group_consecutive_frames_within_the_time_gap(tmp_path):
+    """A burst is a run of frames no further apart than the configured gap."""
+    db, fid = _filter_db(tmp_path)
+    a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00")
+    b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01")
+    c = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:03")
+    lone = _timed_photo(db, fid, "d.jpg", "2024-01-01T10:00:00")
+    db.conn.commit()
+
+    assert _stack_shape(db) == [("burst", [a, b, c]), (None, [lone])]
+    assert db.count_browse_stacks([]) == 2
+
+
+def test_browse_stacks_respect_the_configured_time_gap(tmp_path):
+    """The gap is a setting, not a constant — both directions must bite."""
+    db, fid = _filter_db(tmp_path)
+    a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00")
+    b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:02")
+    db.conn.commit()
+
+    tight = {"browse_stack_time_gap": 1.0}
+    assert _stack_shape(db, tight) == [(None, [a]), (None, [b])]
+    assert db.count_browse_stacks([], stack_config=tight) == 2
+
+    loose = {"browse_stack_time_gap": 5.0}
+    assert _stack_shape(db, loose) == [("burst", [a, b])]
+    assert db.count_browse_stacks([], stack_config=loose) == 1
+
+
+def test_browse_stacks_treat_a_gap_equal_to_the_setting_as_inside(tmp_path):
+    """The boundary belongs to the burst, and it must not wobble.
+
+    ``julianday`` differencing leaves about 0.05 ms of float noise at modern
+    dates, so without a tolerance one pair spaced exactly at the gap stacks
+    while the next identical pair does not.
+    """
+    db, fid = _filter_db(tmp_path)
+    a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00")
+    b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:03")
+    c = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:06")
+    db.conn.commit()
+
+    # Exactly 3.0s apart, twice over, at the default 3.0s gap.
+    assert _stack_shape(db) == [("burst", [a, b, c])]
+
+    # A hair under, and the same frames stop being one run.
+    assert _stack_shape(db, {"browse_stack_time_gap": 2.9}) == [
+        (None, [a]), (None, [b]), (None, [c]),
+    ]
+
+
+def test_browse_stacks_ignore_the_exif_burst_id(tmp_path):
+    """``photos.burst_id`` is no longer a stacking signal.
+
+    The cameras that write EXIF ImageUniqueID at all reuse the value for the
+    life of the body, so keying stacks on it collapsed frames taken years
+    apart into one card. Sharing the column must not stack anything; only
+    capture-time proximity may.
+    """
+    db, fid = _filter_db(tmp_path)
+    old = _timed_photo(db, fid, "a.jpg", "2018-11-17T07:01:55")
+    new = _timed_photo(db, fid, "b.jpg", "2020-10-22T20:53:31")
+    db.conn.execute(
+        "UPDATE photos SET burst_id = 'F12QSJA00SM' WHERE id IN (?, ?)",
+        (old, new),
+    )
+    db.conn.commit()
+
+    assert _stack_shape(db) == [(None, [old]), (None, [new])]
+
+
+def test_browse_stacks_split_an_untagged_frame_out_of_a_tagged_run(tmp_path):
+    """The motivating case: a stack must not hide unfinished tagging.
+
+    Collapsing an untagged frame behind a tagged cover buries the work still
+    to do. Breaking it out keeps the gap visible while culling, and tagging
+    the frame folds it back into the run.
+    """
+    db, fid = _filter_db(tmp_path)
+    eagle = db.add_keyword("Bald Eagle", is_species=True, kw_type="taxonomy")
+    tagged_a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", eagle)
+    tagged_b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", eagle)
+    untagged = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:02")
+    db.conn.commit()
+
+    assert _stack_shape(db) == [("burst", [tagged_a, tagged_b]), (None, [untagged])]
+
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
+        "VALUES (?, ?, 'manual')",
+        (untagged, eagle),
+    )
+    db.conn.commit()
+
+    assert _stack_shape(db) == [("burst", [tagged_a, tagged_b, untagged])]
+
+
+def test_browse_stacks_break_at_a_species_change(tmp_path):
+    """Default ``break`` mode ends the run wherever the species changes."""
+    db, fid = _filter_db(tmp_path)
+    eagle = db.add_keyword("Bald Eagle", is_species=True, kw_type="taxonomy")
+    hawk = db.add_keyword("Red-tailed Hawk", is_species=True, kw_type="taxonomy")
+    first = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", eagle)
+    middle = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", hawk)
+    back_a = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:02", eagle)
+    back_b = _timed_photo(db, fid, "d.jpg", "2024-01-01T09:00:03", eagle)
+    db.conn.commit()
+
+    assert _stack_shape(db) == [
+        (None, [first]), (None, [middle]), ("burst", [back_a, back_b]),
+    ]
+
+
+def test_browse_stacks_partition_mode_regroups_an_interleaved_run(tmp_path):
+    """``partition`` keeps one stack per keyword set instead of fragmenting."""
+    db, fid = _filter_db(tmp_path)
+    eagle = db.add_keyword("Bald Eagle", is_species=True, kw_type="taxonomy")
+    hawk = db.add_keyword("Red-tailed Hawk", is_species=True, kw_type="taxonomy")
+    first = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", eagle)
+    middle = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", hawk)
+    back_a = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:02", eagle)
+    back_b = _timed_photo(db, fid, "d.jpg", "2024-01-01T09:00:03", eagle)
+    db.conn.commit()
+
+    partition = {"browse_stack_split_mode": "partition"}
+    assert _stack_shape(db, partition) == [
+        ("burst", [first, back_a, back_b]), (None, [middle]),
+    ]
+    assert db.count_browse_stacks([], stack_config=partition) == 2
+
+
+def test_browse_stacks_break_at_a_location_change(tmp_path):
+    """Location keywords join the burst identity alongside species."""
+    db, fid = _filter_db(tmp_path)
+    kodiak = db.add_keyword("Kodiak Island", kw_type="location")
+    homer = db.add_keyword("Homer", kw_type="location")
+    a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", kodiak)
+    b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", kodiak)
+    c = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:02", homer)
+    db.conn.commit()
+
+    assert _stack_shape(db) == [("burst", [a, b]), (None, [c])]
+
+
+def test_browse_stacks_never_span_folders(tmp_path):
+    """Two folders are two shoots, however close their capture times."""
+    db, fid = _filter_db(tmp_path)
+    other = db.add_folder("/photos/other", name="other")
+    a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00")
+    b = _timed_photo(db, other, "b.jpg", "2024-01-01T09:00:01")
+    db.conn.commit()
+
+    assert _stack_shape(db) == [(None, [a]), (None, [b])]
+
+
+def test_browse_stacks_skip_frames_without_a_capture_time(tmp_path):
+    """An undated frame has nothing to measure, so it never joins a burst."""
+    db, fid = _filter_db(tmp_path)
+    a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00")
+    b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01")
+    undated = db.add_photo(
+        folder_id=fid, filename="c.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.commit()
+
+    assert _stack_shape(db) == [("burst", [a, b]), (None, [undated])]
+
+
+def test_browse_stacks_filter_before_projection_can_split_a_run(tmp_path):
+    """Stacks describe the current result set, including its gaps.
+
+    Filtering out the middle of a run leaves the survivors further apart
+    than the gap, so they stop being one burst — the same "stacks describe
+    what you are looking at" rule the membership tally already follows.
+    """
+    db, fid = _filter_db(tmp_path)
+    keep_a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00")
+    drop = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:03")
+    keep_b = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:06")
+    db.update_photo_rating(keep_a, 5)
+    db.update_photo_rating(keep_b, 5)
+    db.conn.commit()
+
+    assert _stack_shape(db) == [("burst", [keep_a, drop, keep_b])]
+
+    rated = db.query_browse_stacks(
+        [{"field": "rating", "op": ">=", "value": 5}], sort="name",
+    )
+    assert [row["_browse_stack_kind"] for row in rated] == [None, None]
+
+
+def test_collapse_browse_stack_photo_ids_matches_the_sql_projection(tmp_path):
+    """The visual-search collapse draws the same boundaries as the grid.
+
+    Relevance order decides where groups appear, never what they contain, so
+    reversing the input must not change the grouping.
+    """
+    db, fid = _filter_db(tmp_path)
+    eagle = db.add_keyword("Bald Eagle", is_species=True, kw_type="taxonomy")
+    a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", eagle)
+    b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", eagle)
+    untagged = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:02")
+    far = _timed_photo(db, fid, "d.jpg", "2024-01-01T11:00:00")
+    db.conn.commit()
+
+    every_id = [a, b, untagged, far]
+    sql_groups = {
+        (kind, tuple(members)) for kind, members in _stack_shape(db)
+    }
+    for order in (every_id, list(reversed(every_id))):
+        collapsed = {
+            (item["kind"], tuple(sorted(item["member_ids"])))
+            for item in db.collapse_browse_stack_photo_ids(order)
+        }
+        assert collapsed == sql_groups
+
+
+def test_browse_stack_settings_apply_workspace_overrides(tmp_path):
+    """Per-workspace overrides reach the projection, and junk falls back."""
+    from db import normalize_browse_stack_config
+
+    db, _fid = _filter_db(tmp_path)
+    assert db.browse_stack_settings({}) == {
+        "time_gap": 3.0, "split_mode": "break",
+    }
+
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={
+            "browse_stack_time_gap": 0.5,
+            "browse_stack_split_mode": "partition",
+        },
+    )
+    assert db.browse_stack_settings({"browse_stack_time_gap": 3.0}) == {
+        "time_gap": 0.5, "split_mode": "partition",
+    }
+
+    # A malformed setting must not take Browse down: it falls back to the
+    # behaviour the settings UI describes.
+    assert normalize_browse_stack_config(
+        {"browse_stack_time_gap": "soon", "browse_stack_split_mode": "sideways"}
+    ) == {"time_gap": 3.0, "split_mode": "break"}
+    assert normalize_browse_stack_config(
+        {"browse_stack_time_gap": -5}
+    ) == {"time_gap": 3.0, "split_mode": "break"}
+
+
 def test_visual_stack_cover_prefers_zero_rating_over_null(tmp_path):
     db, fid = _filter_db(tmp_path)
     zero_id = db.add_photo(
@@ -25786,12 +26250,12 @@ def test_visual_stack_cover_prefers_zero_rating_over_null(tmp_path):
         file_size=999, file_mtime=1.0,
     )
     db.conn.execute(
-        "UPDATE photos SET burst_id = 'visual-burst', rating = 0, "
+        "UPDATE photos SET timestamp = '2024-01-01T09:00:00', rating = 0, "
         "width = 1, height = 1 WHERE id = ?",
         (zero_id,),
     )
     db.conn.execute(
-        "UPDATE photos SET burst_id = 'visual-burst', rating = NULL, "
+        "UPDATE photos SET timestamp = '2024-01-01T09:00:01', rating = NULL, "
         "width = 999, height = 999 WHERE id = ?",
         (null_id,),
     )
@@ -25843,9 +26307,19 @@ def test_browse_stack_sharpness_asc_preserves_null_member(tmp_path):
         folder_id=fid, filename="single-scored.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
+    # Consecutive frames one second apart are a burst; the single sits an
+    # hour away, well past the default gap, so it stays its own item.
     db.conn.execute(
-        "UPDATE photos SET burst_id = 'shared-burst' WHERE id IN (?, ?)",
-        (stack_null_id, stack_scored_id),
+        "UPDATE photos SET timestamp = '2024-01-01T09:00:00' WHERE id = ?",
+        (stack_null_id,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp = '2024-01-01T09:00:01' WHERE id = ?",
+        (stack_scored_id,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp = '2024-01-01T10:00:00' WHERE id = ?",
+        (scored_single_id,),
     )
     db.conn.execute(
         "UPDATE photos SET sharpness = NULL WHERE id = ?", (stack_null_id,))
@@ -25863,6 +26337,15 @@ def test_browse_stack_sharpness_asc_preserves_null_member(tmp_path):
     assert ids.index(stack_scored_id) < ids.index(scored_single_id)
 
 
+# Browse bursts are runs of consecutive frames in one folder, so these
+# fixtures put each burst in its own folder and widen the time gap past any
+# spacing they use. That keeps every sort-ordering assertion below about the
+# ordering rule under test rather than about burst detection — in particular
+# it lets the ``date`` cases hold burst members a day apart to prove the sort
+# reads its leading member.
+_WIDE_STACK_CONFIG = {"browse_stack_time_gap": 86400.0 * 365}
+
+
 def _stacked_vs_unstacked_order(db, sort):
     """Return ``(stacked_ids, expected_ids)`` for a Browse sort.
 
@@ -25873,7 +26356,8 @@ def _stacked_vs_unstacked_order(db, sort):
     kind of hidden behaviour CORE_PHILOSOPHY's "no black boxes" rule
     forbids, so the two views must not disagree.
     """
-    rows = db.query_browse_stacks([], sort=sort)
+    rows = db.query_browse_stacks(
+        [], sort=sort, stack_config=_WIDE_STACK_CONFIG)
     stacked_ids = [row["id"] for row in rows]
     cover_by_member = {}
     for row in rows:
@@ -25893,25 +26377,44 @@ def _stacked_vs_unstacked_order(db, sort):
 
 
 def _metric_sort_db(tmp_path, column, specs):
-    """Seed photos from ``(filename, value, burst_id)`` triples on ``column``."""
-    db, fid = _filter_db(tmp_path)
+    """Seed photos from ``(filename, value, burst_label)`` triples on ``column``.
+
+    Each burst label gets a folder of its own and each single gets one too,
+    so a single can never be swept into a neighbouring run no matter how wide
+    ``_WIDE_STACK_CONFIG`` opens the gap. Members are given consecutive
+    capture times unless ``column`` *is* ``timestamp``, in which case the
+    spec's own values stand.
+    """
+    db, _fid = _filter_db(tmp_path)
+    folders = {}
+    sequence = {}
     ids = {}
-    for filename, value, burst_id in specs:
+    for index, (filename, value, burst_label) in enumerate(specs):
+        group = burst_label if burst_label is not None else f"single-{index}"
+        if group not in folders:
+            folders[group] = db.add_folder(f"/photos/{group}", name=group)
+            sequence[group] = 0
+        seq = sequence[group]
+        sequence[group] += 1
         photo_id = db.add_photo(
-            folder_id=fid, filename=filename, extension=".jpg",
+            folder_id=folders[group], filename=filename, extension=".jpg",
             file_size=1, file_mtime=1.0,
         )
         ids[filename] = photo_id
         db.conn.execute(
-            f"UPDATE photos SET {column} = ?, burst_id = ? WHERE id = ?",
-            (value, burst_id, photo_id),
+            f"UPDATE photos SET {column} = ? WHERE id = ?", (value, photo_id),
         )
+        if column != "timestamp":
+            db.conn.execute(
+                "UPDATE photos SET timestamp = ? WHERE id = ?",
+                (f"2024-01-01T00:00:{seq:02d}", photo_id),
+            )
     db.conn.commit()
     return db, ids
 
 
 def _sharpness_sort_db(tmp_path, specs):
-    """Seed photos from ``(filename, sharpness, burst_id)`` triples."""
+    """Seed photos from ``(filename, sharpness, burst_label)`` triples."""
     return _metric_sort_db(tmp_path, "sharpness", specs)
 
 

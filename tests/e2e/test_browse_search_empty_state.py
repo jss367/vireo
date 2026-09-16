@@ -2120,7 +2120,7 @@ def test_clearing_keyword_search_keeps_selected_photo_in_place(live_server, page
 
 
 def test_flag_quick_filters_show_picks_and_rejects(live_server, page):
-    """Browse offers quick filters for picked and rejected photos in Filters."""
+    """Browse offers one-click filters for picked and rejected photos."""
     url = live_server["url"]
     db = live_server["db"]
     photos = db.get_photos()
@@ -2132,7 +2132,6 @@ def test_flag_quick_filters_show_picks_and_rejects(live_server, page):
     page.goto(f"{url}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
 
-    page.click(".vf-filters-btn")
     pick_btn = page.locator('.vf-quick-flags [data-flag="flagged"]')
     reject_btn = page.locator('.vf-quick-flags [data-flag="rejected"]')
     expect(pick_btn).to_be_visible()
