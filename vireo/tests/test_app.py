@@ -24760,3 +24760,44 @@ def test_batch_accept_on_all_qualified_species_without_predictions(app_and_db):
     assert db.conn.execute("SELECT source_taxon_id FROM keywords WHERE id = ?", (keyword["id"],)).fetchone()[0] == 42
     db.undo_last_edit()
     assert not db.get_photo_keywords(photo)
+
+
+def test_accept_legacy_prediction_reuses_unlinked_same_name_keyword(app_and_db):
+    """Legacy custom accept must not mint a suffixed duplicate keyword.
+
+    An upgraded catalog can have a same-name species keyword the async
+    ``mark_species_keywords`` pass has not linked yet (``taxon_id IS NULL``).
+    Accepting a legacy custom prediction (no ``source_taxon_id`` and not a
+    native tol/iNat model) must reuse that existing row through
+    ``add_keyword``'s name path rather than route through
+    ``_add_source_species_keyword`` on a name-lookup-inferred taxon id.
+    """
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (42, 'Melozone crissalis', 'California Towhee', 'species')"
+    )
+    db.set_meta("common_name_identity_version", "1")
+    existing_kid = db.conn.execute(
+        "INSERT INTO keywords (name, is_species, type) "
+        "VALUES ('California Towhee', 1, 'general')"
+    ).lastrowid
+    photo, _ = _seed_prediction_photo(db, "legacy-towhee.jpg", "California Towhee", .9)
+    db.conn.commit()
+    pred_id = _prediction_id(db, photo, "California Towhee")
+
+    response = app.test_client().post("/api/predictions/batch-accept", json={
+        "prediction_ids": [pred_id],
+        "expected_species": "California Towhee",
+    })
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.get_json()["accepted"] == 1
+    tagged = db.get_photo_keywords(photo)
+    assert len(tagged) == 1
+    assert tagged[0]["id"] == existing_kid
+    # No suffixed duplicate leaked into the keywords table.
+    duplicates = db.conn.execute(
+        "SELECT name FROM keywords WHERE name LIKE 'California Towhee%'"
+    ).fetchall()
+    assert [r["name"] for r in duplicates] == ["California Towhee"]

@@ -19773,7 +19773,18 @@ class Database:
             return None
         from species_identity import SpeciesResolver
         identity = SpeciesResolver(db=self).consensus(pred)
-        source_taxon_id = identity.taxon_id
+        # A pure name lookup can flag a same-name keyword the async
+        # ``mark_species_keywords`` pass has not linked yet. Routing the
+        # accept through ``_add_source_species_keyword`` on that inferred
+        # id refuses to reuse the unlinked row and mints a suffixed
+        # duplicate; only explicit prediction evidence (a stored
+        # ``source_taxon_id`` or a native tol/iNat scientific name)
+        # earns that source-specific path.
+        native_scientific = pred["scientific_name"] if (
+            pred["labels_fingerprint"] == "tol" or pred["model"].startswith("iNat")
+        ) else None
+        has_explicit_evidence = pred["source_taxon_id"] is not None or bool(native_scientific)
+        source_taxon_id = identity.taxon_id if has_explicit_evidence else None
 
         def _reject_siblings_of(this_pred_id):
             """Resolve the losing rows on one accepted row's detection.
@@ -19827,7 +19838,22 @@ class Database:
                 )
 
         try:
-            species = identity.display_name if source_taxon_id else (identity.scientific_name or identity.display_name)
+            if has_explicit_evidence:
+                species = identity.display_name if source_taxon_id else (identity.scientific_name or identity.display_name)
+            else:
+                # Preserve the raw label (or burst winner) for legacy
+                # predictions: ``add_keyword``'s name-based dedup will
+                # reuse an existing same-name keyword, even one
+                # ``mark_species_keywords`` has not linked yet, without
+                # introducing a suffixed duplicate.
+                species = pred["species"]
+                if pred["group_id"] and pred["individual"]:
+                    try:
+                        votes = json.loads(pred["individual"])
+                        if isinstance(votes, dict) and votes:
+                            species = max(votes, key=lambda sp: votes[sp])
+                    except (TypeError, ValueError):
+                        pass
 
             # Settle scope before the first write.
             #
