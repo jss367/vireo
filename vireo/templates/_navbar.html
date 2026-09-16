@@ -1934,6 +1934,15 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .vireo-ctx-chip:hover:not(.vireo-ctx-disabled) { background: var(--bg-tertiary); }
 .vireo-ctx-chip.is-active { background: var(--accent); color: white; }
+/* Color-label chips are "●" glyphs, so the label's color has to come from
+   `color`. Without these the five dots all inherit --text-primary and the row
+   reads as five identical dark dots. Palette matches the grid-card and detail
+   swatches. */
+.vireo-ctx-chip[data-color="red"]:not(.is-active) { color: #e74c3c; }
+.vireo-ctx-chip[data-color="yellow"]:not(.is-active) { color: #f1c40f; }
+.vireo-ctx-chip[data-color="green"]:not(.is-active) { color: #2ecc71; }
+.vireo-ctx-chip[data-color="blue"]:not(.is-active) { color: #3498db; }
+.vireo-ctx-chip[data-color="purple"]:not(.is-active) { color: #9b59b6; }
 
 /* ---------- Openable tabs ---------- */
 .navbar .nav-tab {
