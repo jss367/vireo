@@ -5455,6 +5455,84 @@ class Database:
             self.tag_photo(surviving_id, kw_id, _commit=False)
         return True
 
+    def _reconcile_conflicting_keyword_edits(self, losing_id, surviving_id):
+        """Drop the older of two opposing keyword edits before a remap.
+
+        The remap lands both rows' queued keyword changes on one photo, and
+        ``sync._plan_photo_sync`` folds a photo's changes into sets. An
+        ``keyword_add`` and a ``keyword_remove`` that share a normalized
+        match key then look exactly like a normalization rename:
+        ``_remove_planned_keywords`` strips the flat entry and
+        ``add_keywords`` writes it straight back, so the keyword survives
+        and BOTH queue rows are cleared as successfully written. A newer
+        removal queued on one row would be silently reversed by an older
+        addition queued on the other.
+
+        Resolved the same way as the location state: the side holding the
+        newer change wins, by ``(created_at, id)``, and the loser's rows for
+        that key are deleted. Scoped per workspace, because only changes in
+        one workspace's queue are ever planned together.
+
+        A photo that already holds BOTH directions for a key is left alone:
+        that is the deliberate rename pair ``_remove_planned_keywords``
+        exists to handle, not an ambiguity this merge is creating.
+
+        Returns the number of queue rows dropped.
+        """
+        rows = self.conn.execute(
+            "SELECT id, photo_id, workspace_id, change_type, value, "
+            "       created_at "
+            "FROM pending_changes WHERE photo_id IN (?, ?) "
+            "  AND change_type IN "
+            "      ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
+            (losing_id, surviving_id),
+        ).fetchall()
+        if not rows:
+            return 0
+        by_key = {}
+        for r in rows:
+            if not r["value"]:
+                continue
+            key = (r["workspace_id"], keyword_match_key(r["value"]))
+            side = "add" if r["change_type"] == "keyword_add" else "remove"
+            slot = by_key.setdefault(
+                key, {losing_id: {"add": [], "remove": []},
+                      surviving_id: {"add": [], "remove": []}})
+            slot[r["photo_id"]][side].append(r)
+        dropped = 0
+        for (workspace_id, match_key), slot in by_key.items():
+            loser, survivor = slot[losing_id], slot[surviving_id]
+            if (loser["add"] and loser["remove"]) or (
+                    survivor["add"] and survivor["remove"]):
+                # Already a rename pair on one photo before this merge.
+                continue
+            opposed = (
+                (loser["add"] and survivor["remove"])
+                or (loser["remove"] and survivor["add"])
+            )
+            if not opposed:
+                continue
+
+            def newest(side_rows):
+                return max(
+                    ((r["created_at"] or "", r["id"]) for r in side_rows),
+                    default=("", 0))
+
+            loser_rows = loser["add"] + loser["remove"]
+            survivor_rows = survivor["add"] + survivor["remove"]
+            drop = (survivor_rows if newest(loser_rows) > newest(survivor_rows)
+                    else loser_rows)
+            for r in drop:
+                self.conn.execute(
+                    "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
+                dropped += 1
+            log.info(
+                "Merge reconciled opposing %r edits on photos %s/%s in "
+                "workspace %s: dropped %d older queue row(s)",
+                match_key, losing_id, surviving_id, workspace_id, len(drop),
+            )
+        return dropped
+
     def _link_survivor_for_sibling_edits(self, workspace_id, photo_id):
         """Grant a sibling workspace sync-only access to a remapped photo's folder.
 
@@ -6248,6 +6326,15 @@ class Database:
                                 # survivor's own tags alone when ITS
                                 # queued change is newer.
                                 self._move_location_state_for_merge(pid, survivor_id)
+                                # Opposing keyword edits on the two rows
+                                # would fold into a rename pair once they
+                                # share a photo and cancel the newer one
+                                # out. Resolve before anything reads the
+                                # queue: the identity capture and the
+                                # sibling-workspace scan below must see the
+                                # rows that actually survive.
+                                self._reconcile_conflicting_keyword_edits(
+                                    pid, survivor_id)
                                 # Capture the identities of the rows this
                                 # remap is about to move -- restricted to
                                 # the active workspace so sibling-workspace
@@ -6369,6 +6456,13 @@ class Database:
                                 # identically in the collision→staged
                                 # branch above.
                                 self._move_location_state_for_merge(
+                                    collision["id"], pid)
+                                # Same reconciliation as the branch above,
+                                # and for the same reason it runs here: an
+                                # older add on one row must not reverse a
+                                # newer remove on the other once the remap
+                                # puts them on one photo.
+                                self._reconcile_conflicting_keyword_edits(
                                     collision["id"], pid)
                                 # Sibling workspaces owning phantom rows this
                                 # remap will move onto the staged survivor.

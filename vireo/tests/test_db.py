@@ -13268,6 +13268,221 @@ def test_merge_staged_tree_location_same_second_prefers_deleted_row_if_later(
     assert linked == [staged_kw]
 
 
+def _queue_keyword_change(db, photo_id, kind, value, when, token, ws):
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (photo_id, kind, value, token, when, ws),
+    )
+
+
+def _queued_keyword_changes(db, photo_id):
+    return {
+        (r["change_type"], r["value"]) for r in db.conn.execute(
+            "SELECT change_type, value FROM pending_changes "
+            "WHERE photo_id = ?", (photo_id,)).fetchall()
+    }
+
+
+def test_merge_staged_tree_newer_keyword_remove_beats_older_add(db, tmp_path):
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    """The remap lands both rows' keyword changes on one photo, where
+    ``_plan_photo_sync`` folds them into sets: an add and a remove sharing a
+    normalized key then look like a normalization rename, so the sidecar
+    keeps the keyword and BOTH queue rows clear as successful. A newer
+    removal must not be reversed that way by an older addition on the row
+    being deleted."""
+    _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
+                          "2026-01-01 00:00:00", "tok-add", ws)
+    _queue_keyword_change(db, survivor_pid, "keyword_remove", "Birds",
+                          "2026-01-02 00:00:00", "tok-remove", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert _queued_keyword_changes(db, survivor_pid) == {
+        ("keyword_remove", "Birds")}
+
+
+def test_merge_staged_tree_newer_staged_keyword_add_beats_older_remove(db, tmp_path):
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    """Mirror: the staged row holds the newer intent, so its addition wins
+    and the survivor's older removal is dropped rather than cancelling it
+    out on the next sync."""
+    _queue_keyword_change(db, survivor_pid, "keyword_remove", "Birds",
+                          "2026-01-01 00:00:00", "tok-remove", ws)
+    _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
+                          "2026-01-02 00:00:00", "tok-add", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert _queued_keyword_changes(db, survivor_pid) == {
+        ("keyword_add", "Birds")}
+
+
+def test_merge_staged_tree_keeps_existing_keyword_rename_pair(db, tmp_path):
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    """An add + remove already queued on ONE photo is a normalization
+    rename that ``_remove_planned_keywords`` handles deliberately -- remove
+    the legacy spelling, write the clean one. The merge must not read it as
+    a conflict and delete half of it."""
+    _queue_keyword_change(db, survivor_pid, "keyword_remove", "‘Birds",
+                          "2026-01-01 00:00:00", "tok-remove", ws)
+    _queue_keyword_change(db, survivor_pid, "keyword_add", "Birds",
+                          "2026-01-01 00:00:01", "tok-add", ws)
+    _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
+                          "2026-01-02 00:00:00", "tok-staged-add", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert _queued_keyword_changes(db, survivor_pid) == {
+        ("keyword_remove", "‘Birds"),
+        ("keyword_add", "Birds"),
+    }
+
+
+def test_merge_staged_tree_keyword_conflict_is_workspace_scoped(db, tmp_path):
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    """Only one workspace's queue is ever planned together, so an add in
+    another workspace cannot cancel this workspace's removal. Reconciling
+    across workspaces would delete an edit that was never in conflict."""
+    sibling_ws = db.create_workspace("Sibling")
+    db.set_active_workspace(ws)
+    _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
+                          "2026-01-01 00:00:00", "tok-add", sibling_ws)
+    _queue_keyword_change(db, survivor_pid, "keyword_remove", "Birds",
+                          "2026-01-02 00:00:00", "tok-remove", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert _queued_keyword_changes(db, survivor_pid) == {
+        ("keyword_add", "Birds"),
+        ("keyword_remove", "Birds"),
+    }
+
+
+def test_merge_staged_tree_newer_keyword_remove_beats_older_phantom_add(
+        db, tmp_path):
+    """Phantom-branch counterpart: the deleted row is the archive phantom
+    and the survivor is the staged photo, but the same fold applies once
+    their queues share a photo."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"fresh-staged-bytes")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=100, file_mtime=1.0, file_hash="STALEHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=200, file_mtime=2.0, file_hash="NEWHASH",
+    )
+    _queue_keyword_change(db, phantom_pid, "keyword_add", "Birds",
+                          "2026-01-01 00:00:00", "tok-phantom-add", ws)
+    _queue_keyword_change(db, new_pid, "keyword_remove", "Birds",
+                          "2026-01-02 00:00:00", "tok-staged-remove", ws)
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert _queued_keyword_changes(db, new_pid) == {
+        ("keyword_remove", "Birds")}
+
+
 def test_merge_staged_tree_links_survivor_into_sibling_workspace(
         db, tmp_path):
     """The remap moves pending rows by ``photo_id`` alone, so it also moves
