@@ -152,6 +152,22 @@ def test_boolean_values_the_rule_engine_rejects_are_dropped(value):
         "field": "has_gps", "op": "is", "value": value}}]) == []
 
 
+def test_case_sensitivity_survives_normalization():
+    """`case` is part of what a text rule matches, not decoration."""
+    entries = fs.normalize([
+        {"id": "a", "label": "Exact", "rules": {
+            "field": "filename", "op": "is", "value": "IMG.JPG", "case": True}},
+        {"id": "b", "label": "Loose", "rules": {
+            "field": "filename", "op": "is", "value": "IMG.JPG"}},
+        # A field without case_toggle has no case dimension to carry.
+        {"id": "c", "label": "Flag", "rules": {
+            "field": "flag", "op": "is", "value": "flagged", "case": True}},
+    ])
+    assert entries[0]["rules"]["case"] is True
+    assert "case" not in entries[1]["rules"]
+    assert "case" not in entries[2]["rules"]
+
+
 def test_a_group_keeps_only_its_usable_children():
     entries = fs.normalize([{
         "id": "x", "label": "Mixed",

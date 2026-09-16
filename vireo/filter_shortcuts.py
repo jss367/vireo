@@ -140,6 +140,11 @@ def _clean_leaf(node):
         else:
             return None
     cleaned = {"field": field, "op": op, "value": value}
+    # ``case`` is part of what a text rule means — the query compiler reads
+    # it — so a case-sensitive shortcut has to keep it rather than quietly
+    # widening to a case-insensitive match.
+    if spec.get("case_toggle") and node.get("case"):
+        cleaned["case"] = True
     # ``keyword_identity`` carries its own display label through the rule.
     label = node.get("label")
     if isinstance(label, str) and label.strip():
