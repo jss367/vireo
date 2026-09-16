@@ -1,5 +1,7 @@
 """The photo the user clicked stays on screen when the window is resized."""
 
+from e2e.stack_seed import seed_browse_stack
+
 CARD_VISIBILITY = """
 () => {
   const card = document.querySelector('.grid-card.selected');
@@ -233,11 +235,7 @@ def test_browse_resize_keeps_a_collapsed_stack_cover_visible(live_server, page):
     # instead of finding no card and giving up on the cover the user can see.
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
-    with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'resize-burst' WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
+    seed_browse_stack(db, burst_ids)
     _seed_extra_photos(live_server, 40)
 
     page.set_viewport_size({"width": 1400, "height": 900})

@@ -3,6 +3,8 @@ import re
 
 from playwright.sync_api import expect
 
+from e2e.stack_seed import seed_browse_stack
+
 
 def click_more_menu_item(page, label):
     """Open the batch bar's More menu and click the named action.
@@ -213,11 +215,8 @@ def test_double_click_opens_the_photo_the_batch_bar_would_cover(
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'covered-burst' WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
         )
@@ -280,11 +279,8 @@ def test_a_bar_click_after_deliberate_movement_is_not_redirected_to_the_photo(
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'nudge-burst' WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
         )
@@ -336,11 +332,8 @@ def test_slow_double_click_still_opens_photo_when_bar_activated_between_clicks(
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'slow-dbl-burst' WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
         )
@@ -396,11 +389,8 @@ def test_double_click_slower_than_every_timer_still_opens_the_photo(
     """
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
     with db.conn:
-        db.conn.execute(
-            "UPDATE photos SET burst_id = 'late-dbl-burst' WHERE id IN (?, ?, ?)",
-            burst_ids,
-        )
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (burst_ids[1],)
         )
