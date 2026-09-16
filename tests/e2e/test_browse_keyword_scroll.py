@@ -189,12 +189,15 @@ def test_membership_refresh_keeps_scrolling_done_while_waiting(live_server, page
     _seed_filtered_library(live_server["db"], live_server["data"]["folders"][0])
     _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
     _scroll_and_select(page)
+    page.evaluate("async () => { while (!allLoaded) await loadPhotos(); }")
     pending = []
     page.route("**/api/photos/query", lambda route: pending.append(route), times=1)
     page.evaluate("() => { window.refreshDone = resetAndLoad({preserveScroll: true}); }")
     page.wait_for_timeout(200)
     assert pending
-    page.evaluate("gridContainer.scrollTop += 350")
+    # Move beyond the pages needed when the request started. The staged
+    # refresh must extend to this new viewport before committing.
+    page.locator("#grid .grid-card").nth(125).scroll_into_view_if_needed()
     before = page.evaluate("gridContainer.scrollTop")
     _watch_grid_frames(page)
     page.wait_for_timeout(100)
@@ -335,3 +338,21 @@ def test_stack_loading_above_viewport_keeps_browser_scroll_anchoring(live_server
     page.evaluate("stackDone")
     page.wait_for_timeout(150)
     assert abs(below.bounding_box()["y"] - before) < 2
+
+
+def test_membership_refresh_does_not_refetch_the_historical_tail(live_server, page):
+    _seed_filtered_library(live_server["db"], live_server["data"]["folders"][0], count=600)
+    _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
+    page.evaluate("async () => { while (!allLoaded) await loadPhotos(); }")
+    assert page.evaluate("photos.length") == 600
+    before = _scroll_and_select(page)
+    _watch_grid_frames(page)
+    requests = []
+    page.on("request", lambda r: requests.append(r.post_data_json) if "/api/photos/query" in r.url else None)
+    _add_keyword_to_selection(page, "Golden Hour")
+    _assert_grid_never_jumped(page, before)
+    assert requests
+    assert sum(request["per_page"] for request in requests) <= 150
+    assert page.evaluate("photos.length") < 600
+    assert page.evaluate("totalPhotos") == 600
+    assert page.evaluate("allLoaded") is False

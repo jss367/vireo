@@ -6713,20 +6713,47 @@ async function refreshBrowseWindowInPlace() {
   selectAllRequestSeq++;
   loading = true;
   var firstPage = earliestPage;
-  var endPage = Math.max(firstPage, currentPage - 1);
   var nextPhotos = [];
   var data;
   var page = firstPage;
   var succeeded = false;
   var scrollContainer = null;
   var previousOverflowAnchor;
-  try {
-    // Stage only the window already loaded, including focused windows that
-    // start deep in a library. Do not expose partially refreshed pages.
-    while (page <= endPage) {
-      var request = buildBrowsePageRequest(page, perPage);
+
+  function neededEndPage() {
+    var viewport = document.getElementById('gridContainer').getBoundingClientRect();
+    var anchor = captureBrowseViewportAnchor();
+    // No real card on screen means the user reached the placeholder tail;
+    // retain the loaded prefix beneath that position rather than truncating it.
+    var lastIndex = anchor ? Math.max(0, anchor.index) : Math.max(0, photos.length - 1);
+    var cards = document.querySelectorAll('#grid > .grid-card');
+    for (var i = lastIndex; i < cards.length; i++) {
+      if (cards[i].getBoundingClientRect().top >= viewport.bottom) break;
+      lastIndex = i;
+    }
+    // Keep selected photos too, including selected members of a stack. The
+    // rest of the historical tail can return through ordinary lazy loading.
+    photos.forEach(function(photo, index) {
+      if (photo.id === selectedPhotoId || selectedPhotos.has(photo.id)
+          || (photo.browse_stack && photo.browse_stack.photo_ids.some(function(id) {
+            return id === selectedPhotoId || selectedPhotos.has(id);
+          }))) lastIndex = Math.max(lastIndex, index);
+    });
+    // One extra page provides room for rows to fill the gaps after removals.
+    return Math.max(firstPage, Math.min(currentPage - 1,
+      firstPage + Math.floor(lastIndex / perPage) + 1));
+  }
+
+  async function stageNeededPages() {
+    // Re-evaluate the live viewport after every await. A user can scroll
+    // farther while either pages or expanded stack members are being fetched.
+    while (windowIsCurrent() && page <= neededEndPage()
+        && (!data || (page - 1) * perPage < data.total)) {
+      var chunk = Math.max(1, Math.min(Math.floor(500 / perPage), neededEndPage() - page + 1));
+      while ((page - 1) % chunk !== 0) chunk--;
+      var request = buildBrowsePageRequest((page - 1) / chunk + 1, perPage * chunk);
       data = await safeFetch(request.url, request.options);
-      if (!windowIsCurrent()) return null;
+      if (!windowIsCurrent()) return false;
       if (data.total === 0) {
         firstPage = 1;
         page = 1;
@@ -6738,14 +6765,16 @@ async function refreshBrowseWindowInPlace() {
       if (page === firstPage && page > 1 && !data.photos.length && data.total > 0) {
         firstPage = Math.max(1, Math.ceil(data.total / perPage));
         page = firstPage;
-        endPage = firstPage;
         continue;
       }
       nextPhotos = nextPhotos.concat(data.photos);
-      page++;
+      page += chunk;
       if ((page - 1) * perPage >= data.total || !data.photos.length) break;
     }
+    return windowIsCurrent();
+  }
 
+  try {
     // Keep expanded stacks open when their surviving members still form a
     // stack, even if its cover changed. Hydrate them before the atomic paint
     // so a loading tray cannot temporarily shrink the grid under the user.
@@ -6760,6 +6789,7 @@ async function refreshBrowseWindowInPlace() {
     }
     var nextMembers = {};
     while (true) {
+      if (await stageNeededPages() !== true || !windowIsCurrent()) return null;
       // Recheck after each request so opening another stack while waiting
       // doesn't cause that newly opened tray to collapse on commit.
       var expandedIds = expandedMemberIds();
