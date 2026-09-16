@@ -1827,19 +1827,19 @@ class Database:
         # inaccessible with nothing saying why. Rewrite them into the
         # photo-keyed table -- every ``workspace_sync_only_folders`` row
         # was written by ``_link_survivor_for_sibling_edits`` for a
-        # specific survivor whose folder happened to be the grant key at
-        # the time. Any pending edit queued in that workspace is one of
-        # those preserved rows, so a photo-keyed grant for each such
-        # ``(workspace_id, photo_id)`` recovers exactly the authorization
-        # the old table gave, and does so independent of whether the
-        # survivor was moved out of the granted folder between the merge
-        # and this upgrade -- ``move_photos`` rewrites ``photos.folder_id``
-        # and knew nothing about the legacy table, so joining on
-        # ``p.folder_id = sof.folder_id`` would silently drop those
-        # exact rows and the ``DROP TABLE`` below would remove the only
-        # marker. Grants for library-visible photos are inert:
-        # ``_photo_syncable_in_workspace`` short-circuits on library
-        # membership before consulting the grant.
+        # specific survivor sitting in that folder at grant time. Match
+        # each legacy row to the pending photos that were actually
+        # authorized by it: photos still in the granted folder, and photos
+        # that ``move_photos`` later relocated out of it (matched by
+        # ``last_move_source_folder_path``, the exact provenance the mover
+        # records for this purpose). Restricting the migration this way
+        # keeps unrelated pending edits in the same workspace -- for
+        # example, an edit for a folder subsequently unlinked from the
+        # workspace by ``remove_workspace_folder`` -- from silently gaining
+        # sync-only access on upgrade, which was never something the
+        # legacy grant authorized. Grants for library-visible photos are
+        # inert: ``_photo_syncable_in_workspace`` short-circuits on
+        # library membership before consulting the grant.
         legacy_sof = self.conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='workspace_sync_only_folders'"
@@ -1850,10 +1850,15 @@ class Database:
                        (workspace_id, photo_id)
                    SELECT DISTINCT pc.workspace_id, pc.photo_id
                    FROM pending_changes pc
-                   WHERE EXISTS (
-                       SELECT 1 FROM workspace_sync_only_folders sof
-                       WHERE sof.workspace_id = pc.workspace_id
-                   )"""
+                   JOIN photos p ON p.id = pc.photo_id
+                   JOIN workspace_sync_only_folders sof
+                     ON sof.workspace_id = pc.workspace_id
+                   LEFT JOIN folders granted
+                     ON granted.id = sof.folder_id
+                   WHERE sof.folder_id = p.folder_id
+                      OR (granted.path IS NOT NULL
+                          AND granted.path
+                              = p.last_move_source_folder_path)"""
             )
             self.conn.execute("DROP TABLE workspace_sync_only_folders")
         # Migration: working-copy failure markers. Backfill (and the inline
@@ -5547,9 +5552,15 @@ class Database:
         honored -- keeping both would just hand the outcome to whichever
         workspace syncs last.
 
-        A photo that already holds BOTH directions for a key is left alone:
-        that is the deliberate rename pair ``_remove_planned_keywords``
-        exists to handle, not an ambiguity this merge is creating.
+        A photo that already holds BOTH directions for a key in ONE
+        workspace's queue is left alone: that is the deliberate rename pair
+        ``_remove_planned_keywords`` exists to handle, not an ambiguity this
+        merge is creating. The exemption stays workspace-scoped -- an add in
+        workspace A and a remove in workspace B on the same photo are two
+        intents competing across workspaces, not a rename pair, and letting
+        them slip past reconciliation would leave the survivor with both
+        rows and the sync planner reading them as a normalization rename
+        that re-adds the keyword.
 
         The winning side's catalog state travels too. A ``keyword_add`` has
         already inserted the ``photo_keywords`` row on its photo and a
@@ -5577,6 +5588,12 @@ class Database:
         ).fetchall()
         if not rows:
             return 0
+        # by_key[match_key][photo_id][workspace_id] = {"add": [...],
+        # "remove": [...]}. Grouped by workspace inside each photo so the
+        # rename-pair exemption below applies within a single workspace's
+        # queue -- an add in workspace A and a remove in workspace B on the
+        # same photo are two intents competing across workspaces, not a
+        # normalization rename.
         by_key = {}
         for r in rows:
             if not r["value"]:
@@ -5584,19 +5601,34 @@ class Database:
             key = keyword_match_key(r["value"])
             side = "add" if r["change_type"] == "keyword_add" else "remove"
             slot = by_key.setdefault(
-                key, {losing_id: {"add": [], "remove": []},
-                      surviving_id: {"add": [], "remove": []}})
-            slot[r["photo_id"]][side].append(r)
+                key, {losing_id: {}, surviving_id: {}})
+            ws_slot = slot[r["photo_id"]].setdefault(
+                r["workspace_id"], {"add": [], "remove": []})
+            ws_slot[side].append(r)
+
+        def _non_rename_sides(photo_slot):
+            """Aggregate add/remove rows outside per-workspace rename pairs.
+
+            A workspace whose queue already carries BOTH directions of the
+            key on this photo is the rename pair ``_remove_planned_keywords``
+            handles; its rows are left alone. Rows from every other
+            workspace are the ones competing across the merge boundary.
+            """
+            add_rows, remove_rows = [], []
+            for ws_sides in photo_slot.values():
+                if ws_sides["add"] and ws_sides["remove"]:
+                    continue
+                add_rows.extend(ws_sides["add"])
+                remove_rows.extend(ws_sides["remove"])
+            return add_rows, remove_rows
+
         dropped = 0
         for match_key, slot in by_key.items():
-            loser, survivor = slot[losing_id], slot[surviving_id]
-            if (loser["add"] and loser["remove"]) or (
-                    survivor["add"] and survivor["remove"]):
-                # Already a rename pair on one photo before this merge.
-                continue
+            loser_add, loser_rem = _non_rename_sides(slot[losing_id])
+            surv_add, surv_rem = _non_rename_sides(slot[surviving_id])
             opposed = (
-                (loser["add"] and survivor["remove"])
-                or (loser["remove"] and survivor["add"])
+                (loser_add and surv_rem)
+                or (loser_rem and surv_add)
             )
             if not opposed:
                 continue
@@ -5606,8 +5638,8 @@ class Database:
                     ((r["created_at"] or "", r["id"]) for r in side_rows),
                     default=("", 0))
 
-            loser_rows = loser["add"] + loser["remove"]
-            survivor_rows = survivor["add"] + survivor["remove"]
+            loser_rows = loser_add + loser_rem
+            survivor_rows = surv_add + surv_rem
             drop = (survivor_rows if newest(loser_rows) > newest(survivor_rows)
                     else loser_rows)
             for r in drop:
@@ -5639,14 +5671,19 @@ class Database:
                 (losing_id, surviving_id),
             ).fetchall()
         }
+
+        def _flatten(photo_slot):
+            out = []
+            for ws_sides in photo_slot.values():
+                out.extend(ws_sides["add"] + ws_sides["remove"])
+            return out
+
         for match_key, slot in by_key.items():
-            loser = [r for r in slot[losing_id]["add"] + slot[losing_id]["remove"]
-                     if r["id"] in live]
+            loser = [r for r in _flatten(slot[losing_id]) if r["id"] in live]
             if not loser:
                 continue
             survivor = [
-                r for r in slot[surviving_id]["add"] + slot[surviving_id]["remove"]
-                if r["id"] in live
+                r for r in _flatten(slot[surviving_id]) if r["id"] in live
             ]
 
             def key(r):
