@@ -21443,7 +21443,7 @@ class Database:
                 )
             tokened = [tok for tok in expected_tokens if tok is not None]
             legacy_ids = [
-                cid for cid, tok in zip(change_ids, expected_tokens)
+                cid for cid, tok in zip(change_ids, expected_tokens, strict=True)
                 if tok is None
             ]
             for chunk in _chunks(tokened):
