@@ -2523,6 +2523,16 @@ var selectedIndex = -1;
 var lastClickedPhotoId = null;
 var anchorRestoreEpoch = 0;
 var anchorScanDepth = 0;
+// Focused reloads (sort changes) capture the selection, then clear it and
+// tear down the cards before their async page fetch settles. If the user
+// changes sort a second time while the first request is in flight, the DOM
+// capture the second call needs is already gone — it would clear
+// ``selectedPhotoId`` and reload from page 1, losing the selection the
+// feature exists to preserve. Hold the in-flight target here so a newer
+// focused reload can pick up the older one's anchor (Codex review
+// r4021334323). Cleared once every in-flight focused reload has settled.
+var pendingFocusAnchor = null;
+var focusReloadInFlight = 0;
 var selectedPhotos = new Set(); // multi-select
 var expandedBrowseStacks = new Set();
 var browseStackMembers = {};
@@ -6717,6 +6727,19 @@ async function resetAndLoad(options) {
   var anchor = (preserveAnchor || preserveScroll)
     ? captureSelectedPhotoAnchor()
     : null;
+  // A newer focused reload arriving while an older one is still in flight
+  // has nothing to capture from the DOM — the older reload cleared the
+  // selection and tore down the cards synchronously before its await. The
+  // target the older reload was aiming at is still the target, so forward
+  // it to this call rather than dropping back to page 1 (Codex review
+  // r4021334323).
+  if (!anchor && focusAnchor && pendingFocusAnchor) {
+    anchor = pendingFocusAnchor;
+  }
+  if (focusAnchor) {
+    pendingFocusAnchor = anchor;
+    focusReloadInFlight++;
+  }
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   // Membership-change reloads (``preserveScroll``) can arrive after an edit
   // that removed the selected photo from the filter — untagging its only
@@ -6850,6 +6873,14 @@ async function resetAndLoad(options) {
     });
     return true;
   } finally {
+    if (focusAnchor) {
+      focusReloadInFlight = Math.max(0, focusReloadInFlight - 1);
+      // Only clear the shared anchor once no focused reload is still in
+      // flight — otherwise the first reload's ``finally`` (it exits early
+      // when a newer reload has invalidated its window) would drop the
+      // anchor the newer reload is still relying on.
+      if (focusReloadInFlight === 0) pendingFocusAnchor = null;
+    }
     if (anchor || scrollAnchor) {
       anchorScanDepth = Math.max(0, anchorScanDepth - 1);
       if (anchorScanDepth === 0) {
