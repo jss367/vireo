@@ -11907,6 +11907,24 @@ def _seed_prediction_confidences(db, by_filename):
     db.conn.commit()
 
 
+def test_api_photos_by_ids_exposes_prediction_confidence(app_and_db):
+    """Browse's post-edit card refresh reads the new score from /by-ids, so
+    the field has to be on that payload too — without it an accept or reject
+    leaves the badge showing the score the user just changed (Codex P2 on
+    PR #1670)."""
+    app, db = app_and_db
+    _seed_prediction_confidences(db, {"bird1.jpg": 0.4})
+    ids = [p["id"] for p in db.get_photos(sort="name")]
+
+    resp = app.test_client().post("/api/photos/by-ids",
+                                  json={"photo_ids": ids})
+
+    assert resp.status_code == 200
+    by_name = {p["filename"]: p for p in resp.get_json()["photos"]}
+    assert by_name["bird1.jpg"]["prediction_confidence"] == 0.4
+    assert by_name["bird2.jpg"]["prediction_confidence"] is None
+
+
 def test_api_photos_query_sorts_by_prediction_confidence(app_and_db):
     """The Browse sort orders on the top current prediction, strongest first,
     and photos with no prediction land last rather than at either extreme."""
