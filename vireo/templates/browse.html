@@ -7850,12 +7850,27 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
   // and stop propagating, so they never reach selectPhoto and never make a
   // selection. The dblclick still bubbles here, and an identical id set would
   // otherwise let a deliberate batch be claimed by a gesture that did not
-  // create it. Codex P2 on PR #1672.
+  // create it.
+  //
+  // And a card dblclick over a batch the user already assembled (tray Select
+  // all + collapse) still runs through selectPhoto, so the resulting ids also
+  // read the same as the gesture case even though the two clicks reaffirmed
+  // the batch rather than creating it. Consult the pre-first-click snapshot:
+  // only mark the gesture when the clicks actually moved the selection onto
+  // this stack. Codex P2 on PR #1672.
   var gestureIds = e.target.closest('.browse-stack-badge')
     ? null : browseStackMemberIds(id);
+  var preState = browseSelectionBeforeStackDblClickStart;
+  browseSelectionBeforeStackDblClickStart = null;
+  var preStateWasThisStack = !!(
+    preState && gestureIds
+    && preState.size === gestureIds.length
+    && gestureIds.every(function(memberId) { return preState.has(memberId); })
+  );
   browseLightboxStackGestureSpent = null;
   browseLightboxStackGesture = (
-    gestureIds
+    !preStateWasThisStack
+    && gestureIds
     && gestureIds.length === selectedPhotos.size
     && gestureIds.every(function(memberId) { return selectedPhotos.has(memberId); })
   ) ? { ids: gestureIds.slice(), epoch: anchorRestoreEpoch } : null;
@@ -7992,6 +8007,18 @@ var browseLightboxStackGesture = null;
 // that caused it either completes (and hands it back) or is cancelled (and
 // never claims it). See the ``lightbox:photodeleted`` listener.
 var browseLightboxStackGestureSpent = null;
+
+// The selection as it stood before the first click of the most recent click
+// sequence. Captured in ``selectPhoto`` and consulted by the grid double-click
+// handler so it can tell "these clicks made the selection" from "these clicks
+// reaffirmed a selection the user already had": a deliberate tray Select all
+// + collapse leaves the stack members in ``selectedPhotos``, and a plain
+// click on the collapsed cover then sets the same set again, so the
+// resulting ``selectedPhotos`` is byte-for-byte identical either way. Without
+// this snapshot the dblclick handler would mark that pre-existing batch as
+// gesture-generated and the close handler would then replace it with the
+// finished-on photo. Codex P2 on PR #1672.
+var browseSelectionBeforeStackDblClickStart = null;
 
 function browseLightboxOwnsLoadedWindow() {
   return (
@@ -8286,6 +8313,17 @@ gridContainer.addEventListener('wheel', function(e) {
 
 /* ---------- Photo Selection & Detail ---------- */
 function selectPhoto(e, id, idx, opts) {
+  // Snapshot the pre-click selection so the grid dblclick handler can tell
+  // "these clicks made the selection" from "these clicks reaffirmed an
+  // existing one" — the two produce identical ``selectedPhotos`` when the
+  // click lands on the stack that was already selected. Only the first click
+  // of a click sequence records: the browser numbers sequential clicks in
+  // ``event.detail`` (1 for the first, 2 for the second of a dblclick), so
+  // detail > 1 preserves the pre-first-click snapshot through the second.
+  // Codex P2 on PR #1672.
+  if (!(e && e.detail > 1)) {
+    browseSelectionBeforeStackDblClickStart = new Set(selectedPhotos);
+  }
   anchorRestoreEpoch++;
   lastClickedPhotoId = id;
   // A collapsed stack card is its whole stack (see browseStackMemberIds), so

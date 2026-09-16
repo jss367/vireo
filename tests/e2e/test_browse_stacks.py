@@ -863,6 +863,63 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     )
 
 
+def test_double_clicking_a_preselected_stack_preserves_the_batch(
+    live_server, page,
+):
+    """A dblclick on a stack the user already selected is a viewing gesture.
+
+    Its two clicks reaffirm the pre-existing selection rather than making a
+    new one, so the resulting ``selectedPhotos`` is byte-for-byte identical
+    to the gesture-generated case — a membership check at dblclick time
+    cannot tell them apart. Without capturing the pre-first-click state, the
+    close handler would consume the marker and silently replace the user's
+    tray Select all batch with the photo they navigated to.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    expect(cover).to_be_visible()
+
+    # Assemble a deliberate batch through the tray, then collapse.
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    tray.get_by_role("button", name="Select all").click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+    page.wait_for_function(
+        "ids => selectedPhotos.size === ids.length"
+        " && ids.every(function(id) { return selectedPhotos.has(id); })",
+        arg=burst_ids,
+    )
+
+    # Double-click the collapsed cover — a viewing gesture over an existing
+    # batch, not the batch itself. Navigating away and closing must leave
+    # the user's deliberate selection intact.
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        "ids => selectedPhotos.size === ids.length"
+        " && ids.every(function(id) { return selectedPhotos.has(id); })",
+        burst_ids,
+    )
+
+
 def test_clearing_the_selection_scrubs_a_stack_cards_partial_mark(
     live_server, page,
 ):

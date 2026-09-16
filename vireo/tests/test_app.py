@@ -22541,6 +22541,72 @@ process.stdout.write(JSON.stringify({
     }
 
 
+def test_stack_dblclick_snapshot_distinguishes_a_preselected_stack(app_and_db):
+    """The dblclick provenance marker cannot come from the resulting ids alone.
+
+    A double-click on a stack card runs its two clicks through ``selectPhoto``
+    first, so the stack is selected by the time the lightbox opens. That is
+    also the state a tray Select all + Collapse leaves behind, so the two
+    clicks then reaffirm a selection rather than creating one — and the close
+    handler would silently swap that user-assembled batch for the finished-on
+    photo if the dblclick were still marked as gesture-generated. Capturing
+    ``selectedPhotos`` before the first click of a sequence is what lets the
+    handler tell those cases apart: ``event.detail`` numbers the sequence, so
+    only ``detail === 1`` records, and ``detail === 2`` preserves that snapshot
+    through the second click. Codex P2 on PR #1672.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+var FIRST = Object.assign({detail: 1}, CLICK);
+var SECOND = Object.assign({detail: 2}, CLICK);
+// Fresh gesture: pre-state is empty, so the dblclick's two clicks made the
+// stack selection and its provenance should be recorded.
+selectPhoto(FIRST, 10, 0);
+var afterFirst = new Set(browseSelectionBeforeStackDblClickStart);
+selectPhoto(SECOND, 10, 0);
+var freshGesture = {
+  pre: Array.from(browseSelectionBeforeStackDblClickStart).sort(),
+  afterFirst: Array.from(afterFirst).sort(),
+};
+seedGrid();
+// Deliberate batch preselects the stack; a subsequent dblclick has to see
+// that the pre-first-click state was already the stack, so the two clicks
+// only reaffirmed it. Codex P2 on PR #1672.
+selectedPhotos = new Set([10, 11, 12]);
+selectPhoto(FIRST, 10, 0);
+selectPhoto(SECOND, 10, 0);
+var preselected = {
+  pre: Array.from(browseSelectionBeforeStackDblClickStart).sort(),
+};
+seedGrid();
+// A single click captures its own pre-state; the next first-of-a-sequence
+// overwrites it with whatever the earlier click left behind.
+selectPhoto(FIRST, 10, 0);
+var afterSingle = Array.from(browseSelectionBeforeStackDblClickStart).sort();
+var LATER_FIRST = Object.assign({detail: 1}, CLICK);
+selectPhoto(LATER_FIRST, 30, 2);
+var afterLater = Array.from(browseSelectionBeforeStackDblClickStart).sort();
+process.stdout.write(JSON.stringify({
+  freshGesture: freshGesture,
+  preselected: preselected,
+  afterSingle: afterSingle,
+  afterLater: afterLater,
+}));
+"""), [])
+    # A fresh gesture's pre-state is empty on both clicks — the second click
+    # preserves the first's snapshot rather than overwriting it.
+    assert result["freshGesture"] == {"pre": [], "afterFirst": []}
+    # The preselected stack's pre-state is the stack, byte-for-byte — enough
+    # for the dblclick handler to see the batch was already there.
+    assert result["preselected"] == {"pre": [10, 11, 12]}
+    # First click captured an empty pre-state; the LATER_FIRST click then
+    # overwrote that with what the first click had left behind (the stack).
+    assert result["afterSingle"] == []
+    assert result["afterLater"] == [10, 11, 12]
+
+
 def test_selection_count_names_stacks_only_when_the_grid_accounts_for_all(
     app_and_db,
 ):
