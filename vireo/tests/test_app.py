@@ -22643,6 +22643,89 @@ process.stdout.write(JSON.stringify({
     }
 
 
+def test_batch_delete_discards_a_companion_count_for_a_stale_selection(
+    app_and_db,
+):
+    """The count request keeps the grid interactive while it is in flight.
+
+    A user who clicks Delete, changes the selection, and then sees a dialog
+    backed by the earlier ids would permanently delete photos they no longer
+    have selected. A second Delete pressed before the first count returns
+    can also open a dialog and then be overwritten by the earlier reply
+    landing late. Each batchDelete stamps its request with a monotonic seq
+    and snapshots the ids it asked about; a stale seq is dropped silently
+    (a newer Delete owns the dialog now), and a snapshot that no longer
+    matches the current selection tells the user to click Delete again.
+    Codex P1 on PR #1672.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    body = _browse_js_function_body(html, "async function batchDelete(")
+    source = "\n".join([
+        """
+var _batchDeleteRequestSeq = 0;
+var _activeSelection = [1, 2, 3];
+var _pending = [];
+var dialogs = [], toasts = [];
+function getActiveSelection() { return _activeSelection.slice(); }
+function safeFetch(url, opts) {
+  var body = JSON.parse(opts.body);
+  return new Promise(function(resolve, reject) {
+    _pending.push({url: url, ids: body.photo_ids, resolve: resolve, reject: reject});
+  });
+}
+function showDeleteDialog(ids, companionCount) {
+  dialogs.push({ids: ids.slice(), companionCount: companionCount});
+}
+function showToast(message, kind) { toasts.push({message: message, kind: kind}); }
+function browseStacksEnabled() { return false; }
+""",
+        body,
+        """
+(async function() {
+  // (a) selection changes while the count is in flight → no dialog, info toast.
+  var pStale = batchDelete();
+  var staleReq = _pending.shift();
+  _activeSelection = [1, 2];
+  staleReq.resolve({count: 2});
+  await pStale;
+
+  // (b) two Deletes overlap: the newer request retires the older one, so a
+  //     late reply for the older cannot overwrite the newer dialog.
+  _activeSelection = [4, 5, 6];
+  var pFirst = batchDelete();
+  var firstReq = _pending.shift();
+  var pSecond = batchDelete();
+  var secondReq = _pending.shift();
+  firstReq.resolve({count: 1});
+  await pFirst;
+  secondReq.resolve({count: 2});
+  await pSecond;
+
+  process.stdout.write(JSON.stringify({
+    dialogs: dialogs,
+    toasts: toasts,
+    requestIds: [staleReq.ids, firstReq.ids, secondReq.ids],
+  }));
+})();
+""",
+    ])
+    result = _run_node(source, [])
+    # Only one dialog opens: the newer of the two overlapping Deletes.
+    assert result["dialogs"] == [{"ids": [4, 5, 6], "companionCount": 2}]
+    # The stale-selection case surfaces an info toast; the superseded first
+    # request is dropped silently rather than surprising the user with a
+    # second toast about a Delete they did not know had been queued.
+    assert result["toasts"] == [{
+        "message":
+            "Selection changed while checking for companion files. Click Delete again.",
+        "kind": "info",
+    }]
+    # Each request asked the server about the ids that were selected when it
+    # started, not whatever the selection happens to be now.
+    assert result["requestIds"] == [[1, 2, 3], [4, 5, 6], [4, 5, 6]]
+
+
 _APOSTROPHE_SPECIES = "Say's Phoebe"
 
 

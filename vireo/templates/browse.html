@@ -11054,6 +11054,8 @@ async function confirmBatchKeyword() {
   showUndoToast();
 }
 
+var _batchDeleteRequestSeq = 0;
+
 async function batchDelete() {
   var ids = getActiveSelection();
   if (ids.length === 0) return;
@@ -11064,15 +11066,28 @@ async function batchDelete() {
   // disk delete silently leaves those companions behind. Refuse to open the
   // dialog rather than open it with a count that cannot be trusted: a wrong
   // number here is a file left on disk. Codex P2 on PR #1672.
+  //
+  // The request is async and the grid stays interactive, so the selection can
+  // move under us while the count is in flight. A confirm on a dialog backed
+  // by the old ids would permanently delete photos the user no longer has
+  // selected, and a second Delete pressed before the first response arrives
+  // could open a dialog and then be overwritten by the earlier reply landing
+  // late. Stamp each request with a monotonic seq and snapshot the ids it
+  // asked about — a later request retires the earlier one, and a selection
+  // that no longer matches the snapshot means the user has moved on and gets
+  // a fresh ask rather than a stale dialog. Codex P1 on PR #1672.
+  var seq = ++_batchDeleteRequestSeq;
+  var capturedIds = ids.slice();
   var companionCount;
   try {
     var counted = await safeFetch('/api/photos/companion-count', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: ids}),
+      body: JSON.stringify({photo_ids: capturedIds}),
     }, { toast: false });
     companionCount = counted.count || 0;
   } catch (e) {
+    if (seq !== _batchDeleteRequestSeq) return;
     showToast(
       'Could not check these photos for companion files, so nothing was '
         + 'deleted. Try again: ' + (e.message || e),
@@ -11080,7 +11095,18 @@ async function batchDelete() {
     );
     return;
   }
-  showDeleteDialog(ids, companionCount, function(data) {
+  if (seq !== _batchDeleteRequestSeq) return;
+  var currentIds = getActiveSelection();
+  var selectionMatches = currentIds.length === capturedIds.length
+    && currentIds.every(function(id) { return capturedIds.indexOf(id) !== -1; });
+  if (!selectionMatches) {
+    showToast(
+      'Selection changed while checking for companion files. Click Delete again.',
+      'info'
+    );
+    return;
+  }
+  showDeleteDialog(capturedIds, companionCount, function(data) {
     // The server may have retained rows whose Trash step failed (and the
     // user declined the permanent-delete fallback). Keep those rows visible
     // — dropping them from ``photos`` would hide files still on disk until
