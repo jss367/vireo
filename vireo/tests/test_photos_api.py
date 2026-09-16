@@ -12103,6 +12103,69 @@ def test_api_photos_query_focus_on_hidden_stack_member(app_and_db):
     assert hidden in stack["browse_stack"]["photo_ids"]
 
 
+def test_api_photos_query_focus_holds_one_read_snapshot(app_and_db, monkeypatch):
+    """The position and the page it implies must come from one snapshot.
+
+    Offset pagination is only self-consistent within a snapshot: a commit
+    landing between the two moves a target sitting on a page boundary onto
+    the adjacent page, and the response would carry a valid ``focus_page``
+    whose rows omit the photo. Browse does not page towards a focused
+    target, so it would clear the selection this whole path exists to
+    preserve (Codex review on PR #1658).
+    """
+    from db import Database
+
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    ws_id = db._ws_id()
+    db_path = app.config["DB_PATH"]
+    # Position 5 of 12; at three a page that is the last row of page 2.
+    target = ids[5]
+
+    original = Database.query_photo_position
+    inserted = []
+
+    def insert_between(self, *args, **kwargs):
+        position = original(self, *args, **kwargs)
+        # A separate connection — a background scan committing mid-request.
+        # Sorting ahead of everything pushes the target onto page 3.
+        writer = Database(db_path)
+        writer.set_active_workspace(ws_id)
+        inserted.append(writer.add_photo(
+            folder_id=folder,
+            filename="aaa-landed-mid-request.jpg",
+            extension=".jpg",
+            file_size=10,
+            file_mtime=1.0,
+            timestamp="2024-01-01T00:00:00",
+        ))
+        writer.close()
+        return position
+
+    monkeypatch.setattr(Database, "query_photo_position", insert_between)
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "per_page": 3,
+        "focus_photo_id": target,
+    })
+
+    assert response.status_code == 200
+    assert inserted, "the test must actually commit during the request"
+    payload = response.get_json()
+    assert payload["focus_index"] == 5
+    assert payload["focus_page"] == 2
+    listed = [photo["id"] for photo in payload["photos"]]
+    assert target in listed, (
+        "the focused page must still hold the photo the position described"
+    )
+    # And the page is the pre-insert one: the row that landed mid-request is
+    # not spliced into a page numbered against the older ordering.
+    assert inserted[0] not in listed
+
+
 def test_api_photos_query_focus_photo_id_must_be_an_integer(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
