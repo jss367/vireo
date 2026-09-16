@@ -13274,9 +13274,12 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
     rows owned by a workspace other than the one running the merge. That
     workspace never linked the archive folder, and
     ``sync._resolve_xmp_paths`` builds its map from ``get_folder_tree`` --
-    so without a link the preserved row would stay queued and fail every
-    future sync as inaccessible, with nothing saying why. Link the
-    survivor's folder into the owning workspace instead."""
+    so without help the preserved row would stay queued and fail every
+    future sync as inaccessible, with nothing saying why. Grant the
+    sibling workspace sync-only access to the survivor's folder instead --
+    a ``workspace_folders`` link would widen library membership over every
+    other photo in that folder."""
+    from sync import _resolve_xmp_paths
     ws = db._active_workspace_id
     sibling_ws = db.create_workspace("Sibling")
     arch = tmp_path / "arch" / "USA"
@@ -13289,6 +13292,13 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
     survivor_pid = db.add_photo(
         folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    # Unrelated archive-side photo in the same folder. The sibling
+    # workspace must NOT gain visibility on it.
+    (date_dir / "other.raf").write_bytes(b"unrelated")
+    other_pid = db.add_photo(
+        folder_id=date_id, filename="other.raf", extension=".raf",
+        file_size=9, file_mtime=1.0, file_hash="OTHERHASH",
     )
     db.set_active_workspace(ws)
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13314,20 +13324,40 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
         "SELECT photo_id FROM pending_changes "
         "WHERE change_token = 'tok-sibling'").fetchone()
     assert row is not None and row["photo_id"] == survivor_pid
-    # The sibling workspace can now resolve the survivor: its folder is in
-    # that workspace's tree, which is the map ``_resolve_xmp_paths`` uses.
+    # The sibling workspace's sync can now resolve the survivor -- the
+    # map used by ``_resolve_xmp_paths`` unions the workspace-scoped
+    # folder tree with sync-only grants.
     db.set_active_workspace(sibling_ws)
     try:
-        assert date_id in {f["id"] for f in db.get_folder_tree()}
+        resolved = _resolve_xmp_paths(db, [survivor_pid])
+        assert resolved[survivor_pid] == str(date_dir / "dup.xmp")
+        # But the survivor's folder is NOT part of the sibling
+        # workspace's library membership: it is not in
+        # ``workspace_folders`` and does not show up in
+        # ``get_folder_tree``.
+        assert date_id not in {f["id"] for f in db.get_folder_tree()}
+        assert db.conn.execute(
+            "SELECT COUNT(*) AS n FROM workspace_folders "
+            "WHERE workspace_id = ?", (sibling_ws,),
+        ).fetchone()["n"] == 0
+        # And the unrelated photo in the same folder stays invisible to
+        # every workspace-scoped browse/library query. A library-membership
+        # link would have exposed it.
+        other_resolved = _resolve_xmp_paths(db, [other_pid])
+        assert other_resolved[other_pid] == str(date_dir / "other.xmp")
+        # Resolution succeeds because the folder path is in the sync-only
+        # map, but the photo isn't visible in the browse tree.
     finally:
         db.set_active_workspace(ws)
-    # Linked non-root: the sibling gains the one folder its edit needs, not
-    # a second workspace root over the whole archive.
-    link = db.conn.execute(
-        "SELECT is_root FROM workspace_folders "
+    # Grant is recorded in the sync-only table, not ``workspace_folders``.
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM workspace_sync_only_folders "
         "WHERE workspace_id = ? AND folder_id = ?",
-        (sibling_ws, date_id)).fetchone()
-    assert link is not None and link["is_root"] == 0
+        (sibling_ws, date_id)).fetchone()["n"] == 1
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM workspace_folders "
+        "WHERE workspace_id = ? AND folder_id = ?",
+        (sibling_ws, date_id)).fetchone()["n"] == 0
     assert db.conn.execute(
         "SELECT COUNT(*) AS n FROM workspace_folders "
         "WHERE workspace_id = ? AND folder_id = ?",
@@ -13337,9 +13367,10 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
 def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
         db, tmp_path):
     """Phantom-branch counterpart: here the survivor is the staged row,
-    which only lands in the archive folder later in the merge, so the link
-    has to name its final folder rather than the staged one it occupied
-    when its edits were remapped."""
+    which only lands in the archive folder later in the merge, so the
+    sync-only grant has to name its final folder rather than the staged
+    one it occupied when its edits were remapped."""
+    from sync import _resolve_xmp_paths
     ws = db._active_workspace_id
     sibling_ws = db.create_workspace("Sibling")
     arch = tmp_path / "arch" / "USA"
@@ -13383,9 +13414,67 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
     assert survivor_folder == date_id
     db.set_active_workspace(sibling_ws)
     try:
-        assert survivor_folder in {f["id"] for f in db.get_folder_tree()}
+        # The sync engine can resolve the survivor even though the
+        # sibling workspace has no library membership on the folder.
+        resolved = _resolve_xmp_paths(db, [new_pid])
+        assert resolved[new_pid] == str(date_dir / "dup.xmp")
+        # No workspace_folders link -- browse/library queries stay clean.
+        assert survivor_folder not in {f["id"] for f in db.get_folder_tree()}
     finally:
         db.set_active_workspace(ws)
+    # Grant is on the survivor's FINAL folder (the archive one), not the
+    # staged folder it occupied when the remap happened.
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM workspace_sync_only_folders "
+        "WHERE workspace_id = ? AND folder_id = ?",
+        (sibling_ws, date_id)).fetchone()["n"] == 1
+
+
+def test_link_survivor_sync_only_grant_is_idempotent(db, tmp_path):
+    """Two remaps into the same folder for the same sibling workspace
+    share one sync-only grant. The insert uses OR IGNORE and the caller
+    also short-circuits when a grant already exists, so the row count
+    stays at one."""
+    ws = db._active_workspace_id
+    sibling_ws = db.create_workspace("Sibling")
+    arch = tmp_path / "arch"
+    arch.mkdir()
+    folder_id = db.add_folder(str(arch), name="arch")
+    pid = db.add_photo(
+        folder_id=folder_id, filename="a.raf", extension=".raf",
+        file_size=1, file_mtime=1.0, file_hash="H1",
+    )
+    assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is True
+    assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is False
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM workspace_sync_only_folders "
+        "WHERE workspace_id = ? AND folder_id = ?",
+        (sibling_ws, folder_id)).fetchone()["n"] == 1
+
+
+def test_link_survivor_skips_when_workspace_already_owns_folder(
+        db, tmp_path):
+    """If the sibling workspace already has a real ``workspace_folders``
+    link to the survivor's folder, no sync-only grant is needed on top --
+    the workspace-scoped map already covers it. Keeps the sync-only
+    table free of noise rows that would linger past merge."""
+    ws = db._active_workspace_id
+    sibling_ws = db.create_workspace("Sibling")
+    arch = tmp_path / "arch"
+    arch.mkdir()
+    folder_id = db.add_folder(str(arch), name="arch")
+    pid = db.add_photo(
+        folder_id=folder_id, filename="a.raf", extension=".raf",
+        file_size=1, file_mtime=1.0, file_hash="H1",
+    )
+    db.set_active_workspace(sibling_ws)
+    db.add_workspace_folder(sibling_ws, folder_id, is_root=True)
+    db.set_active_workspace(ws)
+    assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is False
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM workspace_sync_only_folders "
+        "WHERE workspace_id = ?", (sibling_ws,),
+    ).fetchone()["n"] == 0
 
 
 def test_merge_staged_tree_off_staging_identities_skip_sibling_workspace(

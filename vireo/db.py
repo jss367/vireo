@@ -940,6 +940,22 @@ class Database:
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
+            -- Sync-only folder grants. Rows here give ``_resolve_xmp_paths``
+            -- a way to find a photo's sidecar for a workspace that owns a
+            -- queued edit on the photo but has no ``workspace_folders`` link
+            -- to its folder. Tracked-merge collision handling adds a row per
+            -- sibling workspace whose ``pending_changes`` were remapped onto
+            -- an archive-side survivor, so the row can sync without the
+            -- workspace gaining library membership on every other photo in
+            -- that folder. Read only by ``get_sync_only_folder_map``; every
+            -- browse/library query stays folder-scoped through
+            -- ``workspace_folders``.
+            CREATE TABLE IF NOT EXISTS workspace_sync_only_folders (
+                workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                folder_id       INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+                PRIMARY KEY (workspace_id, folder_id)
+            );
+
             CREATE TABLE IF NOT EXISTS local_workspaces (
                 workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
                 state        TEXT NOT NULL,
@@ -5440,11 +5456,11 @@ class Database:
         return True
 
     def _link_survivor_for_sibling_edits(self, workspace_id, photo_id):
-        """Link a remapped photo's folder into a non-active workspace.
+        """Grant a sibling workspace sync-only access to a remapped photo's folder.
 
         The collision loop remaps ``pending_changes`` by ``photo_id``, which
         also moves rows owned by workspaces other than the one running the
-        merge. The merge links the destination subtree to the active
+        merge. The merge links the destination subtree into the active
         workspace only, so without this a sibling workspace would be left
         holding a queued edit on a photo it cannot resolve:
         ``sync._resolve_xmp_paths`` builds its folder map from that
@@ -5452,14 +5468,23 @@ class Database:
         empty path and fails every future sync as inaccessible — queued
         forever, with nothing saying why.
 
-        Linked non-root and one folder at a time: ``add_workspace_folder``
-        materializes the whole path-prefixed subtree, which would pull the
-        archive's unrelated siblings into a workspace that never asked for
-        them. ``get_folder_tree`` includes any linked folder, root or not,
-        so a single non-root link is all the sibling needs to resolve the
-        photo.
+        Recorded in ``workspace_sync_only_folders`` rather than
+        ``workspace_folders``. A ``workspace_folders`` link is library
+        membership: every browse/library query joins on it by folder id
+        alone, so any link -- root or not -- would make every photo sharing
+        the survivor's folder visible in the sibling workspace, and the
+        link would remain after the queued edit was synced. One queued
+        edit on a colliding staged photo would permanently import an
+        archive folder of unrelated photos into a workspace that never
+        asked for it.
 
-        Returns ``True`` when a new link was written.
+        ``workspace_sync_only_folders`` is read only by
+        ``get_sync_only_folder_map``, which the sync engine unions with
+        ``get_folder_tree`` when building its sidecar-path map. Every
+        browse/library query stays folder-scoped through
+        ``workspace_folders`` and sees no change.
+
+        Returns ``True`` when a new grant was written.
         """
         row = self.conn.execute(
             "SELECT folder_id FROM photos WHERE id = ?", (photo_id,)
@@ -5467,24 +5492,55 @@ class Database:
         if row is None or row["folder_id"] is None:
             return False
         folder_id = row["folder_id"]
-        already = self.conn.execute(
+        # Skip if the workspace already resolves this folder through its
+        # normal library membership -- no sync-only grant is needed on top.
+        already_linked = self.conn.execute(
             "SELECT 1 FROM workspace_folders "
             "WHERE workspace_id = ? AND folder_id = ?",
             (workspace_id, folder_id),
         ).fetchone()
-        if already is not None:
+        if already_linked is not None:
+            return False
+        already_grant = self.conn.execute(
+            "SELECT 1 FROM workspace_sync_only_folders "
+            "WHERE workspace_id = ? AND folder_id = ?",
+            (workspace_id, folder_id),
+        ).fetchone()
+        if already_grant is not None:
             return False
         self.conn.execute(
-            "INSERT OR IGNORE INTO workspace_folders "
-            "(workspace_id, folder_id, is_root) VALUES (?, ?, 0)",
+            "INSERT OR IGNORE INTO workspace_sync_only_folders "
+            "(workspace_id, folder_id) VALUES (?, ?)",
             (workspace_id, folder_id),
         )
         log.info(
-            "Linked folder %s into workspace %s so preserved edits on "
-            "photo %s stay syncable after the archive merge",
-            folder_id, workspace_id, photo_id,
+            "Granted workspace %s sync-only access to folder %s so preserved "
+            "edits on photo %s stay syncable after the archive merge",
+            workspace_id, folder_id, photo_id,
         )
         return True
+
+    def get_sync_only_folder_map(self, workspace_id=None):
+        """Return ``{folder_id: folders.path}`` for the workspace's sync-only grants.
+
+        The sync engine unions this map with the workspace-scoped folder tree
+        so ``_resolve_xmp_paths`` can resolve sidecar paths for photos whose
+        folder was granted only for sync (see
+        ``_link_survivor_for_sibling_edits``). Absent from every
+        browse/library query, which still joins on ``workspace_folders``
+        alone.
+        """
+        if workspace_id is None:
+            workspace_id = self._ws_id()
+        rows = self.conn.execute(
+            "SELECT f.id AS id, f.path AS path "
+            "FROM workspace_sync_only_folders sof "
+            "JOIN folders f ON f.id = sof.folder_id "
+            "WHERE sof.workspace_id = ? "
+            "  AND f.status IN ('ok', 'partial')",
+            (workspace_id,),
+        ).fetchall()
+        return {r["id"]: r["path"] for r in rows}
 
     def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
         """Fold a staged folder subtree into an existing tracked archive.
@@ -5554,10 +5610,11 @@ class Database:
 
         Side effect worth knowing about: when a remapped pending edit is
         owned by a workspace other than the active one, the survivor's
-        folder is linked (non-root) into that workspace so the edit stays
-        resolvable there. Without it the preserved row would be queued
-        against a photo that workspace cannot see, and every future sync
-        would fail it as inaccessible. See
+        folder is recorded in ``workspace_sync_only_folders`` for that
+        workspace so the sync engine can resolve the sidecar path.
+        ``workspace_folders`` is not touched -- a real library link would
+        make every other photo in the survivor's folder visible in the
+        sibling workspace and persist past the sync. See
         ``_link_survivor_for_sibling_edits``.
         """
         staged_root = self.conn.execute(
