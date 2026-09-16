@@ -22,13 +22,34 @@ def test_card_carries_its_saved_color_label(live_server, page):
     card.wait_for(state="visible")
     expect(card).to_have_attribute("data-color-label", "purple")
 
-    # The tint is a real computed border color, not just an attribute.
-    border = card.evaluate("el => getComputedStyle(el).borderTopColor")
-    assert border not in ("", "rgba(0, 0, 0, 0)")
+    # The tint is implemented as an inset outline (the base .grid-card border
+    # is non-transparent, so asserting on borderTopColor would pass even if
+    # every tint rule were deleted). Assert on the outline itself and on the
+    # tinted info-strip background — the two surfaces the tint actually paints.
+    tint = card.evaluate(
+        """el => {
+            const cs = getComputedStyle(el);
+            const info = el.querySelector('.grid-card-info');
+            return {
+                outlineColor: cs.outlineColor,
+                outlineWidth: cs.outlineWidth,
+                outlineStyle: cs.outlineStyle,
+                infoBg: info ? getComputedStyle(info).backgroundColor : '',
+            };
+        }"""
+    )
+    assert tint["outlineStyle"] == "solid"
+    assert tint["outlineWidth"] not in ("", "0px")
+    assert tint["outlineColor"] not in ("", "rgba(0, 0, 0, 0)", "transparent")
+    assert tint["infoBg"] not in ("", "rgba(0, 0, 0, 0)", "transparent")
 
-    # Unlabelled cards stay untinted.
+    # Unlabelled cards stay untinted: no data attribute, and no outline paint.
     other = page.locator(f'.grid-card:not([data-id="{photo_id}"])').first
     assert other.get_attribute("data-color-label") is None
+    other_outline = other.evaluate(
+        "el => getComputedStyle(el).outlineColor"
+    )
+    assert other_outline in ("", "rgba(0, 0, 0, 0)", "transparent")
 
 
 def test_setting_and_clearing_a_color_updates_the_card_live(live_server, page):

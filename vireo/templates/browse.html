@@ -2682,6 +2682,16 @@ var colorLabels = {};    // {photo_id: color_string}
 // rendering "everything is uncoloured" for a still-loading selection.
 var colorLabelsFetched = new Set();
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
+// Per-id record of the generation each id was last locally edited at, so a
+// slow fetch that started before an edit still cannot overwrite that edit for
+// the specific ids it touched. `colorLabelGen === gen` alone catches only the
+// nothing-changed case; a concurrent edit to one id would otherwise let the
+// stale response's values for every other id overwrite them anyway, and the
+// stale value for the edited id survive.
+var colorLabelEditGen = Object.create(null);
+function _noteColorLabelEdits(ids) {
+  ids.forEach(function(id) { colorLabelEditGen[id] = colorLabelGen; });
+}
 // Generation counter for the grid window (photos/currentPage/earliestPage/
 // allLoaded). Never compare it directly — go through claimBrowseWindow() /
 // observeBrowseWindow() so every async path guards the same way.
@@ -3431,7 +3441,8 @@ function renderPhotoCard(p, idx) {
   if (isOffline) {
     return '<div class="grid-card offline" data-id="' + p.id +
       '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) +
-      '" aria-disabled="true" title="This photo\'s folder is offline. Reconnect or relocate the folder to edit it.">' +
+      '"' + cardColorLabelAttr(p.id) +
+      ' aria-disabled="true" title="This photo\'s folder is offline. Reconnect or relocate the folder to edit it.">' +
       '<div class="grid-card-img-wrap">' +
         '<div class="offline-photo-placeholder">' +
           '<span class="offline-icon">\u26d3</span>' +
@@ -10820,6 +10831,7 @@ async function batchSetColorLabel(color) {
   var ids = getActiveSelection();
   if (!ids.length) return;
   colorLabelGen++;
+  _noteColorLabelEdits(ids);
   try {
     await safeFetch('/api/batch/color_label', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -11878,11 +11890,17 @@ async function fetchColorLabels(photoIds) {
     for (var id in data) combined[id] = data[id];
   }
   if (chunkFailed) return;
-  // Only clear stale entries if no local edits happened during the fetch
-  if (colorLabelGen === gen) {
-    photoIds.forEach(function(id) { delete colorLabels[id]; });
+  // Skip per id whose local edit happened after this fetch started: the
+  // delete would drop the fresh value, and the merge would overwrite it with
+  // the older server truth. Ids the user never touched are still applied.
+  photoIds.forEach(function(id) {
+    if ((colorLabelEditGen[id] || 0) > gen) return;
+    delete colorLabels[id];
+  });
+  for (var pid in combined) {
+    if ((colorLabelEditGen[pid] || 0) > gen) continue;
+    colorLabels[pid] = combined[pid];
   }
-  for (var pid in combined) colorLabels[pid] = combined[pid];
   // Mark every requested id as fetched — an absent id in `combined` means
   // "no color set" now that we've asked, so the batch inspector can trust
   // colorLabels[id] === undefined for these ids as a definite value.
@@ -11907,6 +11925,7 @@ async function setColorLabel(color) {
   if (!selectedPhotoId) return;
   colorLabelGen++;
   var photoId = selectedPhotoId;
+  _noteColorLabelEdits([photoId]);
   var current = colorLabels[photoId] || null;
   var newColor = (current === color) ? null : color;
   await safeFetch('/api/photos/' + photoId + '/color_label', {
@@ -13156,6 +13175,7 @@ async function setFlagFor(photoId, flag) {
 
 async function setColorLabelFor(photoId, color) {
   colorLabelGen++;
+  _noteColorLabelEdits([photoId]);
   try {
     await safeFetch('/api/batch/color_label', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
