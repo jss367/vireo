@@ -190,9 +190,9 @@ SCHEMA = {
     "browse_card_fields": {
         "type": "list_string",
         "items_enum": [
-            "filename", "location_status", "rating", "flag", "sharpness", "species",
-            "dimensions", "file_size", "capture_date", "extension",
-            "quality_score",
+            "filename", "location_status", "rating", "flag", "color_label",
+            "sharpness", "species", "dimensions", "file_size", "capture_date",
+            "extension", "quality_score",
         ],
         "category": "Display", "scope": "global",
         "label": "Browse card fields",
