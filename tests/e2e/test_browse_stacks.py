@@ -554,6 +554,28 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     )
     expect(page.locator("#detailFilename")).to_have_text("robin1.jpg")
 
+    # Same ids, different provenance: a stack the user selected on purpose is
+    # a batch, and viewing it with a shortcut leaves it alone even when the
+    # user navigates away and closes somewhere else entirely.
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    tray.get_by_role("button", name="Select all").click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        burst_ids,
+    )
+
 
 def test_clearing_the_selection_scrubs_a_stack_cards_partial_mark(
     live_server, page,

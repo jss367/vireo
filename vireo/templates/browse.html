@@ -3397,21 +3397,6 @@ function browseCardSelectionClass(photo) {
   return chosen ? ' stack-partial' : '';
 }
 
-// True when the selection is exactly one stack's frames — the state a single
-// click on a stack card produces. Distinguishing that from a batch the user
-// assembled card by card is what lets lightbox navigation replace the former
-// and preserve the latter. A selection this cannot recognize (an unusual
-// insertion order, members with no loaded cover) reads as a batch, which is
-// the safe answer: batches are preserved.
-function browseSelectionIsOneStack() {
-  if (!selectedPhotos.size) return false;
-  var first = selectedPhotos.values().next().value;
-  var members = browseStackMemberIds(first)
-    || browseStackMemberIds(browseStackCoverIdForPhoto(first));
-  return !!members && members.length === selectedPhotos.size
-    && members.every(function(id) { return selectedPhotos.has(id); });
-}
-
 // "12 photos selected · 2 stacks" — the sentence a stack click has to be able
 // to answer, since one click now moves the count by more than one. It is only
 // printable when the stacks and singles currently in the grid account for
@@ -7854,6 +7839,18 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
   if (!card || card.classList.contains('offline')) return;
   var id = parseInt(card.dataset.id, 10);
   var filename = card.dataset.filename || '';
+  // Provenance for the close handler. A double-click on a stack card runs its
+  // own two clicks through selectPhoto first, so the stack is selected by the
+  // time the lightbox opens — a selection this viewing gesture made, not a
+  // batch the user assembled, and the only one the close handler may replace.
+  // Recording the opener is the only way to tell those apart: the selected ids
+  // are identical either way. Codex P2 on PR #1672.
+  var gestureIds = browseStackMemberIds(id);
+  browseLightboxStackGesture = (
+    gestureIds
+    && gestureIds.length === selectedPhotos.size
+    && gestureIds.every(function(memberId) { return selectedPhotos.has(memberId); })
+  ) ? selectionIdsKey(gestureIds) : null;
   // Top-level grid cards navigate the grid, matching pre-stacks behaviour;
   // an expanded stack's members live in ``.browse-stack-member`` cards and
   // open against their own member list instead.
@@ -7975,6 +7972,9 @@ function browseKeyMatchesConfiguredShortcut(e) {
    at the same boundary and advance as soon as the page is available. */
 var browseLightboxBoundaryRetry = null;
 var browseLightboxSession = 0;
+// Set by the grid double-click handler when the gesture's own clicks selected
+// the stack it opened; consumed and cleared by the ``lightbox:closed`` handler.
+var browseLightboxStackGesture = null;
 
 function browseLightboxOwnsLoadedWindow() {
   return (
@@ -13172,17 +13172,20 @@ function scrollToCard(idx) {
 // Previous/Next step while the lightbox is still open.
 document.addEventListener('lightbox:closed', function(event) {
   var photoId = event && event.detail ? event.detail.photoId : null;
+  // One marker per open/close pair, whatever the outcome below.
+  var stackGesture = browseLightboxStackGesture;
+  browseLightboxStackGesture = null;
   if (photoId == null) return;
   if (selectedPhotos.size > 0) {
     // Viewing shortcuts can open the lightbox without collapsing an existing
     // batch. Preserve that batch instead of replacing it with the viewed
-    // photo — unless the "batch" is exactly one stack, which is the state a
-    // single card click produces rather than one the user assembled. A
-    // double-click on a stack card runs its own two clicks through
-    // selectPhoto first, so without this the guard would see that stack and
-    // refuse to follow the user to the photo they finished on.
-    // Codex P2 on PR #1672.
-    if (!browseSelectionIsOneStack()) return;
+    // photo — unless this lightbox was opened by a double-click on a stack
+    // card and that gesture's own selection is still untouched, which is the
+    // one "batch" the user did not assemble. Same ids, different provenance:
+    // an intentional stack selection (tray Select all, then E) still reads as
+    // a batch. Codex P2 on PR #1672.
+    if (stackGesture == null
+        || stackGesture !== selectionIdsKey(Array.from(selectedPhotos))) return;
     // Finished inside that stack: the viewing gesture ended where it began,
     // so the stack stays selected rather than shrinking to one frame.
     if (selectedPhotos.has(photoId)) {
