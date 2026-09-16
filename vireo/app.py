@@ -9313,34 +9313,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "suggestions": suggestions,
         })
 
-    def _prediction_consensus_species(row):
-        """Species ``accept_prediction`` will actually apply for this row.
-
-        Non-grouped predictions accept as their own ``species``. A grouped
-        (burst) prediction accepts as the burst's winning species, derived
-        from the per-individual vote counts stored in
-        ``prediction_review.individual`` — a Robin/Robin/Sparrow burst
-        accepts as Robin even from the minority Sparrow frame.
-
-        The Browse panel and the selection aggregator both group by species,
-        so they must group by *this* species — otherwise a minority frame
-        surfaces a Sparrow Accept button that silently tags Robin. Kept as a
-        module-level helper so the two callers stay in lockstep.
-        """
-        species = row["species"]
-        if not row["group_id"] or not row["individual"]:
-            return species
-        try:
-            votes = json.loads(row["individual"])
-        except (TypeError, ValueError):
-            return species
-        if not isinstance(votes, dict) or not votes:
-            return species
-        try:
-            return max(votes, key=lambda sp: votes[sp])
-        except (TypeError, ValueError):
-            return species
-
     def _effective_category_resolver(db, photo_ids):
         """Build ``(photo_id, species) -> category`` against *current* keywords.
 
@@ -9394,29 +9366,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             taxonomy = load_local_taxonomy()
         except Exception:
             taxonomy = None
-        species_by_photo = db.get_species_keywords_for_photos(photo_ids)
+        from species_identity import SpeciesResolver
+        resolver = SpeciesResolver(db=db)
+        species_by_photo = db.get_species_keywords_for_photos(photo_ids, include_identities=True)
         resolved = {}
         cache = {}
 
-        def _category(photo_id, species):
+        def comparison_name(species, identity=None):
+            identity = identity or resolver.display(species)
+            if identity.scientific_name:
+                return identity.scientific_name
+            if species not in resolved:
+                resolved[species] = db.resolve_species_display_name(identity.display_name)
+            return resolved[species]
+
+        keyword_names = {}
+        for photo_id, entries in species_by_photo.items():
+            names = []
+            for entry in entries:
+                source = {"taxon_id": int(entry["key"][6:])} if entry["key"].startswith("taxon:") else None
+                identity = resolver.resolve(entry["name"], source=source) if source else resolver.display(entry["name"])
+                names.append(comparison_name(entry["name"], identity))
+            keyword_names[photo_id] = names
+
+        def _category(photo_id, species, identity=None):
             if not species or photo_id is None:
                 return None
-            if species not in resolved:
-                try:
-                    resolved[species] = db.resolve_species_display_name(species)
-                except Exception:
-                    resolved[species] = species
-            key = (photo_id, resolved[species])
+            identity = identity or resolver.display(species)
+            key = (photo_id, identity.key)
             if key not in cache:
-                comparison = compare_prediction_to_keywords(
-                    resolved[species],
-                    species_by_photo.get(photo_id, []),
-                    taxonomy,
-                )
-                cache[key] = (
-                    comparison.get("category")
-                    if isinstance(comparison, dict) else None
-                )
+                if any(entry["key"] == identity.key for entry in species_by_photo.get(photo_id, [])):
+                    cache[key] = "match"
+                else:
+                    comparison = compare_prediction_to_keywords(
+                        comparison_name(species, identity),
+                        keyword_names.get(photo_id, []),
+                        taxonomy,
+                    )
+                    cache[key] = (
+                        comparison.get("category")
+                        if isinstance(comparison, dict) else None
+                    )
             return cache[key]
 
         return _category
@@ -9490,13 +9480,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         }
         effective_category_of = _effective_category_resolver(db, photo_ids)
+        from species_identity import SpeciesResolver
+        resolver = SpeciesResolver(db=db)
         ambiguous = set()
         for row in rows:
             # Compared on the species the accept path would actually apply
             # (the burst consensus), not the row's own label.
-            species = _prediction_consensus_species(row)
+            identity = resolver.consensus(row)
+            species = identity.display_name
             effective_category = (
-                effective_category_of(row["photo_id"], species)
+                effective_category_of(row["photo_id"], species, identity)
                 if effective_category_of is not None and species else None
             )
             if (
@@ -9581,6 +9574,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # precondition cannot describe different sets.
         ambiguous_row_ids = _ambiguous_prediction_ids(db, pending)
 
+        from species_identity import SpeciesResolver
+        resolver = SpeciesResolver(db=db)
         order = {pid: i for i, pid in enumerate(photo_ids)}
         by_key = {}
         for row in pending:
@@ -9590,10 +9585,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Robin/Robin/Sparrow burst must aggregate under Robin — the
             # Sparrow minority frame would otherwise surface its own bucket
             # advertising an Accept button that tags Robin.
-            species = _prediction_consensus_species(row)
+            identity = resolver.consensus(row)
+            species = identity.display_name
             if not species:
                 continue
-            key = keyword_match_key(species) or species.casefold()
+            key = identity.key
             entry = by_key.setdefault(key, {
                 "species": species,
                 "models": set(),
@@ -9612,8 +9608,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raw_species = row["species"]
             row_matches_consensus = bool(
                 raw_species
-                and (keyword_match_key(raw_species) or raw_species.casefold())
-                == key
+                and resolver.prediction(row).key == key
             )
             if row_matches_consensus:
                 entry["confidences"].append(row["confidence"] or 0.0)
@@ -9646,9 +9641,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Look up existing rows only — asking here must not create keywords.
         kid_by_key = {}
         for row in db.conn.execute(
-            "SELECT id, name FROM keywords WHERE is_species = 1 OR type = 'taxonomy'"
+            "SELECT k.id, k.name, COALESCE(k.source_taxon_id, t.inat_id) AS source_id, "
+            "t.name AS scientific_name FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id "
+            "WHERE k.is_species = 1 OR k.type = 'taxonomy'"
         ).fetchall():
-            kid_by_key.setdefault(keyword_match_key(row["name"]), row["id"])
+            source = {"taxon_id": row["source_id"], "scientific_name": row["scientific_name"]} if row["source_id"] else None
+            identity = resolver.resolve(row["name"], row["scientific_name"], source)
+            kid_by_key.setdefault(identity.key, row["id"])
 
         results = []
         # A bucket-level suppression used to sit here: when the threshold was
@@ -15901,6 +15900,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         effective_category_of = _effective_category_resolver(
             db, pending_photo_ids,
         )
+        from species_identity import SpeciesResolver
+        resolver = SpeciesResolver(db=db)
         for d in pred_dicts:
             if d.get("status") == "alternative":
                 continue  # alternatives are nested, not top-level
@@ -15913,10 +15914,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # majority-Robin burst never surfaces a Sparrow row whose Accept
             # actually tags Robin. Computed before the comparison below
             # because that species is the one that would land on the photo.
-            d["consensus_species"] = _prediction_consensus_species(d)
+            identity = resolver.consensus(d)
+            d["consensus_species"] = identity.display_name
+            d["consensus_species_key"] = identity.key
+            d["species_key"] = resolver.prediction(d).key
             effective_category = (
                 effective_category_of(
-                    d.get("photo_id"), d.get("consensus_species"),
+                    d.get("photo_id"), d.get("consensus_species"), identity,
                 )
                 if effective_category_of is not None else None
             )
@@ -16524,7 +16528,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         has_accepted_predictions = bool(items)
         if all_photo_ids is not None:
             if keyword_id is None:
-                keyword_id = db.add_keyword(expected_species, is_species=True, _commit=False)
+                from species_identity import SpeciesResolver
+                identity = SpeciesResolver(db=db).display(expected_species)
+                keyword_id = db.add_keyword(
+                    identity.display_name, is_species=True, _commit=False,
+                    source_taxon_id=identity.taxon_id,
+                )
                 species = db.conn.execute(
                     "SELECT name FROM keywords WHERE id = ?", (keyword_id,),
                 ).fetchone()["name"]
@@ -16648,6 +16657,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(db.conn.execute(
                 f"""SELECT pr.id, pr.species, pr.category, pr.detection_id,
+                           pr.source_taxon_id, pr.scientific_name, pr.labels_fingerprint,
                            pr.classifier_model AS model, d.photo_id,
                            pr_rev.group_id AS group_id,
                            pr_rev.individual AS individual
@@ -17003,7 +17013,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         * ``/api/predictions/group/apply`` in another tab ungroups a burst
           member, so the row's ``individual`` votes are cleared and
-          ``_prediction_consensus_species`` falls back to the raw per-frame
+          ``SpeciesResolver.consensus`` falls back to the raw per-frame
           label — a Robin-consensus row for a frame whose own species column
           reads Sparrow now accepts as Sparrow, not the Robin the button
           named.
@@ -17017,19 +17027,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         No-ops when ``expected_species`` is falsy — a caller with no species
         in hand (Review's single-photo routes, older tests) is out of scope
-        for this check. Match key uses ``keyword_match_key`` so canonical
-        casing / typography does not falsely register as a drift.
+        for this check. Compare resolved identities so common/scientific aliases
+        do not register as drift. Unresolved labels retain text matching.
 
         Returns the drifted-row subset of ``rows`` ids.
         """
         rows = list(rows)
         if not rows or not expected_species:
             return set()
-        expected_key = keyword_match_key(expected_species)
+        from species_identity import SpeciesResolver
+        resolver = SpeciesResolver(db=db)
+        expected_key = resolver.display(expected_species).key
         drifted = set()
         for row in rows:
-            current = _prediction_consensus_species(row)
-            if not current or keyword_match_key(current) != expected_key:
+            current = resolver.consensus(row)
+            if current.key != expected_key and keyword_match_key(current.display_name) != keyword_match_key(expected_species):
                 drifted.add(row["id"])
         return drifted
 

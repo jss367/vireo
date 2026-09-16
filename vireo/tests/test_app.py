@@ -24608,3 +24608,155 @@ def test_compare_preserves_exact_keyword_match_with_incomplete_taxonomy(
     assert prediction["category"] == "match"
     assert prediction["canonical_species"] == ("taxon:123" if source_backed or tax and taxonomy_state == "scientific_only"
                                                 else "scientific:test species")
+
+
+@pytest.mark.parametrize("verified_names", [True, False])
+@pytest.mark.parametrize("on_all", [True, False])
+@pytest.mark.parametrize("already_tagged", [True, False])
+def test_selection_prediction_species_identity_merges_names_and_accepts(
+    app_and_db, verified_names, on_all, already_tagged,
+):
+    """Common/scientific burst spellings share evidence, tags, and one undo."""
+    app, db = app_and_db
+    client = app.test_client()
+    common = "California Towhee"
+    scientific = "Melozone crissalis"
+    qualified = f"{common} ({scientific})"
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (42, ?, ?, 'species')",
+        (scientific, common),
+    )
+    db.set_meta("common_name_identity_version", "1" if verified_names else "")
+    photos = []
+    prediction_ids = []
+    for i in range(2):
+        photo, detection = _seed_prediction_photo(db, f"towhee-{i}.jpg", common, .87 + i * .1)
+        photos.append(photo)
+        pred = _prediction_id(db, photo, common)
+        prediction_ids.append(pred)
+        db.conn.execute(
+            "UPDATE predictions SET source_taxon_id = 42, scientific_name = ? WHERE id = ?",
+            (scientific, pred),
+        )
+        db.add_prediction(
+            detection, scientific, .99, "iNat21", labels_fingerprint="tol",
+            taxonomy={"scientific_name": scientific}, group_id="towhee-burst",
+            individual=json.dumps({qualified: 2}),
+        )
+        prediction_ids.append(_prediction_id(db, photo, scientific))
+    third, _ = _seed_prediction_photo(db, "no-pending-towhee.jpg", common, .8, status="rejected")
+    photos.append(third)
+    existing_kid = None
+    if already_tagged:
+        existing_kid = db.add_keyword(common, is_species=True, source_taxon_id=42)
+        db.tag_photo(photos[0], existing_kid)
+    db.conn.commit()
+    response = client.post("/api/selection/prediction-suggestions", json={"photo_ids": photos})
+    assert response.status_code == 200
+    entries = response.get_json()["predictions"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["keyworded_count"] == int(already_tagged)
+    assert entry["acceptable_keyworded_count"] == int(already_tagged)
+    assert entry["predicted_count"] == 2
+    assert entry["acceptable_photo_count"] == 2
+    assert set(entry["acceptable_prediction_ids"]) == set(prediction_ids)
+    assert entry["min_confidence"] == .87
+    assert entry["max_confidence"] == .99
+    payload = {"prediction_ids": entry["acceptable_prediction_ids"], "expected_species": entry["species"]}
+    if on_all:
+        payload["photo_ids"] = photos
+    response = client.post("/api/predictions/batch-accept", json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.get_json()["skipped_species_drifted"] == 0
+    assert response.get_json()["accepted"] == (3 if on_all else 2)
+    tagged = [db.get_photo_keywords(p) for p in photos]
+    assert len(tagged[0]) == len(tagged[1]) == 1
+    assert tagged[0][0]["id"] == tagged[1][0]["id"]
+    assert len(tagged[2]) == (1 if on_all else 0)
+    assert {r["status"] for r in db.get_predictions(photo_ids=photos[:2])} == {"accepted"}
+    db.undo_last_edit()
+    assert all(not db.get_photo_keywords(p) for p in photos[1:])
+    assert [k["id"] for k in db.get_photo_keywords(photos[0])] == ([existing_kid] if already_tagged else [])
+    assert {r["status"] for r in db.get_predictions(photo_ids=photos[:2])} == {"pending"}
+
+
+def test_selection_prediction_species_identity_keeps_homonyms_separate(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    photos = []
+    for tid, scientific in [(42, "Melozone crissalis"), (43, "Melozone fusca")]:
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, 'Towhee', 'species')",
+            (tid, scientific),
+        )
+        photo, _ = _seed_prediction_photo(db, f"towhee-{tid}.jpg", "Towhee", .9)
+        photos.append(photo)
+        db.conn.execute(
+            "UPDATE predictions SET source_taxon_id = ?, scientific_name = ? WHERE id = ?",
+            (tid, scientific, _prediction_id(db, photo, "Towhee")),
+        )
+    db.conn.commit()
+    entries = client.post("/api/selection/prediction-suggestions", json={"photo_ids": photos}).get_json()["predictions"]
+    assert len(entries) == 2
+    assert {e["species"] for e in entries} == {"Towhee (Melozone crissalis)", "Towhee (Melozone fusca)"}
+    assert all(e["predicted_count"] == 1 and e["max_confidence"] == .9 for e in entries)
+    # A source change under an unchanged common name is real drift.
+    first = entries[0]
+    db.conn.execute(
+        "UPDATE predictions SET source_taxon_id = 43, scientific_name = 'Melozone fusca' WHERE id = ?",
+        (first["acceptable_prediction_ids"][0],),
+    )
+    db.conn.commit()
+    response = client.post("/api/predictions/batch-accept", json={
+        "prediction_ids": first["acceptable_prediction_ids"], "expected_species": first["species"],
+    })
+    assert response.status_code == 200
+    assert response.get_json()["accepted"] == 0
+    assert response.get_json()["skipped_species_drifted"] == 1
+
+
+def test_browse_detail_prediction_species_identity_credits_scientific_alias(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (42, 'Melozone crissalis', 'California Towhee', 'species')"
+    )
+    photo, detection = _seed_prediction_photo(db, "detail-towhee.jpg", "California Towhee", .87)
+    db.conn.execute(
+        "UPDATE predictions SET source_taxon_id = 42 WHERE detection_id = ?", (detection,),
+    )
+    db.add_prediction(
+        detection, "Melozone crissalis", .99, "iNat21", labels_fingerprint="tol",
+        taxonomy={"scientific_name": "Melozone crissalis"},
+        group_id="detail-burst", individual=json.dumps({"California Towhee (Melozone crissalis)": 1}),
+    )
+    db.conn.commit()
+    data = client.get(f"/api/predictions?photo_ids={photo}").get_json()
+    assert len(data["predictions"]) == 2
+    assert all(p["species_key"] == p["consensus_species_key"] == "taxon:42" for p in data["predictions"])
+    html = client.get("/browse").get_data(as_text=True)
+    rendered = _run_detail_prediction_panel(html, "render", {"photoId": photo, "data": data})["html"]
+    assert rendered.count('class="prediction-species"') == 1
+    assert "99%" in rendered
+    assert "confidence unknown" not in rendered
+
+
+def test_batch_accept_on_all_qualified_species_without_predictions(app_and_db):
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (42, 'Melozone crissalis', 'California Towhee', 'species')"
+    )
+    photo, _ = _seed_prediction_photo(db, "towhee-manual.jpg", "California Towhee", .9, status="rejected")
+    response = app.test_client().post("/api/predictions/batch-accept", json={
+        "photo_ids": [photo], "prediction_ids": [],
+        "expected_species": "California Towhee (Melozone crissalis)",
+    })
+    assert response.status_code == 200
+    assert response.get_json()["accepted"] == 1
+    keyword = db.get_photo_keywords(photo)[0]
+    assert db.conn.execute("SELECT source_taxon_id FROM keywords WHERE id = ?", (keyword["id"],)).fetchone()[0] == 42
+    db.undo_last_edit()
+    assert not db.get_photo_keywords(photo)

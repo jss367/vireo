@@ -165,7 +165,50 @@ class SpeciesResolver:
         source = None
         if row.get("source_taxon_id"):
             source = {"taxon_id": row["source_taxon_id"], "scientific_name": row.get("scientific_name")}
+        if not source and not (native and row.get("scientific_name")):
+            return self.display(row.get("species"))
         return self.resolve(row.get("species"), row.get("scientific_name") if native else None, source)
+
+    def display(self, name):
+        """Resolve review labels without treating arbitrary parentheses as aliases."""
+        name = str(name or "").strip()
+        prefix, sep, suffix = name.rpartition(" (")
+        if sep and suffix.endswith(")"):
+            qualifier = suffix[:-1]
+            if qualifier.startswith("taxon ") and qualifier[6:].isdecimal() and len(qualifier[6:]) <= 19:
+                taxon_id = int(qualifier[6:])
+                if 0 < taxon_id < (1 << 63):
+                    return self.resolve(prefix, source={"taxon_id": taxon_id})
+            taxon = self._lookup(qualifier, scientific=True)
+            if taxon:
+                return self.resolve(prefix, source=taxon)
+        return self.resolve(name)
+
+    def consensus(self, row):
+        """Identity the accept action applies, including legacy burst votes.
+
+        A display spelling of the row's own identity retains its source
+        evidence. A vote for another species must not inherit that evidence.
+        """
+        row = dict(row)
+        own = self.prediction(row)
+        species = row.get("species") or ""
+        if row.get("group_id") and row.get("individual"):
+            try:
+                votes = json.loads(row["individual"])
+                if isinstance(votes, dict) and votes:
+                    species = max(votes, key=lambda sp: votes[sp])
+            except (TypeError, ValueError):
+                pass
+        spellings = [row.get("species"), own.display_name]
+        if own.scientific_name:
+            spellings.extend([
+                own.scientific_name,
+                f"{row.get('species')} ({own.scientific_name})",
+            ])
+        if keyword_match_key(species) in {keyword_match_key(s) for s in spellings if s}:
+            return own
+        return self.display(species)
 
 
 def correct_common_name_index(by_common, by_scientific):
