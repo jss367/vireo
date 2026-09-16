@@ -29,7 +29,9 @@ outside a closed vocabulary) are dropped here rather than rendered as a
 button that could never match anything.
 """
 
+import datetime
 import json
+import math
 import re
 import uuid
 
@@ -60,9 +62,25 @@ BOOLEAN_FALSE = (False, 0, "0", "false")
 # engine's date branch and RECENT_UNITS in vireo-filter.js).
 RECENT_UNITS = ("days", "weeks", "months", "years")
 
-# Date leaves are bound straight into a comparison against stored timestamps,
-# so a value that is not a date silently matches nothing.
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ].*)?$")
+# Stored timestamps are extended-ISO text, and the comparison is lexical, so
+# the shape has to match theirs: "20260101" parses as a date but sorts
+# against "2026-01-01 08:00:00" as nonsense.
+DATE_SHAPE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?(Z|[+-]\d{2}:?\d{2})?$")
+
+
+def _is_date(value):
+    """True when the rule engine can compare this against a timestamp.
+
+    Both a non-date and an impossible one ("2026-02-31") otherwise pass
+    silently and then match nothing — or, compared lexically, far too much.
+    """
+    if not isinstance(value, str) or not DATE_SHAPE.match(value):
+        return False
+    try:
+        datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 # The bar's original hardcoded buttons, kept as the default configuration so
 # an untouched install renders exactly what it always did.
@@ -146,12 +164,16 @@ def _clean_leaf(node):
                 number = float(item)
             except (TypeError, ValueError):
                 return None
-            numbers.append(int(number) if float(number).is_integer() else number)
+            # NaN/Infinity survive float() and then serialize as tokens no
+            # JSON parser accepts, so the browser loses the whole row.
+            if not math.isfinite(number):
+                return None
+            numbers.append(int(number) if number.is_integer() else number)
         value = numbers if isinstance(value, list) else numbers[0]
     elif spec["type"] == "date" and op != "recent":
-        for item in (value if isinstance(value, list) else [value]):
-            if not isinstance(item, str) or not DATE_RE.match(item):
-                return None
+        if not all(_is_date(item)
+                   for item in (value if isinstance(value, list) else [value])):
+            return None
     if spec["type"] == "boolean":
         # Normalize to the 0/1 the defaults use, so ``kind`` and the bar's
         # active-state matching see one representation of "no".
@@ -161,6 +183,12 @@ def _clean_leaf(node):
             value = 0
         else:
             return None
+    # ``in`` with one value says exactly what ``is`` says. Keeping both
+    # shapes would give one filter two identities: different duplicate keys,
+    # and different toggle behavior for buttons that mean the same thing.
+    if op == "in" and isinstance(value, list) and len(value) == 1 \
+            and "is" in spec["ops"]:
+        op, value = "is", value[0]
     cleaned = {"field": field, "op": op, "value": value}
     # ``case`` is part of what a text rule means — the query compiler reads
     # it — so a case-sensitive shortcut has to keep it rather than quietly

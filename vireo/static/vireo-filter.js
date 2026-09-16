@@ -1061,9 +1061,13 @@
         return;
       }
       if (!owned.length) { state.root.rules.unshift(makeRule(field, 'in', [value])); return; }
-      const first = owned[0];
-      state.root.rules[first] = makeRule(
-        field, 'in', enumClauseValues(state.root.rules[first]).concat([value]));
+      // Into every owned clause, not just the first: with two clauses on one
+      // field, adding to one leaves the other excluding the value while the
+      // button reports it applied.
+      owned.forEach((i) => {
+        state.root.rules[i] = makeRule(
+          field, 'in', enumClauseValues(state.root.rules[i]).concat([value]));
+      });
     });
   }
 

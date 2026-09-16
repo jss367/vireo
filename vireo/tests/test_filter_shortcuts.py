@@ -188,6 +188,31 @@ def test_values_the_comparison_cannot_use_are_dropped(rules):
     assert fs.normalize([{"id": "x", "label": "Bad", "rules": rules}]) == []
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", float("inf"), float("nan")])
+def test_non_finite_numbers_are_dropped(value):
+    """They serialize as tokens no JSON parser accepts, losing the whole row."""
+    assert fs.normalize([{"id": "x", "label": "N", "rules": {
+        "field": "rating", "op": ">=", "value": value}}]) == []
+
+
+@pytest.mark.parametrize("value", ["2026-99-99", "2026-02-31", "2026-13-01", "20260101"])
+def test_impossible_calendar_dates_are_dropped(value):
+    assert fs.normalize([{"id": "x", "label": "D", "rules": {
+        "field": "timestamp", "op": ">=", "value": value}}]) == []
+
+
+def test_a_single_value_in_rule_is_stored_as_is():
+    """One shape per filter: `in [x]` and `is x` are the same button."""
+    entries = fs.normalize([{"id": "x", "label": "Picked", "rules": {
+        "field": "flag", "op": "in", "value": ["flagged"]}}])
+    assert entries[0]["rules"] == {"field": "flag", "op": "is", "value": "flagged"}
+    assert entries[0]["kind"] == "enum"
+    assert fs.find_duplicate([
+        {"id": "a", "label": "A", "rules": {"field": "flag", "op": "is", "value": "flagged"}},
+        {"id": "b", "label": "B", "rules": {"field": "flag", "op": "in", "value": ["flagged"]}},
+    ]) == ("A", "B")
+
+
 def test_a_date_comparison_keeps_a_real_date():
     entries = fs.normalize([{"id": "x", "label": "Since", "rules": {
         "field": "timestamp", "op": ">=", "value": "2026-01-01"}}])

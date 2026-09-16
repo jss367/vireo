@@ -287,6 +287,23 @@ def test_a_second_button_for_the_same_rule_is_refused(live_server, page):
     expect(page.locator("#cfgFilterShortcutsList [data-shortcut-row]")).to_have_count(5)
 
 
+def test_turning_a_value_on_reaches_every_clause_for_its_field(live_server, page):
+    """A button must not report a value it only half-applied."""
+    _open_browse(page, live_server)
+    page.evaluate(
+        "VireoFilter.loadExpression({mode: 'all', rules: ["
+        "  {field: 'flag', op: 'in', value: ['flagged']},"
+        "  {field: 'flag', op: 'in', value: ['none']}]})"
+    )
+    rejected = page.locator('.vf-shortcuts [data-value="rejected"]')
+    expect(rejected).to_have_attribute("aria-pressed", "false")
+
+    rejected.click()
+    expect(rejected).to_have_attribute("aria-pressed", "true")
+    rules = page.evaluate("VireoFilter.getUserRules()")["rules"]
+    assert all("rejected" in rule["value"] for rule in rules)
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):
