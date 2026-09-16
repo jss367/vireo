@@ -62,10 +62,12 @@ BOOLEAN_FALSE = (False, 0, "0", "false")
 # engine's date branch and RECENT_UNITS in vireo-filter.js).
 RECENT_UNITS = ("days", "weeks", "months", "years")
 
-# Stored timestamps are extended-ISO text, and the comparison is lexical, so
-# the shape has to match theirs: "20260101" parses as a date but sorts
-# against "2026-01-01 08:00:00" as nonsense.
-DATE_SHAPE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?(Z|[+-]\d{2}:?\d{2})?$")
+# Stored timestamps are timezone-free extended-ISO text and the comparison is
+# lexical, so the shape has to match theirs exactly: "20260101" parses as a
+# date but sorts against "2026-01-01 08:00:00" as nonsense, and an offset
+# ("…T08:00Z", "…T10:00+02:00") is text the stored values never carry, so two
+# equivalent instants would cut the range in different places.
+DATE_SHAPE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?$")
 
 
 def _is_date(value):
@@ -77,7 +79,7 @@ def _is_date(value):
     if not isinstance(value, str) or not DATE_SHAPE.match(value):
         return False
     try:
-        datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        datetime.datetime.fromisoformat(value)
     except ValueError:
         return False
     return True

@@ -940,9 +940,18 @@
   // "Missing X" shape: a boolean field set to no. Any boolean field can carry
   // a quick filter, so this is typed off the registry rather than a fixed
   // list of fields.
+  // Exactly {field, op, value}. A leaf carrying a qualifier (a pinned
+  // ``model``, a ``case`` flag) means something narrower than the button
+  // does, and these toggles rebuild a leaf from its field and value alone —
+  // claiming it would rewrite it without the qualifier.
+  function isPlainLeaf(node) {
+    return Boolean(node) && !isGroup(node) &&
+      Object.keys(node).every((key) => ['field', 'op', 'value'].includes(key));
+  }
+
   function isMissingTagRule(node) {
     const spec = node && !isGroup(node) && state.fields ? state.fields[node.field] : null;
-    return Boolean(spec) && spec.type === 'boolean' &&
+    return Boolean(spec) && isPlainLeaf(node) && spec.type === 'boolean' &&
       node.op === 'is' && [0, false, '0'].includes(node.value);
   }
 
@@ -1011,7 +1020,7 @@
   function enumClauseIndexes(field) {
     const out = [];
     state.root.rules.forEach((node, i) => {
-      if (!isGroup(node) && node.field === field &&
+      if (isPlainLeaf(node) && node.field === field &&
           (node.op === 'is' || (node.op === 'in' && Array.isArray(node.value)))) out.push(i);
     });
     return out;

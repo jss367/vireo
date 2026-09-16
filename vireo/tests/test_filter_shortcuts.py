@@ -289,6 +289,14 @@ def test_a_qualified_leaf_toggles_as_its_own_clause():
         "field": "has_visual_index", "op": "is", "value": 0}}])[0]["kind"] == "missing"
 
 
+@pytest.mark.parametrize("value", ["2026-01-01T08:00Z", "2026-01-01T10:00+02:00",
+                                   "2026-01-01T10:00-0500"])
+def test_offset_bearing_timestamps_are_dropped(value):
+    """Stored timestamps carry no zone, and the comparison is textual."""
+    assert fs.normalize([{"id": "x", "label": "Since", "rules": {
+        "field": "timestamp", "op": ">=", "value": value}}]) == []
+
+
 @pytest.mark.parametrize("value,expected", [
     ("2026-01-01 12:00", "2026-01-01T12:00"),
     ("2026-01-01T12:00", "2026-01-01T12:00"),

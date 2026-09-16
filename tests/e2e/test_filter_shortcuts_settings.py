@@ -333,6 +333,28 @@ def test_a_value_only_reads_as_on_when_every_clause_allows_it(live_server, page)
     assert all("rejected" in rule["value"] for rule in rules)
 
 
+def test_a_generic_button_leaves_a_qualified_clause_alone(live_server, page):
+    """A model-pinned rule means something narrower than the button does."""
+    page.request.post(live_server["url"] + "/api/config", data={"filter_shortcuts": [
+        {"id": "no_index", "label": "No visual index", "group": "",
+         "rules": {"field": "has_visual_index", "op": "is", "value": 0}},
+    ]}, headers={"Content-Type": "application/json"})
+    _open_browse(page, live_server)
+    page.evaluate(
+        "VireoFilter.loadExpression({mode: 'all', rules: ["
+        "  {field: 'has_visual_index', op: 'is', value: 0, model: 'legacy-model'}]})"
+    )
+    button = page.locator('.vf-shortcuts [data-field="has_visual_index"]')
+    # The restored clause is pinned to a model, so the generic button does
+    # not own it and must not report it as its own.
+    expect(button).to_have_attribute("aria-pressed", "false")
+
+    button.click()
+    rules = page.evaluate("VireoFilter.getUserRules()")["rules"]
+    pinned = [rule for rule in rules if rule.get("model") == "legacy-model"]
+    assert len(pinned) == 1, rules
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):
