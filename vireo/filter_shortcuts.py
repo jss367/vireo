@@ -29,6 +29,8 @@ outside a closed vocabulary) are dropped here rather than rendered as a
 button that could never match anything.
 """
 
+import json
+import re
 import uuid
 
 from filter_fields import FILTER_FIELDS
@@ -57,6 +59,10 @@ BOOLEAN_FALSE = (False, 0, "0", "false")
 # ``recent`` carries a {n, unit} window rather than a scalar (see the rule
 # engine's date branch and RECENT_UNITS in vireo-filter.js).
 RECENT_UNITS = ("days", "weeks", "months", "years")
+
+# Date leaves are bound straight into a comparison against stored timestamps,
+# so a value that is not a date silently matches nothing.
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ].*)?$")
 
 # The bar's original hardcoded buttons, kept as the default configuration so
 # an untouched install renders exactly what it always did.
@@ -130,6 +136,22 @@ def _clean_leaf(node):
         wanted = value if isinstance(value, list) else [value]
         if any(item not in allowed for item in wanted):
             return None
+    # A numeric comparison binds its value as-is: "four" is accepted by
+    # SQLite and matches nothing, which is a button that lies rather than one
+    # that fails. Same for a date comparison against a non-date.
+    if spec["type"] in ("number", "rating"):
+        numbers = []
+        for item in (value if isinstance(value, list) else [value]):
+            try:
+                number = float(item)
+            except (TypeError, ValueError):
+                return None
+            numbers.append(int(number) if float(number).is_integer() else number)
+        value = numbers if isinstance(value, list) else numbers[0]
+    elif spec["type"] == "date" and op != "recent":
+        for item in (value if isinstance(value, list) else [value]):
+            if not isinstance(item, str) or not DATE_RE.match(item):
+                return None
     if spec["type"] == "boolean":
         # Normalize to the 0/1 the defaults use, so ``kind`` and the bar's
         # active-state matching see one representation of "no".
@@ -194,7 +216,27 @@ def _default_label(rules):
     return spec["label"]
 
 
-def normalize(entries):
+def _rule_key(rules):
+    return json.dumps(rules, sort_keys=True)
+
+
+def find_duplicate(entries):
+    """Labels of the first two entries that apply the same rule, or None.
+
+    Two buttons with one expression cannot be told apart: clicking either
+    lights both, and a chip can only carry one label. Write paths refuse such
+    a list rather than storing a button that answers for its twin.
+    """
+    seen = {}
+    for entry in normalize(entries, dedupe=False):
+        key = _rule_key(entry["rules"])
+        if key in seen:
+            return (seen[key], entry["label"])
+        seen[key] = entry["label"]
+    return None
+
+
+def normalize(entries, dedupe=True):
     """Coerce stored shortcut entries into the list the bar renders.
 
     Entries that no longer describe a usable filter are dropped; ids are
@@ -205,15 +247,23 @@ def normalize(entries):
     if entries is None:
         entries = DEFAULT_SHORTCUTS
     if not isinstance(entries, list):
-        return [dict(item) for item in normalize(DEFAULT_SHORTCUTS)]
+        return normalize(DEFAULT_SHORTCUTS, dedupe=dedupe)
     out = []
     seen_ids = set()
+    seen_rules = set()
     for entry in entries[:MAX_SHORTCUTS]:
         if not isinstance(entry, dict):
             continue
         rules = clean_rules(entry.get("rules"))
         if rules is None:
             continue
+        # A stored list can predate the write-path check (hand-edited config,
+        # an older build); render the first of each expression only.
+        if dedupe:
+            key = _rule_key(rules)
+            if key in seen_rules:
+                continue
+            seen_rules.add(key)
         kind, field, value = _kind(rules)
         label = entry.get("label")
         label = label.strip()[:MAX_LABEL_LEN] if isinstance(label, str) else ""

@@ -18753,6 +18753,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             f"{filter_shortcuts.MAX_SHORTCUTS} quick filters",
                             status=400,
                         )
+                    # Two buttons applying one expression cannot be told
+                    # apart on the bar, so refuse rather than store a pair
+                    # where clicking either lights both.
+                    twins = filter_shortcuts.find_duplicate(raw_shortcuts)
+                    if twins:
+                        return json_error(
+                            f"filter_shortcuts: {twins[0]!r} and {twins[1]!r} "
+                            "apply the same rule",
+                            status=400,
+                        )
                     current["filter_shortcuts"] = filter_shortcuts.for_storage(
                         filter_shortcuts.normalize(raw_shortcuts)
                     )
@@ -19496,6 +19506,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             elif len(raw_shortcuts) > filter_shortcuts.MAX_SHORTCUTS:
                 errors["filter_shortcuts"] = (
                     f"at most {filter_shortcuts.MAX_SHORTCUTS} quick filters"
+                )
+            elif filter_shortcuts.find_duplicate(raw_shortcuts):
+                twins = filter_shortcuts.find_duplicate(raw_shortcuts)
+                errors["filter_shortcuts"] = (
+                    f"{twins[0]!r} and {twins[1]!r} apply the same rule"
                 )
             else:
                 payload["filter_shortcuts"] = filter_shortcuts.for_storage(

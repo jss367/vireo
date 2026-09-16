@@ -1914,6 +1914,26 @@ function loadFilterShortcuts(list) {
   }).catch(function() { /* Restore stays unavailable; the list still edits. */ });
 }
 
+// Stable text for a rule node so two expressions can be compared. The
+// server refuses two buttons that apply the same rule (neither could own the
+// chip), so the form has to notice before the save fails.
+function canonicalRule(node) {
+  if (Array.isArray(node)) return '[' + node.map(canonicalRule).join(',') + ']';
+  if (node && typeof node === 'object') {
+    return '{' + Object.keys(node).sort().map(function(k) {
+      return JSON.stringify(k) + ':' + canonicalRule(node[k]);
+    }).join(',') + '}';
+  }
+  return JSON.stringify(node);
+}
+
+function shortcutWithSameRule(rules) {
+  var key = canonicalRule(rules);
+  return _filterShortcutsState.find(function(entry) {
+    return canonicalRule(entry.rules) === key;
+  }) || null;
+}
+
 function describeShortcutRules(rules) {
   if (window.VireoFilter && _filterFieldSpecs) {
     try { return VireoFilter.describeRule(rules, _filterFieldSpecs); }
@@ -2229,6 +2249,12 @@ function addFilterShortcut() {
     showToast('Pick a field and fill in a value first.', 'error');
     return;
   }
+  var twin = shortcutWithSameRule(rule);
+  if (twin) {
+    showToast('“' + (twin.label || twin.id) + '” already applies this rule — ' +
+              'rename that button instead.', 'error');
+    return;
+  }
   var labelInput = document.getElementById('cfgShortcutLabel');
   var label = ((labelInput.value || '').trim() ||
                describeShortcutRules(rule)).slice(0, MAX_SHORTCUT_LABEL);
@@ -2254,6 +2280,9 @@ function restoreDefaultFilterShortcuts() {
   var skipped = 0;
   FILTER_SHORTCUT_DEFAULTS.forEach(function(entry) {
     if (have[entry.id]) return;
+    // A button of your own already applying this rule counts as restored —
+    // adding the built-in beside it would be a rejected duplicate.
+    if (shortcutWithSameRule(entry.rules)) return;
     if (_filterShortcutsState.length >= MAX_FILTER_SHORTCUTS) { skipped += 1; return; }
     _filterShortcutsState.push(JSON.parse(JSON.stringify(entry)));
     restored += 1;

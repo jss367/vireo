@@ -168,6 +168,51 @@ def test_case_sensitivity_survives_normalization():
     assert "case" not in entries[2]["rules"]
 
 
+@pytest.mark.parametrize("value,expected", [
+    (4, 4), ("4", 4), (4.0, 4), ("4.5", 4.5),
+])
+def test_numeric_values_are_coerced_to_numbers(value, expected):
+    entries = fs.normalize([{"id": "x", "label": "R", "rules": {
+        "field": "rating", "op": ">=", "value": value}}])
+    assert entries[0]["rules"]["value"] == expected
+
+
+@pytest.mark.parametrize("rules", [
+    {"field": "rating", "op": ">=", "value": "four"},
+    {"field": "file_size", "op": "between", "value": [1, "big"]},
+    {"field": "timestamp", "op": ">=", "value": "soon"},
+    {"field": "timestamp", "op": "<=", "value": 20260101},
+])
+def test_values_the_comparison_cannot_use_are_dropped(rules):
+    """SQLite accepts these and matches nothing — a button that lies."""
+    assert fs.normalize([{"id": "x", "label": "Bad", "rules": rules}]) == []
+
+
+def test_a_date_comparison_keeps_a_real_date():
+    entries = fs.normalize([{"id": "x", "label": "Since", "rules": {
+        "field": "timestamp", "op": ">=", "value": "2026-01-01"}}])
+    assert entries[0]["rules"]["value"] == "2026-01-01"
+
+
+def test_two_buttons_cannot_apply_the_same_rule():
+    """Clicking either would light both, and a chip carries one label."""
+    pair = [
+        {"id": "a", "label": "Keepers",
+         "rules": {"field": "rating", "op": ">=", "value": 4}},
+        {"id": "b", "label": "Portfolio",
+         "rules": {"field": "rating", "op": ">=", "value": 4}},
+    ]
+    assert fs.find_duplicate(pair) == ("Keepers", "Portfolio")
+    # Key order in the stored JSON does not make two rules different.
+    assert fs.find_duplicate([
+        {"id": "a", "label": "One", "rules": {"op": ">=", "value": 4, "field": "rating"}},
+        {"id": "b", "label": "Two", "rules": {"field": "rating", "op": ">=", "value": 4}},
+    ]) == ("One", "Two")
+    assert fs.find_duplicate(fs.DEFAULT_SHORTCUTS) is None
+    # A stored list that predates the check still renders one button.
+    assert [entry["label"] for entry in fs.normalize(pair)] == ["Keepers"]
+
+
 def test_a_group_keeps_only_its_usable_children():
     entries = fs.normalize([{
         "id": "x", "label": "Mixed",
@@ -283,8 +328,9 @@ def test_config_post_ignores_a_non_list_payload(app_and_db):
 
 
 def _many_shortcuts(n):
+    """n distinct shortcuts — two buttons may not share one rule."""
     return [{"id": f"s{i}", "label": f"S{i}",
-             "rules": {"field": "rating", "op": ">=", "value": 4}} for i in range(n)]
+             "rules": {"field": "file_size", "op": ">=", "value": i}} for i in range(n)]
 
 
 def test_writes_past_the_cap_are_refused_not_silently_trimmed(app_and_db):
@@ -304,6 +350,32 @@ def test_writes_past_the_cap_are_refused_not_silently_trimmed(app_and_db):
         "filter_shortcuts": _many_shortcuts(fs.MAX_SHORTCUTS),
     }).status_code == 200
     assert len(cfg.load()["filter_shortcuts"]) == fs.MAX_SHORTCUTS
+
+
+def test_write_paths_refuse_two_buttons_with_one_rule(app_and_db):
+    import json
+
+    import config as cfg
+
+    app, _ = app_and_db
+    client = app.test_client()
+    pair = [
+        {"id": "a", "label": "Keepers",
+         "rules": {"field": "rating", "op": ">=", "value": 4}},
+        {"id": "b", "label": "Portfolio",
+         "rules": {"field": "rating", "op": ">=", "value": 4}},
+    ]
+    before = cfg.load()["filter_shortcuts"]
+    resp = client.post("/api/config", json={"filter_shortcuts": pair})
+    assert resp.status_code == 400
+    assert "Portfolio" in resp.get_json()["error"]
+    assert cfg.load()["filter_shortcuts"] == before
+
+    resp = client.post("/api/settings/import", json={
+        "json": json.dumps({"filter_shortcuts": pair}),
+    })
+    assert resp.status_code == 400
+    assert "filter_shortcuts" in resp.get_json()["errors"]
 
 
 def test_settings_import_rejects_a_list_past_the_cap(app_and_db):

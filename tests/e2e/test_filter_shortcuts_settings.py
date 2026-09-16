@@ -121,7 +121,7 @@ def test_the_cap_is_visible_and_enforced_before_a_row_is_lost(live_server, page)
     url = live_server["url"]
     filled = [
         {"id": f"s{i}", "label": f"S{i}",
-         "rules": {"field": "rating", "op": ">=", "value": 4}}
+         "rules": {"field": "file_size", "op": ">=", "value": i}}
         for i in range(24)
     ]
     page.request.post(f"{url}/api/config", data={"filter_shortcuts": filled},
@@ -270,6 +270,21 @@ def test_shortcut_reconciles_every_clause_naming_its_value(live_server, page):
     assert page.evaluate("VireoFilter.getUserRules()")["rules"] == [
         {"field": "flag", "op": "in", "value": ["flagged"]}
     ]
+
+
+def test_a_second_button_for_the_same_rule_is_refused(live_server, page):
+    """Both would light on one click, and the chip can name only one."""
+    _open_settings(page, live_server)
+    page.select_option("#cfgShortcutField", "has_species")
+    page.select_option("#cfgShortcutOp", "is")
+    page.select_option("#cfgShortcutValue select", "0")
+    page.fill("#cfgShortcutLabel", "Untagged")
+    page.click("text=+ Add quick filter")
+
+    expect(page.locator("#toastContainer > *").first).to_contain_text(
+        "already applies this rule"
+    )
+    expect(page.locator("#cfgFilterShortcutsList [data-shortcut-row]")).to_have_count(5)
 
 
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
