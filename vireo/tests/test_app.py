@@ -22301,6 +22301,282 @@ def _run_detail_prediction_panel(html, mode, payload):
     return _run_node(source, [mode, _json.dumps(payload)])
 
 
+_STACK_SELECTION_STUB = """
+// Minimal stand-ins for the Browse globals the selection code reads. Every
+// side effect is captured rather than performed, so the assertions are about
+// what the selection *is* after a click.
+var __detail = {visible: false, photoId: null};
+var __document = {
+  getElementById: function() { return {classList: {
+    contains: function() { return false; },
+    add: function() {}, remove: function() {},
+  }}; },
+  querySelectorAll: function() { return []; },
+};
+var document = __document;
+var window = {};
+var anchorRestoreEpoch = 0;
+var lastClickedPhotoId = null;
+var selectedPhotos = new Set();
+var selectedPhotoId = null;
+var selectedIndex = -1;
+var photos = [];
+var browseStackMembers = {};
+var __batchUpdates = 0;
+function loadDetail(id) { __detail.visible = true; __detail.photoId = id; }
+function hideDetailPanel() { __detail.visible = false; __detail.photoId = null; }
+function loadSummary() {}
+function clearExifSuggestion() {}
+function refreshCardSelectionVisuals() {}
+function noteFocusedCardVisibility() {}
+function updateBatchBar() { __batchUpdates++; }
+function browseStackCoverIdForPhoto(photoId) {
+  var coverIds = Object.keys(browseStackMembers);
+  for (var i = 0; i < coverIds.length; i++) {
+    if ((browseStackMembers[coverIds[i]] || []).some(function(member) {
+      return member.id === photoId;
+    })) return Number(coverIds[i]);
+  }
+  return null;
+}
+// Two burst stacks and a single, the shape of the screenshot that started
+// this: one card per stack, each standing for several frames.
+function seedGrid() {
+  photos = [
+    {id: 10, browse_stack: {kind: 'burst', count: 3, photo_ids: [11, 10, 12]}},
+    {id: 20, browse_stack: {kind: 'burst', count: 2, photo_ids: [20, 21]}},
+    {id: 30, browse_stack: null},
+  ];
+  browseStackMembers = {};
+  selectedPhotos = new Set();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  __detail.visible = false;
+  __detail.photoId = null;
+}
+function state() {
+  return {
+    selected: Array.from(selectedPhotos),
+    focused: selectedPhotoId,
+    index: selectedIndex,
+    detail: __detail.photoId,
+  };
+}
+var CLICK = {shiftKey: false, metaKey: false, ctrlKey: false};
+var CMD_CLICK = {shiftKey: false, metaKey: true, ctrlKey: false};
+var SHIFT_CLICK = {shiftKey: true, metaKey: false, ctrlKey: false};
+"""
+
+
+def _browse_selection_js(html, body):
+    """Browse's real selection functions over a stubbed grid."""
+    return "\n".join([
+        _STACK_SELECTION_STUB,
+        _browse_js_function_body(html, "function browseStackMemberIdsFor("),
+        _browse_js_function_body(html, "function browseStackMemberIds("),
+        _browse_js_function_body(html, "function browseSelectionIdsForClick("),
+        _browse_js_function_body(html, "function browseStackMemberRange("),
+        _browse_js_function_body(html, "function browseCardSelectionClass("),
+        _browse_js_function_body(html, "function browseSelectionStackNote("),
+        _browse_js_function_body(html, "function selectPhoto("),
+        body,
+    ])
+
+
+def test_clicking_a_stack_card_selects_every_frame_behind_it(app_and_db):
+    """A collapsed stack card is the stack, not the frame on top of it.
+
+    The badge says "3 photos", so a species, rating or flag applied while
+    looking at that card has to reach all three. Selecting only the cover
+    would make every count in the batch bar and the selection panel — the
+    ones the user reads as "what the next action will do" — describe 1 of 3
+    (CORE_PHILOSOPHY.md, "no black boxes"). The cover leads the list so
+    Best Batch, burst review and the export preview start from the card the
+    user can actually see.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+selectPhoto(CLICK, 10, 0);
+var stackClick = state();
+seedGrid();
+selectPhoto(CLICK, 30, 2);
+var singleClick = state();
+process.stdout.write(JSON.stringify(
+  {stackClick: stackClick, singleClick: singleClick}
+));
+"""), [])
+    assert result["stackClick"] == {
+        # Cover first, then the rest of the stack in grid order.
+        "selected": [10, 11, 12],
+        # No single photo is being acted on, so nothing claims the focus and
+        # the panel opens as the batch inspector instead of one frame's detail.
+        "focused": None,
+        "index": 0,
+        "detail": None,
+    }
+    # A card that is not a stack is untouched: one photo, focused, detail open.
+    assert result["singleClick"] == {
+        "selected": [], "focused": 30, "index": 2, "detail": 30,
+    }
+
+
+def test_stack_cards_toggle_and_range_select_as_whole_stacks(app_and_db):
+    """Cmd-click and Shift-range follow the same rule as a plain click.
+
+    A stack leaves the selection only when every frame is in it, so
+    Cmd-clicking a stack that contributed three frames from its tray fills
+    the stack in rather than subtracting those three — the count moves the
+    way the card the user clicked says it should.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+selectPhoto(CLICK, 10, 0);
+selectPhoto(CMD_CLICK, 20, 1);
+var twoStacks = state();
+selectPhoto(CMD_CLICK, 20, 1);
+var afterUntoggle = state();
+seedGrid();
+selectedPhotos = new Set([11]);
+selectPhoto(CMD_CLICK, 10, 0);
+var partialFilledIn = state();
+seedGrid();
+selectPhoto(CLICK, 10, 0);
+selectPhoto(SHIFT_CLICK, 30, 2);
+var range = state();
+process.stdout.write(JSON.stringify({
+  twoStacks: twoStacks.selected, afterUntoggle: afterUntoggle.selected,
+  partialFilledIn: partialFilledIn.selected, range: range.selected,
+}));
+"""), [])
+    assert result["twoStacks"] == [10, 11, 12, 20, 21]
+    assert result["afterUntoggle"] == [10, 11, 12]
+    # One frame of the stack was already in, so the Cmd-click completes the
+    # stack; treating it as "already selected" would silently remove frames.
+    assert result["partialFilledIn"] == [11, 10, 12]
+    # The range sweeps three cards: two stacks and a single, six photos.
+    assert sorted(result["range"]) == [10, 11, 12, 20, 21, 30]
+
+
+def test_restoring_focus_to_a_stack_card_does_not_select_the_stack(app_and_db):
+    """``stackAware: false`` is for the callers that restore a focus.
+
+    A tray click is how the user picks one frame out of a stack — including
+    the cover frame, which is why there is no modifier for it — and a
+    collapsing tray or a closing lightbox is a view action. None of them may
+    turn one photo into a stack-wide batch.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+selectPhoto(CLICK, 10, 0, {stackAware: false});
+process.stdout.write(JSON.stringify(state()));
+"""), [])
+    assert result == {"selected": [], "focused": 10, "index": 0, "detail": 10}
+    body = _browse_js_function_body(html, "function selectBrowseStackMember(")
+    assert "stackAware: false" in body, (
+        "a tray member click must stay a single-photo selection"
+    )
+
+
+def test_shift_click_inside_a_tray_ranges_over_the_trays_own_members(
+    app_and_db,
+):
+    """Every member of an expanded stack reports the cover's grid slot.
+
+    The top-level range loop therefore cannot tell two members apart, and
+    without a member-order range a Shift-click between two frames of one
+    burst would take the whole stack — the opposite of what expanding it
+    was for.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+browseStackMembers['10'] = [{id: 11}, {id: 10}, {id: 12}];
+selectPhoto(CLICK, 11, 0, {stackAware: false});
+selectPhoto(SHIFT_CLICK, 10, 0, {stackAware: false});
+process.stdout.write(JSON.stringify(state()));
+"""), [])
+    assert sorted(result["selected"]) == [10, 11]
+
+
+def test_stack_card_paints_a_partial_mark_for_a_partial_selection(app_and_db):
+    """The full ring on a stack card means the whole stack.
+
+    It has to, now that clicking the card selects the whole stack. A frame
+    picked out of the tray, or the focus a collapsing tray hands back to the
+    cover, leaves some-but-not-all selected — that state gets its own mark
+    rather than a ring that would overstate what the batch bar will act on.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+var none = browseCardSelectionClass(photos[0]);
+selectPhoto(CLICK, 10, 0);
+var whole = browseCardSelectionClass(photos[0]);
+seedGrid();
+selectedPhotoId = 10;
+var coverFocusOnly = browseCardSelectionClass(photos[0]);
+seedGrid();
+selectedPhotos = new Set([12]);
+var oneMember = browseCardSelectionClass(photos[0]);
+var single = browseCardSelectionClass(photos[2]);
+process.stdout.write(JSON.stringify({
+  none: none, whole: whole, coverFocusOnly: coverFocusOnly,
+  oneMember: oneMember, single: single,
+}));
+"""), [])
+    assert result == {
+        "none": "",
+        "whole": " selected",
+        "coverFocusOnly": " stack-partial",
+        "oneMember": " stack-partial",
+        "single": "",
+    }
+
+
+def test_selection_count_names_stacks_only_when_the_grid_accounts_for_all(
+    app_and_db,
+):
+    """"12 photos selected · 2 stacks" answers the question one click now
+    raises: why did the count move by more than one.
+
+    It is only printable while the stacks and singles in the loaded grid
+    account for every selected photo. Counting the stacks that happen to be
+    on screen out of a Select-all that reaches past the window would be a
+    proxy for the composition of the selection rather than an answer, so
+    that case says nothing instead.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+process.stdout.write(JSON.stringify({
+  oneStack: browseSelectionStackNote([10, 11, 12]),
+  twoStacksAndASingle: browseSelectionStackNote([10, 11, 12, 20, 21, 30]),
+  partialStack: browseSelectionStackNote([10, 11]),
+  singlesOnly: browseSelectionStackNote([30]),
+  pastTheWindow: browseSelectionStackNote([10, 11, 12, 999]),
+  empty: browseSelectionStackNote([]),
+}));
+"""), [])
+    assert result == {
+        "oneStack": " · 1 stack",
+        "twoStacksAndASingle": " · 2 stacks",
+        # Two frames of a three-frame stack are not "1 stack".
+        "partialStack": "",
+        "singlesOnly": "",
+        "pastTheWindow": "",
+        "empty": "",
+    }
+
+
 _APOSTROPHE_SPECIES = "Say's Phoebe"
 
 

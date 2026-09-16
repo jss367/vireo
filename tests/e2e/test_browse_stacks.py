@@ -202,7 +202,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     expect(tray).to_be_visible()
 
     tray.get_by_role("button", name="Select all").click()
-    expect(page.locator("#batchCount")).to_have_text("3 selected")
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
     for photo_id in burst_ids:
         expect(
             tray.locator(f'.browse-stack-member[data-id="{photo_id}"]')
@@ -313,18 +313,34 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     # A collapsed stack has no hydrated member cache. Rejecting its current
     # cover still hydrates that one group and promotes the correct replacement.
     assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+    # A collapsed stack card stands for its whole stack, so one click selects
+    # every frame behind it and the panel opens as the batch inspector. No
+    # member cache is needed: the cover carries its member ids.
     page.locator(f'.grid-card[data-id="{burst_ids[0]}"]').click()
+    page.wait_for_function(
+        """ids => selectedPhotoId === null && selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
+    )
+    expect(page.locator("#selectionCount")).to_have_text(
+        "3 photos selected \u00b7 1 stack"
+    )
     page.evaluate(
         "photoId => setFlagFor(photoId, 'rejected')",
         burst_ids[0],
     )
     expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_be_visible()
     expect(page.locator(f'.grid-card[data-id="{burst_ids[0]}"]')).to_have_count(0)
+    # Promoting a new cover moves no photo in or out of the stack, so the
+    # selection the click made survives it intact.
     page.wait_for_function(
-        "photoId => selectedPhotoId === photoId",
-        arg=burst_ids[1],
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
     )
-    expect(page.locator("#detailFilename")).to_have_text("hawk2.jpg")
+    expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_have_class(
+        "grid-card has-browse-stack selected"
+    )
 
     # Restore the original cover, then demote it while it remains part of a
     # batch. Exact selected IDs stay unchanged while preview maps the now-hidden
@@ -782,8 +798,10 @@ def test_shift_range_from_stack_member_keeps_selection_honest(live_server, page)
     # And the member the user actually clicked is still one of them.
     assert burst_ids[2] in selection_state["active"]
     expect(hidden_member).to_have_class("browse-stack-member selected")
+    # The range swept one whole stack and two singles, and the bar says so:
+    # a stack card in a Shift-range contributes every frame behind it.
     expect(page.locator("#batchCount")).to_have_text(
-        str(len(selection_state["active"])) + " selected"
+        str(len(selection_state["active"])) + " selected \u00b7 1 stack"
     )
 
     # The export modal snapshots the active selection, so the focused member

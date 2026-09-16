@@ -396,6 +396,16 @@ body.sidebar-resizing {
 .grid-card.has-browse-stack.selected {
   box-shadow: 0 0 0 1px var(--accent), 3px 3px 0 var(--bg-tertiary), 6px 6px 0 var(--border-primary);
 }
+/* The full ring on a stack card means "every frame behind this card is
+   selected", because that is what clicking the card does. Some-but-not-all
+   (a frame picked out of the tray, a focus handed back by a collapse) gets
+   its own softer, dashed mark instead of borrowing a ring that would
+   overstate the count the batch bar is about to act on. */
+.grid-card.has-browse-stack.stack-partial {
+  border-style: dashed;
+  border-color: var(--accent);
+  box-shadow: 3px 3px 0 var(--bg-tertiary), 6px 6px 0 var(--border-primary);
+}
 .grid-card.offline {
   cursor: default;
   opacity: 0.78;
@@ -3310,6 +3320,106 @@ function browseStackLabel(kind) {
   return kind === 'duplicate' ? 'Exact duplicates' : 'Burst';
 }
 
+// A collapsed stack card stands for its whole stack, not for the one frame
+// whose thumbnail it borrows: the badge counts the frames behind it, and a
+// species, rating, flag or color the user applies while looking at that card
+// is meant for all of them. So clicking it selects every member — the count
+// in the batch bar and the selection panel then states exactly what the next
+// action will touch, instead of silently acting on 1 of 11 (CORE_PHILOSOPHY,
+// "no black boxes"). Working frame by frame is what expanding the stack is
+// for: the tray selects members individually.
+//
+// Members are the filter-scoped ones the badge counted, and the projection
+// never puts an offline frame in a stack (see ``_browse_stack_query_parts``),
+// so every id returned here is actionable. The cover leads the list for the
+// same reason Select-all flattens cover-first: Best Batch, burst review and
+// the export preview all start from the card the user can see.
+function browseStackMemberIdsFor(photo) {
+  var stack = photo && photo.browse_stack;
+  if (!stack || stack.count < 2) return null;
+  var members = (stack.photo_ids || []).filter(function(id) {
+    return id !== photo.id;
+  });
+  if (!members.length) return null;
+  return [photo.id].concat(members);
+}
+
+// By id, for the callers that only have one. Stack cards are top-level grid
+// cards, so an id that is not in ``photos`` — a tray member — is a single
+// photo by construction.
+function browseStackMemberIds(photoId) {
+  return browseStackMemberIdsFor(photos.find(function(p) {
+    return p.id === photoId;
+  }));
+}
+
+// The ids one click acts on: the whole stack for a collapsed stack card, the
+// single photo for anything else. ``stackAware: false`` is for the callers
+// that are restoring a focus rather than making a selection — a tray member
+// click, a collapsing tray, a closing lightbox — where expanding to the
+// stack would escalate a view action into a 15-photo batch.
+function browseSelectionIdsForClick(photoId, opts) {
+  if (opts && opts.stackAware === false) return [photoId];
+  return browseStackMemberIds(photoId) || [photoId];
+}
+
+// Shift-clicking from one tray member to another: both ends report the
+// cover's grid slot, so the top-level range loop cannot tell them apart and
+// would take the whole stack. Range over the tray's own member order
+// instead, which is the order the user is looking at.
+function browseStackMemberRange(anchorId, targetId) {
+  if (anchorId == null) return null;
+  var coverId = browseStackCoverIdForPhoto(targetId);
+  if (coverId == null || browseStackCoverIdForPhoto(anchorId) !== coverId) return null;
+  var members = browseStackMembers[String(coverId)] || [];
+  var anchorAt = -1, targetAt = -1;
+  members.forEach(function(member, at) {
+    if (member.id === anchorId) anchorAt = at;
+    if (member.id === targetId) targetAt = at;
+  });
+  if (anchorAt < 0 || targetAt < 0) return null;
+  return members
+    .slice(Math.min(anchorAt, targetAt), Math.max(anchorAt, targetAt) + 1)
+    .map(function(member) { return member.id; });
+}
+
+// Which of this card's photos are in the active selection. A stack card
+// paints the full selected ring only when the whole stack is in.
+function browseCardSelectionClass(photo) {
+  var inSelection = function(id) {
+    return id === selectedPhotoId || selectedPhotos.has(id);
+  };
+  var members = browseStackMemberIdsFor(photo);
+  if (!members) return photo && inSelection(photo.id) ? ' selected' : '';
+  var chosen = members.filter(inSelection).length;
+  if (chosen === members.length) return ' selected';
+  return chosen ? ' stack-partial' : '';
+}
+
+// "12 photos selected · 2 stacks" — the sentence a stack click has to be able
+// to answer, since one click now moves the count by more than one. It is only
+// printable when the stacks and singles currently in the grid account for
+// every selected photo: counting the stacks that happen to be loaded out of a
+// selection that reaches past the window would be a proxy, not an answer, so
+// that case says nothing rather than something cheaper.
+function browseSelectionStackNote(ids) {
+  if (!ids.length) return '';
+  var remaining = new Set(ids);
+  var stacks = 0;
+  photos.forEach(function(photo) {
+    var stack = photo.browse_stack;
+    var members = (stack && stack.count >= 2 && stack.photo_ids) || [];
+    if (!members.length) return;
+    if (!members.every(function(id) { return remaining.has(id); })) return;
+    stacks++;
+    members.forEach(function(id) { remaining.delete(id); });
+  });
+  if (!stacks) return '';
+  photos.forEach(function(photo) { remaining.delete(photo.id); });
+  if (remaining.size) return '';
+  return ' · ' + stacks + (stacks === 1 ? ' stack' : ' stacks');
+}
+
 function renderBrowseStackBadge(p) {
   var stack = p && p.browse_stack;
   if (!stack || stack.count < 2) return '';
@@ -3374,7 +3484,7 @@ function renderDetectionBoxes(p) {
 }
 
 function renderPhotoCard(p, idx) {
-  var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  var selectedClass = browseCardSelectionClass(p);
   // Offline members render first and unconditionally: they are read-only
   // placeholders with no thumbnail, and the server never lets one join a
   // stack, so there is no stack chrome to preserve here.
@@ -3879,7 +3989,12 @@ async function toggleBrowseStack(event, coverId) {
         selectedIndex = coverIndex;
         refreshCardSelectionVisuals();
       } else {
-        selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false}, coverId, coverIndex);
+        // stackAware: false — collapsing a tray is a view action. It hands
+        // the focus back to the visible cover; it does not turn one frame
+        // the user was looking at into a stack-wide selection. The cover
+        // card paints the partial mark for exactly this state.
+        selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+                    coverId, coverIndex, { stackAware: false });
       }
     } else if (batchHasHiddenMembers) {
       // Preserve the batch (Select all) selection but pin single-photo focus
@@ -4025,11 +4140,14 @@ function selectBrowseStackMember(event, photoId, coverId) {
   // card). selectPhoto's shift branch folds the click target into the
   // resulting range so the hidden member always ends up in the selection.
   // Codex P2 on PR #1561.
+  // stackAware: false — a tray click is the way to pick one frame out of a
+  // stack, including the cover frame, so it must never expand back to the
+  // whole stack the way clicking the collapsed card does.
   selectPhoto({
     shiftKey: !!(event && event.shiftKey),
     metaKey: !!(event && event.metaKey),
     ctrlKey: !!(event && event.ctrlKey),
-  }, photoId, coverIndex);
+  }, photoId, coverIndex, { stackAware: false });
 }
 
 function selectBrowseStackAll(event, coverId) {
@@ -4042,7 +4160,11 @@ function selectBrowseStackAll(event, coverId) {
   anchorRestoreEpoch++;
   selectedPhotoId = null;
   selectedIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
-  selectedPhotos = new Set(cover.browse_stack.photo_ids || []);
+  // Same list, in the same cover-first order, that clicking the collapsed
+  // card produces — the tray button and the card must not disagree.
+  selectedPhotos = new Set(
+    browseStackMemberIds(coverId) || cover.browse_stack.photo_ids || []
+  );
   hideDetailPanel();
   refreshCardSelectionVisuals();
   updateBatchBar();
@@ -8129,17 +8251,29 @@ gridContainer.addEventListener('wheel', function(e) {
 }, { passive: true });
 
 /* ---------- Photo Selection & Detail ---------- */
-function selectPhoto(e, id, idx) {
+function selectPhoto(e, id, idx, opts) {
   anchorRestoreEpoch++;
   lastClickedPhotoId = id;
+  // A collapsed stack card is its whole stack (see browseStackMemberIds), so
+  // every branch below acts on this list rather than on `id` alone.
+  var clickIds = browseSelectionIdsForClick(id, opts);
   if (e.shiftKey && selectedIndex >= 0) {
     // Shift-click: range select
-    var start = Math.min(selectedIndex, idx);
-    var end = Math.max(selectedIndex, idx);
-    for (var i = start; i <= end; i++) {
-      if (photos[i] && (!photos[i].folder_status ||
-          photos[i].folder_status === 'ok' || photos[i].folder_status === 'partial')) {
-        selectedPhotos.add(photos[i].id);
+    var memberRange = browseStackMemberRange(selectedPhotoId, id);
+    if (memberRange) {
+      memberRange.forEach(function(memberId) { selectedPhotos.add(memberId); });
+    } else {
+      var start = Math.min(selectedIndex, idx);
+      var end = Math.max(selectedIndex, idx);
+      for (var i = start; i <= end; i++) {
+        if (photos[i] && (!photos[i].folder_status ||
+            photos[i].folder_status === 'ok' || photos[i].folder_status === 'partial')) {
+          // Each card in the range contributes what clicking it would: a
+          // stack card contributes its frames, not just its cover.
+          browseSelectionIdsForClick(photos[i].id).forEach(function(rangeId) {
+            selectedPhotos.add(rangeId);
+          });
+        }
       }
     }
     // The anchor of a range is always part of that range. Usually it is
@@ -8159,7 +8293,7 @@ function selectPhoto(e, id, idx) {
     // only reach the cover. Fold the target in so a Shift-click on a hidden
     // stack member always ends up in the resulting range. Codex P2 on
     // PR #1561.
-    selectedPhotos.add(id);
+    clickIds.forEach(function(clickId) { selectedPhotos.add(clickId); });
   } else if (e.metaKey || e.ctrlKey) {
     // Cmd/Ctrl-click: toggle in selection. Fold the focused photo into the
     // set so batch operations include it (otherwise the highlighted
@@ -8167,11 +8301,16 @@ function selectPhoto(e, id, idx) {
     if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
       selectedPhotos.add(selectedPhotoId);
     }
-    if (selectedPhotos.has(id)) {
-      selectedPhotos.delete(id);
-    } else {
-      selectedPhotos.add(id);
-    }
+    // A stack toggles as a unit, and it only leaves the selection when every
+    // one of its frames is in it: Cmd-clicking a stack whose tray contributed
+    // three frames adds the rest rather than removing those three.
+    var alreadySelected = clickIds.every(function(clickId) {
+      return selectedPhotos.has(clickId);
+    });
+    clickIds.forEach(function(clickId) {
+      if (alreadySelected) selectedPhotos.delete(clickId);
+      else selectedPhotos.add(clickId);
+    });
     // If the toggle dropped the focused photo out of a non-empty set, its
     // highlight/detail focus is now stale: the card still paints "selected"
     // via the selectedPhotoId branch of the highlight rule, yet
@@ -8205,6 +8344,16 @@ function selectPhoto(e, id, idx) {
       // into the batch inspector. Codex P2 on PR #1097 (17:04Z follow-up).
       window._detailPhotoId = null;
     }
+  } else if (clickIds.length > 1) {
+    // Normal click on a stack card: select the stack, the same state the
+    // tray's "Select all" produces. There is no single photo to focus — the
+    // card stands for all of them — so the panel opens as the batch
+    // inspector rather than showing one frame's detail as if it were the
+    // thing being acted on.
+    selectedPhotos = new Set(clickIds);
+    selectedPhotoId = null;
+    selectedIndex = idx;
+    hideDetailPanel();
   } else {
     // Normal click: single select
     selectedPhotos.clear();
@@ -8511,7 +8660,8 @@ function updateBatchBar() {
       }
       bar.style.display = 'flex';
     }
-    document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
+    document.getElementById('batchCount').textContent =
+      ids.length.toLocaleString() + ' selected' + browseSelectionStackNote(ids);
   } else {
     if (batchBarActivateTimer) {
       clearTimeout(batchBarActivateTimer);
@@ -8757,7 +8907,8 @@ function updateSelectionPanel(ids) {
     detail.classList.add('batch-mode');
   }
   panel.classList.remove('hidden');
-  document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
+  document.getElementById('selectionCount').textContent =
+    ids.length.toLocaleString() + ' photos selected' + browseSelectionStackNote(ids);
   updatePasteEditSection(ids);
   renderSelectionWildlifeState(ids);
   // Keep any EXIF suggestion fetched for the anchor photo: Accept is
@@ -13021,7 +13172,11 @@ document.addEventListener('lightbox:closed', function(event) {
     scrollToCard(idx);
     return;
   }
-  selectPhoto({ shiftKey: false, metaKey: false, ctrlKey: false }, photoId, idx);
+  // stackAware: false — this restores the grid focus to the photo the user
+  // finished viewing. Closing the lightbox on a stack cover must not silently
+  // promote a single-photo view into a stack-wide batch.
+  selectPhoto({ shiftKey: false, metaKey: false, ctrlKey: false }, photoId, idx,
+              { stackAware: false });
   scrollToCard(idx);
 });
 
@@ -13166,9 +13321,16 @@ async function copyPhotoPaths(photoIds) {
 // of selectPhoto(); factored out so the context-menu handler can coerce
 // selection without paying the full selectPhoto side-effects.
 function refreshCardSelectionVisuals() {
+  var byId = new Map(photos.map(function(photo) { return [photo.id, photo]; }));
   document.querySelectorAll('.grid-card, .browse-stack-member').forEach(function(el) {
     var cardId = parseInt(el.dataset.id, 10);
-    el.classList.toggle('selected', cardId === selectedPhotoId || selectedPhotos.has(cardId));
+    // Tray members are single photos even when their cover is a stack card,
+    // so they never take the stack-wide rule: address them by id only.
+    var state = el.classList.contains('browse-stack-member')
+      ? ((cardId === selectedPhotoId || selectedPhotos.has(cardId)) ? ' selected' : '')
+      : browseCardSelectionClass(byId.get(cardId));
+    el.classList.toggle('selected', state === ' selected');
+    el.classList.toggle('stack-partial', state === ' stack-partial');
   });
 }
 
@@ -13329,7 +13491,26 @@ document.addEventListener('contextmenu', function(e) {
   if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
     selectedPhotos.add(selectedPhotoId);
   }
-  var ids = coerceSelectionOnContext(selectedPhotos, pid);
+  // The "item" a collapsed stack card offers is the stack, so coercion
+  // replaces the selection with every frame behind it unless they are all in
+  // the selection already. A tray member coerces to itself: that is how a
+  // single frame gets a context menu of its own.
+  var stackIds = card.classList.contains('browse-stack-member')
+    ? [pid]
+    : browseSelectionIdsForClick(pid);
+  var wholeStackSelected = stackIds.every(function(stackId) {
+    return selectedPhotos.has(stackId);
+  });
+  var ids;
+  if (stackIds.length > 1 && !wholeStackSelected) {
+    selectedPhotos = new Set(stackIds);
+    selectedPhotoId = null;
+    selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
+    hideDetailPanel();
+    ids = stackIds;
+  } else {
+    ids = coerceSelectionOnContext(selectedPhotos, pid);
+  }
   // If coercion replaced the set, align selectedPhotoId (so the detail panel
   // reflects the right-clicked photo) and selectedIndex (the Shift-range
   // anchor — a subsequent Shift-click must range-select from this card).
