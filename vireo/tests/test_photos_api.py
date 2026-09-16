@@ -11941,6 +11941,253 @@ def test_api_photos_query_browse_stacks(app_and_db):
     )
 
 
+def _seed_sortable_photos(db, count=12):
+    """Photos whose name order and rating order deliberately disagree, so a
+    focused re-sort has to actually move the target."""
+    folder = db.add_folder("/photos/sortable", name="sortable")
+    ids = []
+    for index in range(count):
+        photo_id = db.add_photo(
+            folder_id=folder,
+            filename=f"sortable-{index:02d}.jpg",
+            extension=".jpg",
+            file_size=1000 + index,
+            file_mtime=float(index),
+            timestamp=f"2024-03-{index + 1:02d}T00:00:00",
+        )
+        # Reverse the rating order relative to filename order.
+        db.update_photo_rating(photo_id, 5 if index >= count - 2 else 1)
+        ids.append(photo_id)
+    return folder, ids
+
+
+def test_api_photos_query_focus_photo_serves_that_photos_page(app_and_db):
+    """A focused query returns the page holding the photo, not page 1.
+
+    Browse re-sorts around the selected photo: without a server-side
+    position it would have to page forward until the photo turned up.
+    """
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    target = ids[7]
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "page": 1,
+        "per_page": 3,
+        "focus_photo_id": target,
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["focus_index"] == 7
+    assert payload["focus_page"] == 3
+    assert payload["page"] == 3
+    assert target in [photo["id"] for photo in payload["photos"]]
+
+
+def test_api_photos_query_focus_page_follows_the_requested_sort(app_and_db):
+    """The focused page is computed in the sort being switched to."""
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    target = ids[-1]
+
+    def focus_under(sort):
+        response = app.test_client().post("/api/photos/query", json={
+            "rules": [],
+            "folder_id": folder,
+            "sort": sort,
+            "per_page": 3,
+            "focus_photo_id": target,
+        })
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert target in [photo["id"] for photo in payload["photos"]]
+        return payload["focus_index"], payload["focus_page"]
+
+    # Last by filename, first by rating — the two answers must differ, or the
+    # test is not exercising the sort at all.
+    assert focus_under("name") == (11, 4)
+    assert focus_under("rating")[0] < 2
+
+
+def test_api_photos_query_focus_respects_the_rule_tree(app_and_db):
+    """Position is a position *within the filtered set*, not the folder."""
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    target = ids[-1]
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [{"field": "rating", "op": ">=", "value": 5}],
+        "folder_id": folder,
+        "sort": "name",
+        "per_page": 3,
+        "focus_photo_id": target,
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    # Only the two 5-star photos match, so the target is second — not 11th.
+    assert payload["total"] == 2
+    assert payload["focus_index"] == 1
+    assert payload["focus_page"] == 1
+
+
+def test_api_photos_query_focus_index_null_when_photo_filtered_out(app_and_db):
+    """A photo the filter excludes reports no position and no substitution.
+
+    Browse reads this as "I could not keep you with your photo" and resets to
+    the top with the selection cleared, rather than silently anchoring the
+    grid on some other photo's page.
+    """
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [{"field": "rating", "op": ">=", "value": 5}],
+        "folder_id": folder,
+        "sort": "name",
+        "page": 1,
+        "per_page": 3,
+        "focus_photo_id": ids[0],
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["focus_index"] is None
+    assert payload["focus_page"] == 1
+    assert payload["page"] == 1
+    assert len(payload["photos"]) == 2
+
+
+def test_api_photos_query_focus_on_hidden_stack_member(app_and_db):
+    """Under Stacks a hidden burst frame resolves to its cover's page.
+
+    Stacked Browse pages logical items, so a hidden member has no page of
+    its own; focused deep links dodge this by turning Stacks off, which a
+    re-sort cannot do without changing the view the user is looking at.
+    """
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    hidden, cover = ids[8], ids[9]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'b1' WHERE id IN (?, ?)",
+            (hidden, cover),
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,),
+        )
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "stacks": True,
+        "per_page": 3,
+        "focus_photo_id": hidden,
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    # 12 photos collapse to 11 items; the burst sits where its leading
+    # member (index 8) did, so it is the 9th item — page 3 of 3-per-page.
+    assert payload["focus_index"] == 8
+    assert payload["focus_page"] == 3
+    stack = next(
+        photo for photo in payload["photos"] if photo["browse_stack"]
+    )
+    assert stack["id"] == cover
+    assert hidden in stack["browse_stack"]["photo_ids"]
+
+
+def test_api_photos_query_focus_holds_one_read_snapshot(app_and_db, monkeypatch):
+    """The position and the page it implies must come from one snapshot.
+
+    Offset pagination is only self-consistent within a snapshot: a commit
+    landing between the two moves a target sitting on a page boundary onto
+    the adjacent page, and the response would carry a valid ``focus_page``
+    whose rows omit the photo. Browse does not page towards a focused
+    target, so it would clear the selection this whole path exists to
+    preserve (Codex review on PR #1658).
+    """
+    from db import Database
+
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    ws_id = db._ws_id()
+    db_path = app.config["DB_PATH"]
+    # Position 5 of 12; at three a page that is the last row of page 2.
+    target = ids[5]
+
+    original = Database.query_photo_position
+    inserted = []
+
+    def insert_between(self, *args, **kwargs):
+        position = original(self, *args, **kwargs)
+        # A separate connection — a background scan committing mid-request.
+        # Sorting ahead of everything pushes the target onto page 3.
+        writer = Database(db_path)
+        writer.set_active_workspace(ws_id)
+        inserted.append(writer.add_photo(
+            folder_id=folder,
+            filename="aaa-landed-mid-request.jpg",
+            extension=".jpg",
+            file_size=10,
+            file_mtime=1.0,
+            timestamp="2024-01-01T00:00:00",
+        ))
+        writer.close()
+        return position
+
+    monkeypatch.setattr(Database, "query_photo_position", insert_between)
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "per_page": 3,
+        "focus_photo_id": target,
+    })
+
+    assert response.status_code == 200
+    assert inserted, "the test must actually commit during the request"
+    payload = response.get_json()
+    assert payload["focus_index"] == 5
+    assert payload["focus_page"] == 2
+    listed = [photo["id"] for photo in payload["photos"]]
+    assert target in listed, (
+        "the focused page must still hold the photo the position described"
+    )
+    # And the page is the pre-insert one: the row that landed mid-request is
+    # not spliced into a page numbered against the older ordering.
+    assert inserted[0] not in listed
+
+
+def test_api_photos_query_focus_photo_id_must_be_an_integer(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    for bad in ("12", 1.5, True, [1], {"id": 1}):
+        resp = client.post("/api/photos/query", json={
+            "rules": [], "focus_photo_id": bad,
+        })
+        assert resp.status_code == 400, bad
+        assert "focus_photo_id" in resp.get_json()["error"]
+
+
+def test_api_photos_query_omits_focus_keys_when_not_asked(app_and_db):
+    """Ordinary Browse paging must not start paying for a position it never
+    requested."""
+    app, _ = app_and_db
+    payload = app.test_client().post(
+        "/api/photos/query", json={"rules": []},
+    ).get_json()
+    assert "focus_index" not in payload
+    assert "focus_page" not in payload
+
+
 def test_api_photos_query_offline_members_are_opt_in_and_read_only(app_and_db):
     """Browse can reveal offline collection members without selecting them."""
     app, db = app_and_db
@@ -12545,6 +12792,73 @@ def _seed_embeddings(db, model_name="test-clip"):
             photos[name], model_name, np.array(vec, dtype=np.float32).tobytes()
         )
     return photos
+
+
+def test_api_photos_query_focus_inside_visual_results(app_and_db, monkeypatch):
+    """A visual clause ranks by relevance, and a focus still has to resolve.
+
+    Browse can be re-sorted with a visual search active; the endpoint holds
+    the whole ranked id list in memory there, so the focused page is a list
+    index rather than another query — but it must still be reported, or the
+    grid silently restarts at the top.
+    """
+    app, db = app_and_db
+    photos = _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+        "per_page": 1,
+        "focus_photo_id": photos["bird2.jpg"],
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    # bird1 ranks first, so bird2 is the second result — page 2 at one a page.
+    assert payload["focus_index"] == 1
+    assert payload["focus_page"] == 2
+    assert [p["filename"] for p in payload["photos"]] == ["bird2.jpg"]
+
+    # A photo the visual clause did not match has no position in it.
+    missed = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+        "per_page": 1,
+        "focus_photo_id": photos["bird3.jpg"],
+    }).get_json()
+    assert missed["focus_index"] is None
+    assert missed["focus_page"] == 1
+
+
+def test_api_photos_query_focus_on_visual_stack_member(app_and_db, monkeypatch):
+    """Stacked visual results page items too, so a hidden member resolves to
+    the item holding it."""
+    app, db = app_and_db
+    photos = _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET burst_id = 'visual-burst' WHERE id IN (?, ?)",
+            (photos["bird1.jpg"], photos["bird2.jpg"]),
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (photos["bird2.jpg"],),
+        )
+
+    payload = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "stacks": True,
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+        "per_page": 1,
+        # bird1 is the hidden member — bird2 wins the cover on quality.
+        "focus_photo_id": photos["bird1.jpg"],
+    }).get_json()
+
+    assert payload["focus_index"] == 0
+    assert payload["focus_page"] == 1
+    assert [p["id"] for p in payload["photos"]] == [photos["bird2.jpg"]]
 
 
 def test_api_photos_query_visual_ranks_by_similarity(app_and_db, monkeypatch):
