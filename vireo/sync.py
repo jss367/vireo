@@ -461,6 +461,11 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 locations[photo_id] = db.get_assigned_photo_location(
                     photo_id,
                     verify_workspace=require_workspace_membership,
+                    # A sync-only grant authorizes writing this sidecar;
+                    # the path map above already honors it, and the
+                    # membership test here would otherwise refuse the same
+                    # photo and leave the edit queued forever.
+                    allow_sync_only=True,
                 )
             except Exception as e:
                 # Historically this lookup ran inside the per-photo try, so a

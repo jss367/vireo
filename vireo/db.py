@@ -2524,6 +2524,32 @@ class Database:
                 f"Photo {photo_id} does not belong to the active workspace"
             )
 
+    def _photo_syncable_in_workspace(self, photo_id):
+        """Return True if the workspace may write this photo's sidecar.
+
+        Library membership, or a ``workspace_sync_only_folders`` grant --
+        the narrow record that tracked-merge collision handling writes so a
+        remapped edit stays syncable without the workspace gaining
+        visibility of every other photo in the folder.
+        """
+        if self._photo_in_workspace(photo_id):
+            return True
+        row = self.conn.execute(
+            """SELECT 1 FROM photos p
+               JOIN workspace_sync_only_folders sof
+                 ON sof.folder_id = p.folder_id
+               WHERE p.id = ? AND sof.workspace_id = ?""",
+            (photo_id, self._ws_id()),
+        ).fetchone()
+        return row is not None
+
+    def _verify_photo_syncable_in_workspace(self, photo_id):
+        """Raise ValueError if the workspace may not write this sidecar."""
+        if not self._photo_syncable_in_workspace(photo_id):
+            raise ValueError(
+                f"Photo {photo_id} does not belong to the active workspace"
+            )
+
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
         cur = self.conn.execute(
@@ -5533,6 +5559,81 @@ class Database:
             )
         return dropped
 
+    def _transfer_review_state_for_merge(self, losing_id, surviving_id):
+        """Carry queued rating / flag state onto the survivor by chronology.
+
+        ``photos.rating`` and ``photos.flag`` are written at edit time and
+        the queue row only records what the sidecar still owes. Remapping
+        the row alone would leave the survivor's catalog columns untouched:
+        the next sync writes the queued value into the sidecar and clears
+        the row, and the catalog is left permanently disagreeing with the
+        file on disk.
+
+        Two rows of the same type in one workspace are also a problem in
+        their own right -- ``sync._plan_photo_sync`` keeps whichever it
+        folds last -- so the older one is dropped per workspace, the same
+        rule the location and keyword paths use. The catalog column then
+        takes the value of the newest queued row across both photos, which
+        is exactly what the sync will write.
+
+        Only queued state is compared. A rating set on the survivor and
+        already synced has no row left to date it, so it loses to a
+        still-queued older edit; the queue is the only evidence of intent
+        that survives a sync.
+
+        Returns the number of queue rows dropped.
+        """
+        dropped = 0
+        for change_type, column in (("rating", "rating"), ("flag", "flag")):
+            rows = self.conn.execute(
+                "SELECT id, photo_id, workspace_id, value, created_at "
+                "FROM pending_changes "
+                "WHERE photo_id IN (?, ?) AND change_type = ?",
+                (losing_id, surviving_id, change_type),
+            ).fetchall()
+            if not any(r["photo_id"] == losing_id for r in rows):
+                # Nothing queued on the row being deleted: the survivor's
+                # own column and queue already agree with each other.
+                continue
+
+            def key(r):
+                return (r["created_at"] or "", r["id"])
+
+            by_ws = {}
+            for r in rows:
+                by_ws.setdefault(r["workspace_id"], []).append(r)
+            for ws_rows in by_ws.values():
+                if len(ws_rows) < 2:
+                    continue
+                winner = max(ws_rows, key=key)
+                for r in ws_rows:
+                    if r["id"] == winner["id"]:
+                        continue
+                    self.conn.execute(
+                        "DELETE FROM pending_changes WHERE id = ?", (r["id"],))
+                    dropped += 1
+            newest = max(rows, key=key)
+            value = newest["value"]
+            if change_type == "rating":
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    # A malformed queue row; ``sync_to_xmp`` skips it too.
+                    continue
+            else:
+                value = value or "none"
+            self.conn.execute(
+                f"UPDATE photos SET {column} = ? WHERE id = ?",
+                (value, surviving_id),
+            )
+        if dropped:
+            log.info(
+                "Merge reconciled queued review state on photos %s/%s: "
+                "dropped %d older queue row(s)",
+                losing_id, surviving_id, dropped,
+            )
+        return dropped
+
     def _link_survivor_for_sibling_edits(self, workspace_id, photo_id):
         """Grant a sibling workspace sync-only access to a remapped photo's folder.
 
@@ -6335,6 +6436,12 @@ class Database:
                                 # rows that actually survive.
                                 self._reconcile_conflicting_keyword_edits(
                                     pid, survivor_id)
+                                # ``photos.rating`` / ``photos.flag`` live
+                                # outside the queue row, so they have to
+                                # travel with it or the survivor's catalog
+                                # keeps a value the sidecar no longer has.
+                                self._transfer_review_state_for_merge(
+                                    pid, survivor_id)
                                 # Capture the identities of the rows this
                                 # remap is about to move -- restricted to
                                 # the active workspace so sibling-workspace
@@ -6463,6 +6570,10 @@ class Database:
                                 # newer remove on the other once the remap
                                 # puts them on one photo.
                                 self._reconcile_conflicting_keyword_edits(
+                                    collision["id"], pid)
+                                # Same carry-over of the catalog columns the
+                                # queue row does not hold.
+                                self._transfer_review_state_for_merge(
                                     collision["id"], pid)
                                 # Sibling workspaces owning phantom rows this
                                 # remap will move onto the staged survivor.
@@ -9945,10 +10056,23 @@ class Database:
         """
         return self.conn.execute(query, species_col_params + params).fetchall()
 
-    def get_assigned_photo_location(self, photo_id, verify_workspace=True):
-        """Return linked location-keyword coordinates for one visible photo."""
+    def get_assigned_photo_location(self, photo_id, verify_workspace=True,
+                                    allow_sync_only=False):
+        """Return linked location-keyword coordinates for one visible photo.
+
+        ``allow_sync_only`` accepts a ``workspace_sync_only_folders`` grant
+        as sufficient authorization. The sync engine passes it because that
+        grant exists precisely to let a workspace write the sidecar of a
+        photo it does not carry in its library: without it a remapped
+        sibling-workspace ``location`` change resolves its path through the
+        grant and then fails this check, staying queued on every retry.
+        Browse and library callers keep the strict membership test.
+        """
         if verify_workspace:
-            self._verify_photo_in_workspace(photo_id)
+            if allow_sync_only:
+                self._verify_photo_syncable_in_workspace(photo_id)
+            else:
+                self._verify_photo_in_workspace(photo_id)
 
         row = self.conn.execute(
             """

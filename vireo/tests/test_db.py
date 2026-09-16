@@ -13483,6 +13483,236 @@ def test_merge_staged_tree_newer_keyword_remove_beats_older_phantom_add(
         ("keyword_remove", "Birds")}
 
 
+def test_merge_staged_tree_carries_queued_rating_onto_survivor(db, tmp_path):
+    """``photos.rating`` is written when the edit is made; the queue row only
+    records what the sidecar still owes. Remapping the row alone leaves the
+    survivor's catalog rating untouched, so the next sync writes the queued
+    value into the sidecar, clears the row, and the catalog is left
+    permanently disagreeing with the file on disk."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    db.conn.execute("UPDATE photos SET rating = 2 WHERE id = ?",
+                    (survivor_pid,))
+    db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (dup_pid,))
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '4', 'tok-rating', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert db.conn.execute(
+        "SELECT rating FROM photos WHERE id = ?",
+        (survivor_pid,)).fetchone()["rating"] == 4
+    assert db.conn.execute(
+        "SELECT photo_id FROM pending_changes WHERE change_token = ?",
+        ("tok-rating",)).fetchone()["photo_id"] == survivor_pid
+
+
+def test_merge_staged_tree_newest_queued_rating_wins_and_older_row_goes(
+        db, tmp_path):
+    """Two rating rows on one photo make ``_plan_photo_sync`` keep whichever
+    it folds last. Drop the older one per workspace and set the catalog to
+    the newest queued value, so the column and the sidecar agree."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?",
+                    (survivor_pid,))
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, 'rating', '3', 'tok-old', "
+        "'2026-01-01 00:00:00', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, created_at, "
+        " workspace_id) VALUES (?, 'rating', '5', 'tok-new', "
+        "'2026-01-02 00:00:00', ?)",
+        (survivor_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert db.conn.execute(
+        "SELECT rating FROM photos WHERE id = ?",
+        (survivor_pid,)).fetchone()["rating"] == 5
+    tokens = {r["change_token"] for r in db.conn.execute(
+        "SELECT change_token FROM pending_changes "
+        "WHERE change_type = 'rating'").fetchall()}
+    assert tokens == {"tok-new"}
+
+
+def test_merge_staged_tree_carries_queued_flag_onto_survivor(db, tmp_path):
+    """Same shape as the rating: ``photos.flag`` is catalog state the queue
+    row does not carry."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    survivor_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="DUPHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=8, file_mtime=2.0, file_hash="DUPHASH",
+    )
+    db.conn.execute("UPDATE photos SET flag = 'none' WHERE id = ?",
+                    (survivor_pid,))
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'flag', 'flagged', 'tok-flag', ?)",
+        (dup_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?",
+        (survivor_pid,)).fetchone()["flag"] == "flagged"
+
+
+def test_merge_staged_tree_carries_queued_rating_on_phantom_target(
+        db, tmp_path):
+    """Phantom-branch counterpart: the deleted row is the archive phantom
+    and the staged row survives, but the catalog column has to follow the
+    queued value just the same."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"fresh-staged-bytes")
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(
+        folder_id=date_id, filename="dup.raf", extension=".raf",
+        file_size=100, file_mtime=1.0, file_hash="STALEHASH",
+    )
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(
+        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+        file_size=200, file_mtime=2.0, file_hash="NEWHASH",
+    )
+    db.conn.execute("UPDATE photos SET rating = 1 WHERE id = ?", (new_pid,))
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '5', 'tok-phantom-rating', ?)",
+        (phantom_pid, ws),
+    )
+    db.conn.commit()
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert db.conn.execute(
+        "SELECT rating FROM photos WHERE id = ?",
+        (new_pid,)).fetchone()["rating"] == 5
+
+
+def test_assigned_location_accepts_sync_only_grant(db, tmp_path):
+    """A sync-only grant is what lets a sibling workspace write a remapped
+    edit's sidecar. The location lookup runs its own membership check
+    against ``workspace_folders``, so without honoring the grant a remapped
+    ``location`` change would resolve its path and then fail this check,
+    staying queued on every retry."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    arch.mkdir(parents=True)
+    folder_id = db.add_folder(str(arch), name="USA")
+    pid = db.add_photo(
+        folder_id=folder_id, filename="a.raf", extension=".raf",
+        file_size=8, file_mtime=1.0, file_hash="AHASH",
+    )
+    kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Yosemite', 'location', 37.865, -119.538) RETURNING id"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kw))
+    sibling_ws = db.create_workspace("Sibling")
+    db.set_active_workspace(sibling_ws)
+    db.conn.commit()
+
+    # No membership of any kind: both paths refuse.
+    with pytest.raises(ValueError):
+        db.get_assigned_photo_location(pid)
+    with pytest.raises(ValueError):
+        db.get_assigned_photo_location(pid, allow_sync_only=True)
+
+    db.conn.execute(
+        "INSERT INTO workspace_sync_only_folders (workspace_id, folder_id) "
+        "VALUES (?, ?)", (sibling_ws, folder_id))
+    db.conn.commit()
+
+    # The grant authorizes the sync path, and only the sync path.
+    assert db.get_assigned_photo_location(
+        pid, allow_sync_only=True)["latitude"] == 37.865
+    with pytest.raises(ValueError):
+        db.get_assigned_photo_location(pid)
+    db.set_active_workspace(ws)
+
+
 def test_merge_staged_tree_links_survivor_into_sibling_workspace(
         db, tmp_path):
     """The remap moves pending rows by ``photo_id`` alone, so it also moves
