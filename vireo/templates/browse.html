@@ -372,8 +372,6 @@ body.sidebar-resizing {
 .grid-container {
   flex: 1;
   overflow-y: auto;
-  /* Browse explicitly preserves position when refreshing or prepending. */
-  overflow-anchor: none;
   padding: 16px 20px;
 }
 .grid {
@@ -6720,6 +6718,8 @@ async function refreshBrowseWindowInPlace() {
   var data;
   var page = firstPage;
   var succeeded = false;
+  var scrollContainer = null;
+  var previousOverflowAnchor;
   try {
     // Stage only the window already loaded, including focused windows that
     // start deep in a library. Do not expose partially refreshed pages.
@@ -6787,6 +6787,12 @@ async function refreshBrowseWindowInPlace() {
     // during the request must not be undone by its eventual response.
     var container = document.getElementById('gridContainer');
     var scrollTop = container.scrollTop;
+    // Only the synchronous replacement owns scroll position. Other updates,
+    // such as a stack finishing loading above the viewport, still need the
+    // browser's normal scroll anchoring.
+    scrollContainer = container;
+    previousOverflowAnchor = container.style.overflowAnchor;
+    container.style.overflowAnchor = 'none';
     var stillExpandedIds = expandedMemberIds();
     expandedBrowseStacks.clear();
     nextPhotos.forEach(function(photo) {
@@ -6855,6 +6861,7 @@ async function refreshBrowseWindowInPlace() {
     // usable rather than replacing them with a partial response.
     return windowIsCurrent() ? false : null;
   } finally {
+    if (scrollContainer) scrollContainer.style.overflowAnchor = previousOverflowAnchor;
     if (windowIsCurrent()) {
       loading = false;
       if (succeeded) {

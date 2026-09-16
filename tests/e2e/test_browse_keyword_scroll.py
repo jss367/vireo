@@ -304,3 +304,34 @@ def test_membership_refresh_handles_removing_all_matches(live_server, page):
     assert page.evaluate("getActiveSelection()") == []
     assert page.evaluate("totalPhotos") == 0
     assert page.evaluate("gridContainer.scrollTop") == 0
+
+
+def test_stack_loading_above_viewport_keeps_browser_scroll_anchoring(live_server, page, browser_name):
+    if browser_name != "chromium":
+        pytest.skip("WebKit does not implement CSS scroll anchoring")
+    db = live_server["db"]
+    _seed_filtered_library(db, live_server["data"]["folders"][0])
+    ids = [row[0] for row in db.conn.execute(
+        "SELECT id FROM photos WHERE filename LIKE 'marsh%' ORDER BY timestamp LIMIT 20 OFFSET 10"
+    )]
+    seed_browse_stack(db, ids)
+    _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
+    page.locator("#browseStacksToggle").check()
+    page.wait_for_function("!loading && browseDatasetReady")
+    assert page.evaluate("resetAndLoad({preserveScroll: true})") is True
+    assert page.evaluate("getComputedStyle(gridContainer).overflowAnchor") == "auto"
+    cover = page.locator("#grid .has-browse-stack").first
+    cover_id = int(cover.get_attribute("data-id"))
+    pending = []
+    page.route("**/api/photos/by-ids", lambda route: pending.append(route), times=1)
+    page.evaluate("id => { window.stackDone = toggleBrowseStack(null, id); }", cover_id)
+    page.wait_for_timeout(100)
+    assert pending
+    below = page.locator("#grid .grid-card").nth(35)
+    below.scroll_into_view_if_needed()
+    page.wait_for_timeout(100)
+    before = below.bounding_box()["y"]
+    pending[0].continue_()
+    page.evaluate("stackDone")
+    page.wait_for_timeout(150)
+    assert abs(below.bounding_box()["y"] - before) < 2
