@@ -198,6 +198,31 @@ SCHEMA = {
         "label": "Browse card fields",
         "desc": "Which metadata badges appear on each photo card in browse.",
     },
+    "browse_stack_time_gap": {
+        "type": "float", "min": 0.0, "max": 600.0, "step": 0.5,
+        "category": "Display", "scope": "both",
+        "label": "Stacks: burst time gap (s)",
+        "desc": (
+            "Browse's Stacks toggle groups consecutive frames from one folder "
+            "into a burst while each gap between shots is no longer than this. "
+            "Frames must also share the same species and location keywords."
+        ),
+    },
+    "browse_stack_split_mode": {
+        "type": "enum",
+        "enum": ["break", "partition"],
+        "enum_labels": {
+            "break": "Break the run at every keyword change",
+            "partition": "One stack per keyword set in the run",
+        },
+        "category": "Display", "scope": "both",
+        "label": "Stacks: keyword changes",
+        "desc": (
+            "What happens when species or location keywords change part-way "
+            "through a burst. Breaking keeps shooting order, so a run tagged "
+            "A, B, A becomes three stacks; partitioning regroups it into two."
+        ),
+    },
     "open_in_browser": {
         "type": "bool",
         "category": "Display", "scope": "global",

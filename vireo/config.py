@@ -109,6 +109,21 @@ DEFAULTS = {
     "preview_quality": 90,
     "preview_cache_max_mb": 20480,
     "browse_thumb_default": 220,
+    # --- Browse stacks ---
+    # Browse's Stacks toggle collapses exact duplicates and camera bursts.
+    # A burst is a run of frames from one folder whose consecutive capture
+    # times are no further apart than ``browse_stack_time_gap`` seconds and
+    # which carry the same species and location keywords. Keyword matching
+    # is deliberate: an untagged frame inside a tagged run breaks out as its
+    # own item so the gap in tagging stays visible instead of hiding behind
+    # a tagged cover.
+    "browse_stack_time_gap": 3.0,
+    # How a keyword change inside a time run is resolved.
+    #   "break"     - start a new stack at every change, so an A/B/A run
+    #                 yields three stacks in shooting order.
+    #   "partition" - one stack per distinct keyword set in the run, so the
+    #                 same A/B/A run yields two.
+    "browse_stack_split_mode": "break",
     # --- Detection ---
     "detector_confidence": 0.2,
     "detection_padding": 0.2,
