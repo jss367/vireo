@@ -1026,7 +1026,14 @@
       let values;
       if (rule.op === 'in' && Array.isArray(rule.value)) values = rule.value.slice();
       else if (rule.op === 'is') values = [rule.value];
-      else { state.root.rules[idx] = makeRule(field, 'in', [value]); return; }
+      else {
+        // An ``is not``/``not_in`` clause on the same field is a rule the
+        // user built in the popover, not one this button owns. Narrow it
+        // with a separate clause instead of overwriting it — a shortcut
+        // must never silently delete an exclusion someone wrote.
+        state.root.rules.unshift(makeRule(field, 'in', [value]));
+        return;
+      }
       if (values.includes(value)) values = values.filter((v) => v !== value);
       else values.push(value);
       if (!values.length) state.root.rules.splice(idx, 1);

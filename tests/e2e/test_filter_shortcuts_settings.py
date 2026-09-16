@@ -195,6 +195,25 @@ def test_removing_one_of_a_pair_keeps_the_other_in_control(live_server, page):
     assert page.evaluate("VireoFilter.getUserRules()")["rules"].__len__() == 1
 
 
+def test_a_shortcut_narrows_an_exclusion_instead_of_replacing_it(live_server, page):
+    """A quick filter must not delete a rule built in the popover."""
+    _open_browse(page, live_server)
+    page.evaluate(
+        "VireoFilter.loadExpression({mode: 'all', rules: ["
+        "  {field: 'flag', op: 'not_in', value: ['rejected']}]})"
+    )
+    expect(page.locator(".vf-chips")).to_contain_text("Flag is not one of Rejected")
+
+    page.locator('.vf-shortcuts [data-value="flagged"]').click()
+    rules = page.evaluate("VireoFilter.getUserRules()")["rules"]
+    assert {"field": "flag", "op": "not_in", "value": ["rejected"]} in rules
+    assert {"field": "flag", "op": "in", "value": ["flagged"]} in rules
+    # And toggling back off leaves the exclusion alone.
+    page.locator('.vf-shortcuts [data-value="flagged"]').click()
+    rules = page.evaluate("VireoFilter.getUserRules()")["rules"]
+    assert rules == [{"field": "flag", "op": "not_in", "value": ["rejected"]}]
+
+
 def test_clearing_every_quick_filter_leaves_a_working_bar(live_server, page):
     status = _open_settings(page, live_server)
     for _ in range(5):
