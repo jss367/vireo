@@ -32,7 +32,7 @@ from urllib.parse import quote
 
 import path_guard
 import source_discovery
-from db import Database
+from db import Database, _chunks
 from flask import Blueprint, Response, abort, jsonify, make_response, request
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from metadata import scan_metadata_warning
@@ -178,6 +178,181 @@ def _folder_ids_under(folders, staging_destination):
     return ids
 
 
+def _all_folders(db):
+    """Every catalog folder, not just the active workspace's.
+
+    A staging tree can be unlinked from the workspace that imported it while
+    still linked to a sibling -- nothing guards ``pending_archives`` against
+    folder removal -- and the rows, the files and the queued edits all survive
+    that. Scoping by workspace membership would report nothing to sync and
+    hide the button, which reads as "nothing to do here" rather than "I cannot
+    see this tree". A transfer is defined by a path on disk, so resolve it
+    from the path.
+    """
+    return db.conn.execute("SELECT id, path FROM folders").fetchall()
+
+
+def _staging_folder_ids(db, staging_destination):
+    """``_folder_ids_under`` for one archive, reading the folder list itself.
+
+    The listing route hoists the folder read across every pending row; a job
+    thread has exactly one archive and its own db, so it asks directly rather
+    than carrying the hoisted list across threads.
+    """
+    return _folder_ids_under(_all_folders(db), staging_destination)
+
+
+# How many times the pre-transfer sync re-reads the queue before giving up on
+# draining it. Job admission is workspace-scoped and the rating/keyword routes
+# are ordinary requests, so the user can queue an edit while the sync runs. A
+# second pass catches that; the cap only exists so a change that somehow never
+# clears cannot spin here forever. Whatever is still queued after the move is
+# reported rather than silently swallowed -- see ``_residual_staged_changes``.
+_MAX_SYNC_DRAIN_PASSES = 5
+
+
+def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
+    """Write the staged import's queued sidecar edits, before it leaves.
+
+    Runs against the local staging copy on purpose. A verified transfer
+    deletes the originals, so from then on the same sync has to write over the
+    NAS connection -- and only while that mount is up. Returns
+    ``(photos_synced, undeliverable_identities)``; raises so the caller abandons
+    the transfer when a write actually fails, because the user asked for both
+    halves and silently sending stale sidecars to the NAS is the outcome they
+    were trying to avoid.
+
+    Held under the same app-wide lock as ``/api/jobs/sync``: that job is not
+    excluded by this one's workspace-scoped admission, and ``sync_to_xmp``
+    takes its sidecar locks per call, so the two could otherwise
+    read-modify-write one .xmp concurrently. Acquired cancellably, because the
+    wait can be long and nothing on disk has been touched yet.
+
+    The queue is re-read after every pass so an edit made while the sync was
+    running still travels with the transfer.
+
+    ``create_missing_sidecars`` is on here and nowhere else: this is the last
+    moment a rating-only photo can get a sidecar at all, because the transfer
+    is about to delete the file it would sit next to.
+
+    ``folder_paths`` is built from every catalog folder rather than from the
+    active workspace's tree so the sync resolves sidecar paths even when the
+    staging tree has been unlinked from its owning workspace. Membership is
+    not what defines the transfer -- the path is -- and the workspace-scoped
+    map would otherwise fail every photo as "folder not accessible". The
+    same shape drives ``require_workspace_membership=False``: an unlinked
+    staged photo's assigned-location lookup would otherwise raise "photo
+    not in workspace" and drop every queued ``location`` change on the
+    floor, so that check is skipped for the pre-transfer sync too.
+    """
+    import sync as sync_mod
+
+    def sync_progress(current, total):
+        progress(current, total, "", "Writing metadata to sidecars")
+
+    folder_paths = {row["id"]: row["path"] for row in _all_folders(db)}
+    synced_photos = set()
+    # Changes this workspace declines to write to XMP (a flag under
+    # sync_flags_to_xmp off). Tracked so the drain stops instead of re-running
+    # them forever, and so the residual count below does not report them as
+    # edits that "missed the transfer" -- a different claim, and a false one.
+    # Keyed on row identity, never on the row id; see ``staged_sync_scope``.
+    undeliverable = set()
+    for _ in range(_MAX_SYNC_DRAIN_PASSES):
+        changes, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
+        pending = [entry for entry in changes if entry[0] not in undeliverable]
+        if not pending:
+            break
+        result = sync_mod.sync_to_xmp(
+            db, progress_callback=sync_progress,
+            change_ids=[cid for _key, cid, _pid in pending],
+            create_missing_sidecars=True,
+            folder_paths=folder_paths,
+            # Same reason ``folder_paths`` is passed: the staging tree may
+            # have been unlinked from the workspace that imported it, and
+            # the default workspace-membership verification on
+            # ``get_assigned_photo_location`` would then refuse every
+            # queued ``location`` change for those photos even though the
+            # sidecar path resolves fine.
+            require_workspace_membership=False,
+        )
+        # A change this workspace declines to write to XMP is reported as a
+        # failure so the ordinary sync job lands in history as "failed". It is
+        # not a reason to abandon a transfer: nothing went wrong, and the edit
+        # was never bound for the sidecar. Only failures carrying a ``reason``
+        # -- the ones an actual prepare or write raises -- stop the move.
+        if [f for f in result["failures"] if f.get("reason")]:
+            raise ValueError(
+                "Metadata sync failed, so nothing was sent: "
+                + "; ".join(result["errors"])
+                + ". The local originals are untouched. Fix the sidecars and "
+                "try again, or use Send to NAS to transfer without syncing first."
+            )
+        after, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
+        remaining = {key for key, _cid, _pid in after}
+        # Counted as photos, not as per-pass tallies: one photo edited across
+        # two passes is one sidecar, and the banner counts distinct photos too.
+        synced_photos.update(
+            pid for key, _cid, pid in pending if key not in remaining)
+        undeliverable.update(
+            key for key, _cid, _pid in pending if key in remaining)
+    return len(synced_photos), undeliverable
+
+
+def _staged_photo_ids(db, folder_ids):
+    """Every photo id currently in the given staging folders.
+
+    Captured before ``send_pending_archive`` so the post-transfer residual
+    check can still find changes queued during the copy even when a
+    tracked-merge move reparents the photos onto the destination folder
+    ids -- at which point a folder-id-scoped re-read would report zero and
+    the completed job would falsely claim no metadata missed the transfer.
+    A photo's id survives the reparent; its folder_id does not.
+    """
+    if not folder_ids:
+        return []
+    ids = []
+    for chunk in _chunks(folder_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        ids.extend(row["id"] for row in db.conn.execute(
+            f"SELECT id FROM photos WHERE folder_id IN ({placeholders})",
+            list(chunk),
+        ))
+    return ids
+
+
+def _residual_staged_changes(db, photo_ids, undeliverable):
+    """Count edits queued too late to have travelled with the transfer.
+
+    Blocking the rating and keyword routes for the length of a NAS transfer
+    would be a worse trade than this gap, so the gap is reported instead of
+    closed: the job must not claim it synced everything when an edit landed
+    after the last drain. Only ids the sync never saw count -- something it
+    considered and left queued was deliberately not written to XMP (a flag
+    under sync_flags_to_xmp off), which is a different claim than "missed the
+    transfer".
+
+    Scoped by photo id, not folder id: ``send_pending_archive`` takes the
+    tracked-merge path when the NAS destination is already represented in
+    the catalog, and that reparents each staged photo onto the existing
+    destination folder id. A folder-id-scoped re-read would then find
+    nothing even if the user queued an edit during the copy. Photo ids are
+    captured before the move for this reason.
+
+    Returns ``None`` when the re-read itself fails. The transfer has already
+    succeeded by then, so the failure is not fatal -- but an affirmative
+    ``0`` would be read as "nothing missed the transfer" when the honest
+    answer is "I could not tell", and the edits are still sitting in the
+    queue. The caller says so in the summary.
+    """
+    try:
+        changes, _here, _elsewhere, _overlap = db.staged_sync_scope_by_photos(photo_ids)
+        return sum(1 for key, _cid, _pid in changes if key not in undeliverable)
+    except Exception:
+        log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
+        return None
+
+
 def create_imports_blueprint(
     get_db,
     json_error,
@@ -192,6 +367,7 @@ def create_imports_blueprint(
     chain_after_move,
     bulk_gps_location_payload,
     guard_move_folder,
+    sync_job_lock,
 ):
     """Build the imports blueprint.
 
@@ -219,19 +395,31 @@ def create_imports_blueprint(
         # Only pay for the folder read when something is actually pending —
         # three pages poll this endpoint every 5s with an empty list most of
         # the time.
-        ws_folders = db.conn.execute(
-            "SELECT f.id, f.path FROM folders f "
-            "JOIN workspace_folders wf ON wf.folder_id = f.id "
-            "WHERE wf.workspace_id = ?",
-            (db._ws_id(),),
-        ).fetchall() if rows else []
+        ws_folders = _all_folders(db) if rows else []
         items = []
         for row in rows:
             sending = any(j.get("type") == "send-to-nas"
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
+            folder_ids = _folder_ids_under(ws_folders, row["staging_destination"])
+            _changes, here, elsewhere, overlap = db.staged_sync_scope(folder_ids)
             items.append({
                 "id": row["id"], "destination": row["destination"],
-                "folder_ids": _folder_ids_under(ws_folders, row["staging_destination"]),
+                "folder_ids": folder_ids,
+                # Scoped to this archive's staging tree, not the catalog-wide
+                # sync queue: the banner offers to sync *these* photos, so the
+                # number has to be the ones the transfer would leave stale.
+                # ``_other_workspaces`` is what this sync will NOT write, kept
+                # separate so neither number over-promises.
+                # ``_here_with_sibling_edits`` is the overlap: photos already
+                # counted in ``unsynced_photos`` that also have edits queued in
+                # a sibling workspace. Left out of ``other_workspaces`` because
+                # it would read as extra photos rather than the same photo
+                # carrying two workspaces' edits, and surfaced on its own so
+                # the banner can warn that the sibling's changes on those
+                # photos will not be written by this button.
+                "unsynced_photos": here,
+                "unsynced_photos_other_workspaces": elsewhere,
+                "unsynced_photos_here_with_sibling_edits": overlap,
                 "source_available": os.path.isdir(row["staging_destination"]),
                 "collection_id": row["review_collection_id"], "name": row["collection_name"] or "Imported photos",
                 "state": "sending" if sending else "waiting" if jobs else "ready",
@@ -271,6 +459,25 @@ def create_imports_blueprint(
         db = get_db()
         runner = get_runner()
         workspace_id = db._ws_id()
+        raw = request.get_data(cache=True, as_text=True)
+        # ``get_json(silent=True)`` returns None for both an absent body and a
+        # parse failure, and ``or {}`` would additionally swallow the falsy
+        # literals false / 0 / [] / "". Any of those would start the one-way
+        # transfer as a plain send for a request that never asked for one.
+        if raw and raw.strip():
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                return json_error("Request body must be valid JSON")
+            if not isinstance(body, dict):
+                return json_error("Request body must be a JSON object")
+        else:
+            body = {}
+        sync_first = body.get("sync_first", False)
+        # Not coerced: bool("false") is True, and this option writes sidecars
+        # and can fail a transfer.
+        if not isinstance(sync_first, bool):
+            return json_error("sync_first must be a boolean")
         with archive_dispatch_lock:
             archive = get_pending_archive(db, archive_id)
             if archive is None:
@@ -281,6 +488,19 @@ def create_imports_blueprint(
             existing = next((j for j in active if j.get("type") == "send-to-nas"
                              and (j.get("config") or {}).get("pending_archive_id") == archive_id), None)
             if existing:
+                # Joining is only honest when the running job is doing what
+                # this caller asked for. A plain transfer cannot be upgraded
+                # mid-flight, so handing back its id would promise a metadata
+                # sync that is never going to run.
+                if bool((existing.get("config") or {}).get("sync_first")) != sync_first:
+                    return json_error(
+                        "These photos are already being sent to NAS "
+                        + ("without the metadata sync" if sync_first
+                           else "with the metadata sync")
+                        + ". Wait for that transfer to finish before starting "
+                        "a different one.",
+                        409,
+                    )
                 return jsonify({"job_id": existing["id"]})
             if active:
                 return json_error("Wait for running jobs to finish before sending these photos to NAS", 409)
@@ -294,19 +514,90 @@ def create_imports_blueprint(
                     )
                     thread_db.conn.commit()
                     try:
-                        if not runner.begin_uncancellable(job["id"]):
-                            raise ValueError("Transfer cancelled before it started. Local originals are retained.")
-
                         def progress(current, total, filename, phase="Sending to NAS"):
                             job["progress"].update(current=current, total=total, current_file=filename)
                             runner.push_event(job["id"], "progress", {
                                 "current": current, "total": total, "current_file": filename, "phase": phase,
                             })
 
-                        result = send_pending_archive(
-                            thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
-                            guard_folder=guard_move_folder, progress_cb=progress,
+                        folder_ids = _staging_folder_ids(
+                            thread_db, archive["staging_destination"]) if sync_first else []
+                        # Photo ids are captured before the move so the
+                        # post-transfer residual check still finds late edits
+                        # after a tracked-merge reparent onto the destination
+                        # folder ids. See _residual_staged_changes.
+                        staged_photo_ids = (
+                            _staged_photo_ids(thread_db, folder_ids)
+                            if sync_first else []
                         )
+                        if sync_first and not sync_job_lock.acquire(blocking=False):
+                            # Cancellably: the wait can be minutes if another
+                            # workspace's XMP sync holds the lock, and nothing
+                            # on disk has been touched yet. Mirrors the
+                            # /api/jobs/sync route's own acquire.
+                            progress(0, 0, "", "Waiting for current XMP sync")
+                            while not sync_job_lock.acquire(timeout=0.1):
+                                if runner.is_cancelled(job["id"]):
+                                    raise ValueError(
+                                        "Transfer cancelled before it started. "
+                                        "Local originals are retained.")
+                        try:
+                            # Only now: the lock is in hand and the next step
+                            # touches files.
+                            if not runner.begin_uncancellable(job["id"]):
+                                raise ValueError("Transfer cancelled before it started. Local originals are retained.")
+
+                            # Before the move, while the sidecars are still on
+                            # local disk. Recomputed here rather than trusting
+                            # the count the banner showed, so edits queued
+                            # between the click and the job travel too.
+                            synced, undeliverable = _sync_staged_metadata(
+                                thread_db, progress, sync_job_lock,
+                                folder_ids) if sync_first else (0, set())
+
+                            result = send_pending_archive(
+                                thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                                guard_folder=guard_move_folder, progress_cb=progress,
+                            )
+                            if sync_first:
+                                # Unconditionally, not just when something
+                                # synced: a queue holding only changes this
+                                # workspace declines to write syncs nothing,
+                                # and an edit made during the copy would then
+                                # go unreported.
+                                residual = _residual_staged_changes(
+                                    thread_db, staged_photo_ids, undeliverable)
+                        finally:
+                            if sync_first:
+                                sync_job_lock.release()
+                        if sync_first:
+                            summary = result["summary"]
+                            if synced:
+                                summary = (
+                                    f"Synced metadata for {synced} photo"
+                                    f"{'' if synced == 1 else 's'}. {summary}"
+                                )
+                            if residual is None:
+                                # The re-read failed, not the transfer. Saying
+                                # nothing here would read as "nothing missed
+                                # the transfer" -- the one claim this job
+                                # cannot make.
+                                summary += (
+                                    ". Could not re-check the sync queue "
+                                    "afterwards, so whether any edit was "
+                                    "queued during the transfer is unknown"
+                                )
+                            elif residual:
+                                summary += (
+                                    f". {residual} edit{'' if residual == 1 else 's'} "
+                                    "queued during the transfer and still need a "
+                                    "sync, now over the NAS connection"
+                                )
+                            result = {
+                                **result, "metadata_synced": synced,
+                                "metadata_queued_during_transfer": residual,
+                                "summary": summary,
+                            }
                         thread_db.conn.execute(
                             "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
                         )
@@ -326,7 +617,8 @@ def create_imports_blueprint(
                 "send-to-nas", work, singleton_key=archive_id,
                 workspace_id=workspace_id,
                 exclusive_workspace=True,
-                config={"pending_archive_id": archive_id, "destination": archive["destination"]},
+                config={"pending_archive_id": archive_id, "destination": archive["destination"],
+                        "sync_first": sync_first},
             )
         return jsonify({"job_id": job_id})
     # Import workers run on separate threads. Serialize execution of the same
