@@ -404,7 +404,8 @@ body.sidebar-resizing {
 .grid-card.has-browse-stack.stack-partial {
   border-style: dashed;
   border-color: var(--accent);
-  box-shadow: 3px 3px 0 var(--bg-tertiary), 6px 6px 0 var(--border-primary);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+              3px 3px 0 var(--bg-tertiary), 6px 6px 0 var(--border-primary);
 }
 .grid-card.offline {
   cursor: default;
@@ -1992,7 +1993,7 @@ body.sidebar-resizing {
                  oninput="updateThumbSize(this.value)">
           <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
         </label>
-        <label class="browse-stack-toggle" title="Collapse exact duplicates and camera bursts. A burst is a run of consecutive frames from one folder taken within the burst time gap that share the same species and location keywords — an untagged frame inside a tagged run stays its own item. Gap and keyword handling are in Settings › Display.">
+        <label class="browse-stack-toggle" title="Collapse exact duplicates and camera bursts. A burst is a run of consecutive frames from one folder taken within the burst time gap that share the same species and location keywords — an untagged frame inside a tagged run stays its own item. A stacked card stands for every frame in it, so selecting one selects them all; expand a stack to work on single frames. Gap and keyword handling are in Settings › Display.">
           <input type="checkbox" id="browseStacksToggle"
                  data-view-preference="vireo.browse.stacks"
                  onchange="toggleBrowseStacks()">
@@ -3429,7 +3430,8 @@ function renderBrowseStackBadge(p) {
   // pre-edit cover on screen. Say that on the badge itself: the toast that
   // reported it is long gone by the time the user looks back at the grid.
   var needsRecheck = browseStackCoverRecheck.has(p.id);
-  var title = label + ' · ' + stack.count + ' photos';
+  var title = label + ' · ' + stack.count + ' photos · clicking the card selects all '
+    + stack.count + ', this badge expands the stack to pick single frames';
   if (needsRecheck) {
     title += ' · cover may be out of date after a recent edit — expand to refresh';
   }
