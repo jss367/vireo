@@ -201,6 +201,13 @@ def _clean_leaf(node):
     # widening to a case-insensitive match.
     if spec.get("case_toggle") and node.get("case"):
         cleaned["case"] = True
+    # Same for a ``has_visual_index`` rule pinned to one model: dropping the
+    # key lets the API substitute whichever model is active, so the button
+    # would query a different embedding index than the one configured.
+    if field == "has_visual_index":
+        model = node.get("model")
+        if isinstance(model, str) and model.strip():
+            cleaned["model"] = model.strip()[:128]
     # ``keyword_identity`` carries its own display label through the rule.
     label = node.get("label")
     if isinstance(label, str) and label.strip():

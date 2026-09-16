@@ -252,6 +252,28 @@ def test_two_buttons_cannot_apply_the_same_rule():
     assert [entry["label"] for entry in fs.normalize(pair)] == ["Keepers"]
 
 
+def test_a_pinned_visual_model_survives_normalization():
+    """Dropping it lets the API substitute whichever model is active."""
+    entries = fs.normalize([
+        {"id": "a", "label": "Indexed", "rules": {
+            "field": "has_visual_index", "op": "is", "value": 1,
+            "model": "legacy-model"}},
+        {"id": "b", "label": "Any index", "rules": {
+            "field": "has_visual_index", "op": "is", "value": 1}},
+        # Only this field carries a model; elsewhere the key is noise.
+        {"id": "c", "label": "GPS", "rules": {
+            "field": "has_gps", "op": "is", "value": 1, "model": "legacy-model"}},
+    ])
+    assert entries[0]["rules"]["model"] == "legacy-model"
+    assert "model" not in entries[1]["rules"]
+    assert "model" not in entries[2]["rules"]
+    # Pinned and unpinned are different filters, not duplicates.
+    assert fs.find_duplicate(
+        [{"id": "a", **{k: v for k, v in entries[0].items() if k in ("label", "rules")}},
+         {"id": "b", **{k: v for k, v in entries[1].items() if k in ("label", "rules")}}]
+    ) is None
+
+
 def test_a_group_keeps_only_its_usable_children():
     entries = fs.normalize([{
         "id": "x", "label": "Mixed",
