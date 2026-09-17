@@ -2478,6 +2478,14 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
     # and their rows would then resolve to files outside ``dest_path``. It
     # also normalizes separators, so Windows descendants stored with
     # backslashes are matched rather than silently skipped.
+    #
+    # It is a PREFILTER, not the authority. ``_path_for_subtree_match`` folds
+    # ``\\`` to ``/`` on every platform, and ``\\`` is a legal filename
+    # character on POSIX -- so moving ``/photos/shoot\\1`` normalizes to the
+    # same prefix as the unrelated ``/photos/shoot/1`` tree. Every row is
+    # re-checked below against the move module's own alias-folding
+    # containment test (symlinks, Windows case folding, case-insensitive
+    # POSIX), which is FS truth rather than string shape.
     prefix = _subtree_prefix(src_path)
     rows = db.conn.execute(
         """SELECT p.id, p.filename, p.file_mtime, p.file_size,
@@ -2488,6 +2496,11 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
         (src_path, len(prefix), prefix),
     ).fetchall()
     updates = []
+    # Hoisted: the probe is per-ancestor, and the containment answer depends
+    # only on the folder, so a tree of thousands of photos costs one realpath
+    # per distinct folder rather than one per photo.
+    ci_root = _case_insensitive_root(src_path)
+    contained = {}
     for index, row in enumerate(rows):
         # One stat per side per photo, on a mount that may be slow enough
         # for that to be visible. Keep the phase label on screen rather
@@ -2496,15 +2509,22 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
         if progress_cb and index % 100 == 0:
             progress_cb(total_files, total_files, row["filename"],
                         "Checking timestamps")
+        folder_path = row["folder_path"]
+        if folder_path not in contained:
+            contained[folder_path] = _path_equal_or_descends(
+                folder_path, src_path, ci_root)
+        if not contained[folder_path]:
+            # Prefilter slack: this row is not actually in the moved tree.
+            continue
         stored_mtime, stored_size = row["file_mtime"], row["file_size"]
         if stored_mtime is None or stored_size is None:
             continue
-        src_file = os.path.join(row["folder_path"], row["filename"])
+        src_file = os.path.join(folder_path, row["filename"])
         # Prefix-strip rather than ``os.path.relpath``: relpath is happy to
         # walk out of the subtree with ``..`` if a row ever slipped past the
         # predicate above, which would point this at a file the move never
         # copied.
-        relative = _subtree_relative(row["folder_path"], src_path)
+        relative = _subtree_relative(folder_path, src_path)
         dst_file = _join_subtree_path(
             dest_path,
             f"{relative}/{row['filename']}" if relative else row["filename"],

@@ -5979,3 +5979,64 @@ def test_move_folder_rechecks_the_destination_after_planning_mtimes(
     assert db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (fid,)
     ).fetchone()["path"] == str(src)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="A literal backslash in a folder name is only possible on POSIX — "
+    "on Windows it is a separator, so the conflation under test can't exist.",
+)
+def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
+    """A POSIX folder named ``shoot\\1`` must not sweep in ``shoot/1``.
+
+    The SQL prefilter normalizes ``\\`` to ``/`` on every platform, and ``\\``
+    is a legal POSIX filename character, so those two distinct trees share a
+    normalized prefix. They can also agree on a relative path, which without
+    a real containment check lets a photo that never moved be re-stamped
+    from a file under the destination.
+
+    Exercises the planner directly rather than a whole ``move_folder``: the
+    same normalization lives in ``db.move_folder_path``'s cascade, where
+    this layout raises ``UNIQUE constraint failed: folders.path`` on ``main``
+    today. That is a pre-existing bug in a different module — this test pins
+    the planner's own behavior without depending on it.
+    """
+    import move as move_mod
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+
+    def _add(folder_id, directory, name, mtime=1577880000):
+        path_ = directory / name
+        path_.write_bytes(b"\xff\xd8" + b"\x00" * 64)
+        os.utime(path_, (mtime, mtime))
+        st = path_.stat()
+        return db.add_photo(folder_id=folder_id, filename=name,
+                            extension=".jpg", file_size=st.st_size,
+                            file_mtime=st.st_mtime)
+
+    # The tree being moved: one directory whose NAME contains a backslash.
+    src = tmp_path / "shoot\\1"
+    sub = src / "sub"
+    sub.mkdir(parents=True)
+    fid = db.add_folder(str(src), name="shoot\\1")
+    fid_sub = db.add_folder(str(sub), name="sub", parent_id=fid)
+    moved_id = _add(fid_sub, sub, "d.jpg")
+
+    # Unrelated tree that normalizes to the same prefix, at the same relative
+    # path so the escaped lookup would find a same-sized file.
+    decoy_dir = tmp_path / "shoot" / "1" / "sub"
+    decoy_dir.mkdir(parents=True)
+    fid_decoy = db.add_folder(str(decoy_dir), name="sub")
+    decoy_id = _add(fid_decoy, decoy_dir, "d.jpg")
+
+    # The copy as the transfer left it: same bytes, a fresh timestamp.
+    dest = tmp_path / "archive" / "shoot\\1"
+    (dest / "sub").mkdir(parents=True)
+    (dest / "sub" / "d.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 64)
+    os.utime(dest / "sub" / "d.jpg", (1600000000, 1600000000))
+
+    updates = move_mod._plan_moved_file_mtimes(db, str(src), str(dest))
+
+    assert [u[1] for u in updates] == [moved_id]
+    assert decoy_id not in [u[1] for u in updates]
