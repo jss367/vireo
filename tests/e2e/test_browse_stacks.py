@@ -858,6 +858,110 @@ def test_undo_keeps_a_whole_stack_selected(live_server, page):
     expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
 
 
+def test_undo_hydration_does_not_clobber_a_fresh_selection(live_server, page):
+    """Selecting mid-hydration must not resurrect the pre-undo ids.
+
+    ``afterHistoryChange`` captures the selection before ``resetAndLoad``,
+    then hydrates every cover whose members it might need. An uncached
+    collapsed stack is exactly that case: its hidden frames have never
+    been fetched, so hydration awaits ``/api/photos/by-ids`` before the
+    restore loop can find them. If the user clicks another card during
+    that await, the restore would fold the pre-undo stack back into the
+    fresh selection, replacing a one-card pick or merging into a new
+    batch. ``anchorRestoreEpoch`` moves on every selection change, so the
+    handler snapshots it after the reload and refuses to restore when the
+    snapshot no longer matches. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected · 1 stack")
+    # The stack has never been expanded, so its hidden frames are in no
+    # member cache — the case the restore hydrates for.
+    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+
+    # Colour label edits every frame in the selection but does not move
+    # any of them between stacks, so the reload's own restore is what
+    # would put the stack back — the same handler under test.
+    page.evaluate("() => batchSetColorLabel('red')")
+    page.wait_for_function(
+        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        arg=burst_ids,
+    )
+
+    # Hold the hydration fetch open long enough for a user-scale click to
+    # land inside its await. Route interception fires per request; only
+    # the by-ids POSTs are held, and only until the click has cleared.
+    hydration_hold = "__hydrationHold"
+    other_card_id = other_id
+    page.evaluate(
+        """holdKey => {
+          window[holdKey] = new Promise(function(resolve) {
+            window[holdKey + 'Release'] = resolve;
+          });
+          var origFetch = window.fetch;
+          window[holdKey + 'OrigFetch'] = origFetch;
+          window.fetch = async function(input, init) {
+            var url = typeof input === 'string' ? input : input.url;
+            if (url && url.indexOf('/api/photos/by-ids') !== -1) {
+              await window[holdKey];
+            }
+            return origFetch.call(this, input, init);
+          };
+        }""",
+        hydration_hold,
+    )
+
+    try:
+        page.evaluate("() => doUndo()")
+        # Grid re-renders once the initial photo list load returns; the
+        # hydration fetch behind it is still parked, so the click below
+        # lands in the async gap the handler snapshots the epoch for.
+        page.wait_for_function(
+            "() => photos.length > 0 && selectedPhotos.size === 0"
+        )
+        other_card = page.locator(f'.grid-card[data-id="{other_card_id}"]')
+        other_card.click()
+        page.wait_for_function(
+            "photoId => selectedPhotoId === photoId && selectedPhotos.size === 0",
+            arg=other_card_id,
+        )
+    finally:
+        page.evaluate(
+            """holdKey => {
+              window[holdKey + 'Release']();
+              window.fetch = window[holdKey + 'OrigFetch'];
+              delete window[holdKey + 'Release'];
+              delete window[holdKey + 'OrigFetch'];
+              delete window[holdKey];
+            }""",
+            hydration_hold,
+        )
+
+    # Give the restore a chance to run: it was waiting on hydration.
+    # ``selectedPhotos.size === 0`` because the user chose a single card —
+    # a stale restore would push the burst ids into ``selectedPhotos``
+    # here, so waiting for a merge (or lack of one) covers both failure
+    # modes with the same assertion.
+    page.wait_for_timeout(400)
+    assert page.evaluate("() => getActiveSelection()") == [other_id]
+    assert page.evaluate("() => selectedPhotoId") == other_id
+    # A merged batch would also revive the batch bar; a preserved
+    # single-card pick keeps it hidden.
+    expect(page.locator("#batchBar")).to_be_hidden()
+
+
 def test_cmd_clicking_a_selected_stack_deselects_it_as_a_unit(live_server, page):
     """Toggling a stack off has to take its focus with it.
 

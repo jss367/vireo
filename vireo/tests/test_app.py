@@ -21894,6 +21894,43 @@ def test_browse_sidebar_panels_refresh_on_undo_and_redo(app_and_db):
     ), "stale selection key would make the keyword refresh a no-op"
 
 
+def test_browse_undo_bails_when_selection_moves_during_hydration(app_and_db):
+    """The undo restore is captured before ``resetAndLoad`` and would
+    otherwise fold those pre-undo ids back into whatever the user picked
+    while we hydrated uncached stack members. ``selectPhoto`` bumps
+    ``anchorRestoreEpoch`` — the same async-selection signal the batch
+    delete's companion count and Select all already use — so the handler
+    snapshots the epoch after the reload and gates the restore on it
+    still matching before writing to ``selectedPhotos``. Without that
+    gate, a click that lands in the async gap either merges the old
+    stack into a new batch or gets replaced outright. Codex P2 on PR
+    #1672.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/browse").get_data(as_text=True)
+    handler = _browse_js_function_body(
+        html, "window.afterHistoryChange = async function("
+    )
+    reset_at = handler.find("await resetAndLoad(")
+    assert reset_at != -1, "the handler must reload the query"
+    snapshot_at = handler.find("restoreEpoch = anchorRestoreEpoch", reset_at)
+    assert snapshot_at != -1, (
+        "the handler must snapshot anchorRestoreEpoch after resetAndLoad "
+        "so the restore below can tell a mid-hydration click apart"
+    )
+    guard_at = handler.find(
+        "anchorRestoreEpoch === restoreEpoch", snapshot_at
+    )
+    assert guard_at != -1, (
+        "the previousSelection restore must be gated on the snapshot"
+    )
+    restore_at = handler.find("previousSelection.forEach(", guard_at)
+    assert restore_at != -1 and restore_at > guard_at, (
+        "the restore body has to sit inside the epoch guard, not beside it"
+    )
+
+
 def test_browse_review_deep_link_clears_persisted_filters(app_and_db):
     """``/review?photo_id=N`` alone is not the scope the pill advertises.
 

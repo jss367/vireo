@@ -10055,6 +10055,16 @@ window.afterHistoryChange = async function() {
   var loaded = await resetAndLoad({preserveAnchor: true, preserveCollection: true});
   if (loaded === false) throw new Error('Could not reload Browse');
   if (loaded !== true) return;
+  // resetAndLoad has cleared selection; the reload settled with the grid
+  // interactive. If the user clicks another card while we hydrate uncached
+  // stack members below, selectPhoto() bumps anchorRestoreEpoch — the same
+  // signal every other async selection path (Select all, keyword suggestions,
+  // batch-delete companion count) uses to know its captured ids no longer
+  // reflect what the user wants. Snapshot the epoch here so the restore
+  // below can bail out instead of folding the pre-undo ids back into the
+  // fresh selection, which would replace a new single-card pick or merge
+  // into a new batch. Codex P2 on PR #1672.
+  var restoreEpoch = anchorRestoreEpoch;
   var windowIsCurrent = observeBrowseWindow();
   for (var cover of photos.slice()) {
     var memberIds = cover.browse_stack && cover.browse_stack.photo_ids;
@@ -10072,11 +10082,13 @@ window.afterHistoryChange = async function() {
       if (status === 'unresolved') throw new Error('Could not reload stack members');
     }
   }
-  // Restore only selections that still belong to the refreshed query.
-  previousSelection.forEach(function(id) {
-    var photo = findBrowsePhoto(id);
-    if (photo && browsePhotoIsAvailable(photo)) selectedPhotos.add(id);
-  });
+  if (anchorRestoreEpoch === restoreEpoch) {
+    // Restore only selections that still belong to the refreshed query.
+    previousSelection.forEach(function(id) {
+      var photo = findBrowsePhoto(id);
+      if (photo && browsePhotoIsAvailable(photo)) selectedPhotos.add(id);
+    });
+  }
   refreshCardSelectionVisuals();
   updateBatchBar();
   refreshBrowseSidebarPanels();
