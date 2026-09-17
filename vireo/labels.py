@@ -8,6 +8,7 @@ import os
 import re
 import ssl
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
@@ -769,6 +770,13 @@ _SUMMARY_CACHE = OrderedDict()
 _SUMMARY_CACHE_MAX = 256
 _NORMALIZED_CACHE = OrderedDict()
 _NORMALIZED_CACHE_MAX = 16
+# Waitress serves these endpoints on 16 threads and Settings, Storage and
+# autocomplete all reach the caches. Without this, one thread's
+# ``move_to_end`` can hit a key another thread just evicted (KeyError), so
+# every read and every insert takes the lock. The work itself stays
+# outside it: two threads recomputing one list is waste, but holding a
+# process-wide lock for half a second is a stall.
+_CACHE_LOCK = threading.Lock()
 
 
 def _cache_stamp(meta):
@@ -785,17 +793,19 @@ def _cache_stamp(meta):
 
 
 def _cache_get(cache, key):
-    value = cache.get(key)
-    if value is not None:
-        cache.move_to_end(key)
-    return value
+    with _CACHE_LOCK:
+        value = cache.get(key)
+        if value is not None:
+            cache.move_to_end(key)
+        return value
 
 
 def _cache_put(cache, key, value, limit):
-    cache[key] = value
-    cache.move_to_end(key)
-    while len(cache) > limit:
-        cache.popitem(last=False)
+    with _CACHE_LOCK:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
     return value
 
 
