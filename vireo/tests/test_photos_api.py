@@ -1279,6 +1279,57 @@ def test_api_photos_companion_count_sees_photos_browse_never_loaded(app_and_db):
     ).status_code == 400
 
 
+def test_api_photos_companion_count_scoped_to_active_workspace(app_and_db):
+    """Photos in folders another workspace owns do not count here.
+
+    This endpoint sits next to ``/api/photos/by-ids``, which explicitly
+    scopes its ids to the caller's workspace. Counting companions across
+    workspaces would leak "this id has a companion in some workspace"
+    through an endpoint that never scoped the request. Codex P2 on PR #1672.
+    """
+    app, db = app_and_db
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    other_fid = db.add_folder('/other/photos', name='other')
+    other_pid = db.add_photo(
+        folder_id=other_fid, filename='foreign.jpg', extension='.jpg',
+        file_size=10, file_mtime=1.0,
+    )
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            ("foreign.nef", other_pid),
+        )
+    db.set_active_workspace(default_ws)
+
+    photos = db.get_photos(sort="name")
+    by_name = {p["filename"]: p["id"] for p in photos}
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            ("bird1.nef", by_name["bird1.jpg"]),
+        )
+    client = app.test_client()
+
+    # The other workspace's photo is not counted even though it carries a
+    # companion — the active workspace cannot see that folder.
+    resp = client.post(
+        "/api/photos/companion-count",
+        json={"photo_ids": [by_name["bird1.jpg"], other_pid]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"count": 1}
+
+    # Requesting only the foreign id from this workspace returns 0.
+    resp = client.post(
+        "/api/photos/companion-count",
+        json={"photo_ids": [other_pid]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"count": 0}
+
+
 def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
     """Browse-selected review should return the same rich result shape as Pipeline Review."""
     app, db = app_and_db
