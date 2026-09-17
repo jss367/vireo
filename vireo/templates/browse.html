@@ -13300,9 +13300,43 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   browseLightboxStackGesture = spent;
 });
 
+// Reconcile browse selection state for a null-photo close. The only caller
+// of ``closeLightbox(null)`` is ``lightboxDelete()`` after its splice emptied
+// ``_lightboxPhotoList`` — a stack cover was the deleted photo's only
+// top-level representation, and its hidden members are still in
+// ``selectedPhotos`` with no card left on the grid to stand for them. The
+// ``lightbox:photodeleted`` handler that runs immediately after this would
+// otherwise re-arm the set-aside gesture, leaving the batch bar counting
+// photos a shortcut cannot see — see the stack-gesture rules for why this
+// close has to actively clean up rather than return unchanged.
+// Codex P2 on PR #1672.
+function browseReconcileEmptyLightboxClose() {
+  var pending = browseLightboxStackGesture || browseLightboxStackGestureSpent;
+  browseLightboxStackGesture = null;
+  browseLightboxStackGestureSpent = null;
+  if (!pending) return;
+  var touched = false;
+  pending.ids.forEach(function(id) {
+    if (selectedPhotos.delete(id)) touched = true;
+  });
+  if (selectedPhotoId != null && pending.ids.indexOf(selectedPhotoId) !== -1) {
+    selectedPhotoId = null;
+    touched = true;
+  }
+  if (touched) {
+    if (typeof refreshCardSelectionVisuals === 'function') {
+      refreshCardSelectionVisuals();
+    }
+    if (typeof updateBatchBar === 'function') updateBatchBar();
+  }
+}
+
 document.addEventListener('lightbox:closed', function(event) {
   var photoId = event && event.detail ? event.detail.photoId : null;
-  if (photoId == null) return;
+  if (photoId == null) {
+    browseReconcileEmptyLightboxClose();
+    return;
+  }
   // Every close retires the gesture — including the one the lightbox's own
   // Delete button causes on its way to the delete dialog (it sits inside the
   // overlay and does not stop propagating). That close only looks

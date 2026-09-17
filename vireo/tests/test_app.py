@@ -22729,6 +22729,115 @@ function browseStacksEnabled() { return false; }
     assert result["requestIds"] == [[1, 2, 3], [4, 5, 6], [4, 5, 6]]
 
 
+def test_empty_lightbox_close_drops_a_stacks_dangling_members(app_and_db):
+    """Deleting a stack cover that is the only top-level lightbox entry
+    emptied ``_lightboxPhotoList`` and fires ``closeLightbox(null)`` — no
+    successor lightbox to reopen against, so nothing else consumes the
+    stack gesture the delete-button close set aside. The hidden members are
+    still in ``selectedPhotos`` but their cover is gone from the grid, and
+    the ``lightbox:photodeleted`` handler right after would re-arm that
+    gesture, leaving batch shortcuts pointing at photos with no card.
+
+    ``browseReconcileEmptyLightboxClose`` clears both the armed and set-
+    aside slots and drops the gesture's ids from the selection so nothing
+    is left dangling. CORE_PHILOSOPHY.md, "no black boxes": the batch bar's
+    count has to describe photos the user can see.
+    Codex P2 on PR #1672.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    body = _browse_js_function_body(html, "function browseReconcileEmptyLightboxClose(")
+    # The extractor's boundary is ``\nfunction ``, so the body carries the
+    # `lightbox:closed` addEventListener call that follows. Stub the DOM
+    # instead of the extractor's boundary rule: the fix under test is the
+    # named function, not its wiring.
+    source = "\n".join([
+        """
+var selectedPhotos = new Set();
+var selectedPhotoId = null;
+var browseLightboxStackGesture = null;
+var browseLightboxStackGestureSpent = null;
+var refreshes = 0, bars = 0;
+function refreshCardSelectionVisuals() { refreshes += 1; }
+function updateBatchBar() { bars += 1; }
+global.document = { addEventListener: function() {}, querySelector: function() { return null; } };
+""",
+        body,
+        """
+function snapshot() {
+  return {
+    selected: Array.from(selectedPhotos).sort(function(a, b){ return a - b; }),
+    focus: selectedPhotoId,
+    armed: browseLightboxStackGesture,
+    spent: browseLightboxStackGestureSpent,
+    refreshes: refreshes,
+    bars: bars,
+  };
+}
+var results = {};
+
+// (a) Delete flow: the delete-button close set the gesture aside as
+//     spent. `closeLightbox(null)` fires next, and its handler has to
+//     drop the dangling hidden members and retire the spent gesture so
+//     lightbox:photodeleted cannot re-arm it.
+selectedPhotos = new Set([11, 12]);
+selectedPhotoId = 10;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = {ids: [10, 11, 12], epoch: 3};
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.spentDeleteFlow = snapshot();
+
+// (b) The gesture may still be armed if the delete-button close did not
+//     set it aside (no `#deleteModal.open`). Same cleanup applies.
+selectedPhotos = new Set([11, 12]);
+selectedPhotoId = null;
+browseLightboxStackGesture = {ids: [10, 11, 12], epoch: 7};
+browseLightboxStackGestureSpent = null;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.armedFallback = snapshot();
+
+// (c) No gesture in either slot, no lingering selection — nothing to
+//     touch and no visible refresh should fire.
+selectedPhotos = new Set();
+selectedPhotoId = null;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.nothingPending = snapshot();
+
+process.stdout.write(JSON.stringify(results));
+""",
+    ])
+    result = _run_node(source, [])
+    assert result["spentDeleteFlow"] == {
+        "selected": [],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 1,
+        "bars": 1,
+    }, "the spent gesture's ids must be dropped so photodeleted cannot re-arm them"
+    assert result["armedFallback"] == {
+        "selected": [],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 1,
+        "bars": 1,
+    }, "an armed gesture with no spent slot must clean up the same way"
+    assert result["nothingPending"] == {
+        "selected": [],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, "an empty close with nothing pending must not touch the batch-bar UI"
+
+
 _APOSTROPHE_SPECIES = "Say's Phoebe"
 
 
