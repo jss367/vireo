@@ -6003,10 +6003,10 @@ def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
     (dest / "sub" / "d.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 64)
     os.utime(dest / "sub" / "d.jpg", (1600000000, 1600000000))
 
-    updates, unreadable = move_mod._plan_moved_file_mtimes(
+    updates, problem = move_mod._plan_moved_file_mtimes(
         db, str(src), str(dest))
 
-    assert unreadable is None
+    assert problem is None
     assert [u[1] for u in updates] == [moved_id]
     assert decoy_id not in [u[1] for u in updates]
 
@@ -6122,15 +6122,16 @@ def test_mtime_plan_reports_an_unreadable_destination_file(tmp_path):
     for name in ("a.jpg", "b.jpg"):
         (landing / name).write_bytes((src / name).read_bytes())
 
-    updates, unreadable = move_mod._plan_moved_file_mtimes(
+    updates, problem = move_mod._plan_moved_file_mtimes(
         db, str(src), str(landing))
-    assert unreadable is None
+    assert problem is None
     assert len(updates) == len(ids)
 
     (landing / "a.jpg").unlink()
-    updates, unreadable = move_mod._plan_moved_file_mtimes(
+    updates, problem = move_mod._plan_moved_file_mtimes(
         db, str(src), str(landing))
-    assert unreadable == str(landing / "a.jpg")
+    assert str(landing / "a.jpg") in problem
+    assert "unreadable" in problem
     assert updates == []
 
 
@@ -6244,3 +6245,77 @@ def test_restamping_leaves_unrelated_marker_timestamps_alone(
     assert row["file_mtime"] != 1577880000
     assert row["working_copy_evicted_mtime"] == -1
     assert row["working_copy_failed_mtime"] == 12345.0
+
+
+def test_a_differently_sized_copy_stops_a_fresh_move(tmp_path, monkeypatch):
+    """A damaged copy is reported, not skipped.
+
+    A fresh local move verifies by file count, so a truncated or replaced
+    destination file passes that check. The timestamp pass is the only thing
+    that compares sizes, and skipping the row would let the rmtree delete
+    the intact original.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    real = move_mod._run_rsync_streamed
+
+    def truncating_transfer(src_path, dest_spec, rsync_flags, total_files,
+                            progress_cb, **kwargs):
+        import shutil
+        os.makedirs(dest_spec, exist_ok=True)
+        for name in os.listdir(src_path):
+            shutil.copyfile(os.path.join(src_path, name),
+                            os.path.join(dest_spec, name))
+        # As if the copy were truncated after rsync reported success.
+        with open(os.path.join(dest_spec, "a.jpg"), "wb") as handle:
+            handle.write(b"\xff\xd8")
+        return 0, "", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", truncating_transfer)
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("does not match the source's size" in e
+               for e in result["errors"])
+    assert (src / "a.jpg").exists()
+    assert not (dst / "shoot").exists()
+
+
+def test_restamping_carries_the_offline_cache_row(tmp_path, monkeypatch):
+    """A cached original stays fresh across the correction.
+
+    ``offline_originals.source_mtime`` records the ``file_mtime`` its cached
+    copy was taken from. Leaving it behind would mark every cached original
+    stale and have the next cache preparation re-copy bytes that never
+    changed — over the same slow link this PR exists to spare.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    kept, unrelated = ids["a.jpg"], ids["b.jpg"]
+    size = db.conn.execute("SELECT file_size FROM photos WHERE id = ?",
+                           (kept,)).fetchone()["file_size"]
+    db.conn.execute(
+        "INSERT INTO offline_originals (photo_id, original_path, source_size,"
+        " source_mtime, cached_at, status)"
+        " VALUES (?, ?, ?, ?, datetime('now'), 'ready')",
+        (kept, "offline/a.jpg", size, 1577880000))
+    # Pinned to some other timestamp: not this correction's to move.
+    db.conn.execute(
+        "INSERT INTO offline_originals (photo_id, original_path, source_size,"
+        " source_mtime, cached_at, status)"
+        " VALUES (?, ?, ?, ?, datetime('now'), 'ready')",
+        (unrelated, "offline/b.jpg", size, 999.0))
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    assert move_folder(db=db, folder_id=fid,
+                       destination=str(dst))["errors"] == []
+
+    rows = {r["photo_id"]: r["source_mtime"] for r in db.conn.execute(
+        "SELECT photo_id, source_mtime FROM offline_originals").fetchall()}
+    fresh = db.conn.execute("SELECT file_mtime FROM photos WHERE id = ?",
+                            (kept,)).fetchone()["file_mtime"]
+    assert rows[kept] == fresh != 1577880000
+    assert rows[unrelated] == 999.0

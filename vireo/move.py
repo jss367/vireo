@@ -2474,8 +2474,9 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
     parameters for the rows to re-stamp; read-only itself, so the caller
     applies them once the catalog update it belongs with has gone through
     and a cascade that fails leaves no half-applied timestamps behind.
-    ``unreadable`` is the destination path whose stat failed while its
-    source was still present, or None.
+    ``problem`` describes a destination file that contradicts what
+    verification established -- missing, unreadable, or a different size
+    from the source still sitting next to it -- or None.
 
     That second return value exists because this pass is the last thing
     that looks at the destination before ``shutil.rmtree`` deletes the
@@ -2553,18 +2554,25 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
         try:
             dst_st = os.stat(dst_file)
         except OSError:
-            return [], dst_file
+            return [], (f"'{dst_file}' is missing or unreadable at the "
+                        f"destination")
         if src_st.st_mtime != stored_mtime or src_st.st_size != stored_size:
             # The row does not describe the file being moved -- it was
             # edited (or replaced) since its last scan. Leave it stale so
             # the scan that would have caught that still does.
             continue
-        if dst_st.st_size != stored_size or dst_st.st_mtime == stored_mtime:
-            # Either the timestamp already survived the copy (nothing to
-            # do) or the destination file is not the one we just verified
-            # -- on a merge, rsync's ``--ignore-existing`` leaves a
-            # same-name file it did not write, and that file's timestamp
-            # is not ours to adopt.
+        if dst_st.st_size != stored_size:
+            # The guard above already confirmed the source still matches the
+            # row, so a differently sized copy differs from the file this
+            # move is about to delete. On a merge the verification below
+            # rejects it; a fresh local move only compares file counts, so
+            # nothing else ever would, and the rmtree would take the intact
+            # original with it. Skipping the row would leave that damage
+            # unreported -- the same mistake as swallowing a failed stat.
+            return [], (f"'{dst_file}' does not match the source's size at "
+                        f"the destination")
+        if dst_st.st_mtime == stored_mtime:
+            # The timestamp survived the copy: nothing to correct.
             continue
         updates.append((dst_st.st_mtime, row["id"], stored_mtime, stored_size))
     return updates, None
@@ -3072,11 +3080,11 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # is preserved anyway.
     mtime_updates = []
     if not remote:
-        mtime_updates, unreadable = _plan_moved_file_mtimes(
+        mtime_updates, problem = _plan_moved_file_mtimes(
             db, src_path, transfer_dest,
             progress_cb=progress_cb, total_files=total_files,
         )
-        if unreadable is not None:
+        if problem is not None:
             # Verification below would catch this too. Failing here just
             # spares the user a full byte-for-byte pass over a destination
             # already known to be incomplete.
@@ -3090,8 +3098,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             if not dest_exists:
                 shutil.rmtree(transfer_dest, ignore_errors=True)
             return {"moved": 0, "errors": [
-                f"Verification failed: '{unreadable}' is missing or "
-                f"unreadable at the destination. Originals preserved."
+                f"Verification failed: {problem}. Originals preserved."
             ]}
 
     # Verify before deleting originals.
@@ -3216,6 +3223,19 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
              for fresh, photo_id, stale, size in mtime_updates],
         )
         mtimes_refreshed = cursor.rowcount
+        # Same reasoning as the working-copy markers, one table over.
+        # ``offline_originals.source_mtime`` records the ``file_mtime`` its
+        # cached copy was taken from, and ``offline_cache`` treats a
+        # mismatch as "the original changed" -- so correcting ``file_mtime``
+        # alone would mark every cached original stale and have the next
+        # cache preparation re-copy bytes that never changed. Only a row
+        # pinned to the timestamp being corrected, for a file of the same
+        # size, moves with it.
+        db.conn.executemany(
+            "UPDATE offline_originals SET source_mtime = ?"
+            " WHERE photo_id = ? AND source_mtime IS ? AND source_size IS ?",
+            mtime_updates,
+        )
         db.conn.commit()
         log.info(
             "Re-stamped file_mtime for %d photo(s) under %s from the copy "
