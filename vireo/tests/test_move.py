@@ -5737,13 +5737,16 @@ def _catalog_folder_with_current_stats(tmp_path, names=("a.jpg", "b.jpg"),
     return db, src, dst, fid, ids
 
 
-def _lose_timestamps_in_transfer(monkeypatch):
+def _lose_timestamps_in_transfer(monkeypatch, skip=None):
     """Copy the tree's bytes without its timestamps.
 
     Stands in for what rsync's temp-write-then-rename does on a mount that
     stamps the renamed file with the current time (measured on macOS smbfs
     against a Synology share) — the copy is byte-for-byte correct and every
     destination file carries a fresh mtime.
+
+    ``skip`` omits one basename from the copy, standing in for a destination
+    file that never arrived or vanished before the timestamps were read.
     """
     import shutil
 
@@ -5756,6 +5759,8 @@ def _lose_timestamps_in_transfer(monkeypatch):
             target = dest_spec if rel == "." else os.path.join(dest_spec, rel)
             os.makedirs(target, exist_ok=True)
             for fn in files:
+                if fn == skip:
+                    continue
                 # copyfile, not copy2: bytes land, timestamps do not.
                 shutil.copyfile(os.path.join(root, fn),
                                 os.path.join(target, fn))
@@ -6127,3 +6132,49 @@ def test_mtime_plan_reports_an_unreadable_destination_file(tmp_path):
         db, str(src), str(landing))
     assert unreadable == str(landing / "a.jpg")
     assert updates == []
+
+
+def test_a_failed_fresh_move_leaves_no_partial_destination(
+        tmp_path, monkeypatch):
+    """All-or-nothing survives the early return.
+
+    The fresh-move contract is that a failure leaves nothing behind, so a
+    retry is another fresh move rather than one that demands a merge. The
+    count check downstream removes the tree it created; this earlier exit
+    has to do the same.
+    """
+    from move import move_folder
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    _lose_timestamps_in_transfer(monkeypatch, skip="a.jpg")
+
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("Originals preserved" in e for e in result["errors"])
+    assert not (dst / "shoot").exists()
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+
+
+def test_a_failed_merge_never_removes_a_pre_existing_destination(
+        tmp_path, monkeypatch):
+    """...but a destination we did not create is not ours to delete.
+
+    A merge target can hold the user's own files, so the cleanup above must
+    not fire for one.
+    """
+    from move import move_folder
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    landing = dst / "shoot"
+    landing.mkdir()
+    (landing / "theirs.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 32)
+
+    _lose_timestamps_in_transfer(monkeypatch, skip="a.jpg")
+    result = move_folder(db=db, folder_id=fid, destination=str(dst),
+                         merge=True)
+
+    assert result["moved"] == 0
+    assert (landing / "theirs.jpg").exists()
+    assert (src / "a.jpg").exists()

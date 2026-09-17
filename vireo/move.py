@@ -3080,6 +3080,15 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             # Verification below would catch this too. Failing here just
             # spares the user a full byte-for-byte pass over a destination
             # already known to be incomplete.
+            #
+            # Clean up the same way the fresh-move count check does. A
+            # destination this move created is ours to remove, and leaving a
+            # partial tree behind would turn the documented all-or-nothing
+            # retry into one that demands a merge. A destination that was
+            # already there is never removed -- it may hold the user's own
+            # files.
+            if not dest_exists:
+                shutil.rmtree(transfer_dest, ignore_errors=True)
             return {"moved": 0, "errors": [
                 f"Verification failed: '{unreadable}' is missing or "
                 f"unreadable at the destination. Originals preserved."
