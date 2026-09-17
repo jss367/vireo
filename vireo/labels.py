@@ -75,6 +75,18 @@ def _representative_entry(members):
     )
 
 
+def _taxon_key(entry):
+    """What makes two identities the same taxon here.
+
+    Identity first, binomial as the fallback: a source that names a
+    species without an iNat ID still has to count as its own taxon.
+    """
+    entry = entry or {}
+    return (entry.get("taxon_id")
+            or (entry.get("scientific_name") or "").casefold()
+            or None)
+
+
 def _base_name(name, entry):
     """A prompt with its own scientific-name qualifier stripped.
 
@@ -147,7 +159,7 @@ def disambiguate_labels(records):
         key = keyword_match_key(_base_name(name, entry)) or name
         groups.setdefault(key, []).append((name, entry or {}))
 
-    names, identities, disambiguated, dropped = [], {}, [], []
+    emitted, dropped = [], []
     for group in groups.values():
         by_taxon = {}
         unattributed = []
@@ -156,33 +168,57 @@ def disambiguate_labels(records):
             if entry.get("ambiguous") or not scientific_name:
                 unattributed.append((name, entry))
             else:
-                # Identity first, binomial as the fallback key: a source
-                # that names a species without an iNat ID still has to
-                # count as its own taxon here.
-                taxon = entry.get("taxon_id") or scientific_name.casefold()
-                by_taxon.setdefault(taxon, []).append((name, entry))
+                by_taxon.setdefault(_taxon_key(entry), []).append((name, entry))
         contested = len(by_taxon) > 1 or any(
             entry.get("ambiguous") for _name, entry in unattributed
         )
         if not contested:
             # One taxon, or none at all: keep the historical spelling fold.
             spelling = _preferred_spelling([name for name, _entry in group])
-            names.append(spelling)
             members = next(iter(by_taxon.values()), [])
-            if members:
-                identities[spelling] = _representative_entry(members)
+            entry = _representative_entry(members) if members else None
+            emitted.append([spelling, entry, spelling, False])
             continue
         for members in by_taxon.values():
             spelling = _preferred_spelling([name for name, _entry in members])
             entry = _representative_entry(members)
             qualified = _qualified_name(spelling, entry.get("scientific_name"))
-            names.append(qualified)
-            identities[qualified] = entry
-            disambiguated.append(qualified)
+            emitted.append([qualified, entry, spelling, True])
         # A prompt with no scientific name in a contested group cannot be
         # qualified — and must not stand, because it would answer for
         # whichever taxon the model happened to mean.
         dropped.extend(name for name, _entry in unattributed)
+
+    # Two groups can still land on one string: a source whose common name
+    # literally reads "Foo (Alpha beta)" for another taxon, or two taxon
+    # IDs sharing a binomial. Taking the collision after every group has
+    # spoken keeps the outcome independent of label-set order, and the
+    # taxon form is one ``SpeciesResolver.explicit_source`` already reads.
+    # Fold the claim key the way SQLite and ``add_prediction`` do: two
+    # prompts that differ only in case are one keyword downstream, so a
+    # shared binomial under two taxon IDs collides even when the strings
+    # are not byte-identical.
+    claims = {}
+    for record in emitted:
+        claims.setdefault(keyword_match_key(record[0]), set()).add(
+            _taxon_key(record[1])
+        )
+    names, identities, disambiguated = [], {}, []
+    for name, entry, spelling, was_split in emitted:
+        if len(claims[keyword_match_key(name)]) > 1:
+            taxon_id = (entry or {}).get("taxon_id")
+            if not taxon_id:
+                # Nothing left to tell it apart by; it would answer for a
+                # taxon that is not its own.
+                dropped.append(name)
+                continue
+            name = f"{spelling} (taxon {taxon_id})"
+            was_split = True
+        names.append(name)
+        if entry:
+            identities[name] = entry
+        if was_split:
+            disambiguated.append(name)
     return names, identities, disambiguated, dropped
 
 
@@ -684,8 +720,7 @@ def _contributed(records, kept_names, kept_taxa, kept_keys, dropped_keys):
             continue  # this prompt was dropped; it produced no class
         if name in kept_names:
             return True
-        taxon = (entry.get("taxon_id")
-                 or (entry.get("scientific_name") or "").casefold())
+        taxon = _taxon_key(entry)
         if taxon and taxon in kept_taxa:
             return True
         if not entry and keyword_match_key(_base_name(name, entry)) in kept_keys:
@@ -791,10 +826,7 @@ def load_merged_labels_with_metas(label_sets):
     kept_identities = {
         name: merged_identities[name] for name in kept if name in merged_identities
     }
-    kept_taxa = {
-        entry.get("taxon_id") or (entry.get("scientific_name") or "").casefold()
-        for entry in kept_identities.values()
-    }
+    kept_taxa = {_taxon_key(entry) for entry in kept_identities.values()}
     kept_keys = {
         keyword_match_key(_base_name(name, kept_identities.get(name)))
         for name in kept

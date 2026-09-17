@@ -205,6 +205,43 @@ def test_prompt_that_is_its_own_binomial_is_not_double_qualified(tmp_path, monke
     assert labels == ["Amazona viridigenalis", "amazona viridigenalis (Amazona rhodocorytha)"]
 
 
+def test_two_taxon_ids_sharing_a_binomial_keep_separate_prompts(tmp_path, monkeypatch, db):
+    """Qualifying by scientific name alone would produce one string for
+    both, silently costing a class; the taxon form keeps them apart."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    twin = {**RED, "taxon_id": 99999}
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot", "parrot"], {"Parrot": RED, "parrot": twin},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    assert labels == ["Parrot (taxon 18976)", "parrot (taxon 99999)"]
+    assert labels.identities["Parrot (taxon 18976)"]["taxon_id"] == 18976
+    assert labels.identities["parrot (taxon 99999)"]["taxon_id"] == 99999
+    # The suffix is a form review already reads back as explicit evidence.
+    assert SpeciesResolver(db=db).display(labels[0]).key == "taxon:18976"
+
+
+def test_generated_prompt_cannot_take_a_name_another_taxon_already_uses(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    # Two taxa called "Parrot" qualify to "Parrot (Amazona viridigenalis)",
+    # which a third source already uses verbatim for a different species.
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot", "parrot", "Parrot (Amazona viridigenalis)"],
+        {"Parrot": RED, "parrot": BROWED,
+         "Parrot (Amazona viridigenalis)": LILAC},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    assert sorted(labels) == [
+        "Parrot (Amazona viridigenalis) (taxon 18993)",
+        "Parrot (taxon 18976)",
+        "parrot (Amazona rhodocorytha)",
+    ]
+    taxa = {e["taxon_id"] for e in labels.identities.values()}
+    assert taxa == {18976, 18993, 18997}, "no class may be lost to a name clash"
+
+
 def test_irrecoverably_ambiguous_label_is_dropped_and_named(tmp_path, monkeypatch):
     """A list written before the rewrite kept no scientific names to split by."""
     monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
