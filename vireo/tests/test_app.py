@@ -23222,6 +23222,169 @@ process.stdout.write(JSON.stringify(results));
     )
 
 
+def test_photodeleted_prunes_hidden_member_from_cover_metadata(app_and_db):
+    """A hidden tray member deleted from its own lightbox is not in
+    ``photos`` — ``lightboxDelete``'s splice never runs for it, so nothing
+    up the chain updates the cover. The cover's ``browse_stack.photo_ids``
+    and ``count`` and the hydrated ``browseStackMembers`` entry still
+    carry the deleted id, and the ``represented`` block in the handler
+    skips this case because the deleted photo was not itself a top-level
+    representation.
+
+    After the tray collapses, a click on the cover reads that stale
+    ``photo_ids`` through ``browseStackMemberIdsFor`` and puts the
+    deleted id back into ``selectedPhotos`` — the batch bar overcounts,
+    and an Add Keyword then commits every live id individually before
+    the stale id trips a foreign-key failure. The handler must prune the
+    deleted id from each cover's stack metadata and cached members and
+    repaint the affected badge so what the card stands for matches what
+    still exists. CORE_PHILOSOPHY.md, "no black boxes": the badge's
+    count and the click-selects-all rule must not diverge from reality.
+    Codex P2 on PR #1672.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    marker = "document.addEventListener('lightbox:photodeleted', function(event) {"
+    start = html.find(marker)
+    assert start != -1, "the lightbox:photodeleted handler must exist"
+    end_marker = "\n});\n"
+    end = html.find(end_marker, start)
+    assert end != -1, "the handler must terminate with a top-level `});`"
+    handler_registration = html[start:end + len(end_marker)]
+
+    source = "\n".join([
+        """
+var selectedPhotos = new Set();
+var selectedPhotoId = null;
+var selectedIndex = -1;
+var browseLightboxRepresentedByPhoto = {};
+var browseLightboxStackGesture = null;
+var browseLightboxStackGestureSpent = null;
+var anchorRestoreEpoch = 0;
+var photos = [];
+var browseStackMembers = {};
+var badgeRefreshes = [];
+var refreshes = 0, bars = 0;
+function refreshCardSelectionVisuals() { refreshes += 1; }
+function updateBatchBar() { bars += 1; }
+function refreshBrowseStackBadge(id) { badgeRefreshes.push(id); }
+var capturedListener = null;
+global.document = {
+  addEventListener: function(name, fn) {
+    if (name === 'lightbox:photodeleted') capturedListener = fn;
+  },
+  querySelector: function() { return null; },
+};
+""",
+        handler_registration,
+        """
+function snapshot(coverId) {
+  var photo = photos.find(function(p) { return p.id === coverId; });
+  return {
+    stack: photo && photo.browse_stack ? {
+      photo_ids: photo.browse_stack.photo_ids.slice(),
+      count: photo.browse_stack.count,
+    } : null,
+    cachedMembers: (browseStackMembers[String(coverId)] || []).map(
+      function(m) { return m.id; }
+    ),
+    badgeRefreshes: badgeRefreshes.slice(),
+  };
+}
+var results = {};
+
+// (a) The P2 scenario: a hidden member (52) is deleted from the tray
+//     lightbox. The cover (50) still lists 52 in browse_stack.photo_ids,
+//     the count is still 4, and the hydration cache still carries the
+//     dead entry. The handler must prune all three and repaint the badge
+//     so a later cover click does not resurrect the id.
+photos = [{id: 50, browse_stack: {photo_ids: [50, 51, 52, 53], count: 4}}];
+browseStackMembers = {"50": [{id: 50}, {id: 51}, {id: 52}, {id: 53}]};
+badgeRefreshes = [];
+capturedListener({detail: {photoId: 52}});
+results.prunedHiddenMember = snapshot(50);
+
+// (b) The deleted id belongs to no cover on the grid — nothing to prune,
+//     no badge repaint, no crash on an untouched stack.
+photos = [{id: 60, browse_stack: {photo_ids: [60, 61], count: 2}}];
+browseStackMembers = {"60": [{id: 60}, {id: 61}]};
+badgeRefreshes = [];
+capturedListener({detail: {photoId: 999}});
+results.unrelatedDelete = snapshot(60);
+
+// (c) A mixed grid — a solo photo alongside an affected stack. The solo
+//     card has no ``browse_stack`` at all, so reading ``photo_ids`` off
+//     ``undefined`` would throw; the handler has to skip it and still
+//     prune the stack behind it.
+photos = [{id: 70}, {id: 71, browse_stack: {photo_ids: [71, 72], count: 2}}];
+browseStackMembers = {};
+badgeRefreshes = [];
+capturedListener({detail: {photoId: 72}});
+results.mixedGridSolo = snapshot(70);
+results.mixedGridStack = snapshot(71);
+
+// (d) The last hidden member is deleted, dropping the count below 2:
+//     ``renderBrowseStackBadge`` hides the badge from then on and
+//     ``browseStackMemberIdsFor`` returns null, so a later cover click is
+//     just a solo selection — no stale id resurrection possible.
+photos = [{id: 80, browse_stack: {photo_ids: [80, 81], count: 2}}];
+browseStackMembers = {"80": [{id: 80}, {id: 81}]};
+badgeRefreshes = [];
+capturedListener({detail: {photoId: 81}});
+results.stackShrinksToOne = snapshot(80);
+
+// (e) A null detail must not throw; the handler already returns on a
+//     missing id above, and its guard has to survive alongside the new
+//     prune loop.
+photos = [{id: 90, browse_stack: {photo_ids: [90, 91], count: 2}}];
+browseStackMembers = {"90": [{id: 90}, {id: 91}]};
+badgeRefreshes = [];
+capturedListener({detail: null});
+results.nullDetail = snapshot(90);
+
+process.stdout.write(JSON.stringify(results));
+""",
+    ])
+    result = _run_node(source, [])
+    assert result["prunedHiddenMember"] == {
+        "stack": {"photo_ids": [50, 51, 53], "count": 3},
+        "cachedMembers": [50, 51, 53],
+        "badgeRefreshes": [50],
+    }, (
+        "the deleted hidden member must leave the cover metadata and the "
+        "hydration cache in the same step, so a later cover click reads "
+        "the pruned list"
+    )
+    assert result["unrelatedDelete"] == {
+        "stack": {"photo_ids": [60, 61], "count": 2},
+        "cachedMembers": [60, 61],
+        "badgeRefreshes": [],
+    }, "an unrelated delete must leave every stack — and every badge — alone"
+    assert result["mixedGridSolo"] == {
+        "stack": None,
+        "cachedMembers": [],
+        "badgeRefreshes": [71],
+    }, "a solo card with no browse_stack must be skipped without a crash"
+    assert result["mixedGridStack"] == {
+        "stack": {"photo_ids": [71], "count": 1},
+        "cachedMembers": [],
+        "badgeRefreshes": [71],
+    }, "the affected stack is pruned even when the cache never held it"
+    assert result["stackShrinksToOne"] == {
+        "stack": {"photo_ids": [80], "count": 1},
+        "cachedMembers": [80],
+        "badgeRefreshes": [80],
+    }, (
+        "a stack shrinking to a single member is fine — count < 2 hides the "
+        "badge and turns the card back into a solo click"
+    )
+    assert result["nullDetail"] == {
+        "stack": {"photo_ids": [90, 91], "count": 2},
+        "cachedMembers": [90, 91],
+        "badgeRefreshes": [],
+    }, "a null detail must short-circuit before the prune loop touches anything"
+
+
 _APOSTROPHE_SPECIES = "Say's Phoebe"
 
 

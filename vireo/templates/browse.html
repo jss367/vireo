@@ -13410,6 +13410,43 @@ document.addEventListener('lightbox:photodeleted', function(event) {
       updateBatchBar();
     }
   }
+  // A hidden tray member deleted from its own lightbox is not in ``photos``,
+  // so the splice in ``lightboxDelete`` never runs and nothing above updates
+  // the cover: its ``browse_stack.photo_ids`` and ``count`` still carry the
+  // deleted id, and the ``browseStackMembers`` hydration cache still lists it.
+  // The ``represented`` block above skips this case because the deleted photo
+  // was not itself a top-level representation. After the tray collapses, a
+  // click on the cover reads that stale ``photo_ids`` and puts the deleted
+  // id back into ``selectedPhotos``: the batch bar overcounts, and an
+  // Add Keyword then commits every live id before the stale id trips a
+  // foreign-key failure — partial writes the user cannot see coming.
+  // Prune the deleted id from each cover's stack metadata (and cached
+  // members) so what the card stands for matches what still exists, then
+  // repaint the affected badge so its count matches the pruned list.
+  // Codex P2 on PR #1672.
+  var badgesToRefresh = [];
+  photos.forEach(function(photo) {
+    var stack = photo.browse_stack;
+    var stackIds = stack && stack.photo_ids;
+    if (!Array.isArray(stackIds)) return;
+    var idx = stackIds.indexOf(deletedId);
+    if (idx === -1) return;
+    stackIds.splice(idx, 1);
+    if (typeof stack.count === 'number') {
+      stack.count = Math.max(0, stack.count - 1);
+    }
+    var cacheKey = String(photo.id);
+    var members = browseStackMembers[cacheKey];
+    if (Array.isArray(members)) {
+      browseStackMembers[cacheKey] = members.filter(function(member) {
+        return member.id !== deletedId;
+      });
+    }
+    badgesToRefresh.push(photo.id);
+  });
+  if (badgesToRefresh.length && typeof refreshBrowseStackBadge === 'function') {
+    badgesToRefresh.forEach(refreshBrowseStackBadge);
+  }
   if (!spent) return;
   if (spent.epoch !== anchorRestoreEpoch) return;
   if (spent.ids.indexOf(deletedId) === -1) return;
