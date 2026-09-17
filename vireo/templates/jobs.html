@@ -146,6 +146,16 @@
 .job-move-route-note {
   grid-column: 2; color: var(--text-muted); font-size: 11px;
 }
+.job-move-route-dates {
+  grid-column: 2; margin: 0; padding: 0; list-style: none;
+  color: var(--text-secondary, var(--text-muted)); font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  display: flex; flex-direction: column; gap: 2px;
+  overflow-wrap: anywhere;
+}
+.job-move-route-dates-more {
+  color: var(--text-muted); font-family: var(--font-sans, inherit);
+}
 .job-pause-banner {
   font-size: 13px; padding: 8px 12px; margin: 8px 0;
   background: color-mix(in srgb, var(--warning, #d99a24) 12%, transparent);
@@ -423,6 +433,52 @@
     return job && job.config && typeof job.config === 'object' ? job.config : {};
   }
 
+  function plural(n, word) {
+    return n === 1 ? word : word + 's';
+  }
+
+  // The note under a date-organized move's To row. ``resolved_destination``
+  // is the exact landing folder when the plan resolved to a single capture
+  // date, and the selected root when it fanned out — so this has to say
+  // which of the two the path above it is, and name the folders photos
+  // actually land in. Jobs enqueued before the plan snapshot existed carry
+  // no counts; they fall back to the template-only sentence.
+  function moveDateNote(cfg) {
+    var template = '<code>' + esc(cfg.folder_template) + '</code>';
+    var folders = Array.isArray(cfg.date_destinations) ? cfg.date_destinations : [];
+    var folderCount = cfg.date_destination_count || 0;
+    var photoCount = cfg.date_photo_count || 0;
+    if (!folderCount) {
+      return '<span class="job-move-route-note">Organizing photos into ' +
+        'capture-date folders using ' + template + '</span>';
+    }
+    if (folderCount === 1) {
+      return '<span class="job-move-route-note">' +
+        'All ' + photoCount.toLocaleString() + ' ' + plural(photoCount, 'photo') +
+        ' share one capture date, so ' + template +
+        ' puts them in this single folder</span>';
+    }
+    var html = '<span class="job-move-route-note">' +
+      photoCount.toLocaleString() + ' ' + plural(photoCount, 'photo') +
+      ' split across ' + folderCount.toLocaleString() + ' capture-date ' +
+      plural(folderCount, 'folder') + ' under this path, named by ' +
+      template + ':</span>';
+    html += '<ul class="job-move-route-dates">';
+    folders.forEach(function(item) {
+      var count = item.photo_count || 0;
+      html += '<li title="' + escapeAttr(item.path || '') + '">' +
+        esc(item.relative_path || '') + ' · ' + count.toLocaleString() +
+        ' ' + plural(count, 'photo') + '</li>';
+    });
+    if (folderCount > folders.length) {
+      var rest = folderCount - folders.length;
+      html += '<li class="job-move-route-dates-more">+ ' + rest.toLocaleString() +
+        ' more ' + plural(rest, 'folder') + '</li>';
+    }
+    html += '</ul>';
+    return html;
+  }
+
   function renderMoveRoute(job) {
     if (!job || job.type !== 'move-folder') return '';
     var cfg = jobConfig(job);
@@ -440,8 +496,7 @@
     html += '<span class="job-move-route-path" title="' +
       escapeAttr(destination) + '">' + esc(destination) + '</span>';
     if (cfg.folder_template) {
-      html += '<span class="job-move-route-note">Organizing photos into capture-date folders using <code>' +
-        esc(cfg.folder_template) + '</code></span>';
+      html += moveDateNote(cfg);
     } else if (cfg.merge) {
       html += '<span class="job-move-route-note">Merging with the existing destination folder</span>';
     }

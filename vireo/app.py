@@ -189,6 +189,12 @@ _WIN_ERROR_MODE_LOCK = threading.Lock()
 # clearly reports truncation and lets users narrow the shared filters.
 MAP_RENDER_PHOTO_LIMIT = 10_000
 
+# How many planned capture-date folders a date-organized move job snapshots
+# into its config for the jobs panel. The panel lists these and reports the
+# real total separately, so the route stays readable (and the job row small)
+# even when a source folder spans hundreds of dates.
+MOVE_DATE_DEST_PREVIEW_LIMIT = 8
+
 
 class _ArtifactResponseError(RuntimeError):
     """Carry a producer's non-success Flask response to equal-key waiters."""
@@ -24586,6 +24592,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                destination, display_dest, destination_name,
                                source_path, resolved_destination,
                                merge, remote, developed_dir, folder_template="",
+                               date_destinations=None,
                                chained_from=None, serialize_lock=None,
                                allow_tracked_merge=False,
                                managed_staging_root=None, mount_baseline=None,
@@ -24606,6 +24613,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         chained import→process→move hook opts in (see the why-comment in
         ``_enqueue_move_folder_job``); the manual move endpoint keeps the
         default refusal of tracked destinations.
+
+        ``date_destinations``: the planned capture-date folders for a
+        date-organized move (``path``/``relative_path``/``photo_count`` per
+        entry, as produced by ``plan_folder_date_moves``). Snapshotted into
+        the job config so the jobs panel can name the folders photos actually
+        land in rather than only the selected root.
         """
         def work(job):
             from move import move_folder, move_folder_by_date
@@ -24793,6 +24806,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
         if folder_template:
             job_config["folder_template"] = folder_template
+        if date_destinations:
+            # Cap the stored list: a multi-year source folder can plan
+            # thousands of date folders, and the whole config is serialized
+            # into the job row and every status poll. The panel shows the
+            # first few and reports the true totals from the counts below,
+            # which are computed over the full plan.
+            job_config["date_destinations"] = [
+                {
+                    "path": item["path"],
+                    "relative_path": item["relative_path"],
+                    "photo_count": item["photo_count"],
+                }
+                for item in date_destinations[:MOVE_DATE_DEST_PREVIEW_LIMIT]
+            ]
+            job_config["date_destination_count"] = len(date_destinations)
+            job_config["date_photo_count"] = sum(
+                item["photo_count"] for item in date_destinations)
         if destination_name:
             job_config["destination_name"] = destination_name
         if remote:
@@ -24941,6 +24971,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("destination must be an absolute path")
             display_dest = destination
 
+        date_plan = None
+        date_destinations = None
         if folder_template:
             try:
                 date_plan = move_mod.plan_folder_date_moves(
@@ -24950,11 +24982,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error(str(exc))
             if not date_plan:
                 return json_error("No tracked photos found in the source folder")
+            date_destinations = [
+                {
+                    "path": item["destination"],
+                    "relative_path": item["relative_path"],
+                    "photo_count": item["photo_count"],
+                }
+                for item in date_plan
+            ]
 
         if folder_template:
-            # A date-organized move fans out into several final folders. The
-            # selected root is the most truthful single destination to show.
-            resolved_destination = display_dest
+            # A date-organized move fans out into one folder per capture date.
+            # When the plan resolves to a single date folder — the common case
+            # for a one-shoot source folder — that folder *is* where every
+            # photo lands, so show it in full instead of the selected root the
+            # user would otherwise read as the landing path. With several date
+            # folders there is no single landing path; keep the root and let
+            # the jobs panel list the folders underneath it.
+            resolved_destination = (
+                date_destinations[0]["path"] if len(date_destinations) == 1
+                else display_dest
+            )
         elif remote:
             import posixpath
 
@@ -24982,6 +25030,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             remote=remote,
             developed_dir=developed_dir,
             folder_template=folder_template,
+            date_destinations=date_destinations,
         )
         return jsonify({"job_id": job_id})
 

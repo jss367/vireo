@@ -31,8 +31,16 @@ def test_keep_awake_reminder_opens_with_keyboard_and_click(live_server, page):
     expect(note).to_be_hidden()
 
 
-def test_move_folder_job_shows_source_and_destination(live_server, page):
-    job = {
+def _move_folder_job(live_server, config):
+    base = {
+        "folder_id": 42,
+        "destination": "/Volumes/Photos/Archive",
+        "source_path": "/Volumes/Camera/Paris",
+        "resolved_destination": "/Volumes/Photos/Archive",
+        "merge": False,
+    }
+    base.update(config)
+    return {
         "id": "move-folder-route-test",
         "type": "move-folder",
         "status": "running",
@@ -47,19 +55,14 @@ def test_move_folder_job_shows_source_and_destination(live_server, page):
         },
         "result": None,
         "errors": [],
-        "config": {
-            "folder_id": 42,
-            "destination": "/Volumes/Photos/Archive",
-            "source_path": "/Volumes/Camera/Paris",
-            "resolved_destination": "/Volumes/Photos/Archive",
-            "folder_template": "%Y/%Y-%m-%d",
-            "merge": False,
-        },
+        "config": base,
         "workspace_id": live_server["db"]._active_workspace_id,
         "steps": [],
         "pausable": False,
     }
 
+
+def _serve_jobs_page(live_server, page, job):
     page.route(
         "**/api/jobs",
         lambda route: route.fulfill(
@@ -79,8 +82,13 @@ def test_move_folder_job_shows_source_and_destination(live_server, page):
             status=200, content_type="application/json", json=[]
         ),
     )
-
     page.goto(f"{live_server['url']}/jobs")
+
+
+def test_move_folder_job_shows_source_and_destination(live_server, page):
+    """History entries predating the plan snapshot keep the generic note."""
+    job = _move_folder_job(live_server, {"folder_template": "%Y/%Y-%m-%d"})
+    _serve_jobs_page(live_server, page, job)
 
     move_route = page.locator(".job-move-route")
     expect(move_route).to_be_visible()
@@ -93,6 +101,68 @@ def test_move_folder_job_shows_source_and_destination(live_server, page):
     expect(move_route.locator(".job-move-route-note")).to_contain_text(
         "Organizing photos into capture-date folders using %Y/%Y-%m-%d"
     )
+
+
+def test_move_folder_job_shows_the_single_capture_date_folder(
+    live_server, page,
+):
+    """One capture date: "To" is the date folder itself, and says so."""
+    job = _move_folder_job(live_server, {
+        "folder_template": "%Y-%m-%d",
+        "resolved_destination": "/Volumes/Photos/Archive/2026-09-12",
+        "date_destinations": [{
+            "path": "/Volumes/Photos/Archive/2026-09-12",
+            "relative_path": "2026-09-12",
+            "photo_count": 499,
+        }],
+        "date_destination_count": 1,
+        "date_photo_count": 499,
+    })
+    _serve_jobs_page(live_server, page, job)
+
+    move_route = page.locator(".job-move-route")
+    expect(move_route.locator(".job-move-route-path")).to_have_text(
+        ["/Volumes/Camera/Paris", "/Volumes/Photos/Archive/2026-09-12"]
+    )
+    expect(move_route.locator(".job-move-route-note")).to_contain_text(
+        "All 499 photos share one capture date"
+    )
+    expect(move_route.locator(".job-move-route-dates")).to_have_count(0)
+
+
+def test_move_folder_job_lists_the_capture_date_folders(live_server, page):
+    """Several capture dates: "To" is the root, with the fan-out listed."""
+    job = _move_folder_job(live_server, {
+        "folder_template": "%Y-%m-%d",
+        "date_destinations": [
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-12",
+                "relative_path": "2026-09-12",
+                "photo_count": 300,
+            },
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-13",
+                "relative_path": "2026-09-13",
+                "photo_count": 199,
+            },
+        ],
+        "date_destination_count": 5,
+        "date_photo_count": 700,
+    })
+    _serve_jobs_page(live_server, page, job)
+
+    move_route = page.locator(".job-move-route")
+    expect(move_route.locator(".job-move-route-path")).to_have_text(
+        ["/Volumes/Camera/Paris", "/Volumes/Photos/Archive"]
+    )
+    expect(move_route.locator(".job-move-route-note")).to_contain_text(
+        "700 photos split across 5 capture-date folders under this path"
+    )
+    expect(move_route.locator(".job-move-route-dates li")).to_have_text([
+        "2026-09-12 · 300 photos",
+        "2026-09-13 · 199 photos",
+        "+ 3 more folders",
+    ])
 
 
 def test_label_preparation_shows_progress_and_one_estimate(live_server, page):
