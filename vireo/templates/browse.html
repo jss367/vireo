@@ -13359,14 +13359,49 @@ function browseReconcileEmptyLightboxClose() {
   var pending = browseLightboxStackGesture || browseLightboxStackGestureSpent;
   browseLightboxStackGesture = null;
   browseLightboxStackGestureSpent = null;
-  if (!pending) return;
   var touched = false;
-  pending.ids.forEach(function(id) {
-    if (selectedPhotos.delete(id)) touched = true;
-  });
-  if (selectedPhotoId != null && pending.ids.indexOf(selectedPhotoId) !== -1) {
-    selectedPhotoId = null;
-    touched = true;
+  if (pending) {
+    pending.ids.forEach(function(id) {
+      if (selectedPhotos.delete(id)) touched = true;
+    });
+    if (selectedPhotoId != null && pending.ids.indexOf(selectedPhotoId) !== -1) {
+      selectedPhotoId = null;
+      touched = true;
+    }
+  }
+  // Even with no gesture in either slot, an empty close means the deleted
+  // photo was the only top-level lightbox entry — and when that photo was
+  // a stack cover selected by a single click (or the tray's Select all),
+  // its hidden members are still in ``selectedPhotos`` but no card on the
+  // grid represents them any more. Batch shortcuts would then act on
+  // photos the user cannot see. Drop any selected id whose cover has left
+  // ``photos`` so the selection matches what is on screen — CORE_PHILOSOPHY
+  // "no black boxes", the batch bar has to count photos the user can see.
+  // Codex P2 on PR #1672.
+  if (selectedPhotos.size > 0) {
+    var reachable = new Set();
+    photos.forEach(function(photo) {
+      reachable.add(photo.id);
+      var members = browseStackMembers[String(photo.id)] || [];
+      members.forEach(function(member) { reachable.add(member.id); });
+    });
+    Array.from(selectedPhotos).forEach(function(id) {
+      if (!reachable.has(id)) {
+        selectedPhotos.delete(id);
+        touched = true;
+      }
+    });
+  }
+  if (selectedPhotoId != null) {
+    var focusStillReachable = photos.some(function(photo) {
+      if (photo.id === selectedPhotoId) return true;
+      var members = browseStackMembers[String(photo.id)] || [];
+      return members.some(function(member) { return member.id === selectedPhotoId; });
+    });
+    if (!focusStillReachable) {
+      selectedPhotoId = null;
+      touched = true;
+    }
   }
   if (touched) {
     if (typeof refreshCardSelectionVisuals === 'function') {

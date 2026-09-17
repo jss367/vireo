@@ -22925,6 +22925,8 @@ var selectedPhotos = new Set();
 var selectedPhotoId = null;
 var browseLightboxStackGesture = null;
 var browseLightboxStackGestureSpent = null;
+var photos = [];
+var browseStackMembers = {};
 var refreshes = 0, bars = 0;
 function refreshCardSelectionVisuals() { refreshes += 1; }
 function updateBatchBar() { bars += 1; }
@@ -22947,11 +22949,16 @@ var results = {};
 // (a) Delete flow: the delete-button close set the gesture aside as
 //     spent. `closeLightbox(null)` fires next, and its handler has to
 //     drop the dangling hidden members and retire the spent gesture so
-//     lightbox:photodeleted cannot re-arm it.
+//     lightbox:photodeleted cannot re-arm it. The deleted cover (10) is
+//     already gone from `photos`; the hidden members (11, 12) live under
+//     its orphaned browseStackMembers entry with no cover to represent
+//     them on the grid.
 selectedPhotos = new Set([11, 12]);
 selectedPhotoId = 10;
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = {ids: [10, 11, 12], epoch: 3};
+photos = [];
+browseStackMembers = {"10": [{id: 11}, {id: 12}]};
 refreshes = 0; bars = 0;
 browseReconcileEmptyLightboxClose();
 results.spentDeleteFlow = snapshot();
@@ -22962,6 +22969,8 @@ selectedPhotos = new Set([11, 12]);
 selectedPhotoId = null;
 browseLightboxStackGesture = {ids: [10, 11, 12], epoch: 7};
 browseLightboxStackGestureSpent = null;
+photos = [];
+browseStackMembers = {"10": [{id: 11}, {id: 12}]};
 refreshes = 0; bars = 0;
 browseReconcileEmptyLightboxClose();
 results.armedFallback = snapshot();
@@ -22972,9 +22981,41 @@ selectedPhotos = new Set();
 selectedPhotoId = null;
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
+photos = [];
+browseStackMembers = {};
 refreshes = 0; bars = 0;
 browseReconcileEmptyLightboxClose();
 results.nothingPending = snapshot();
+
+// (d) The P2 scenario: user picks a collapsed stack by single-clicking its
+//     card (all members go into `selectedPhotos` via the stack-click rule,
+//     no gesture is recorded), opens the lightbox with `E`, deletes the
+//     cover. `_lightboxPhotoList` was just that stack so it empties,
+//     `closeLightbox(null)` fires with neither gesture slot populated. The
+//     empty-close path still has to drop the hidden members (11, 12) so
+//     batch shortcuts do not act on photos with no card on screen.
+selectedPhotos = new Set([11, 12]);
+selectedPhotoId = null;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 20}, {id: 21}];
+browseStackMembers = {"10": [{id: 11}, {id: 12}]};
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.noGestureOrphaned = snapshot();
+
+// (e) The same empty-close on a selection that is still fully reachable
+//     from the grid must leave it alone — an unrelated stack cover was
+//     deleted; the surviving batch of another stack is not orphaned.
+selectedPhotos = new Set([20, 21]);
+selectedPhotoId = 20;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 20}, {id: 21}];
+browseStackMembers = {};
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.noGestureReachable = snapshot();
 
 process.stdout.write(JSON.stringify(results));
 """,
@@ -23004,6 +23045,22 @@ process.stdout.write(JSON.stringify(results));
         "refreshes": 0,
         "bars": 0,
     }, "an empty close with nothing pending must not touch the batch-bar UI"
+    assert result["noGestureOrphaned"] == {
+        "selected": [],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 1,
+        "bars": 1,
+    }, "hidden members whose cover was deleted must be dropped even without a gesture"
+    assert result["noGestureReachable"] == {
+        "selected": [20, 21],
+        "focus": 20,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, "a selection still represented on the grid must survive an empty close"
 
 
 _APOSTROPHE_SPECIES = "Say's Phoebe"
