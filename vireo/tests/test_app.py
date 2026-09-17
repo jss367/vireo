@@ -22963,6 +22963,7 @@ var selectedPhotoId = null;
 var browseLightboxStackGesture = null;
 var browseLightboxStackGestureSpent = null;
 var photos = [];
+var allLoaded = true;
 var browseStackMembers = {};
 var refreshes = 0, bars = 0;
 function refreshCardSelectionVisuals() { refreshes += 1; }
@@ -23050,9 +23051,27 @@ browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
 photos = [{id: 20}, {id: 21}];
 browseStackMembers = {};
+allLoaded = true;
 refreshes = 0; bars = 0;
 browseReconcileEmptyLightboxClose();
 results.noGestureReachable = snapshot();
+
+// (f) The window is only part of the result set — a Select all that reaches
+//     past the loaded page. "Not in `photos`" then means "not loaded yet",
+//     not "no card on screen", and sweeping on it would delete most of a
+//     selection whose photos are all perfectly valid. The bounded drop in
+//     the lightbox:photodeleted handler covers the real orphans here.
+//     Codex P2 on PR #1672.
+selectedPhotos = new Set([11, 12, 900, 901]);
+selectedPhotoId = null;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 20}, {id: 21}];
+browseStackMembers = {};
+allLoaded = false;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.partialWindow = snapshot();
 
 process.stdout.write(JSON.stringify(results));
 """,
@@ -23090,6 +23109,18 @@ process.stdout.write(JSON.stringify(results));
         "refreshes": 1,
         "bars": 1,
     }, "hidden members whose cover was deleted must be dropped even without a gesture"
+    assert result["partialWindow"] == {
+        "selected": [11, 12, 900, 901],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "a selection reaching past the loaded window must survive: unloaded "
+        "is not unreachable, and the bounded photodeleted drop handles the "
+        "ids the deleted cover actually stood for"
+    )
     assert result["noGestureReachable"] == {
         "selected": [20, 21],
         "focus": 20,

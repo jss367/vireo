@@ -13417,7 +13417,15 @@ function browseReconcileEmptyLightboxClose() {
   // ``photos`` so the selection matches what is on screen — CORE_PHILOSOPHY
   // "no black boxes", the batch bar has to count photos the user can see.
   // Codex P2 on PR #1672.
-  if (selectedPhotos.size > 0) {
+  // Only when the grid holds the whole result set. "Not in ``photos``" means
+  // "no card on screen" only once there are no more pages to load: with a
+  // Select all that reaches past the loaded window, every id from a later
+  // page looks unreachable here and the sweep would quietly delete most of
+  // the user's selection — photos that exist and are still perfectly valid
+  // members of it. The bounded drop in the ``lightbox:photodeleted`` handler
+  // covers the partial-window case, because it knows which ids the deleted
+  // cover actually stood for. Codex P2 on PR #1672.
+  if (selectedPhotos.size > 0 && allLoaded) {
     var reachable = new Set();
     photos.forEach(function(photo) {
       reachable.add(photo.id);
@@ -13431,7 +13439,7 @@ function browseReconcileEmptyLightboxClose() {
       }
     });
   }
-  if (selectedPhotoId != null) {
+  if (selectedPhotoId != null && allLoaded) {
     var focusStillReachable = photos.some(function(photo) {
       if (photo.id === selectedPhotoId) return true;
       var members = browseStackMembers[String(photo.id)] || [];
