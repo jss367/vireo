@@ -2958,3 +2958,220 @@ def test_catalog_independent_job_does_not_block_work_locally(tmp_path, monkeypat
         finally:
             release.set()
         assert wait_for_job_via_client(client, job_id)["status"] == "completed"
+
+
+def test_sync_reports_the_source_check_before_publishing(tmp_path):
+    """The conflict scan is the slow half of a sync and must report progress.
+
+    It re-reads every at-risk source file over the network before anything is
+    published, so without its own counter the job shows a bare spinner for the
+    bulk of its run.
+    """
+    db, vireo_dir, source, _first, _second, folder_id = _shared_environment(tmp_path)
+    try:
+        (source / "kept.jpg").write_bytes(b"kept")
+        (source / "culled.jpg").write_bytes(b"culled")
+        stage_folder(db, folder_id, str(vireo_dir))
+        local_root = Path(db.get_folder(folder_id)["path"])
+        (local_root / "bird.jpg").write_bytes(b"local edit")
+        (local_root / "culled.jpg").unlink()
+
+        scanned = []
+        published = []
+        result = sync_folder(
+            db,
+            folder_id,
+            str(vireo_dir),
+            allow_deletions=True,
+            confirmed_deletions=1,
+            progress=lambda current, total, path: published.append((current, total, path)),
+            scan_progress=lambda current, total, path: scanned.append((current, total, path)),
+        )
+
+        assert result["created_or_modified"] == 1
+        assert result["deleted"] == 1
+        # One modified file plus one deletion to verify against the source.
+        # Each entry is named before it is read and counted only once the
+        # comparison is done, so the count never runs ahead of the work.
+        assert scanned == [
+            (0, 2, "bird.jpg"),
+            (1, 2, "culled.jpg"),
+            (2, 2, ""),
+        ]
+        # Checking finishes before publishing starts; the two never interleave.
+        assert [item[0] for item in published] == [1, 2]
+    finally:
+        db.close()
+
+
+def test_sync_scan_progress_counts_files_with_no_source_counterpart(tmp_path):
+    """Files created locally are checked against the source too, and counted."""
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    try:
+        stage_folder(db, folder_id, str(vireo_dir))
+        local_root = Path(db.get_folder(folder_id)["path"])
+        (local_root / "new.jpg").write_bytes(b"new")
+
+        scanned = []
+        result = sync_folder(
+            db,
+            folder_id,
+            str(vireo_dir),
+            scan_progress=lambda current, total, path: scanned.append((current, total, path)),
+        )
+
+        assert result["created_or_modified"] == 1
+        assert scanned == [(0, 1, "new.jpg"), (1, 1, "")]
+    finally:
+        db.close()
+
+
+def test_sync_job_shows_the_source_check_as_its_own_step(tmp_path, monkeypatch):
+    """The job card names both phases, so neither runs as a silent spinner."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "09"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    (source / "culled.jpg").write_bytes(b"culled")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Trip")
+    folder_id = db.add_folder(str(source), name="09", link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, folder_id)
+    db.set_active_workspace(workspace_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+        staged = client.post(
+            "/api/workspaces/active/local-folders/stage", json={"folder_ids": [folder_id]}
+        )
+        assert staged.status_code == 202, staged.get_json()
+        assert wait_for_job_via_client(
+            client, staged.get_json()["job_id"]
+        )["status"] == "completed"
+
+        check_db = Database(db_path)
+        local_root = Path(check_db.get_folder(folder_id)["path"])
+        check_db.close()
+        (local_root / "bird.jpg").write_bytes(b"edited")
+        (local_root / "culled.jpg").unlink()
+
+        response = client.post(
+            "/api/workspaces/active/local-folders/sync",
+            json={"folder_ids": [folder_id], "confirmed_deletion_counts": {str(folder_id): 1}},
+        )
+        assert response.status_code == 202, response.get_json()
+        job = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert job["status"] == "completed"
+
+        check_step, sync_step = job["steps"]
+        assert check_step["id"] == f"check-{folder_id}"
+        assert check_step["label"] == "Check 09 against source"
+        assert check_step["status"] == "completed"
+        assert check_step["progress"] == {"current": 2, "total": 2}
+        assert check_step["summary"] == "2 checked, no conflicts"
+        assert sync_step["id"] == f"folder-{folder_id}"
+        assert sync_step["label"] == "Sync 09 to source"
+        assert sync_step["status"] == "completed"
+        assert sync_step["summary"] == "1 published, 1 deleted"
+        assert job["progress"]["phase"] == "Syncing 09 to source"
+
+    assert (source / "bird.jpg").read_bytes() == b"edited"
+    assert not (source / "culled.jpg").exists()
+
+
+def test_sync_conflict_marks_the_check_step_not_the_publish_step(tmp_path, monkeypatch):
+    """A conflict stops the job during checking, before anything is written."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "09"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Trip")
+    folder_id = db.add_folder(str(source), name="09", link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, folder_id)
+    db.set_active_workspace(workspace_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+        staged = client.post(
+            "/api/workspaces/active/local-folders/stage", json={"folder_ids": [folder_id]}
+        )
+        assert staged.status_code == 202, staged.get_json()
+        assert wait_for_job_via_client(
+            client, staged.get_json()["job_id"]
+        )["status"] == "completed"
+
+        check_db = Database(db_path)
+        local_root = Path(check_db.get_folder(folder_id)["path"])
+        check_db.close()
+        (local_root / "bird.jpg").write_bytes(b"local edit")
+        (source / "bird.jpg").write_bytes(b"changed on the source since staging")
+
+        response = client.post(
+            "/api/workspaces/active/local-folders/sync",
+            json={"folder_ids": [folder_id], "confirmed_deletion_counts": {str(folder_id): 0}},
+        )
+        assert response.status_code == 202, response.get_json()
+        job = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert job["status"] == "failed"
+
+        check_step, sync_step = job["steps"]
+        assert check_step["status"] == "failed"
+        assert sync_step["status"] == "pending"
+
+    assert (source / "bird.jpg").read_bytes() == b"changed on the source since staging"
+
+
+def test_scan_counter_waits_for_the_read_it_is_reporting(tmp_path, monkeypatch):
+    """An entry is counted after it is compared, not when it is picked up.
+
+    Throughput and ETA are derived from the count, so counting on entry would
+    show a file as finished for the whole time it is being hashed — minutes,
+    for one large original on a network share.
+    """
+    import services.local_folder as local_folder_service
+
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    try:
+        stage_folder(db, folder_id, str(vireo_dir))
+        local_root = Path(db.get_folder(folder_id)["path"])
+        (local_root / "bird.jpg").write_bytes(b"local edit")
+
+        reports = []
+        seen_while_reading = []
+        real_source_state = local_folder_service._source_state
+
+        def watched_source_state(*args, **kwargs):
+            seen_while_reading.append(reports[-1])
+            return real_source_state(*args, **kwargs)
+
+        monkeypatch.setattr(local_folder_service, "_source_state", watched_source_state)
+        sync_folder(
+            db,
+            folder_id,
+            str(vireo_dir),
+            scan_progress=lambda current, total, path: reports.append((current, total, path)),
+        )
+
+        assert seen_while_reading == [(0, 1, "bird.jpg")]
+        assert reports[-1] == (1, 1, "")
+    finally:
+        db.close()

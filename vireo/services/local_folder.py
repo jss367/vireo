@@ -1000,10 +1000,19 @@ def sync_folder(
     allow_deletions: bool = False,
     confirmed_deletions: int | None = None,
     progress=None,
+    scan_progress=None,
     cancel_check=None,
     begin_commit=None,
 ) -> dict:
-    """Publish one shared local folder and restore its catalog paths."""
+    """Publish one shared local folder and restore its catalog paths.
+
+    ``scan_progress(current, total, rel)`` reports the conflict scan that runs
+    before anything is published, and ``progress(current, total, rel)`` the
+    publish itself. The scan re-reads every at-risk source file over the
+    network, so on a large folder it owns most of the job's wall clock; it is
+    reported separately rather than left as a silent wait. ``current`` counts
+    entries already compared and ``rel`` names the one being compared now.
+    """
     root_folder_id = int(local_root_for_folder(db, root_folder_id) or root_folder_id)
     with _folder_lock(root_folder_id):
         state_row = folder_state(db, root_folder_id)
@@ -1057,38 +1066,66 @@ def sync_folder(
 
         conflicts = []
         at_risk = [key for key in changed if key in baseline] + list(deleted)
+        added = [key for key in changed if key not in baseline]
+        # Every at-risk source entry is re-read (and usually re-hashed) before
+        # a single byte is published, so this loop is the slow half of a sync.
+        # Count the files up front and report each one as it is checked.
+        scan_total = len(at_risk) + len(added)
+        scanned = 0
+
+        def note_scanning(rel):
+            """Name the entry about to be compared, before it is counted.
+
+            The count is what the job's throughput and ETA are derived from,
+            so it may only advance once an entry has actually been read —
+            hashing one multi-gigabyte original over SMB is minutes of work
+            that a count-on-entry would already be showing as finished.
+            """
+            if scan_progress:
+                scan_progress(scanned, scan_total, rel)
+
         for key in at_risk:
             index, rel = key
-            remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
-            remote_matches, remote_sha = _source_state(remote_path, baseline[key], cancel_check)
-            if remote_matches:
-                continue
-            entry = local.get(key)
-            local_path = entry[0] if entry else None
-            if local_path is None and not os.path.lexists(remote_path):
-                continue
-            if key in recovery_republish and not os.path.lexists(remote_path):
-                continue
-            if local_path and _matches_remote(local_path, remote_path, remote_sha, cancel_check):
-                continue
-            conflicts.append(remote_path)
+            note_scanning(rel)
+            try:
+                remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
+                remote_matches, remote_sha = _source_state(remote_path, baseline[key], cancel_check)
+                if remote_matches:
+                    continue
+                entry = local.get(key)
+                local_path = entry[0] if entry else None
+                if local_path is None and not os.path.lexists(remote_path):
+                    continue
+                if key in recovery_republish and not os.path.lexists(remote_path):
+                    continue
+                if local_path and _matches_remote(local_path, remote_path, remote_sha, cancel_check):
+                    continue
+                conflicts.append(remote_path)
+            finally:
+                scanned += 1
 
         deleted_set = set(deleted)
-        for key in changed:
-            if key in baseline:
-                continue
+        for key in added:
             index, rel = key
-            remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
-            if not os.path.lexists(remote_path):
-                continue
-            if os.path.isdir(remote_path) and not os.path.islink(remote_path):
-                conflicts.extend(
-                    full
-                    for entry_rel, full, st in _walk_entries(remote_path)
-                    if _entry_type(st) != "dir" and (index, os.path.join(rel, entry_rel)) not in deleted_set
-                )
-            elif not _matches_remote(local[key][0], remote_path, None, cancel_check):
-                conflicts.append(remote_path)
+            note_scanning(rel)
+            try:
+                remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
+                if not os.path.lexists(remote_path):
+                    continue
+                if os.path.isdir(remote_path) and not os.path.islink(remote_path):
+                    conflicts.extend(
+                        full
+                        for entry_rel, full, st in _walk_entries(remote_path)
+                        if _entry_type(st) != "dir"
+                        and (index, os.path.join(rel, entry_rel)) not in deleted_set
+                    )
+                elif not _matches_remote(local[key][0], remote_path, None, cancel_check):
+                    conflicts.append(remote_path)
+            finally:
+                scanned += 1
+
+        if scan_progress:
+            scan_progress(scanned, scan_total, "")
         conflicts.extend(_ancestor_conflicts(list(changed) + list(deleted), manifest, deleted_set))
         if conflicts:
             raise LocalWorkspaceConflict(sorted(set(conflicts)))
