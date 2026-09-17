@@ -3049,6 +3049,42 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     if returncode != 0:
         return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
 
+    # Read the destination's timestamps BEFORE verifying, not after.
+    #
+    # This pass stats every catalogued photo on both sides, which on a
+    # network mount is minutes of wall clock. Running it between
+    # verification and the ``rmtree`` below would push those minutes into
+    # the one window where a destination file going missing, or being
+    # replaced, is never noticed before the originals are deleted. Ordering
+    # it ahead of verification means the byte-level check remains the last
+    # thing that touches the destination, exactly as it was before this pass
+    # existed -- so no re-verification is owed, and the expensive one never
+    # runs twice.
+    #
+    # Safe to read this early: rsync has finished, so the destination is
+    # final, and the plan is read-only until it is applied after the cascade.
+    #
+    # Local destinations only. For a remote move ``transfer_dest`` lives on
+    # the far side of an SSH connection and cannot be stat'd, and reaching
+    # the same files back through ``catalog_path`` would walk a mount that
+    # need not even be mounted for the transfer to have succeeded -- for a
+    # rename rsync performed on the remote filesystem, where the timestamp
+    # is preserved anyway.
+    mtime_updates = []
+    if not remote:
+        mtime_updates, unreadable = _plan_moved_file_mtimes(
+            db, src_path, transfer_dest,
+            progress_cb=progress_cb, total_files=total_files,
+        )
+        if unreadable is not None:
+            # Verification below would catch this too. Failing here just
+            # spares the user a full byte-for-byte pass over a destination
+            # already known to be incomplete.
+            return {"moved": 0, "errors": [
+                f"Verification failed: '{unreadable}' is missing or "
+                f"unreadable at the destination. Originals preserved."
+            ]}
+
     # Verify before deleting originals.
     if progress_cb:
         progress_cb(total_files, total_files, "", "Verifying copy")
@@ -3120,84 +3156,6 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         progress_cb(total_files, total_files, "", "Updating catalog")
     if pre_commit_check:
         pre_commit_check()
-    # Before the path cascade, while the rows still name the source files:
-    # the guard in ``_refresh_moved_file_mtimes`` compares each row against
-    # the file it was scanned from, which the cascade below is about to
-    # rewrite. The merge path reparents staged photo rows rather than
-    # recreating them, so a timestamp stamped here survives it.
-    #
-    # Local destinations only. For a remote move ``transfer_dest`` lives on
-    # the far side of an SSH connection and cannot be stat'd, and reaching
-    # the same files back through ``catalog_path`` would walk a mount that
-    # need not even be mounted for the transfer to have succeeded -- for a
-    # rename rsync performed on the remote filesystem, where the timestamp
-    # is preserved anyway.
-    mtime_updates = []
-    if not remote:
-        mtime_updates, unreadable = _plan_moved_file_mtimes(
-            db, src_path, transfer_dest,
-            progress_cb=progress_cb, total_files=total_files,
-        )
-        if unreadable is not None:
-            # Before any catalog write and before the rmtree, so returning
-            # here leaves the originals and the catalog exactly as they were.
-            return {"moved": 0, "errors": [
-                f"Verification failed: '{unreadable}' went missing or "
-                f"unreadable at the destination while timestamps were being "
-                f"read. Originals preserved."
-            ]}
-        if progress_cb and mtime_updates:
-            progress_cb(total_files, total_files, "", "Updating catalog")
-        if pre_commit_check:
-            # The plan above can run for minutes on a network mount, so
-            # re-check that the volume is still the one we verified against
-            # before the cascade repoints the catalog and the rmtree deletes
-            # the originals.
-            pre_commit_check()
-        # ...and that the files are still there. The mount callback validates
-        # mount identity and availability, not contents, and the plan above
-        # only ever looks at catalog photo rows -- an ``.xmp`` sidecar, a
-        # published render, or any other non-catalog file could disappear
-        # during the pass on a perfectly healthy mount and nothing would
-        # notice before the originals were gone.
-        #
-        # Structural only (no ``verify_contents``): this re-checks a
-        # guarantee established minutes ago, and the byte-level pass re-reads
-        # every file on both sides. Paying that twice would more than double
-        # the most expensive phase of a NAS transfer -- tens of GB for one
-        # shoot -- to re-derive what a presence-and-size walk already
-        # settles. The full byte comparison stays where it belongs: once,
-        # before this window opens.
-        #
-        # And it mirrors the check this move actually ran rather than
-        # imposing a stronger one. A fresh move into a directory we created
-        # verified by whole-tree file count, and
-        # ``_first_missing_source_file`` deliberately reports a symlinked
-        # destination entry as missing -- so running it here would reject a
-        # legitimately moved symlink that the first pass never objected to.
-        if dest_exists or verify_contents:
-            missing = _first_missing_source_file(src_path, transfer_dest)
-            if missing is not None:
-                return {"moved": 0, "errors": [
-                    f"Verification failed: '{missing}' went missing, changed "
-                    f"size, or was replaced by a symlink at the destination "
-                    f"while timestamps were being read. Originals preserved."
-                ]}
-        else:
-            src_recount = sum(
-                1 for _, _, files in os.walk(src_path) for _ in files)
-            dst_recount = sum(
-                1 for _, _, files in os.walk(transfer_dest) for _ in files)
-            if src_recount != dst_recount:
-                # Unlike the first count check, leave the destination in
-                # place: it passed verification once, so it may already hold
-                # the only complete copy of something. Preserve both sides
-                # and let the user resume as a merge.
-                return {"moved": 0, "errors": [
-                    f"File count changed at the destination while timestamps "
-                    f"were being read: source={src_recount}, "
-                    f"dest={dst_recount}. Originals preserved."
-                ]}
     merge_counts = None
     if merge_into_tracked is not None:
         # Destination is a tracked archive and the caller opted into merging:

@@ -5948,44 +5948,6 @@ def test_mtime_plan_ignores_a_sibling_tree_a_like_pattern_would_match(
     ).fetchone()["file_mtime"] == 1577880000
 
 
-def test_move_folder_rechecks_the_destination_after_planning_mtimes(
-        tmp_path, monkeypatch):
-    """The mount is revalidated after the stat pass, not just before it.
-
-    Planning timestamps stats the destination per photo and swallows
-    OSErrors, so on a network mount it can run for minutes without noticing
-    the share disappear. A check that only ran before that pass would let the
-    catalog repoint and the originals be deleted against a destination nobody
-    re-verified.
-    """
-    from move import move_folder
-
-    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
-    calls = []
-
-    def flaky_check():
-        calls.append(len(calls))
-        if len(calls) > 1:
-            raise ValueError("the destination volume went away mid-move")
-
-    _lose_timestamps_in_transfer(monkeypatch)
-    with pytest.raises(ValueError, match="went away"):
-        move_folder(db=db, folder_id=fid, destination=str(dst),
-                    pre_commit_check=flaky_check)
-
-    assert len(calls) == 2
-    # Originals preserved and the catalog still points at them.
-    assert (src / "a.jpg").exists()
-    assert db.conn.execute(
-        "SELECT path FROM folders WHERE id = ?", (fid,)
-    ).fetchone()["path"] == str(src)
-
-
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="A literal backslash in a folder name is only possible on POSIX — "
-    "on Windows it is a separator, so the conflation under test can't exist.",
-)
 def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
     """A POSIX folder named ``shoot\\1`` must not sweep in ``shoot/1``.
 
@@ -6044,40 +6006,6 @@ def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
     assert decoy_id not in [u[1] for u in updates]
 
 
-def test_move_folder_aborts_when_a_copy_vanishes_before_the_catalog_update(
-        tmp_path, monkeypatch):
-    """A destination file lost after verification stops the move.
-
-    The timestamp pass is the last thing that looks at the destination
-    before the originals are deleted, and the mount re-check only covers
-    mount identity — not whether the copies are still there. Losing that
-    evidence would delete an original whose copy no longer exists.
-    """
-    from move import move_folder
-
-    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
-
-    def drop_a_copy():
-        # Runs after verification and before the timestamp plan — the exact
-        # window where a share can degrade without the mount going away.
-        victim = dst / "shoot" / "a.jpg"
-        if victim.exists():
-            victim.unlink()
-
-    _lose_timestamps_in_transfer(monkeypatch)
-    result = move_folder(db=db, folder_id=fid, destination=str(dst),
-                         pre_commit_check=drop_a_copy)
-
-    assert result["moved"] == 0
-    assert any("Originals preserved" in e for e in result["errors"])
-    # Nothing was deleted and the catalog still points at the source.
-    assert (src / "a.jpg").exists()
-    assert (src / "b.jpg").exists()
-    assert db.conn.execute(
-        "SELECT path FROM folders WHERE id = ?", (fid,)
-    ).fetchone()["path"] == str(src)
-
-
 def test_move_folder_tolerates_a_catalog_row_whose_source_is_gone(
         tmp_path, monkeypatch):
     """A stale row is skipped, not treated as a missing copy.
@@ -6102,36 +6030,100 @@ def test_move_folder_tolerates_a_catalog_row_whose_source_is_gone(
     ).fetchone()["file_mtime"] == 1577880000
 
 
-def test_move_folder_aborts_when_a_sidecar_vanishes_during_planning(
-        tmp_path, monkeypatch):
-    """A non-catalog file lost during the timestamp pass stops the move.
+def test_timestamp_plan_runs_before_the_copy_is_verified(tmp_path, monkeypatch):
+    """Verification must remain the last thing that touches the destination.
 
-    The plan only ever looks at catalog photo rows, and the mount re-check
-    validates mount identity rather than contents — so an ``.xmp`` sidecar
-    disappearing on a perfectly healthy mount would go unnoticed and its
-    original would be deleted.
+    The plan stats every photo on both sides — minutes on a network mount.
+    Run after verification, those minutes would land in the one window where
+    a destination file going missing is never noticed before ``rmtree``
+    deletes the originals. Run before it, the byte-level check still has the
+    final word and nothing is owed a second pass.
     """
-    from move import move_folder
+    import move as move_mod
+
+    db, _src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    order = []
+    real_plan = move_mod._plan_moved_file_mtimes
+    real_verify = move_mod._first_missing_source_file
+
+    def traced_plan(*a, **kw):
+        order.append("plan")
+        return real_plan(*a, **kw)
+
+    def traced_verify(*a, **kw):
+        order.append("verify")
+        return real_verify(*a, **kw)
+
+    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes", traced_plan)
+    monkeypatch.setattr(move_mod, "_first_missing_source_file", traced_verify)
+    _lose_timestamps_in_transfer(monkeypatch)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
+                                 merge=True, verify_contents=True)
+
+    assert result["errors"] == []
+    assert order == ["plan", "verify"]
+
+
+def test_a_copy_lost_during_planning_still_aborts_the_move(
+        tmp_path, monkeypatch):
+    """Anything lost while timestamps are read is caught by verification.
+
+    Covers the files the plan itself never looks at — an ``.xmp`` sidecar is
+    not a catalog row — which is the reason the plan cannot be the thing
+    standing between the copy and the delete.
+    """
+    import move as move_mod
 
     db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
     (src / "a.xmp").write_text("<xmp/>")
+    real_plan = move_mod._plan_moved_file_mtimes
 
-    def drop_the_sidecar():
-        # Runs after the plan, before the re-verification below it.
-        victim = dst / "shoot" / "a.xmp"
-        if victim.exists():
-            victim.unlink()
+    def plan_then_lose_a_sidecar(*a, **kw):
+        result = real_plan(*a, **kw)
+        # As if the share dropped the file mid-pass, mount still healthy.
+        (dst / "shoot" / "a.xmp").unlink()
+        return result
 
+    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes",
+                        plan_then_lose_a_sidecar)
     _lose_timestamps_in_transfer(monkeypatch)
-    result = move_folder(db=db, folder_id=fid, destination=str(dst),
-                         merge=True, verify_contents=True,
-                         pre_commit_check=drop_the_sidecar)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
+                                 merge=True, verify_contents=True)
 
     assert result["moved"] == 0
-    assert any("a.xmp" in e and "Originals preserved" in e
-               for e in result["errors"])
+    assert any("Originals preserved" in e for e in result["errors"])
     assert (src / "a.xmp").exists()
     assert (src / "a.jpg").exists()
     assert db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (fid,)
     ).fetchone()["path"] == str(src)
+
+
+def test_mtime_plan_reports_an_unreadable_destination_file(tmp_path):
+    """The plan fails fast rather than reading bytes it already knows are gone.
+
+    Verification would catch this anyway; reporting it here just spares a
+    full byte-for-byte pass over a destination already known to be
+    incomplete. A missing *source*, by contrast, is a stale catalog row that
+    verification never vouched for, and must not block the move.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    landing = dst / "shoot"
+    landing.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        (landing / name).write_bytes((src / name).read_bytes())
+
+    updates, unreadable = move_mod._plan_moved_file_mtimes(
+        db, str(src), str(landing))
+    assert unreadable is None
+    assert len(updates) == len(ids)
+
+    (landing / "a.jpg").unlink()
+    updates, unreadable = move_mod._plan_moved_file_mtimes(
+        db, str(src), str(landing))
+    assert unreadable == str(landing / "a.jpg")
+    assert updates == []
