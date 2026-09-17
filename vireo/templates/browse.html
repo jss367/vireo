@@ -13424,7 +13424,23 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // members) so what the card stands for matches what still exists, then
   // repaint the affected badge so its count matches the pruned list.
   // Codex P2 on PR #1672.
+  function _browseDissolveStack(photo, cacheKey) {
+    photo.browse_stack = null;
+    delete browseStackMembers[cacheKey];
+    expandedBrowseStacks.delete(photo.id);
+    browseStackCoverRecheck.delete(photo.id);
+    var deadTray = document.querySelector(
+      '.browse-stack-tray[data-stack-cover-id="' + photo.id + '"]');
+    if (deadTray) deadTray.remove();
+    var deadCard = document.querySelector(
+      '.grid-card[data-id="' + photo.id + '"]');
+    if (deadCard) {
+      deadCard.classList.remove('has-browse-stack');
+      deadCard.classList.remove('stack-partial');
+    }
+  }
   var badgesToRefresh = [];
+  var traysToRerender = [];
   photos.forEach(function(photo) {
     var stack = photo.browse_stack;
     var stackIds = stack && stack.photo_ids;
@@ -13452,24 +13468,48 @@ document.addEventListener('lightbox:photodeleted', function(event) {
     // and repaint the card so it stops advertising a stack that no longer
     // exists. Codex P2 on PR #1672.
     if (stack.count < 2) {
-      photo.browse_stack = null;
-      delete browseStackMembers[cacheKey];
-      expandedBrowseStacks.delete(photo.id);
-      browseStackCoverRecheck.delete(photo.id);
-      var tray = document.querySelector(
-        '.browse-stack-tray[data-stack-cover-id="' + photo.id + '"]');
-      if (tray) tray.remove();
-      var card = document.querySelector(
-        '.grid-card[data-id="' + photo.id + '"]');
-      if (card) {
-        card.classList.remove('has-browse-stack');
-        card.classList.remove('stack-partial');
-      }
+      _browseDissolveStack(photo, cacheKey);
+    } else if (stack.kind === 'burst' && idx > 0 && idx < stackIds.length) {
+      // A burst is a run of frames whose *consecutive* capture times are within
+      // ``browse_stack_time_gap`` (see ``_browse_stack_query_parts``), and
+      // ``photo_ids`` arrives from GROUP_CONCAT ordered by ``timestamp``. So
+      // ``idx`` names the deleted frame's slot in that time-ordered run: idx 0
+      // trims the front of the run, an idx equal to the post-splice length
+      // trims the tail, and anything in between is a bridge whose neighbours
+      // may now sit further apart than the gap allows. The gap and the
+      // per-member capture times are server-side state we do not carry to the
+      // client, so we cannot re-project the surviving run locally without
+      // guessing. Dissolve the stack instead: the cover becomes an ordinary
+      // card, the hidden members disappear from the tray, and the next Browse
+      // fetch reprojects the survivors as either a smaller burst, one bigger
+      // stack still legitimate, or separate top-level cards — whichever is
+      // right. This is only wrong when the surviving neighbours happen to sit
+      // within the gap; a false dissolve costs a redundant projection on the
+      // next reload, a false-positive stack keeps selecting frames that no
+      // longer belong together. Codex P2 on PR #1672.
+      _browseDissolveStack(photo, cacheKey);
+    } else if (expandedBrowseStacks.has(photo.id)) {
+      // The stack survives the prune, but ``lightboxDelete`` already called
+      // ``renderGrid()`` before this handler ran — so the reinserted tray was
+      // rebuilt from the pre-prune ``browseStackMembers`` and still carries
+      // the deleted member's card. Reinsert the tray from the pruned cache so
+      // the deleted frame stops appearing as a clickable tray tile and the
+      // header count matches the new length. Codex P2 on PR #1672.
+      traysToRerender.push(photo.id);
     }
     badgesToRefresh.push(photo.id);
   });
   if (badgesToRefresh.length && typeof refreshBrowseStackBadge === 'function') {
     badgesToRefresh.forEach(refreshBrowseStackBadge);
+  }
+  // The pruned stack survives, but ``lightboxDelete`` already called
+  // ``renderGrid()`` before this handler ran — so ``restoreExpandedBrowseStacks``
+  // rebuilt every expanded tray from the pre-prune ``browseStackMembers``.
+  // Reinsert each surviving tray from the pruned cache so the deleted frame
+  // stops appearing as a clickable tray tile and the header count matches
+  // the new length. Codex P2 on PR #1672.
+  if (traysToRerender.length && typeof insertBrowseStackTray === 'function') {
+    traysToRerender.forEach(insertBrowseStackTray);
   }
   // Pruning the cover metadata is only half of what the tray-member delete
   // needs. ``lightboxDelete`` has already dropped the deleted id from
@@ -13478,9 +13518,11 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // never rewrites itself, and a cover whose remaining live members are all
   // selected stays painted ``stack-partial`` from that same pre-delete
   // state — because the deleted id was in the members list back then, the
-  // whole-stack check that would repaint it as ``selected`` said no. Refresh
-  // both from the surviving selection so the count and the paint match what
-  // the user can see. Codex P2 on PR #1672.
+  // whole-stack check that would repaint it as ``selected`` said no. The
+  // stack note (``"12 photos selected · 2 stacks"``) was also computed
+  // against the pre-prune ``photo_ids``. Refresh both from the surviving
+  // selection so the count, the paint, and the note match what the user can
+  // see. Codex P2 on PR #1672.
   if (badgesToRefresh.length) {
     if (typeof refreshCardSelectionVisuals === 'function') {
       refreshCardSelectionVisuals();

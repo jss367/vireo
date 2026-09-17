@@ -23266,10 +23266,12 @@ var browseStackMembers = {};
 var expandedBrowseStacks = new Set();
 var browseStackCoverRecheck = new Set();
 var badgeRefreshes = [];
+var trayReinserts = [];
 var refreshes = 0, bars = 0;
 function refreshCardSelectionVisuals() { refreshes += 1; }
 function updateBatchBar() { bars += 1; }
 function refreshBrowseStackBadge(id) { badgeRefreshes.push(id); }
+function insertBrowseStackTray(id) { trayReinserts.push(id); }
 var capturedListener = null;
 global.document = {
   addEventListener: function(name, fn) {
@@ -23293,9 +23295,15 @@ function snapshot(coverId) {
     badgeRefreshes: badgeRefreshes.slice(),
     expanded: expandedBrowseStacks.has(coverId),
     needsRecheck: browseStackCoverRecheck.has(coverId),
+    trayReinserts: trayReinserts.slice(),
     refreshes: refreshes,
     bars: bars,
   };
+}
+function resetSideEffects() {
+  trayReinserts = [];
+  refreshes = 0;
+  bars = 0;
 }
 var results = {};
 
@@ -23303,30 +23311,34 @@ var results = {};
 //     lightbox. The cover (50) still lists 52 in browse_stack.photo_ids,
 //     the count is still 4, and the hydration cache still carries the
 //     dead entry. The handler must prune all three and repaint the badge
-//     so a later cover click does not resurrect the id, and — because
-//     ``lightboxDelete`` has already dropped the id from ``selectedPhotos``
-//     without touching the batch bar or the ``stack-partial`` paint —
-//     refresh the card visuals and the batch bar in the same step so both
-//     stop advertising a photo the user just deleted.
+//     so a later cover click does not resurrect the id. The stack has no
+//     kind (an exact-duplicate group), so the burst-bridge rule in case
+//     (h) does not apply. ``lightboxDelete`` has already dropped the id
+//     from ``selectedPhotos`` without touching the batch bar or the
+//     ``stack-partial`` paint, so the handler also has to refresh the
+//     card visuals and batch bar in the same step; and its
+//     ``renderGrid()`` reinserted the tray from the pre-prune cache, so
+//     the tray must reinsert once more from the pruned cache too.
 //     Codex P2 on PR #1672.
 photos = [{id: 50, browse_stack: {photo_ids: [50, 51, 52, 53], count: 4}}];
 browseStackMembers = {"50": [{id: 50}, {id: 51}, {id: 52}, {id: 53}]};
 expandedBrowseStacks = new Set([50]);
 browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
-refreshes = 0; bars = 0;
+resetSideEffects();
 capturedListener({detail: {photoId: 52}});
 results.prunedHiddenMember = snapshot(50);
 
 // (b) The deleted id belongs to no cover on the grid — nothing to prune,
-//     no badge repaint, no refresh, no bar update, no crash on an
-//     untouched stack; the pruning path is what triggers the visual work.
+//     no badge repaint, no refresh, no bar update, no tray reinsert, no
+//     crash on an untouched stack; the pruning path is what triggers the
+//     visual work.
 photos = [{id: 60, browse_stack: {photo_ids: [60, 61], count: 2}}];
 browseStackMembers = {"60": [{id: 60}, {id: 61}]};
 expandedBrowseStacks = new Set();
 browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
-refreshes = 0; bars = 0;
+resetSideEffects();
 capturedListener({detail: {photoId: 999}});
 results.unrelatedDelete = snapshot(60);
 
@@ -23341,7 +23353,7 @@ browseStackMembers = {};
 expandedBrowseStacks = new Set();
 browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
-refreshes = 0; bars = 0;
+resetSideEffects();
 capturedListener({detail: {photoId: 72}});
 results.mixedGridSolo = snapshot(70);
 results.mixedGridStack = snapshot(71);
@@ -23360,7 +23372,7 @@ browseStackMembers = {"80": [{id: 80}, {id: 81}]};
 expandedBrowseStacks = new Set([80]);
 browseStackCoverRecheck = new Set([80]);
 badgeRefreshes = [];
-refreshes = 0; bars = 0;
+resetSideEffects();
 capturedListener({detail: {photoId: 81}});
 results.stackShrinksToOne = snapshot(80);
 
@@ -23372,9 +23384,95 @@ browseStackMembers = {"90": [{id: 90}, {id: 91}]};
 expandedBrowseStacks = new Set();
 browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
-refreshes = 0; bars = 0;
+resetSideEffects();
 capturedListener({detail: null});
 results.nullDetail = snapshot(90);
+
+// (f) An expanded burst stack loses its FIRST time-ordered hidden
+//     member (idx 0). ``photo_ids`` arrives from GROUP_CONCAT ordered
+//     by capture time; the cover is the top-ranked member by
+//     ``_STACK_COVER_ORDER`` and can sit anywhere in that order — here
+//     it is at time-idx 1 so a member sits before it. The deleted
+//     frame trims the front of the run, so the survivors are still
+//     consecutive within the gap: prune without dissolving, and
+//     re-render the tray so the removed frame stops appearing as a
+//     clickable tray tile. Codex P2 on PR #1672.
+photos = [{id: 101, browse_stack: {
+  photo_ids: [100, 101, 102, 103], count: 4, kind: 'burst'
+}}];
+browseStackMembers = {"101": [{id: 100}, {id: 101}, {id: 102}, {id: 103}]};
+expandedBrowseStacks = new Set([101]);
+browseStackCoverRecheck = new Set();
+badgeRefreshes = [];
+resetSideEffects();
+capturedListener({detail: {photoId: 100}});
+results.burstDropsFirst = snapshot(101);
+
+// (g) Same shape but the LAST time-ordered hidden member (idx
+//     count - 1) is deleted. Same story as (f): the run just gets
+//     shorter, no bridge broken.
+photos = [{id: 111, browse_stack: {
+  photo_ids: [110, 111, 112, 113], count: 4, kind: 'burst'
+}}];
+browseStackMembers = {"111": [{id: 110}, {id: 111}, {id: 112}, {id: 113}]};
+expandedBrowseStacks = new Set([111]);
+browseStackCoverRecheck = new Set();
+badgeRefreshes = [];
+resetSideEffects();
+capturedListener({detail: {photoId: 113}});
+results.burstDropsLast = snapshot(111);
+
+// (h) The Codex P2: a burst stack loses a MIDDLE hidden member (idx
+//     is neither 0 nor the post-splice length). The removed frame
+//     was a bridge in the time-ordered run, so its two neighbours
+//     may now sit further apart than ``browse_stack_time_gap`` and
+//     the run should split. The gap and the per-member capture times
+//     are server state we do not carry to the client, so we cannot
+//     re-project locally: dissolve the stack instead and let the
+//     next Browse fetch project the survivors as either a smaller
+//     burst or separate top-level cards. A false-positive stack that
+//     keeps selecting frames no longer in a run costs more than a
+//     false dissolve, which only costs a projection on the next
+//     reload. Codex P2 on PR #1672.
+photos = [{id: 121, browse_stack: {
+  photo_ids: [120, 121, 122, 123], count: 4, kind: 'burst'
+}}];
+browseStackMembers = {"121": [{id: 120}, {id: 121}, {id: 122}, {id: 123}]};
+expandedBrowseStacks = new Set([121]);
+browseStackCoverRecheck = new Set([121]);
+badgeRefreshes = [];
+resetSideEffects();
+capturedListener({detail: {photoId: 122}});
+results.burstDropsBridge = snapshot(121);
+
+// (i) A non-burst (exact-duplicate) stack shrinks by a middle member.
+//     Exact duplicates are matched by content hash, so removing one
+//     member cannot invalidate the rest — the bridge rule from (h) is
+//     a burst-only concern. Prune and re-render the expanded tray.
+photos = [{id: 131, browse_stack: {
+  photo_ids: [130, 131, 132, 133], count: 4, kind: 'duplicate'
+}}];
+browseStackMembers = {"131": [{id: 130}, {id: 131}, {id: 132}, {id: 133}]};
+expandedBrowseStacks = new Set([131]);
+browseStackCoverRecheck = new Set();
+badgeRefreshes = [];
+resetSideEffects();
+capturedListener({detail: {photoId: 132}});
+results.duplicateDropsBridge = snapshot(131);
+
+// (j) The pruned stack is not expanded on screen. The tray does not
+//     exist to reinsert, so ``insertBrowseStackTray`` must not be
+//     scheduled — but the selection visuals and the batch bar still
+//     have to recompute, because the pre-prune ring painted the
+//     cover as ``stack-partial`` against the old ``photo_ids``.
+photos = [{id: 140, browse_stack: {photo_ids: [140, 141, 142], count: 3}}];
+browseStackMembers = {"140": [{id: 140}, {id: 141}, {id: 142}]};
+expandedBrowseStacks = new Set();
+browseStackCoverRecheck = new Set();
+badgeRefreshes = [];
+resetSideEffects();
+capturedListener({detail: {photoId: 141}});
+results.collapsedPrune = snapshot(140);
 
 process.stdout.write(JSON.stringify(results));
 """,
@@ -23386,14 +23484,18 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [50],
         "expanded": True,
         "needsRecheck": False,
+        "trayReinserts": [50],
         "refreshes": 1,
         "bars": 1,
     }, (
         "the deleted hidden member must leave the cover metadata and the "
         "hydration cache in the same step, so a later cover click reads "
         "the pruned list; an expansion that still holds enough members "
-        "stays live, and the card visuals and batch bar must be refreshed "
-        "in the same step so neither keeps advertising the deleted id"
+        "stays live and its tray has to reinsert from the pruned cache "
+        "(the reinsert done by ``lightboxDelete``'s ``renderGrid`` was "
+        "built from the pre-prune cache), and the card visuals and batch "
+        "bar must be refreshed in the same step so neither keeps "
+        "advertising the deleted id"
     )
     assert result["unrelatedDelete"] == {
         "stack": {"photo_ids": [60, 61], "count": 2},
@@ -23401,11 +23503,13 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [],
         "expanded": False,
         "needsRecheck": False,
+        "trayReinserts": [],
         "refreshes": 0,
         "bars": 0,
     }, (
-        "an unrelated delete must leave every stack — and every badge — "
-        "alone; the pruning path is what triggers the visual work"
+        "an unrelated delete must leave every stack — and every badge, "
+        "tray, selection ring and batch bar — alone; the pruning path is "
+        "what triggers the visual work"
     )
     assert result["mixedGridSolo"] == {
         "stack": None,
@@ -23413,6 +23517,7 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [71],
         "expanded": False,
         "needsRecheck": False,
+        "trayReinserts": [],
         "refreshes": 1,
         "bars": 1,
     }, "a solo card with no browse_stack must be skipped without a crash"
@@ -23422,6 +23527,7 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [71],
         "expanded": False,
         "needsRecheck": False,
+        "trayReinserts": [],
         "refreshes": 1,
         "bars": 1,
     }, (
@@ -23434,6 +23540,7 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [80],
         "expanded": False,
         "needsRecheck": False,
+        "trayReinserts": [],
         "refreshes": 1,
         "bars": 1,
     }, (
@@ -23442,7 +23549,8 @@ process.stdout.write(JSON.stringify(results));
         "hydration cache, ``expandedBrowseStacks`` and "
         "``browseStackCoverRecheck`` must all clear together — otherwise "
         "``restoreExpandedBrowseStacks`` re-inserts a tray with one member "
-        "the cover already shows"
+        "the cover already shows. A dissolve has no tray left to reinsert, "
+        "but the selection visuals still have to reconcile"
     )
     assert result["nullDetail"] == {
         "stack": {"photo_ids": [90, 91], "count": 2},
@@ -23450,9 +23558,107 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [],
         "expanded": False,
         "needsRecheck": False,
+        "trayReinserts": [],
         "refreshes": 0,
         "bars": 0,
-    }, "a null detail must short-circuit before the prune loop touches anything"
+    }, (
+        "a null detail must short-circuit before the prune loop touches "
+        "anything, side effects included"
+    )
+
+    # (f)/(g) An expanded burst that loses an end frame: the run just
+    # shrinks — the survivors are still consecutive within the gap —
+    # and the tray has to be reinserted from the pruned cache so the
+    # deleted frame stops appearing as a clickable tile.
+    # Codex P2 on PR #1672.
+    assert result["burstDropsFirst"] == {
+        "stack": {"photo_ids": [101, 102, 103], "count": 3},
+        "cachedMembers": [101, 102, 103],
+        "badgeRefreshes": [101],
+        "expanded": True,
+        "needsRecheck": False,
+        "trayReinserts": [101],
+        "refreshes": 1,
+        "bars": 1,
+    }, (
+        "dropping the first time-ordered burst member trims the front "
+        "of the run — the survivors keep the stack, and the tray has to "
+        "reinsert from the pruned cache"
+    )
+    assert result["burstDropsLast"] == {
+        "stack": {"photo_ids": [110, 111, 112], "count": 3},
+        "cachedMembers": [110, 111, 112],
+        "badgeRefreshes": [111],
+        "expanded": True,
+        "needsRecheck": False,
+        "trayReinserts": [111],
+        "refreshes": 1,
+        "bars": 1,
+    }, (
+        "dropping the last time-ordered burst member trims the tail — "
+        "the survivors keep the stack, same as the front case"
+    )
+
+    # (h) The Codex P2 for burst bridges: a middle time-ordered member
+    # is deleted. Bursts are runs of consecutive frames within
+    # ``browse_stack_time_gap``, so the surviving neighbours may now
+    # sit further apart than the gap allows. Dissolve rather than
+    # advertise a possibly-invalid run — the next reload will reproject.
+    # Codex P2 on PR #1672.
+    assert result["burstDropsBridge"] == {
+        "stack": None,
+        "cachedMembers": [],
+        "badgeRefreshes": [121],
+        "expanded": False,
+        "needsRecheck": False,
+        "trayReinserts": [],
+        "refreshes": 1,
+        "bars": 1,
+    }, (
+        "a burst that loses a middle bridge frame must dissolve: the "
+        "surviving neighbours may sit further apart than the gap, and "
+        "we cannot re-project locally — server-side reprojection on the "
+        "next Browse fetch will land the survivors as either a smaller "
+        "burst or separate top-level cards. A dissolve leaves no tray to "
+        "reinsert but still has to reconcile the selection visuals"
+    )
+
+    # (i) A non-burst stack (exact duplicates) losing a middle member:
+    # duplicates share a content hash, so removing one cannot invalidate
+    # the rest. Prune and re-render the tray without dissolving.
+    assert result["duplicateDropsBridge"] == {
+        "stack": {"photo_ids": [130, 131, 133], "count": 3},
+        "cachedMembers": [130, 131, 133],
+        "badgeRefreshes": [131],
+        "expanded": True,
+        "needsRecheck": False,
+        "trayReinserts": [131],
+        "refreshes": 1,
+        "bars": 1,
+    }, (
+        "the burst-bridge rule is burst-only — exact-duplicate stacks "
+        "keep their identity when a middle member goes away, and the "
+        "expanded tray still needs to reinsert"
+    )
+
+    # (j) The pruned stack is not expanded on screen. No tray to
+    # reinsert; selection visuals still have to reconcile because the
+    # cover's ``stack-partial`` ring was painted against the pre-prune
+    # ``photo_ids``.
+    assert result["collapsedPrune"] == {
+        "stack": {"photo_ids": [140, 142], "count": 2},
+        "cachedMembers": [140, 142],
+        "badgeRefreshes": [140],
+        "expanded": False,
+        "needsRecheck": False,
+        "trayReinserts": [],
+        "refreshes": 1,
+        "bars": 1,
+    }, (
+        "a collapsed stack's pruned members must still leave a well-formed "
+        "stack; there is no tray to reinsert, but the selection ring and "
+        "batch bar still need to reconcile after the prune"
+    )
 
 
 _APOSTROPHE_SPECIES = "Say's Phoebe"
