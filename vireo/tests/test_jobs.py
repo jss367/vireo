@@ -1727,3 +1727,55 @@ def test_startup_sweep_keeps_checkpointed_work_on_interrupted_rows(tmp_path):
         assert history["pipeline-crashed"]["result"]["interrupted"] is True
     finally:
         db.close()
+
+
+def test_catalog_independent_job_types_do_not_block_local_transitions():
+    """Model/label/embedding work must not hold Work Locally hostage.
+
+    The block exists so a stage/sync/discard cannot rebase ``folders.path``
+    underneath a job carrying pre-rebase paths. A label-embedding precompute
+    reads a labels file and writes the embedding cache under ``~/.vireo``, so
+    the hazard does not apply and the user should not have to cancel it.
+    """
+    from jobs import JobRunner, job_type_blocks_local_transitions
+
+    assert job_type_blocks_local_transitions("scan") is True
+    assert job_type_blocks_local_transitions("precompute-embeddings") is False
+
+    runner = JobRunner()
+    try:
+        free = runner.start("precompute-embeddings", lambda job: None, workspace_id=1)
+        held = runner.start("scan", lambda job: None, workspace_id=1)
+        wait_for_job_via_runner(runner, free)
+        wait_for_job_via_runner(runner, held)
+        assert runner.get(free)["blocks_local_transitions"] is False
+        assert runner.get(held)["blocks_local_transitions"] is True
+    finally:
+        runner.shutdown()
+
+
+def test_explicit_blocking_flag_overrides_the_job_type_policy():
+    """Dynamic job types (``download-sam2``) still opt out at the call site."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    try:
+        dynamic = runner.start(
+            "download-sam2", lambda job: None, workspace_id=1,
+            blocks_local_transitions=False,
+        )
+        forced = runner.start(
+            "verify-models", lambda job: None, workspace_id=1,
+            blocks_local_transitions=True,
+        )
+        singleton, _, _ = runner.start_singleton(
+            "download-darktable", lambda job: None,
+            singleton_key="darktable-download", workspace_id=1,
+        )
+        for job_id in (dynamic, forced, singleton):
+            wait_for_job_via_runner(runner, job_id)
+        assert runner.get(dynamic)["blocks_local_transitions"] is False
+        assert runner.get(forced)["blocks_local_transitions"] is True
+        assert runner.get(singleton)["blocks_local_transitions"] is False
+    finally:
+        runner.shutdown()
