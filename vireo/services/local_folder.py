@@ -1000,10 +1000,18 @@ def sync_folder(
     allow_deletions: bool = False,
     confirmed_deletions: int | None = None,
     progress=None,
+    scan_progress=None,
     cancel_check=None,
     begin_commit=None,
 ) -> dict:
-    """Publish one shared local folder and restore its catalog paths."""
+    """Publish one shared local folder and restore its catalog paths.
+
+    ``scan_progress(current, total, rel)`` reports the conflict scan that runs
+    before anything is published, and ``progress(current, total, rel)`` the
+    publish itself. The scan re-reads every at-risk source file over the
+    network, so on a large folder it owns most of the job's wall clock; it is
+    reported separately rather than left as a silent wait.
+    """
     root_folder_id = int(local_root_for_folder(db, root_folder_id) or root_folder_id)
     with _folder_lock(root_folder_id):
         state_row = folder_state(db, root_folder_id)
@@ -1057,8 +1065,25 @@ def sync_folder(
 
         conflicts = []
         at_risk = [key for key in changed if key in baseline] + list(deleted)
+        added = [key for key in changed if key not in baseline]
+        # Every at-risk source entry is re-read (and usually re-hashed) before
+        # a single byte is published, so this loop is the slow half of a sync.
+        # Count the files up front and report each one as it is checked.
+        scan_total = len(at_risk) + len(added)
+        scanned = 0
+
+        def note_scanned(rel):
+            """Report the entry about to be compared against the source."""
+            nonlocal scanned
+            scanned += 1
+            if scan_progress:
+                scan_progress(scanned, scan_total, rel)
+
+        if scan_progress:
+            scan_progress(0, scan_total, "")
         for key in at_risk:
             index, rel = key
+            note_scanned(rel)
             remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
             remote_matches, remote_sha = _source_state(remote_path, baseline[key], cancel_check)
             if remote_matches:
@@ -1074,10 +1099,9 @@ def sync_folder(
             conflicts.append(remote_path)
 
         deleted_set = set(deleted)
-        for key in changed:
-            if key in baseline:
-                continue
+        for key in added:
             index, rel = key
+            note_scanned(rel)
             remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
             if not os.path.lexists(remote_path):
                 continue

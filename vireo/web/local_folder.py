@@ -745,24 +745,96 @@ def create_local_folder_blueprint(
             try:
                 runner.set_steps(
                     job["id"],
+                    # Two steps per folder, because a sync has two phases with
+                    # very different meanings: checking re-reads source files
+                    # and writes nothing, publishing overwrites and deletes
+                    # them. One shared counter would hide which is running and
+                    # would feed the checking phase's elapsed time into the
+                    # publishing phase's ETA.
                     [
-                        {"id": f"folder-{root_id}", "label": f"Sync {root_names[root_id]} to source"}
+                        step
                         for root_id in root_ids
+                        for step in (
+                            {
+                                "id": f"check-{root_id}",
+                                "label": f"Check {root_names[root_id]} against source",
+                            },
+                            {
+                                "id": f"folder-{root_id}",
+                                "label": f"Sync {root_names[root_id]} to source",
+                            },
+                        )
                     ],
                 )
+                scan_totals: dict[int, int] = {}
+                active_step = None
                 for root_id in root_ids:
+                    check_id = f"check-{root_id}"
                     step_id = f"folder-{root_id}"
-                    runner.update_step(job["id"], step_id, status="running")
+                    active_step = check_id
+                    runner.update_step(job["id"], check_id, status="running")
                     job["progress"].update(
                         {
                             "current": 0,
                             "total": 0,
                             "current_file": "",
-                            "phase": f"Checking {root_names[root_id]} for conflicts",
+                            "phase": f"Checking {root_names[root_id]} against source",
                             "root_folder_id": root_id,
                         }
                     )
                     runner.push_event(job["id"], "progress", dict(job["progress"]))
+
+                    def scan_report(
+                        current, total, path,
+                        _root=root_id, _name=root_names[root_id],
+                    ):
+                        scan_totals[_root] = total
+                        job["progress"].update(
+                            {
+                                "current": current,
+                                "total": total,
+                                "current_file": path,
+                                "phase": f"Checking {_name} against source",
+                                "root_folder_id": _root,
+                            }
+                        )
+                        runner.update_step(
+                            job["id"],
+                            f"check-{_root}",
+                            progress={"current": current, "total": total},
+                            current_file=path,
+                        )
+                        runner.push_event(job["id"], "progress", dict(job["progress"]))
+
+                    def begin_publish(_root=root_id, _name=root_names[root_id]):
+                        """Close the checking phase and open the publishing one."""
+                        nonlocal active_step
+                        if not runner.begin_uncancellable(job["id"]):
+                            return False
+                        checked = scan_totals.get(_root, 0)
+                        runner.update_step(
+                            job["id"],
+                            f"check-{_root}",
+                            status="completed",
+                            summary=(
+                                f"{checked:,} checked, no conflicts"
+                                if checked
+                                else "nothing to check against source"
+                            ),
+                        )
+                        active_step = f"folder-{_root}"
+                        runner.update_step(job["id"], active_step, status="running")
+                        job["progress"].update(
+                            {
+                                "current": 0,
+                                "total": 0,
+                                "current_file": "",
+                                "phase": f"Syncing {_name} to source",
+                                "root_folder_id": _root,
+                            }
+                        )
+                        runner.push_event(job["id"], "progress", dict(job["progress"]))
+                        return True
 
                     def report(
                         current, total, path,
@@ -786,16 +858,27 @@ def create_local_folder_blueprint(
                         runner.push_event(job["id"], "progress", dict(job["progress"]))
 
                     count = confirmed[root_id]
-                    result = sync_folder(
-                        thread_db,
-                        root_id,
-                        vireo_dir,
-                        allow_deletions=count is not None,
-                        confirmed_deletions=count,
-                        progress=report,
-                        cancel_check=lambda: runner.is_cancelled(job["id"]),
-                        begin_commit=lambda: runner.begin_uncancellable(job["id"]),
-                    )
+                    try:
+                        result = sync_folder(
+                            thread_db,
+                            root_id,
+                            vireo_dir,
+                            allow_deletions=count is not None,
+                            confirmed_deletions=count,
+                            progress=report,
+                            scan_progress=scan_report,
+                            cancel_check=lambda: runner.is_cancelled(job["id"]),
+                            begin_commit=begin_publish,
+                        )
+                    except LocalWorkspaceCancelled:
+                        runner.update_step(job["id"], active_step, status="cancelled")
+                        raise
+                    except Exception:
+                        # A conflict (the usual failure) ends the checking
+                        # phase, not the publishing one. Mark whichever step
+                        # was running so the card says where it stopped.
+                        runner.update_step(job["id"], active_step, status="failed")
+                        raise
                     results.append(result)
                     runner.update_step(
                         job["id"],
