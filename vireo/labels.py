@@ -734,27 +734,31 @@ def load_merged_labels(label_sets):
 def _contributed(records, kept_names, kept_taxa, kept_keys, dropped_keys):
     """Did this file back any class in the merged list?
 
-    A dropped prompt reached no class, whichever way it was dropped — an
-    ``{"ambiguous": True}`` entry, or a bare hand-authored name in a group
-    two source-backed files contested. Its file must not be credited for
-    the qualified prompts those other files produced. Everything not
-    dropped counts, including a spelling that merely lost a collision to
-    another file's — the species is in the list either way, and the
-    historical source list says so.
+    A record with a source identity backs a class only if *its own taxon*
+    survived: a kept prompt says nothing, because a collision loser and
+    the winner that took its spelling carry the same string under
+    different taxa.
+
+    A record without one backs a class if it was not dropped — dropped
+    covers both an ``{"ambiguous": True}`` entry and a bare hand-authored
+    name in a group two source-backed files contested. A spelling that
+    merely lost a collision to another file's still counts: the species is
+    in the list either way, and the historical source list says so.
     """
     from keyword_normalization import keyword_match_key
 
     for name, entry in records:
         entry = entry or {}
-        attributed = entry.get("scientific_name") and not entry.get("ambiguous")
-        if not attributed and keyword_match_key(name) in dropped_keys:
+        taxon = _taxon_key(entry) if not entry.get("ambiguous") else None
+        if entry.get("scientific_name") and taxon:
+            if taxon in kept_taxa:
+                return True
+            continue
+        if keyword_match_key(name) in dropped_keys:
             continue  # this prompt was dropped; it produced no class
         if name in kept_names:
             return True
-        taxon = _taxon_key(entry)
-        if taxon and taxon in kept_taxa:
-            return True
-        if not entry and keyword_match_key(_base_name(name, entry)) in kept_keys:
+        if keyword_match_key(_base_name(name, entry)) in kept_keys:
             return True
     return False
 

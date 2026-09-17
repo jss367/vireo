@@ -332,6 +332,20 @@ def test_a_file_that_backs_no_class_is_not_named_as_a_label_source(
     assert labels == ["Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)"]
     assert [m["labels_file"] for m in metas] == [split_a, split_b]
 
+    # A source-backed file whose prompt loses a name clash outright is not
+    # credited either: the winning class is another taxon's.
+    twin = {**RED, "taxon_id": 99999}
+    clash_a = save_labels("F", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
+    clash_b = save_labels("G", 14, "CA", ["birds"], SpeciesLabels(["parrot"], {"parrot": twin}))
+    loser = save_labels("H", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot (taxon 18976)"], {"Parrot (taxon 18976)": LILAC},
+    ))
+    labels, metas = load_merged_labels_with_metas([
+        {"labels_file": clash_a}, {"labels_file": clash_b}, {"labels_file": loser},
+    ])
+    assert LILAC["taxon_id"] not in {e.get("taxon_id") for e in labels.identities.values()}
+    assert [m["labels_file"] for m in metas] == [clash_a, clash_b]
+
     # A file whose only spelling loses a collision still backs the class.
     variant = save_labels("C", 14, "CA", ["birds"],
                           SpeciesLabels(["lilac-crowned parrot"], {"lilac-crowned parrot": LILAC}))
