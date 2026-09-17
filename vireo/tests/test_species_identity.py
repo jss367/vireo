@@ -160,6 +160,40 @@ def test_fetched_shared_common_name_is_qualified_at_download(tmp_path, monkeypat
     Classifier.__new__(Classifier)  # constructing for real needs model files
 
 
+def test_qualified_and_bare_prompts_for_sibling_taxa_do_not_reintroduce_ambiguity(
+    tmp_path, monkeypatch,
+):
+    """One list already split; another still names one of the pair bare.
+
+    Grouping on the unqualified name is what keeps the bare prompt from
+    surviving the taxon dedupe and answering for both species again."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    split = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot (Amazona viridigenalis)", "Parrot (Amazona rhodocorytha)"],
+        {"Parrot (Amazona viridigenalis)": RED,
+         "Parrot (Amazona rhodocorytha)": BROWED},
+    ))
+    bare = save_labels("B", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
+    for order in ([split, bare], [bare, split]):
+        labels = load_merged_labels([{"labels_file": p} for p in order])
+        assert labels == [
+            "Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)",
+        ], order
+        assert labels.identities["Parrot (Amazona viridigenalis)"]["taxon_id"] == 18976
+
+
+def test_already_split_list_reloads_to_the_same_prompts(tmp_path, monkeypatch):
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot (Amazona viridigenalis)", "Parrot (Amazona rhodocorytha)"],
+        {"Parrot (Amazona viridigenalis)": RED,
+         "Parrot (Amazona rhodocorytha)": BROWED},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    assert labels == ["Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)"]
+    assert labels.identities["Parrot (Amazona rhodocorytha)"]["taxon_id"] == 18997
+
+
 def test_prompt_that_is_its_own_binomial_is_not_double_qualified(tmp_path, monkeypatch):
     monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
     path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(

@@ -75,6 +75,26 @@ def _representative_entry(members):
     )
 
 
+def _base_name(name, entry):
+    """A prompt with its own scientific-name qualifier stripped.
+
+    ``Honey Mushroom (Armillaria alpha)`` and a bare ``Honey Mushroom``
+    for a second Armillaria are the same common name and must be weighed
+    as one collision, or a merge of an already-qualified list with a list
+    that never had to qualify would keep the bare prompt and hand the
+    classifier back the ambiguity this module exists to remove. Only a
+    suffix that is the entry's *own* binomial is stripped, so parentheses
+    that belong to the name survive.
+    """
+    scientific_name = (entry or {}).get("scientific_name")
+    if not scientific_name:
+        return name
+    suffix = f" ({scientific_name})"
+    if len(name) > len(suffix) and name.lower().endswith(suffix.lower()):
+        return name[: -len(suffix)]
+    return name
+
+
 def _qualified_name(name, scientific_name):
     """``Common Name (Scientific name)`` — the prompt for a shared name."""
     from keyword_normalization import keyword_match_key
@@ -83,9 +103,8 @@ def _qualified_name(name, scientific_name):
         return name
     if keyword_match_key(name) == keyword_match_key(scientific_name):
         return name  # the prompt already *is* the binomial
-    if keyword_match_key(name).endswith(keyword_match_key(f"({scientific_name})")):
-        return name  # already qualified by an earlier pass
-    return f"{name} ({scientific_name})"
+    base = _base_name(name, {"scientific_name": scientific_name})
+    return f"{base} ({scientific_name})"
 
 
 def disambiguate_labels(records):
@@ -123,9 +142,10 @@ def disambiguate_labels(records):
 
     groups = {}
     for name, entry in records:
-        groups.setdefault(keyword_match_key(name) or name, []).append(
-            (name, entry or {})
-        )
+        # Key on the unqualified name so an already-split prompt and a
+        # bare one for a sibling taxon meet in the same group.
+        key = keyword_match_key(_base_name(name, entry)) or name
+        groups.setdefault(key, []).append((name, entry or {}))
 
     names, identities, disambiguated, dropped = [], {}, [], []
     for group in groups.values():
