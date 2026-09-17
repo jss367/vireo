@@ -2461,16 +2461,31 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
     phash and metadata still described the pre-edit bytes, and no later
     scan would ever revisit it.
 
-    Best effort, and never fatal: anything that cannot be stat'd on either
-    side is left alone, which is exactly the pre-existing behavior (a
-    stale timestamp that a later scan repairs). Call after the copy is
-    verified and before the originals are removed, while both sides are
-    still readable and the rows still name the source files.
+    A source file that cannot be stat'd is skipped: verification walked the
+    source tree, so it never made a claim about a row whose file is already
+    gone, and there is nothing to re-stamp. A DESTINATION file that cannot
+    be stat'd is different -- see below.
 
-    Returns ``executemany`` parameters for the rows to re-stamp. Read-only
-    itself: the caller applies them once the catalog update it belongs
-    with has gone through, so a cascade that fails leaves no half-applied
-    timestamps behind.
+    Call after the copy is verified and before the originals are removed,
+    while both sides are still readable and the rows still name the source
+    files.
+
+    Returns ``(updates, unreadable)``. ``updates`` is ``executemany``
+    parameters for the rows to re-stamp; read-only itself, so the caller
+    applies them once the catalog update it belongs with has gone through
+    and a cascade that fails leaves no half-applied timestamps behind.
+    ``unreadable`` is the destination path whose stat failed while its
+    source was still present, or None.
+
+    That second return value exists because this pass is the last thing
+    that looks at the destination before ``shutil.rmtree`` deletes the
+    originals. Verification established "every source file is present at
+    the destination" minutes earlier; a source that is still here whose
+    copy has since vanished or gone unreadable means that no longer holds,
+    and ``check_staged_mount`` will not notice -- it re-checks mount
+    identity and availability, not the files. Swallowing that would throw
+    away first-hand evidence at the worst possible moment, so it is handed
+    back for the caller to treat as a verification failure.
     """
     # The repo's literal subtree predicate, not a raw LIKE: LIKE would read
     # ``_`` and ``%`` in a real folder path as wildcards and match
@@ -2531,9 +2546,14 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
         )
         try:
             src_st = os.stat(src_file)
+        except OSError:
+            # A row whose file is already gone: not something this move
+            # copied, and not something verification vouched for.
+            continue
+        try:
             dst_st = os.stat(dst_file)
         except OSError:
-            continue
+            return [], dst_file
         if src_st.st_mtime != stored_mtime or src_st.st_size != stored_size:
             # The row does not describe the file being moved -- it was
             # edited (or replaced) since its last scan. Leave it stale so
@@ -2547,7 +2567,7 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
             # is not ours to adopt.
             continue
         updates.append((dst_st.st_mtime, row["id"], stored_mtime, stored_size))
-    return updates
+    return updates, None
 
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
@@ -3114,10 +3134,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # is preserved anyway.
     mtime_updates = []
     if not remote:
-        mtime_updates = _plan_moved_file_mtimes(
+        mtime_updates, unreadable = _plan_moved_file_mtimes(
             db, src_path, transfer_dest,
             progress_cb=progress_cb, total_files=total_files,
         )
+        if unreadable is not None:
+            # Before any catalog write and before the rmtree, so returning
+            # here leaves the originals and the catalog exactly as they were.
+            return {"moved": 0, "errors": [
+                f"Verification failed: '{unreadable}' went missing or "
+                f"unreadable at the destination while timestamps were being "
+                f"read. Originals preserved."
+            ]}
         if progress_cb and mtime_updates:
             progress_cb(total_files, total_files, "", "Updating catalog")
         if pre_commit_check:

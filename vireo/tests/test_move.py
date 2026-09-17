@@ -6036,7 +6036,67 @@ def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
     (dest / "sub" / "d.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 64)
     os.utime(dest / "sub" / "d.jpg", (1600000000, 1600000000))
 
-    updates = move_mod._plan_moved_file_mtimes(db, str(src), str(dest))
+    updates, unreadable = move_mod._plan_moved_file_mtimes(
+        db, str(src), str(dest))
 
+    assert unreadable is None
     assert [u[1] for u in updates] == [moved_id]
     assert decoy_id not in [u[1] for u in updates]
+
+
+def test_move_folder_aborts_when_a_copy_vanishes_before_the_catalog_update(
+        tmp_path, monkeypatch):
+    """A destination file lost after verification stops the move.
+
+    The timestamp pass is the last thing that looks at the destination
+    before the originals are deleted, and the mount re-check only covers
+    mount identity — not whether the copies are still there. Losing that
+    evidence would delete an original whose copy no longer exists.
+    """
+    from move import move_folder
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+
+    def drop_a_copy():
+        # Runs after verification and before the timestamp plan — the exact
+        # window where a share can degrade without the mount going away.
+        victim = dst / "shoot" / "a.jpg"
+        if victim.exists():
+            victim.unlink()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst),
+                         pre_commit_check=drop_a_copy)
+
+    assert result["moved"] == 0
+    assert any("Originals preserved" in e for e in result["errors"])
+    # Nothing was deleted and the catalog still points at the source.
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["path"] == str(src)
+
+
+def test_move_folder_tolerates_a_catalog_row_whose_source_is_gone(
+        tmp_path, monkeypatch):
+    """A stale row is skipped, not treated as a missing copy.
+
+    Verification walks the source tree, so it never vouched for a row whose
+    file was deleted outside Vireo. Aborting on those would make an
+    unrelated stale row block every future move of the folder.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    ghost = db.add_photo(folder_id=fid, filename="ghost.jpg", extension=".jpg",
+                         file_size=66, file_mtime=1577880000)
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert result["mtimes_refreshed"] == len(ids)
+    assert db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (ghost,)
+    ).fetchone()["file_mtime"] == 1577880000
