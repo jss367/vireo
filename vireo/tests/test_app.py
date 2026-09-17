@@ -22964,6 +22964,7 @@ var browseLightboxStackGesture = null;
 var browseLightboxStackGestureSpent = null;
 var photos = [];
 var allLoaded = true;
+var earliestPage = 1;
 var browseStackMembers = {};
 var refreshes = 0, bars = 0;
 function refreshCardSelectionVisuals() { refreshes += 1; }
@@ -23073,6 +23074,23 @@ refreshes = 0; bars = 0;
 browseReconcileEmptyLightboxClose();
 results.partialWindow = snapshot();
 
+// (g) The tail is exhausted but the window starts past page 1 — a focused or
+//     deep-linked load. The earlier pages have never been fetched, so their
+//     selected ids are no more unreachable than (f)'s.
+//     Codex P2 on PR #1672.
+selectedPhotos = new Set([11, 12, 900, 901]);
+selectedPhotoId = null;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 20}, {id: 21}];
+browseStackMembers = {};
+allLoaded = true;
+earliestPage = 4;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.windowStartsLate = snapshot();
+earliestPage = 1;
+
 process.stdout.write(JSON.stringify(results));
 """,
     ])
@@ -23109,6 +23127,17 @@ process.stdout.write(JSON.stringify(results));
         "refreshes": 1,
         "bars": 1,
     }, "hidden members whose cover was deleted must be dropped even without a gesture"
+    assert result["windowStartsLate"] == {
+        "selected": [11, 12, 900, 901],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "allLoaded only says the tail is exhausted; a window starting past "
+        "page 1 has never seen the pages before it"
+    )
     assert result["partialWindow"] == {
         "selected": [11, 12, 900, 901],
         "focus": None,

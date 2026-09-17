@@ -13376,11 +13376,31 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // with it, or the batch bar keeps counting photos no shortcut can show and
   // the next rating lands on them unseen. Codex P2 on PR #1672.
   if (represented) {
+    // Recorded while the deleted photo was on screen, and a stack can be
+    // reprojected in between: a rating or flag in the lightbox promotes
+    // another member, so deleting the demoted photo leaves the stack standing
+    // under its new cover. Drop only the ids that no card represents *now* —
+    // a bounded check, over this one stack's ids rather than the whole
+    // selection. Codex P2 on PR #1672.
+    var representedNow = new Set();
+    photos.forEach(function(photo) {
+      representedNow.add(photo.id);
+      var stack = photo.browse_stack;
+      ((stack && stack.photo_ids) || []).forEach(function(id) {
+        representedNow.add(id);
+      });
+      (browseStackMembers[String(photo.id)] || []).forEach(function(member) {
+        representedNow.add(member.id);
+      });
+    });
+    var orphaned = represented.filter(function(id) {
+      return !representedNow.has(id);
+    });
     var dropped = false;
-    represented.forEach(function(id) {
+    orphaned.forEach(function(id) {
       if (selectedPhotos.delete(id)) dropped = true;
     });
-    if (selectedPhotoId != null && represented.indexOf(selectedPhotoId) !== -1) {
+    if (selectedPhotoId != null && orphaned.indexOf(selectedPhotoId) !== -1) {
       selectedPhotoId = null;
       selectedIndex = -1;
       dropped = true;
@@ -13429,7 +13449,10 @@ function browseReconcileEmptyLightboxClose() {
   // ``photos`` so the selection matches what is on screen — CORE_PHILOSOPHY
   // "no black boxes", the batch bar has to count photos the user can see.
   // Codex P2 on PR #1672.
-  // Only when the grid holds the whole result set. "Not in ``photos``" means
+  // Only when the grid holds the whole result set — both ends of it.
+  // ``allLoaded`` says the tail is exhausted, which a focused or deep-linked
+  // window reaches while ``earliestPage`` is still past 1 and the pages
+  // before it have never been fetched. "Not in ``photos``" means
   // "no card on screen" only once there are no more pages to load: with a
   // Select all that reaches past the loaded window, every id from a later
   // page looks unreachable here and the sweep would quietly delete most of
@@ -13437,7 +13460,7 @@ function browseReconcileEmptyLightboxClose() {
   // members of it. The bounded drop in the ``lightbox:photodeleted`` handler
   // covers the partial-window case, because it knows which ids the deleted
   // cover actually stood for. Codex P2 on PR #1672.
-  if (selectedPhotos.size > 0 && allLoaded) {
+  if (selectedPhotos.size > 0 && allLoaded && earliestPage === 1) {
     var reachable = new Set();
     photos.forEach(function(photo) {
       reachable.add(photo.id);
@@ -13451,7 +13474,7 @@ function browseReconcileEmptyLightboxClose() {
       }
     });
   }
-  if (selectedPhotoId != null && allLoaded) {
+  if (selectedPhotoId != null && allLoaded && earliestPage === 1) {
     var focusStillReachable = photos.some(function(photo) {
       if (photo.id === selectedPhotoId) return true;
       var members = browseStackMembers[String(photo.id)] || [];
