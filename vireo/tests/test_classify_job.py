@@ -237,6 +237,35 @@ def test_load_labels_refuses_an_empty_selected_file(tmp_path):
             )
 
 
+def test_a_deleted_label_selection_falls_back_instead_of_blocking(tmp_path):
+    """A workspace selection naming only deleted files must not lock
+    classification out: the UI lists files it can find, so there is no
+    checkbox left to untick."""
+    from unittest.mock import patch
+
+    from classify_job import _load_labels
+
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
+
+    class _StaleDb:
+        def get_workspace_active_labels(self):
+            return [str(tmp_path / "deleted.txt")]
+
+    with patch("classify_job.get_saved_labels", return_value=[]):
+        labels, use_tol, label_metas = _load_labels(
+            model_type="bioclip",
+            model_str="hf-hub:imageomics/bioclip",
+            labels_file=None,
+            labels_files=None,
+            db=_StaleDb(),
+            model_dir=str(tmp_path),
+        )
+    assert use_tol is True
+    assert not labels
+    assert label_metas == []
+
+
 def test_load_labels_timm_skips():
     """Phase 2: timm models skip label loading entirely."""
     from classify_job import _load_labels

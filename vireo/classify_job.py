@@ -110,6 +110,20 @@ def _load_taxonomy(taxonomy_path):
         return None
 
 
+def _any_present(label_sets):
+    """Does this selection still name a file on disk?
+
+    A selection that names only deleted files is not a selection to
+    refuse — it is one to fall back from. Deleting a set in Settings now
+    clears it from every workspace, but a selection stored before that
+    fix (or removed outside the app) must not lock classification out
+    with no checkbox left to untick.
+    """
+    return any(
+        os.path.exists(ls.get("labels_file", "")) for ls in label_sets
+    )
+
+
 def _load_labels(
     model_type, model_str, labels_file, labels_files, db=None, model_dir=None,
 ):
@@ -162,7 +176,7 @@ def _load_labels(
             saved_by_file.get(p, {"labels_file": p}) for p in labels_files
         ]
         labels, label_metas = load_merged_labels_with_metas(requested)
-        selected = True
+        selected = _any_present(requested)
         log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
     elif labels_file and os.path.exists(labels_file):
         # One file, same normalization as a list of them. A hand-authored
@@ -197,7 +211,7 @@ def _load_labels(
                 saved_by_file.get(p, {"labels_file": p}) for p in ws_labels
             ]
             labels, label_metas = load_merged_labels_with_metas(requested)
-            selected = bool(requested)
+            selected = _any_present(requested)
             names = [s.get("name", "?") for s in label_metas]
             log.info(
                 "Using %d merged labels from workspace active sets: %s",
@@ -208,7 +222,7 @@ def _load_labels(
             active_sets = get_active_labels()
             if active_sets:
                 labels, label_metas = load_merged_labels_with_metas(list(active_sets))
-                selected = True
+                selected = _any_present(active_sets)
                 names = [s.get("name", "?") for s in label_metas]
                 log.info(
                     "Using %d merged labels from global active sets: %s",

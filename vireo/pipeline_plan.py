@@ -171,7 +171,11 @@ def _resolve_labels_for_models(models, labels_files, db):
 
     def _load(active_sets):
         nonlocal selected
-        selected = bool(active_sets)
+        # A selection naming only deleted files falls back rather than
+        # blocking — same rule as classify_job._any_present.
+        selected = any(
+            os.path.exists(ls.get("labels_file", "")) for ls in active_sets
+        )
         try:
             return load_merged_labels(active_sets) if active_sets else []
         except Exception as e:

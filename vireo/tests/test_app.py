@@ -8057,6 +8057,39 @@ def test_labels_list_reports_skipped_names_without_shipping_identities(app_and_d
     assert "label_identities" not in entry
 
 
+def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_path):
+    """Otherwise the workspace keeps a selection naming a file that no
+    longer exists, which blocks classification with no checkbox to clear."""
+    import json as _json
+
+    import labels as labels_mod
+
+    app, db = app_and_db
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir(exist_ok=True)
+    # delete_labels() also rewrites the global active list under $HOME.
+    os.makedirs(os.path.expanduser("~/.vireo"), exist_ok=True)
+    label_path = str(labels_dir / "birds.txt")
+    with open(label_path, "w") as f:
+        f.write("Robin\n")
+    with open(str(labels_dir / "birds.json"), "w") as f:
+        _json.dump({"name": "Birds", "labels_file": label_path}, f)
+
+    db.set_workspace_active_labels([label_path])
+    other = db.create_workspace("Other", config_overrides={"active_labels": [label_path]})
+
+    orig = labels_mod.LABELS_DIR
+    labels_mod.LABELS_DIR = str(labels_dir)
+    try:
+        with app.test_client() as c:
+            assert c.delete("/api/labels", json={"labels_file": label_path}).status_code == 200
+    finally:
+        labels_mod.LABELS_DIR = orig
+
+    assert db.get_workspace_active_labels() == []
+    assert _json.loads(db.get_workspace(other)["config_overrides"])["active_labels"] == []
+
+
 def test_pipeline_page_init_includes_workspace_overrides(app_and_db):
     """page-init response includes workspace config overrides."""
     app, db = app_and_db

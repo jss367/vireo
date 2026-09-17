@@ -618,6 +618,11 @@ def create_models_blueprint(
         if not labels_file:
             return json_error("labels_file required")
         delete_labels(labels_file)
+        # Every workspace that had this set selected, not just the active
+        # one: a selection naming a deleted file blocks classification and
+        # no checkbox can clear it, because the UI lists only files it can
+        # find.
+        get_db().forget_label_file(labels_file)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/labels/active", methods=["POST"])
