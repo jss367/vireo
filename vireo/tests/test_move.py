@@ -6282,6 +6282,45 @@ def test_a_differently_sized_copy_stops_a_fresh_move(tmp_path, monkeypatch):
     assert not (dst / "shoot").exists()
 
 
+def test_a_destination_truncated_after_planning_stops_a_fresh_move(
+        tmp_path, monkeypatch):
+    """A destination file truncated after the planning pass is caught.
+
+    ``_plan_moved_file_mtimes`` stats every catalogued photo sequentially,
+    and on a network mount that takes minutes. A destination photo stat'd
+    early in the pass could be truncated or replaced while the pass keeps
+    working through the rest of the tree — the pass's later iterations
+    never revisit it, and a count-only fresh-move verification would still
+    match, so ``rmtree(src)`` would delete the intact original. Per-file
+    size verification is the last thing that touches the destination
+    before the catalog update, closing that window.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    transfer_dest = dst / "shoot"
+    real_plan = move_mod._plan_moved_file_mtimes
+
+    def plan_then_truncate(db_, src_path, dest_path, **kwargs):
+        result = real_plan(db_, src_path, dest_path, **kwargs)
+        # As if the mount truncated a.jpg after the planning pass had
+        # already stat'd it and moved on.
+        with open(os.path.join(dest_path, "a.jpg"), "wb") as handle:
+            handle.write(b"\xff\xd8")
+        return result
+
+    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes", plan_then_truncate)
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("size mismatch" in e for e in result["errors"])
+    # All-or-nothing: originals preserved, fresh destination removed.
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+    assert not transfer_dest.exists()
+
+
 def test_restamping_carries_the_offline_cache_row(tmp_path, monkeypatch):
     """A cached original stays fresh across the correction.
 

@@ -3134,19 +3134,79 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 f"or symlinked at destination. Originals preserved."
             ]}
     else:
-        # Fresh move into a destination we created: a whole-tree file
-        # count is a cheap, sufficient integrity check. Recount the source
-        # here rather than reusing the pre-copy `total_files` — if a file
-        # appeared in the source after that upfront count (and rsync didn't
-        # pick it up), a stale count could spuriously match `dst_count` and
-        # the rmtree below would delete the never-copied file. The fresh
-        # walk catches that mismatch and preserves the originals.
-        src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
-        dst_count = sum(1 for _, _, files in os.walk(transfer_dest) for _ in files)
-        if src_count != dst_count:
+        # Fresh move into a destination we created: walk the source and check
+        # each file has a same-sized counterpart at the destination. Recount
+        # the source here rather than reusing the pre-copy `total_files` — if
+        # a file appeared in the source after that upfront count (and rsync
+        # didn't pick it up), a stale count could spuriously match a naive
+        # dst_count and the rmtree below would delete the never-copied file.
+        #
+        # A whole-tree file count alone is not sufficient: ``_plan_moved_file_mtimes``
+        # above stats every catalog photo sequentially and can run for minutes
+        # on a network mount, so a destination photo stat'd early in that pass
+        # could be truncated or replaced afterwards while the pass keeps working
+        # through the rest of the tree. Neither the pass's remaining iterations
+        # nor a count-only check would notice, and rmtree(src) would then delete
+        # the intact original. Per-file size verification is the last thing
+        # that touches the destination before the catalog update, closing the
+        # window opened by the planning pass.
+        #
+        # Symlinks are matched structurally: rsync -a (and the shutil fallback)
+        # preserves source symlinks as destination symlinks with the same
+        # target string; os.path.getsize would follow the link, so lstat sizes
+        # and readlink targets are compared instead.
+        verify_error = None
+        src_count = 0
+        for root, _dirs, files in os.walk(src_path):
+            rel = os.path.relpath(root, src_path)
+            for fn in files:
+                src_count += 1
+                src_file = os.path.join(root, fn)
+                rel_name = fn if rel == "." else os.path.join(rel, fn)
+                dst_file = os.path.join(transfer_dest, rel_name)
+                if not os.path.lexists(dst_file):
+                    verify_error = f"'{rel_name}' missing at destination"
+                    break
+                src_is_link = os.path.islink(src_file)
+                dst_is_link = os.path.islink(dst_file)
+                if src_is_link != dst_is_link:
+                    verify_error = (
+                        f"'{rel_name}' type mismatch (symlink vs regular file) "
+                        f"at destination")
+                    break
+                if src_is_link:
+                    if os.readlink(src_file) != os.readlink(dst_file):
+                        verify_error = (
+                            f"'{rel_name}' symlink target mismatch at destination")
+                        break
+                    continue
+                try:
+                    src_size = os.stat(src_file, follow_symlinks=False).st_size
+                    dst_size = os.stat(dst_file, follow_symlinks=False).st_size
+                except OSError:
+                    verify_error = f"'{rel_name}' unreadable at destination"
+                    break
+                if src_size != dst_size:
+                    verify_error = (
+                        f"'{rel_name}' size mismatch at destination "
+                        f"(source={src_size}, dest={dst_size})")
+                    break
+            if verify_error:
+                break
+        if verify_error is None:
+            # Extras at destination — a leftover rsync temp file, or anything
+            # else the source-driven walk above never looked for — would leave
+            # the fresh destination in a state we do not fully understand.
+            # Count both sides after the size check so a mismatch that a
+            # per-source-file walk catches is not attributed to a stray extra.
+            dst_count = sum(1 for _, _, f in os.walk(transfer_dest) for _ in f)
+            if src_count != dst_count:
+                verify_error = (
+                    f"file count mismatch: source={src_count}, dest={dst_count}")
+        if verify_error is not None:
             shutil.rmtree(transfer_dest, ignore_errors=True)
             return {"moved": 0, "errors": [
-                f"File count mismatch: source={src_count}, dest={dst_count}. Originals preserved."
+                f"Verification failed: {verify_error}. Originals preserved."
             ]}
 
     # Count photos for progress
