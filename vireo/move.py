@@ -15,10 +15,10 @@ import time
 from datetime import datetime
 
 try:
-    from .db import _join_subtree_path, _subtree_prefix, _subtree_relative
+    from .db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
     from .proc import no_window_kwargs
 except ImportError:
-    from db import _join_subtree_path, _subtree_prefix, _subtree_relative
+    from db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
     from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
@@ -3330,28 +3330,49 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # continues to hold. Best-effort: a failure to touch is non-fatal --
         # the worst case is a one-shot regeneration on next access, exactly
         # the pre-fix behavior.
+        #
+        # Everything here runs AFTER the catalog commit above, so it is
+        # wrapped whole: an exception escaping at this point would leave the
+        # catalog repointed at the destination, the originals still sitting
+        # at the source, and the move reported as failed. Nothing about
+        # thumbnail freshness is worth that half-state, so any failure is
+        # logged and swallowed -- the cost is one regeneration on next
+        # access, which is exactly the behaviour without this block.
         if thumb_cache_dir and mtime_updates:
-            photo_ids = [photo_id for _, photo_id, _, _ in mtime_updates]
-            fresh_by_id = {photo_id: fresh
-                           for fresh, photo_id, _, _ in mtime_updates}
-            placeholders = ",".join(["?"] * len(photo_ids))
-            thumb_rows = db.conn.execute(
-                f"SELECT id, thumb_path FROM photos"
-                f" WHERE id IN ({placeholders}) AND thumb_path IS NOT NULL",
-                photo_ids,
-            ).fetchall()
-            for row in thumb_rows:
-                fresh = fresh_by_id.get(row["id"])
-                if fresh is None:
-                    continue
-                thumb_file = os.path.join(thumb_cache_dir, row["thumb_path"])
-                try:
-                    os.utime(thumb_file, (fresh, fresh))
-                except OSError:
-                    log.debug(
-                        "Could not align thumbnail mtime for photo %s at %s",
-                        row["id"], thumb_file, exc_info=True,
-                    )
+            try:
+                fresh_by_id = {photo_id: fresh
+                               for fresh, photo_id, _, _ in mtime_updates}
+                # Chunked: a folder of a few thousand photos would otherwise
+                # bind one variable per id and trip SQLite's
+                # SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) -- and the
+                # transfer this exists for moved 1099 in one go.
+                thumb_rows = []
+                for chunk in _chunks(list(fresh_by_id)):
+                    placeholders = ",".join(["?"] * len(chunk))
+                    thumb_rows.extend(db.conn.execute(
+                        f"SELECT id, thumb_path FROM photos"
+                        f" WHERE id IN ({placeholders})"
+                        f" AND thumb_path IS NOT NULL",
+                        chunk,
+                    ).fetchall())
+                for row in thumb_rows:
+                    fresh = fresh_by_id.get(row["id"])
+                    if fresh is None:
+                        continue
+                    thumb_file = os.path.join(
+                        thumb_cache_dir, row["thumb_path"])
+                    try:
+                        os.utime(thumb_file, (fresh, fresh))
+                    except OSError:
+                        log.debug(
+                            "Could not align thumbnail mtime for photo %s "
+                            "at %s", row["id"], thumb_file, exc_info=True,
+                        )
+            except Exception:
+                log.exception(
+                    "Could not align thumbnail mtimes under %s after the "
+                    "move; they will regenerate on next access", src_path,
+                )
 
     # Rebase any developed-output subdirs nested under the configured
     # darktable_output_dir. `developed_folder_key` hashes the folder's

@@ -1,6 +1,7 @@
 """Tests for photo move operations."""
 
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -6428,7 +6429,7 @@ def test_restamped_photo_thumbnails_stay_fresh(tmp_path, monkeypatch):
     thumb_dir = tmp_path / "thumbs"
     thumb_dir.mkdir()
     thumb_files = {}
-    for name, pid in ids.items():
+    for pid in ids.values():
         thumb_name = f"{pid}.jpg"
         thumb = thumb_dir / thumb_name
         thumb.write_bytes(b"\xff\xd8thumb")
@@ -6478,3 +6479,49 @@ def test_thumbnail_touch_without_thumb_cache_dir_is_a_no_op(tmp_path, monkeypatc
     assert result["errors"] == []
     # No touch requested, so the thumbnail keeps its original mtime.
     assert os.path.getmtime(str(thumb)) == 1577880000
+
+
+def test_thumbnail_alignment_never_fails_a_committed_move(
+        tmp_path, monkeypatch):
+    """Nothing after the catalog commit may fail the move.
+
+    The thumbnail pass runs once the folder paths and mtimes are already
+    committed, so an exception escaping it would leave the catalog pointing
+    at the destination, the originals still at the source, and the move
+    reported failed. A stale thumbnail is not worth that half-state.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    db.conn.execute("UPDATE photos SET thumb_path = 't.jpg'")
+    db.conn.commit()
+
+    def explode(*_a, **_kw):
+        raise sqlite3.OperationalError("too many SQL variables")
+
+    monkeypatch.setattr(move_mod, "_chunks", explode)
+    _lose_timestamps_in_transfer(monkeypatch)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
+                                 thumb_cache_dir=str(thumb_dir))
+
+    assert result["errors"] == []
+    assert result["moved"] >= 1
+    # The move completed: originals gone, catalog at the destination.
+    assert not src.exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["path"] == str(dst / "shoot")
+
+
+def test_thumbnail_lookup_is_chunked_under_the_sqlite_bind_limit(tmp_path):
+    """Photo ids are bound in bounded chunks, not one variable per photo."""
+    import move as move_mod
+
+    seen = []
+    for chunk in move_mod._chunks(list(range(2500))):
+        seen.append(len(chunk))
+    assert max(seen) <= 999
+    assert sum(seen) == 2500
