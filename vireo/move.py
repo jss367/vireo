@@ -3149,16 +3149,55 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         if progress_cb and mtime_updates:
             progress_cb(total_files, total_files, "", "Updating catalog")
         if pre_commit_check:
-            # The plan above stats the destination one photo at a time and
-            # swallows OSErrors by design, so on a network mount it can run
-            # for minutes without surfacing a share that went away mid-pass.
-            # That is exactly the window ``check_staged_mount`` exists to
-            # close: without re-checking, the cascade below would repoint the
-            # catalog and the rmtree at the end would delete the local
-            # originals against a destination nobody re-verified. Re-run it so
-            # the gap before the catalog update is no wider than it was before
-            # this pass existed.
+            # The plan above can run for minutes on a network mount, so
+            # re-check that the volume is still the one we verified against
+            # before the cascade repoints the catalog and the rmtree deletes
+            # the originals.
             pre_commit_check()
+        # ...and that the files are still there. The mount callback validates
+        # mount identity and availability, not contents, and the plan above
+        # only ever looks at catalog photo rows -- an ``.xmp`` sidecar, a
+        # published render, or any other non-catalog file could disappear
+        # during the pass on a perfectly healthy mount and nothing would
+        # notice before the originals were gone.
+        #
+        # Structural only (no ``verify_contents``): this re-checks a
+        # guarantee established minutes ago, and the byte-level pass re-reads
+        # every file on both sides. Paying that twice would more than double
+        # the most expensive phase of a NAS transfer -- tens of GB for one
+        # shoot -- to re-derive what a presence-and-size walk already
+        # settles. The full byte comparison stays where it belongs: once,
+        # before this window opens.
+        #
+        # And it mirrors the check this move actually ran rather than
+        # imposing a stronger one. A fresh move into a directory we created
+        # verified by whole-tree file count, and
+        # ``_first_missing_source_file`` deliberately reports a symlinked
+        # destination entry as missing -- so running it here would reject a
+        # legitimately moved symlink that the first pass never objected to.
+        if dest_exists or verify_contents:
+            missing = _first_missing_source_file(src_path, transfer_dest)
+            if missing is not None:
+                return {"moved": 0, "errors": [
+                    f"Verification failed: '{missing}' went missing, changed "
+                    f"size, or was replaced by a symlink at the destination "
+                    f"while timestamps were being read. Originals preserved."
+                ]}
+        else:
+            src_recount = sum(
+                1 for _, _, files in os.walk(src_path) for _ in files)
+            dst_recount = sum(
+                1 for _, _, files in os.walk(transfer_dest) for _ in files)
+            if src_recount != dst_recount:
+                # Unlike the first count check, leave the destination in
+                # place: it passed verification once, so it may already hold
+                # the only complete copy of something. Preserve both sides
+                # and let the user resume as a merge.
+                return {"moved": 0, "errors": [
+                    f"File count changed at the destination while timestamps "
+                    f"were being read: source={src_recount}, "
+                    f"dest={dst_recount}. Originals preserved."
+                ]}
     merge_counts = None
     if merge_into_tracked is not None:
         # Destination is a tracked archive and the caller opted into merging:

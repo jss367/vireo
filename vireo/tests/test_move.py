@@ -6100,3 +6100,38 @@ def test_move_folder_tolerates_a_catalog_row_whose_source_is_gone(
     assert db.conn.execute(
         "SELECT file_mtime FROM photos WHERE id = ?", (ghost,)
     ).fetchone()["file_mtime"] == 1577880000
+
+
+def test_move_folder_aborts_when_a_sidecar_vanishes_during_planning(
+        tmp_path, monkeypatch):
+    """A non-catalog file lost during the timestamp pass stops the move.
+
+    The plan only ever looks at catalog photo rows, and the mount re-check
+    validates mount identity rather than contents — so an ``.xmp`` sidecar
+    disappearing on a perfectly healthy mount would go unnoticed and its
+    original would be deleted.
+    """
+    from move import move_folder
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    (src / "a.xmp").write_text("<xmp/>")
+
+    def drop_the_sidecar():
+        # Runs after the plan, before the re-verification below it.
+        victim = dst / "shoot" / "a.xmp"
+        if victim.exists():
+            victim.unlink()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst),
+                         merge=True, verify_contents=True,
+                         pre_commit_check=drop_the_sidecar)
+
+    assert result["moved"] == 0
+    assert any("a.xmp" in e and "Originals preserved" in e
+               for e in result["errors"])
+    assert (src / "a.xmp").exists()
+    assert (src / "a.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["path"] == str(src)
