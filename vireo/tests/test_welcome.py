@@ -153,6 +153,39 @@ def test_models_status_empty_label_file_not_ready(app_and_db, monkeypatch, tmp_p
     assert data["classification"]["labels_ready"] is False
 
 
+def test_models_status_tol_model_with_empty_selection_not_ready(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """A ToL-ready model classifies label-free — but not while a selected
+    list classifies nothing: _load_labels raises for that selection, so
+    reporting ready would redirect past onboarding into a run that fails."""
+    import models
+    weights = tmp_path / "bioclip-2"
+    weights.mkdir()
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
+        "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(weights),
+    })
+    empty_file = tmp_path / "empty.txt"
+    empty_file.write_text("\n  \n")
+
+    app, db = app_and_db
+    db.set_workspace_active_labels([str(empty_file)])
+    data = app.test_client().get("/api/models/status").get_json()
+    assert data["classification"]["labels_ready"] is False
+    assert data["needs_setup"] is True
+
+    # A selection naming only deleted files is a fallback, not a block —
+    # same rule as classify_job._any_present — so ToL reports ready again.
+    db.set_workspace_active_labels([str(tmp_path / "gone.txt")])
+    data = app.test_client().get("/api/models/status").get_json()
+    assert data["classification"]["labels_ready"] is True
+    assert data["needs_setup"] is False
+
+
 def test_index_redirects_to_welcome_when_no_model(app_and_db, monkeypatch):
     """GET / redirects to /welcome when no classification model is available."""
     import models

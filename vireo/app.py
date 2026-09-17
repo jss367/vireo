@@ -21007,7 +21007,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_embedding_matrix():
         """Return which model+labels combinations have cached embeddings."""
         from classifier import _embedding_is_cached, _resolve_model_dir
-        from labels import get_saved_labels, load_label_set
+        from labels import get_saved_labels, normalized_label_set
         from models import get_models
 
         # Only BioCLIP-style models use per-label text embeddings. timm models
@@ -21025,7 +21025,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             labels_file = ls.get("labels_file", "")
             if not labels_file or not os.path.exists(labels_file):
                 continue
-            labels = load_label_set(labels_file, ls)
+            # Cached on the files' stamps: both Settings and Storage load
+            # this matrix, and it needs every saved set's full list to ask
+            # whether its embeddings are cached.
+            labels = normalized_label_set(ls)
             row = {
                 "labels_name": ls.get("name", ""),
                 "labels_file": labels_file,

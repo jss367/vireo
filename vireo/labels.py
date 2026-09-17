@@ -757,17 +757,18 @@ def load_merged_labels(label_sets):
     return labels
 
 
-# Two caches, because the two callers want different things. The labels
-# endpoint asks for counts for EVERY saved set on each load, so its cache
-# must survive a full scan — nine sets evicting each other in scan order
-# means nothing is ever reused. Counts are a few bytes, so it holds many.
-# The normalized lists are megabytes each and only the active sets are
-# ever asked for again (autocomplete), so that one stays small and
-# evicts least-recently-used rather than wiping itself.
+# Two caches, because the two shapes cost differently. Both must hold a
+# whole scan of the saved sets: the labels endpoint counts every set on
+# each load, and the embedding matrix needs every set's full list to ask
+# whether its embeddings are cached — a cache smaller than one scan is
+# evicted in scan order and never hits. Counts are a few bytes, so that
+# one holds many; the lists are megabytes, so that one is sized for a
+# realistic library (a dozen regional lists is tens of MB) and evicts
+# least-recently-used rather than wiping itself.
 _SUMMARY_CACHE = OrderedDict()
 _SUMMARY_CACHE_MAX = 256
 _NORMALIZED_CACHE = OrderedDict()
-_NORMALIZED_CACHE_MAX = 4
+_NORMALIZED_CACHE_MAX = 16
 
 
 def _cache_stamp(meta):
