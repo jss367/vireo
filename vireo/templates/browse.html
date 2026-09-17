@@ -13882,7 +13882,16 @@ document.addEventListener('contextmenu', function(e) {
     abandonDetailFocusForBatch();
     ids = stackIds;
   } else {
+    var beforeCoercion = selectionIdsKey(Array.from(selectedPhotos));
     ids = coerceSelectionOnContext(selectedPhotos, pid);
+    // Coercion replacing the selection is a selection change like any other,
+    // so the generation moves with it — otherwise a restore still waiting on
+    // stack hydration (undo/redo) considers itself current and merges the
+    // pre-undo ids into the card just right-clicked. Only when it actually
+    // changed: right-clicking inside the selection keeps it, and retiring a
+    // pending restore for that would lose a selection nobody replaced.
+    // Codex P2 on PR #1672.
+    if (selectionIdsKey(ids) !== beforeCoercion) anchorRestoreEpoch++;
   }
   // If coercion replaced the set, align selectedPhotoId (so the detail panel
   // reflects the right-clicked photo) and selectedIndex (the Shift-range

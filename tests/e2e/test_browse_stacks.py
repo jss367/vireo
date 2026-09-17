@@ -1069,6 +1069,72 @@ def test_right_clicking_a_stack_mid_hydration_abandons_the_restore(
     assert active == sorted(other_burst), active
 
 
+def test_right_clicking_a_single_card_mid_hydration_abandons_the_restore(
+    live_server, page,
+):
+    """The same rule for the ordinary single-card coercion.
+
+    Right-clicking outside the selection replaces it Finder-style, which
+    ``coerceSelectionOnContext`` does without touching the selection
+    generation — so a restore waiting on stack hydration still considered
+    itself current and merged the pre-undo stack into the one card the user
+    had just pointed at. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    page.locator(f'.grid-card[data-id="{burst_ids[1]}"]').click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    page.evaluate("() => batchSetColorLabel('red')")
+    page.wait_for_function(
+        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        arg=burst_ids,
+    )
+
+    page.evaluate(
+        """otherId => {
+          var orig = hydrateBrowseStackCoverMembers;
+          window.__coercedDuringHydration = false;
+          hydrateBrowseStackCoverMembers = function() {
+            if (!window.__coercedDuringHydration) {
+              window.__coercedDuringHydration = true;
+              var card = document.querySelector(
+                '.grid-card[data-id="' + otherId + '"]'
+              );
+              card.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true, cancelable: true, clientX: 10, clientY: 10,
+              }));
+              closeContextMenu();
+            }
+            return orig.apply(this, arguments);
+          };
+          window.__restoreHydrate = function() {
+            hydrateBrowseStackCoverMembers = orig;
+            delete window.__restoreHydrate;
+          };
+        }""",
+        other_id,
+    )
+
+    try:
+        page.evaluate("async () => { await doUndo(); }")
+    finally:
+        page.evaluate("() => window.__restoreHydrate && window.__restoreHydrate()")
+
+    assert page.evaluate("() => window.__coercedDuringHydration") is True
+    assert page.evaluate("() => getActiveSelection()") == [other_id]
+
+
 def test_cmd_clicking_a_selected_stack_deselects_it_as_a_unit(live_server, page):
     """Toggling a stack off has to take its focus with it.
 
