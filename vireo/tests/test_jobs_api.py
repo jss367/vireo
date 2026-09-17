@@ -889,6 +889,43 @@ def test_readiness_reports_an_all_dropped_label_set_as_blocked(
     assert data["use_tol"] is False
 
 
+def test_readiness_reports_partially_dropped_prompts(app_and_db, tmp_path, monkeypatch):
+    """A cross-file collision drops one prompt but keeps the rest. No per-list
+    badge can see that, so the preflight count must not read as "all of it"."""
+    import json as _json
+
+    import labels as labels_mod
+
+    metas = []
+    for name, identities in (
+        ("a", {"Parrot": {"taxon_id": 18976, "scientific_name": "Amazona viridigenalis"}}),
+        ("b", {"Parrot": {"taxon_id": 18997, "scientific_name": "Amazona rhodocorytha"}}),
+        ("legacy", None),
+    ):
+        names = ["Parrot"] if identities else ["Parrot", "Robin"]
+        path = tmp_path / f"{name}.txt"
+        path.write_text("".join(n + "\n" for n in names))
+        meta = {"name": name, "labels_file": str(path)}
+        if identities:
+            meta["label_identities"] = identities
+            meta["labels_text_sha256"] = labels_mod._text_identity(names)
+        (tmp_path / f"{name}.json").write_text(_json.dumps(meta))
+        metas.append(meta)
+    monkeypatch.setattr("labels.get_saved_labels", lambda: metas)
+
+    app, _ = app_and_db
+    query = "&".join(
+        "labels_files=" + m["labels_file"] for m in metas
+    )
+    with app.test_client() as client:
+        data = client.get("/api/classify/readiness?" + query).get_json()
+    # The bare "Parrot" cannot be attributed to either taxon and is dropped;
+    # the qualified pair and "Robin" survive.
+    assert data["labels_count"] == 3
+    assert data["labels_blocked"] is False
+    assert data["labels_skipped"] == 1
+
+
 def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     """Install-exiftool endpoint should exist and return JSON."""
     import shutil

@@ -3534,6 +3534,14 @@ async function updateReadiness() {
     } else if (r.labels_count > 0) {
       var labelDisplay = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
       items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + escapeHtml(labelDisplay) + '</b> — ' + r.labels_count.toLocaleString() + ' species');
+      // Some prompts dropped but others usable: the count above would
+      // otherwise read as "everything I picked", and a cross-file
+      // collision is invisible in the per-list Settings badge.
+      if (r.labels_skipped) {
+        items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> ' +
+          r.labels_skipped.toLocaleString() + ' name' + (r.labels_skipped === 1 ? ' is' : 's are') +
+          ' shared by several species and will not be classified — download the list again in Settings &rarr; Labels to split them by scientific name');
+      }
     }
 
     // Embeddings status
