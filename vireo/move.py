@@ -15,8 +15,10 @@ import time
 from datetime import datetime
 
 try:
+    from .db import _join_subtree_path, _subtree_prefix, _subtree_relative
     from .proc import no_window_kwargs
 except ImportError:
+    from db import _join_subtree_path, _subtree_prefix, _subtree_relative
     from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
@@ -2470,12 +2472,20 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
     with has gone through, so a cascade that fails leaves no half-applied
     timestamps behind.
     """
+    # The repo's literal subtree predicate, not a raw LIKE: LIKE would read
+    # ``_`` and ``%`` in a real folder path as wildcards and match
+    # case-insensitively, pulling in sibling trees this move never touched --
+    # and their rows would then resolve to files outside ``dest_path``. It
+    # also normalizes separators, so Windows descendants stored with
+    # backslashes are matched rather than silently skipped.
+    prefix = _subtree_prefix(src_path)
     rows = db.conn.execute(
         """SELECT p.id, p.filename, p.file_mtime, p.file_size,
                   f.path AS folder_path
            FROM photos p JOIN folders f ON f.id = p.folder_id
-           WHERE f.path = ? OR f.path LIKE ?""",
-        (src_path, src_path + "/%"),
+           WHERE f.path = ?
+              OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
+        (src_path, len(prefix), prefix),
     ).fetchall()
     updates = []
     for index, row in enumerate(rows):
@@ -2490,7 +2500,15 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
         if stored_mtime is None or stored_size is None:
             continue
         src_file = os.path.join(row["folder_path"], row["filename"])
-        dst_file = os.path.join(dest_path, os.path.relpath(src_file, src_path))
+        # Prefix-strip rather than ``os.path.relpath``: relpath is happy to
+        # walk out of the subtree with ``..`` if a row ever slipped past the
+        # predicate above, which would point this at a file the move never
+        # copied.
+        relative = _subtree_relative(row["folder_path"], src_path)
+        dst_file = _join_subtree_path(
+            dest_path,
+            f"{relative}/{row['filename']}" if relative else row["filename"],
+        )
         try:
             src_st = os.stat(src_file)
             dst_st = os.stat(dst_file)
@@ -3082,6 +3100,17 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         )
         if progress_cb and mtime_updates:
             progress_cb(total_files, total_files, "", "Updating catalog")
+        if pre_commit_check:
+            # The plan above stats the destination one photo at a time and
+            # swallows OSErrors by design, so on a network mount it can run
+            # for minutes without surfacing a share that went away mid-pass.
+            # That is exactly the window ``check_staged_mount`` exists to
+            # close: without re-checking, the cascade below would repoint the
+            # catalog and the rmtree at the end would delete the local
+            # originals against a destination nobody re-verified. Re-run it so
+            # the gap before the catalog update is no wider than it was before
+            # this pass existed.
+            pre_commit_check()
     merge_counts = None
     if merge_into_tracked is not None:
         # Destination is a tracked archive and the caller opted into merging:

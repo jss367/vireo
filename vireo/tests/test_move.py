@@ -5700,7 +5700,8 @@ def test_rsync_streamed_closes_pty_fds_when_popen_fails(monkeypatch):
             os.fstat(fd)  # closed: fstat on a closed fd raises EBADF
 
 
-def _catalog_folder_with_current_stats(tmp_path, names=("a.jpg", "b.jpg")):
+def _catalog_folder_with_current_stats(tmp_path, names=("a.jpg", "b.jpg"),
+                                       root_name="shoot"):
     """A folder whose rows describe its files exactly: a scan would skip it.
 
     Timestamps are pinned to a fixed past value so a copy that stamps the
@@ -5711,11 +5712,11 @@ def _catalog_folder_with_current_stats(tmp_path, names=("a.jpg", "b.jpg")):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.ensure_default_workspace())
 
-    src = tmp_path / "shoot"
+    src = tmp_path / root_name
     src.mkdir()
     dst = tmp_path / "archive"
     dst.mkdir()
-    fid = db.add_folder(str(src), name="shoot")
+    fid = db.add_folder(str(src), name=root_name)
 
     ids = {}
     for index, name in enumerate(names):
@@ -5905,3 +5906,76 @@ def test_tracked_merge_restamps_mtimes_a_copy_did_not_preserve(
     assert db.conn.execute(
         "SELECT file_mtime FROM photos WHERE id = ?", (prior,)
     ).fetchone()["file_mtime"] == 3.0
+
+
+def test_mtime_plan_ignores_a_sibling_tree_a_like_pattern_would_match(
+        tmp_path, monkeypatch):
+    """A folder name containing ``_`` must not drag in sibling subtrees.
+
+    ``LIKE '<src>/%'`` reads ``_`` as "any character", so ``shoot_1/%`` also
+    matches ``shootX1/sub`` — and that row resolves through ``..`` to a file
+    outside the destination this move wrote. Re-stamping it would hand an
+    untouched photo the timestamp of an unrelated file.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, _ids = _catalog_folder_with_current_stats(
+        tmp_path, names=("a.jpg", "b.jpg"), root_name="shoot_1")
+
+    # Sibling tree the wildcard would sweep in, catalogued accurately.
+    decoy_dir = tmp_path / "shootX1" / "sub"
+    decoy_dir.mkdir(parents=True)
+    decoy = decoy_dir / "decoy.jpg"
+    decoy.write_bytes(b"\xff\xd8" + b"\x00" * 64)
+    os.utime(decoy, (1577880000, 1577880000))
+    fid_decoy = db.add_folder(str(decoy_dir), name="sub")
+    decoy_id = db.add_photo(
+        folder_id=fid_decoy, filename="decoy.jpg", extension=".jpg",
+        file_size=decoy.stat().st_size, file_mtime=decoy.stat().st_mtime)
+
+    # The file the escaped path would land on: same size, different mtime.
+    escaped = dst / "shootX1" / "sub"
+    escaped.mkdir(parents=True)
+    (escaped / "decoy.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 64)
+    os.utime(escaped / "decoy.jpg", (1600000000, 1600000000))
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (decoy_id,)
+    ).fetchone()["file_mtime"] == 1577880000
+
+
+def test_move_folder_rechecks_the_destination_after_planning_mtimes(
+        tmp_path, monkeypatch):
+    """The mount is revalidated after the stat pass, not just before it.
+
+    Planning timestamps stats the destination per photo and swallows
+    OSErrors, so on a network mount it can run for minutes without noticing
+    the share disappear. A check that only ran before that pass would let the
+    catalog repoint and the originals be deleted against a destination nobody
+    re-verified.
+    """
+    from move import move_folder
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    calls = []
+
+    def flaky_check():
+        calls.append(len(calls))
+        if len(calls) > 1:
+            raise ValueError("the destination volume went away mid-move")
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    with pytest.raises(ValueError, match="went away"):
+        move_folder(db=db, folder_id=fid, destination=str(dst),
+                    pre_commit_check=flaky_check)
+
+    assert len(calls) == 2
+    # Originals preserved and the catalog still points at them.
+    assert (src / "a.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["path"] == str(src)
