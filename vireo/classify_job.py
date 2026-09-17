@@ -159,32 +159,25 @@ def _load_labels(
         labels, label_metas = load_merged_labels_with_metas(requested)
         log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
     elif labels_file and os.path.exists(labels_file):
-        # Legacy label files without saved identities are consumed in
-        # file order — merged label lists sort and dedupe, but a single
-        # hand-authored .txt has always been passed to the classifier as
-        # written. ``compute_fingerprint`` normalises via ``sorted(set)``
-        # so the cached-run key stays identical either way; the branch
-        # still preserves order for callers that observe ``labels``
-        # directly. When the file carries a ``.json`` sidecar of source
-        # identities, route through the atomic loader so identity
-        # dedupe applies and ``label_metas`` reflects a successful read.
+        # One file, same normalization as a list of them. A hand-authored
+        # .txt used to be passed to the classifier as written, which made
+        # ``Robin`` and ``robin`` two classes here and one through
+        # ``labels_files`` — so readiness, the embedding matrix and
+        # precompute (which all report the merged list) described a run
+        # this branch would not perform, and warmed an embedding identity
+        # it would not look up. There is one answer to "what does this
+        # file classify as" and it is the merged one.
         saved = get_saved_labels()
         saved_by_file = {s["labels_file"]: s for s in saved}
         single_meta = saved_by_file.get(labels_file, {"labels_file": labels_file})
-        try:
-            raw = read_label_file(labels_file)
-        except FileNotFoundError:
+        labels, label_metas = load_merged_labels_with_metas([single_meta])
+        if not label_metas:
+            # Racing DELETE between exists() above and the loader's read.
             log.warning(
                 "Label file vanished between exists() and read, skipping: %s",
                 labels_file,
             )
-            label_metas = []
         else:
-            if getattr(raw, "identities", {}):
-                labels, label_metas = load_merged_labels_with_metas([single_meta])
-            else:
-                labels = raw
-                label_metas = [single_meta]
             log.info("Using %d labels from file: %s", len(labels), labels_file)
     else:
         # Try workspace-scoped active labels first

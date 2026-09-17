@@ -101,9 +101,14 @@ def test_taxonomy_returns_none_when_missing(tmp_path):
 
 
 def test_load_labels_from_file(tmp_path):
-    """Phase 2: labels loaded from a single file path."""
+    """Phase 2: labels loaded from a single file path.
+
+    Normalized exactly like a list of files — sorted and folded — so the
+    one file classifies as the same set of classes either way, and the
+    readiness/embedding-matrix surfaces that report the merged list are
+    describing the run this produces."""
     labels_file = tmp_path / "labels.txt"
-    labels_file.write_text("Northern Cardinal\nBlue Jay\nAmerican Robin\n")
+    labels_file.write_text("Northern Cardinal\nBlue Jay\nAmerican Robin\nblue jay\n")
 
     from classify_job import _load_labels
 
@@ -113,9 +118,14 @@ def test_load_labels_from_file(tmp_path):
         labels_file=str(labels_file),
         labels_files=None,
     )
-    assert labels == ["Northern Cardinal", "Blue Jay", "American Robin"]
+    assert labels == ["American Robin", "Blue Jay", "Northern Cardinal"]
     assert use_tol is False
     assert label_metas == [{"labels_file": str(labels_file)}]
+
+    from labels import load_merged_labels
+    assert list(labels) == list(
+        load_merged_labels([{"labels_file": str(labels_file)}])
+    ), "singular and plural requests must classify the same file the same way"
 
 
 def test_load_labels_tol_fallback(tmp_path):
