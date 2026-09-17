@@ -22376,6 +22376,7 @@ def _browse_selection_js(html, body):
         _browse_js_function_body(html, "function browseStackMemberIds("),
         _browse_js_function_body(html, "function browseSelectionIdsForClick("),
         _browse_js_function_body(html, "function browseStackMemberRange("),
+        _browse_js_function_body(html, "function abandonDetailFocusForBatch("),
         _browse_js_function_body(html, "function browseSelectionIncludes("),
         _browse_js_function_body(html, "function browseCardSelectionClass("),
         _browse_js_function_body(html, "function browseSelectionStackNote("),
@@ -22711,8 +22712,9 @@ def test_right_click_stack_branch_scrubs_the_previous_detail_owner(app_and_db):
     cannot exercise the way ``selectPhoto`` is exercised above.
 
     Codex P1 on PR #1672 flagged both branches together; the failure mode is
-    identical, so the same two lines have to appear next to the
-    ``hideDetailPanel()`` call in the right-click stack path.
+    identical, so the right-click stack path has to make the same retirement
+    — through the shared helper the left-click path and the tray's Select all
+    also call, with this test pinning what that helper does.
     """
     app, _ = app_and_db
     html = app.test_client().get("/browse").get_data(as_text=True)
@@ -22727,15 +22729,24 @@ def test_right_click_stack_branch_scrubs_the_previous_detail_owner(app_and_db):
     branch_start = html.find(stack_branch_marker, start)
     assert branch_start != -1, "right-click stack branch not found"
     branch = html[branch_start:branch_start + 1200]
-    assert "hideDetailPanel();" in branch
-    assert "clearExifSuggestion();" in branch, (
-        "the right-click stack branch must scrub the pending EXIF suggestion "
-        "just like the left-click one and closeDetail"
+    assert "abandonDetailFocusForBatch();" in branch, (
+        "the right-click stack branch must retire the abandoned detail focus "
+        "the same way the left-click one and closeDetail do"
     )
-    assert "window._detailPhotoId = null" in branch, (
-        "the right-click stack branch must null the ambient detail-photo "
-        "pointer or a late reverse-geocode can repaint A's Accept line for "
-        "the whole batch"
+    # ...and that helper is what actually has to do the three things. Asserted
+    # here rather than inline in each branch so the paths can share one
+    # implementation instead of three copies that can drift apart.
+    helper = _browse_js_function_body(
+        html, "function abandonDetailFocusForBatch(",
+    )
+    assert "hideDetailPanel();" in helper
+    assert "clearExifSuggestion();" in helper, (
+        "entering a batch must scrub the pending EXIF suggestion, or a late "
+        "reverse-geocode can repaint A's Accept line for the whole batch"
+    )
+    assert "window._detailPhotoId = null" in helper, (
+        "entering a batch must null the ambient detail-photo pointer, which "
+        "is the other half of that same owner check"
     )
 
 

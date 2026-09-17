@@ -4179,7 +4179,7 @@ function selectBrowseStackAll(event, coverId) {
   selectedPhotos = new Set(
     browseStackMemberIds(coverId) || cover.browse_stack.photo_ids || []
   );
-  hideDetailPanel();
+  abandonDetailFocusForBatch();
   refreshCardSelectionVisuals();
   updateBatchBar();
 }
@@ -8445,16 +8445,7 @@ function selectPhoto(e, id, idx, opts) {
     selectedPhotos = new Set(clickIds);
     selectedPhotoId = null;
     selectedIndex = idx;
-    hideDetailPanel();
-    // Same reason as closeDetail: hideDetailPanel only touches CSS, so the
-    // EXIF-suggestion element keeps its data-photo-id and window._detailPhotoId
-    // keeps pointing at the previous single-focus photo. If A's reverse-geocode
-    // was still in flight and a later Select All (or any batch) folds A back
-    // into the selection, the async completion satisfies both owner checks and
-    // resurrects A's Accept line into the batch inspector — clicking it would
-    // apply A's GPS place to every selected photo. Codex P1 on PR #1672.
-    clearExifSuggestion();
-    window._detailPhotoId = null;
+    abandonDetailFocusForBatch();
   } else {
     // Normal click: single select
     selectedPhotos.clear();
@@ -11910,6 +11901,21 @@ function hideDetailPanel() {
   document.getElementById('summaryPanel').classList.remove('hidden');
 }
 
+// Trading a single-photo detail focus for a batch. The panel is not the only
+// thing that has to go: the EXIF suggestion element keeps its data-photo-id
+// and its Accept button, and an in-flight reverse-geocode keeps
+// window._detailPhotoId as its owner check — so a later selection that still
+// contains the abandoned photo would resurrect its Accept line for the whole
+// batch, and one click would apply that one photo's place to every selected
+// photo. closeDetail() and clearSelection() have retired both since Codex P2
+// on PR #1097; the paths that enter a stack selection need it for the same
+// reason. Codex P1 on PR #1672.
+function abandonDetailFocusForBatch() {
+  hideDetailPanel();
+  clearExifSuggestion();
+  window._detailPhotoId = null;
+}
+
 function closeDetail() {
   anchorRestoreEpoch++;
   hideDetailPanel();
@@ -13783,14 +13789,7 @@ document.addEventListener('contextmenu', function(e) {
     selectedPhotos = new Set(stackIds);
     selectedPhotoId = null;
     selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
-    hideDetailPanel();
-    // Match the left-click stack path: without clearing the pending EXIF
-    // suggestion and the ambient owner pointer, an in-flight reverse-geocode
-    // for the previously focused photo can repaint its Accept line into the
-    // batch inspector once a later Select All folds that photo back in.
-    // Codex P1 on PR #1672.
-    clearExifSuggestion();
-    window._detailPhotoId = null;
+    abandonDetailFocusForBatch();
     ids = stackIds;
   } else {
     ids = coerceSelectionOnContext(selectedPhotos, pid);

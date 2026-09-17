@@ -504,6 +504,88 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     assert abs(top_after - top_before) < 4
 
 
+def test_entering_a_stack_batch_retires_the_previous_detail_owner(
+    live_server, page,
+):
+    """A batch may not inherit the last focused photo's EXIF suggestion.
+
+    The suggestion element keeps its ``data-photo-id`` and Accept button,
+    and an in-flight reverse-geocode uses ``window._detailPhotoId`` as its
+    owner check. Leave either behind while entering a stack selection and a
+    later batch containing that photo resurrects its Accept line for the
+    whole batch — one click would then write one photo's place onto every
+    selected photo. Same retirement closeDetail() and clearSelection() have
+    done since Codex P2 on PR #1097. Codex P1 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    other = page.locator(f'.grid-card[data-id="{other_id}"]')
+
+    def focus_then(enter_stack):
+        other.click()
+        page.wait_for_function(
+            "photoId => window._detailPhotoId === photoId", arg=other_id,
+        )
+        # Stand in for a suggestion the detail panel had painted for it.
+        page.evaluate(
+            """photoId => {
+              var sugg = document.getElementById('locationExifSuggestion');
+              sugg.hidden = false;
+              sugg.innerHTML = '<button>Accept</button>';
+              sugg.dataset.photoId = String(photoId);
+            }""",
+            other_id,
+        )
+        enter_stack()
+        return page.evaluate(
+            """() => {
+              var sugg = document.getElementById('locationExifSuggestion');
+              return {
+                owner: window._detailPhotoId,
+                suggestionOwner: sugg.dataset.photoId || null,
+                suggestionHidden: sugg.hidden,
+              };
+            }"""
+        )
+
+    # Clicking the collapsed card...
+    assert focus_then(lambda: cover.click()) == {
+        "owner": None, "suggestionOwner": None, "suggestionHidden": True,
+    }
+    # ...right-clicking it...
+    def right_click():
+        cover.click(button="right")
+        page.evaluate("() => closeContextMenu()")
+
+    assert focus_then(right_click) == {
+        "owner": None, "suggestionOwner": None, "suggestionHidden": True,
+    }
+
+    # ...and the tray's Select all, which enters the same batch.
+    def tray_select_all():
+        cover.locator(".browse-stack-badge").click()
+        tray = page.locator(
+            f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+        )
+        expect(tray.locator(".browse-stack-member")).to_have_count(3)
+        tray.get_by_role("button", name="Select all").click()
+
+    assert focus_then(tray_select_all) == {
+        "owner": None, "suggestionOwner": None, "suggestionHidden": True,
+    }
+
+
 def test_cover_dropped_from_the_tray_leaves_a_partial_mark(live_server, page):
     """A card may not claim frames a batch action would skip.
 
