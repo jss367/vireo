@@ -3525,6 +3525,12 @@ async function updateReadiness() {
     // Labels status
     if (r.use_tol) {
       items.push('<span style="color:var(--info,#7ec8e3);">&#9679;</span> Labels: <b>Tree of Life</b> — classifying against all species (slower, less accurate than regional labels)');
+    } else if (r.labels_blocked) {
+      var blockedName = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
+      items.push('<span style="color:var(--danger,#e74c3c);">&#10007;</span> Labels: <b>' + escapeHtml(blockedName) +
+        '</b> — no usable species' +
+        (r.labels_skipped ? ' (all ' + r.labels_skipped.toLocaleString() + ' names are shared by several species)' : '') +
+        '. Classification will not run — download the list again in Settings &rarr; Labels.');
     } else if (r.labels_count > 0) {
       var labelDisplay = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
       items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + escapeHtml(labelDisplay) + '</b> — ' + r.labels_count.toLocaleString() + ' species');

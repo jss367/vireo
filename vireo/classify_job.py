@@ -69,6 +69,18 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 
+class UnusableLabelsError(RuntimeError):
+    """Every prompt in the selected label set was dropped as ambiguous.
+
+    Its own class because the cache peek in ``run_classify_job``
+    deliberately swallows label-resolution failures (missing weights on a
+    fresh install, ToL artifacts absent) and falls back to model-only
+    cache filtering. Swallowing *this* one would let
+    ``_finalize_cached_only`` report success from a different label space
+    for a request the authoritative load refuses.
+    """
+
+
 @dataclass
 class ClassifyParams:
     """Parameters for a classification job, parsed from the request body."""
@@ -216,7 +228,7 @@ def _load_labels(
     # whole catalog against Tree of Life (all species) when the user asked
     # for one region. Say what happened and how to fix it instead.
     if labels is not None and not labels and getattr(labels, "dropped_ambiguous", ()):
-        raise RuntimeError(
+        raise UnusableLabelsError(
             f"Every name in the selected species list "
             f"({len(labels.dropped_ambiguous):,}) is shared by more than one "
             f"species, so none of them can identify a taxon. Go to Settings → "
@@ -3431,6 +3443,12 @@ def run_classify_job(
             fp_full_peek = compute_full_fingerprint(peek_labels)
             if isinstance(fp_full_peek, str) and len(fp_full_peek) == 64:
                 desired_labels_fingerprint_full = fp_full_peek
+        except UnusableLabelsError:
+            # Same reasoning as the model_id_missing raise above: without
+            # this, the cache-only shortcut would accept runs from any
+            # previous label space and finish "successfully" for a
+            # selection the authoritative load below rejects.
+            raise
         except Exception:
             desired_labels_fingerprint = None
 

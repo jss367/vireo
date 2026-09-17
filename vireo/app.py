@@ -18500,6 +18500,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 else:
                     label_name = "No labels — download a species list in Settings"
 
+        # A selection whose every prompt was dropped is not "no labels":
+        # classify_job raises and the planner marks it blocked, so the
+        # preflight panel has to say so too rather than rendering nothing.
+        labels_skipped = len(getattr(labels, "dropped_ambiguous", ()))
+        labels_blocked = bool(not labels and labels_skipped and not use_tol)
+
         # Check embedding cache
         embeddings_cached = False
         if model and not use_tol and labels:
@@ -18518,6 +18524,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "needs_download": needs_download,
                 "labels_name": label_name,
                 "labels_count": label_count,
+                "labels_blocked": labels_blocked,
+                "labels_skipped": labels_skipped,
                 "use_tol": use_tol,
                 "embeddings_cached": embeddings_cached,
                 "exiftool": exiftool_status,

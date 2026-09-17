@@ -4872,6 +4872,41 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
     return captured_photos, runner.events, result
 
 
+def test_cache_shortcut_does_not_swallow_an_unusable_label_set(tmp_path):
+    """The peek tolerates label-resolution failures on purpose, but not
+    this one: reporting cached success would reuse runs from a different
+    label space for a selection the job refuses."""
+    from unittest.mock import patch
+
+    from classify_job import ClassifyParams, UnusableLabelsError, run_classify_job
+
+    db_path, ws, col_id, _p1, _p2 = _setup_two_photo_classify_workspace(tmp_path)
+    fake_model = {
+        "id": "test-model", "name": "TestModel",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "weights_path": "/tmp/weights.bin",
+        "model_type": "bioclip", "downloaded": True,
+    }
+    params = ClassifyParams(
+        collection_id=col_id, labels_file=None, labels_files=None,
+        model_id=None, model_name="TestModel", grouping_window=10,
+        similarity_threshold=0.85, reclassify=False,
+    )
+    # Every photo looks cached, so without the re-raise the job would
+    # finish "successfully" without ever loading the real labels.
+    with patch("classify_job.get_active_model", return_value=fake_model), \
+         patch("classify_job.get_models", return_value=[fake_model]), \
+         patch("classify_job._load_taxonomy", return_value=None), \
+         patch("classify_job._all_photos_cache_satisfied", return_value=True), \
+         patch("classify_job._finalize_cached_only",
+               return_value={"classified": 2, "cached": True}) as finalize, \
+         patch("classify_job._load_labels",
+               side_effect=UnusableLabelsError("all names are shared")):
+        with pytest.raises(UnusableLabelsError):
+            run_classify_job(_make_job(), FakeRunner(), db_path, ws, params)
+    assert finalize.call_count == 0
+
+
 def test_classify_job_skips_photos_with_subject_keywords(tmp_path):
     """When a photo has a keyword whose type is in the workspace's
     subject_types, the classifier doesn't include it in the run.
