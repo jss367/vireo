@@ -5953,6 +5953,12 @@ def test_mtime_plan_ignores_a_sibling_tree_a_like_pattern_would_match(
     ).fetchone()["file_mtime"] == 1577880000
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="A literal backslash in a folder name is only possible on POSIX — "
+    "on Windows it is a path separator, so the two trees under test would "
+    "resolve to the same directory and could not be distinct.",
+)
 def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
     """A POSIX folder named ``shoot\\1`` must not sweep in ``shoot/1``.
 
