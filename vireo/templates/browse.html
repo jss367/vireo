@@ -8446,6 +8446,15 @@ function selectPhoto(e, id, idx, opts) {
     selectedPhotoId = null;
     selectedIndex = idx;
     hideDetailPanel();
+    // Same reason as closeDetail: hideDetailPanel only touches CSS, so the
+    // EXIF-suggestion element keeps its data-photo-id and window._detailPhotoId
+    // keeps pointing at the previous single-focus photo. If A's reverse-geocode
+    // was still in flight and a later Select All (or any batch) folds A back
+    // into the selection, the async completion satisfies both owner checks and
+    // resurrects A's Accept line into the batch inspector — clicking it would
+    // apply A's GPS place to every selected photo. Codex P1 on PR #1672.
+    clearExifSuggestion();
+    window._detailPhotoId = null;
   } else {
     // Normal click: single select
     selectedPhotos.clear();
@@ -13775,6 +13784,13 @@ document.addEventListener('contextmenu', function(e) {
     selectedPhotoId = null;
     selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
     hideDetailPanel();
+    // Match the left-click stack path: without clearing the pending EXIF
+    // suggestion and the ambient owner pointer, an in-flight reverse-geocode
+    // for the previously focused photo can repaint its Accept line into the
+    // batch inspector once a later Select All folds that photo back in.
+    // Codex P1 on PR #1672.
+    clearExifSuggestion();
+    window._detailPhotoId = null;
     ids = stackIds;
   } else {
     ids = coerceSelectionOnContext(selectedPhotos, pid);

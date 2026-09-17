@@ -22654,6 +22654,91 @@ process.stdout.write(JSON.stringify({
     }
 
 
+def test_clicking_a_stack_card_scrubs_the_previous_detail_owner(app_and_db):
+    """A stack-select click has to clear the same async-anchor state that
+    closeDetail does.
+
+    ``hideDetailPanel`` is CSS-only. If photo A had detail focus with a
+    reverse-geocode in flight, and the user then clicks an unrelated collapsed
+    stack card, ``window._detailPhotoId`` still points at A and the EXIF-
+    suggestion element still carries A's ``data-photo-id``. A subsequent
+    Select All (or any batch that folds A back in) satisfies
+    ``maybeShowExifSuggestion``'s owner check when the fetch finally lands and
+    resurrects A's Accept line into the batch inspector — clicking it would
+    apply A's GPS place to every selected photo. Codex P1 on PR #1672; same
+    reasoning as the drop-anchor and closeDetail paths.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+var __clearCalls = 0;
+clearExifSuggestion = function() { __clearCalls++; };
+seedGrid();
+// Photo 30 is a single: click it to give the detail panel an owner and
+// stand in for a reverse-geocode that has not yet resolved.
+selectPhoto(CLICK, 30, 2);
+window._detailPhotoId = 30;
+var beforeStackClick = {
+  detailOwner: window._detailPhotoId,
+  clearCalls: __clearCalls,
+};
+// The click that would otherwise leave A's owner pointer behind.
+selectPhoto(CLICK, 10, 0);
+process.stdout.write(JSON.stringify({
+  before: beforeStackClick,
+  after: {
+    selected: Array.from(selectedPhotos),
+    detailOwner: window._detailPhotoId,
+    clearCalls: __clearCalls,
+  },
+}));
+"""), [])
+    assert result["before"] == {"detailOwner": 30, "clearCalls": 0}
+    # The stack click selected the stack, dropped the ambient owner pointer,
+    # and scrubbed the pending suggestion element so a late reverse-geocode
+    # for photo 30 cannot repaint its Accept line into the batch inspector.
+    assert result["after"] == {
+        "selected": [10, 11, 12],
+        "detailOwner": None,
+        "clearCalls": 1,
+    }
+
+
+def test_right_click_stack_branch_scrubs_the_previous_detail_owner(app_and_db):
+    """The right-click stack-coercion branch has the same anchor cleanup as
+    the left-click one — reading the source is enough here, since the
+    contextmenu handler is a document-level closure the node harness
+    cannot exercise the way ``selectPhoto`` is exercised above.
+
+    Codex P1 on PR #1672 flagged both branches together; the failure mode is
+    identical, so the same two lines have to appear next to the
+    ``hideDetailPanel()`` call in the right-click stack path.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    # Slice the contextmenu handler out of the file: it opens with the
+    # document-level addEventListener and runs to the corresponding closing
+    # ``});``. That is enough to look for the stack-coercion branch and its
+    # cleanup calls without depending on the exact line numbers.
+    marker = "document.addEventListener('contextmenu', function(e) {"
+    start = html.find(marker)
+    assert start != -1, "contextmenu handler not found in browse.html"
+    stack_branch_marker = "if (stackIds.length > 1 && !wholeStackSelected) {"
+    branch_start = html.find(stack_branch_marker, start)
+    assert branch_start != -1, "right-click stack branch not found"
+    branch = html[branch_start:branch_start + 1200]
+    assert "hideDetailPanel();" in branch
+    assert "clearExifSuggestion();" in branch, (
+        "the right-click stack branch must scrub the pending EXIF suggestion "
+        "just like the left-click one and closeDetail"
+    )
+    assert "window._detailPhotoId = null" in branch, (
+        "the right-click stack branch must null the ambient detail-photo "
+        "pointer or a late reverse-geocode can repaint A's Accept line for "
+        "the whole batch"
+    )
+
+
 def test_batch_delete_discards_a_companion_count_for_a_stale_selection(
     app_and_db,
 ):
