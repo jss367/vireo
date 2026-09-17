@@ -525,6 +525,53 @@ def test_endpoint_dedupes_label_files_with_same_fingerprint(
                 assert p["classified_dets"] <= 1
 
 
+def test_endpoint_excludes_a_label_set_with_no_usable_species(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """An all-ambiguous set loads empty, and compute_fingerprint([]) is the
+    ToL sentinel — so emitting a row for it would bill Tree of Life's counts
+    twice under the set's own name."""
+    import labels as labels_mod
+
+    app, db = app_and_db
+    photo_row = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()
+    _add_detection(db, photo_row["id"])
+
+    paths = _setup_labels_dir(tmp_path, monkeypatch, [
+        ("birds", ["Robin"]),
+        ("ambiguous", ["Honey Mushroom", "Shaggy Parasol"]),
+    ])
+    names = ["Honey Mushroom", "Shaggy Parasol"]
+    meta_path = os.path.splitext(paths["ambiguous"])[0] + ".json"
+    meta = json.load(open(meta_path))
+    meta["label_identities"] = {name: {"ambiguous": True} for name in names}
+    meta["labels_text_sha256"] = labels_mod._text_identity(names)
+    with open(meta_path, "w") as f:
+        json.dump(meta, f)
+
+    body = app.test_client().get(
+        "/api/workspace/classification-inventory"
+    ).get_json()
+
+    assert [u["name"] for u in body["unusable_label_sets"]] == ["ambiguous"]
+    assert body["unusable_label_sets"][0]["skipped"] == 2
+    # The stats page keys its "All combinations classified" line off this
+    # list, so an unusable set must stay reported even when every emitted
+    # pair is complete.
+    assert body["unusable_label_sets"], "the page needs this to stay honest"
+    from labels_fingerprint import TOL_SENTINEL
+    for m in body["models"]:
+        if m.get("legacy"):
+            continue
+        named_tol = [
+            p for p in m["pairs"]
+            if p["fingerprint"] == TOL_SENTINEL and not p.get("is_tol")
+            and not p.get("is_intrinsic")
+        ]
+        assert named_tol == [], f"{m['name']} billed ToL under a label set"
+        assert "ambiguous" not in [p["label_set"] for p in m["pairs"]]
+
+
 def test_endpoint_merged_fingerprint_not_stale(app_and_db, tmp_path, monkeypatch):
     """A classify run with multiple label files merged produces a fingerprint
     of the union — that fingerprint matches no single ``.txt`` file but is

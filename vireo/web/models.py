@@ -554,21 +554,58 @@ def create_models_blueprint(
     @blueprint.route("/api/labels")
     def api_labels_list():
         from labels import get_active_labels as get_global_active_labels
-        from labels import get_saved_labels
+        from labels import get_saved_labels, label_set_summary
+
+        def summarize(meta):
+            """Drop the per-label identity map, keep what it implies.
+
+            ``label_identities`` is megabytes on a regional list and the
+            page never reads it — but the page must still say how many
+            species this set contributes and how many of its names the
+            classifier cannot use, so both counts travel in its place.
+            ``species_count`` is what the file holds; ``usable_count`` is
+            what a run receives, and they differ exactly when names are
+            shared between species.
+            """
+            trimmed = {k: v for k, v in meta.items() if k != "label_identities"}
+            path = meta.get("labels_file")
+            if path and os.path.exists(path):
+                try:
+                    # Memoized on the files' size+mtime: this endpoint
+                    # answers for every saved set on each Settings and
+                    # Pipeline load, and normalizing a regional list is
+                    # ~0.5s of work that only changes when the files do.
+                    usable, skipped = label_set_summary(meta)
+                    trimmed["usable_count"] = usable
+                    trimmed["ambiguous_count"] = skipped
+                except Exception:
+                    log.warning(
+                        "Could not inspect %s for ambiguous labels", path,
+                        exc_info=True,
+                    )
+            return trimmed
 
         db = get_db()
-        saved = get_saved_labels()
+        saved = [summarize(meta) for meta in get_saved_labels()]
+        saved_by_file = {s["labels_file"]: s for s in saved if s.get("labels_file")}
         ws_labels = db.get_workspace_active_labels()
         if ws_labels is not None:
             # Resolve workspace labels to metadata
-            saved_by_file = {s["labels_file"]: s for s in saved}
             active = []
             for p in ws_labels:
                 if os.path.exists(p):
                     meta = saved_by_file.get(p, {"labels_file": p})
                     active.append(meta)
         else:
-            active = get_global_active_labels()
+            # Same trimmed objects as ``saved`` so the identity map is not
+            # re-attached through the active list. Look the entry up rather
+            # than passing ``summarize(meta)`` as a ``get`` default: that
+            # default is evaluated eagerly, so every active set would be
+            # re-read and re-merged even when its trimmed copy is in hand.
+            active = []
+            for meta in get_global_active_labels():
+                known = saved_by_file.get(meta.get("labels_file"))
+                active.append(known if known is not None else summarize(meta))
         return jsonify(
             {
                 "labels": saved,
@@ -585,6 +622,11 @@ def create_models_blueprint(
         if not labels_file:
             return json_error("labels_file required")
         delete_labels(labels_file)
+        # Every workspace that had this set selected, not just the active
+        # one: a selection naming a deleted file blocks classification and
+        # no checkbox can clear it, because the UI lists only files it can
+        # find.
+        get_db().forget_label_file(labels_file)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/labels/active", methods=["POST"])

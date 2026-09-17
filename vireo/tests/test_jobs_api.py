@@ -858,6 +858,93 @@ def test_readiness_includes_exiftool_status(app_and_db):
         assert isinstance(data["exiftool"]["brew_available"], bool)
 
 
+def test_readiness_reports_an_all_dropped_label_set_as_blocked(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The classify job refuses this selection and the planner marks it
+    blocked, so the preflight panel must not render an empty labels line."""
+    import json as _json
+
+    import labels as labels_mod
+
+    names = ["Honey Mushroom", "Shaggy Parasol"]
+    labels_file = tmp_path / "ambiguous.txt"
+    labels_file.write_text("".join(name + "\n" for name in names))
+    meta = {
+        "name": "Ambiguous", "labels_file": str(labels_file),
+        "label_identities": {name: {"ambiguous": True} for name in names},
+        "labels_text_sha256": labels_mod._text_identity(names),
+    }
+    (tmp_path / "ambiguous.json").write_text(_json.dumps(meta))
+    monkeypatch.setattr("labels.get_saved_labels", lambda: [meta])
+
+    app, _ = app_and_db
+    with app.test_client() as client:
+        data = client.get(
+            "/api/classify/readiness?labels_file=" + str(labels_file)
+        ).get_json()
+    assert data["labels_count"] == 0
+    assert data["labels_blocked"] is True
+    assert data["labels_skipped"] == 2
+    assert data["use_tol"] is False
+
+    # An explicitly selected empty file is blocked too — the job refuses it
+    # rather than falling back to Tree of Life — but with nothing skipped.
+    empty = tmp_path / "empty.txt"
+    empty.write_text("")
+    with app.test_client() as client:
+        data = client.get(
+            "/api/classify/readiness?labels_file=" + str(empty)
+        ).get_json()
+    assert data["labels_blocked"] is True
+    assert data["labels_skipped"] == 0
+
+    # A path deleted since the tab rendered is a fallback, not a refusal —
+    # readiness must say what classify_job._any_present would do.
+    with app.test_client() as client:
+        data = client.get(
+            "/api/classify/readiness?labels_files=" + str(tmp_path / "gone.txt")
+        ).get_json()
+    assert data["labels_blocked"] is False
+
+
+def test_readiness_reports_partially_dropped_prompts(app_and_db, tmp_path, monkeypatch):
+    """A cross-file collision drops one prompt but keeps the rest. No per-list
+    badge can see that, so the preflight count must not read as "all of it"."""
+    import json as _json
+
+    import labels as labels_mod
+
+    metas = []
+    for name, identities in (
+        ("a", {"Parrot": {"taxon_id": 18976, "scientific_name": "Amazona viridigenalis"}}),
+        ("b", {"Parrot": {"taxon_id": 18997, "scientific_name": "Amazona rhodocorytha"}}),
+        ("legacy", None),
+    ):
+        names = ["Parrot"] if identities else ["Parrot", "Robin"]
+        path = tmp_path / f"{name}.txt"
+        path.write_text("".join(n + "\n" for n in names))
+        meta = {"name": name, "labels_file": str(path)}
+        if identities:
+            meta["label_identities"] = identities
+            meta["labels_text_sha256"] = labels_mod._text_identity(names)
+        (tmp_path / f"{name}.json").write_text(_json.dumps(meta))
+        metas.append(meta)
+    monkeypatch.setattr("labels.get_saved_labels", lambda: metas)
+
+    app, _ = app_and_db
+    query = "&".join(
+        "labels_files=" + m["labels_file"] for m in metas
+    )
+    with app.test_client() as client:
+        data = client.get("/api/classify/readiness?" + query).get_json()
+    # The bare "Parrot" cannot be attributed to either taxon and is dropped;
+    # the qualified pair and "Robin" survive.
+    assert data["labels_count"] == 3
+    assert data["labels_blocked"] is False
+    assert data["labels_skipped"] == 1
+
+
 def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     """Install-exiftool endpoint should exist and return JSON."""
     import shutil

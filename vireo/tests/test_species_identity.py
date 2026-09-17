@@ -11,6 +11,7 @@ from classifier_cache import _ordered_labels_identity
 from computation_cache import CacheFormatError, _validate_candidate_taxonomy, classifier_runtime_fingerprint
 from db import Database
 from embedding_cache import canonicalize_labels
+from keyword_normalization import keyword_match_key
 from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_label_file, save_labels
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
@@ -115,14 +116,284 @@ def test_edited_prompt_does_not_reuse_stale_identity(tmp_path, monkeypatch):
     assert read_label_file(path).identities == {}
 
 
-def test_conflicting_label_sources_are_not_silently_merged(tmp_path, monkeypatch):
+def test_conflicting_label_sources_are_split_by_scientific_name(tmp_path, monkeypatch, db):
     monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
     a = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
     b = save_labels("B", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": BROWED}))
     labels = load_merged_labels([{"labels_file": a}, {"labels_file": b}])
-    assert labels.identities["Parrot"] == {"ambiguous": True}
+    assert labels == ["Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)"]
+    assert labels.identities["Parrot (Amazona viridigenalis)"]["taxon_id"] == 18976
+    assert labels.disambiguated == labels
+    assert labels.dropped_ambiguous == []
+    # Each prompt reads back as the taxon it names, not as a bare common name.
+    resolver = SpeciesResolver(db=db)
+    assert resolver.display(labels[0]).key == "taxon:18997"
+    assert resolver.display(labels[1]).key == "taxon:18976"
+
+
+def test_case_only_collision_between_taxa_keeps_both_species(tmp_path, monkeypatch):
+    """`Chia` and `chia` are different Salvia species in one iNat region."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot", "parrot"], {"Parrot": RED, "parrot": BROWED},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    # Each taxon keeps the spelling its own source used.
+    assert labels == ["Parrot (Amazona viridigenalis)", "parrot (Amazona rhodocorytha)"]
+
+
+def test_fetched_shared_common_name_is_qualified_at_download(tmp_path, monkeypatch):
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    payload = {"total_results": 2, "results": [
+        {"taxon": {"id": source["taxon_id"], "name": source["scientific_name"],
+                   "preferred_common_name": "Parrot", "rank": "species"}}
+        for source in (RED, BROWED)
+    ]}
+    with patch("labels.urllib.request.urlopen") as request:
+        request.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        fetched = fetch_species_list(14, ["birds"])
+    assert sorted(fetched) == ["Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)"]
+    assert len(fetched.disambiguated) == 2
+    path = save_labels("California birds", 14, "California", ["birds"], fetched)
+    reloaded = load_merged_labels([{"labels_file": path}])
+    assert sorted(reloaded) == sorted(fetched)
+    assert reloaded.identities["Parrot (Amazona viridigenalis)"]["taxon_id"] == 18976
+    Classifier.__new__(Classifier)  # constructing for real needs model files
+
+
+def test_qualified_and_bare_prompts_for_sibling_taxa_do_not_reintroduce_ambiguity(
+    tmp_path, monkeypatch,
+):
+    """One list already split; another still names one of the pair bare.
+
+    Grouping on the unqualified name is what keeps the bare prompt from
+    surviving the taxon dedupe and answering for both species again."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    split = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot (Amazona viridigenalis)", "Parrot (Amazona rhodocorytha)"],
+        {"Parrot (Amazona viridigenalis)": RED,
+         "Parrot (Amazona rhodocorytha)": BROWED},
+    ))
+    bare = save_labels("B", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
+    for order in ([split, bare], [bare, split]):
+        labels = load_merged_labels([{"labels_file": p} for p in order])
+        assert labels == [
+            "Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)",
+        ], order
+        assert labels.identities["Parrot (Amazona viridigenalis)"]["taxon_id"] == 18976
+
+
+def test_already_split_list_reloads_to_the_same_prompts(tmp_path, monkeypatch):
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot (Amazona viridigenalis)", "Parrot (Amazona rhodocorytha)"],
+        {"Parrot (Amazona viridigenalis)": RED,
+         "Parrot (Amazona rhodocorytha)": BROWED},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    assert labels == ["Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)"]
+    assert labels.identities["Parrot (Amazona rhodocorytha)"]["taxon_id"] == 18997
+
+
+def test_prompt_that_is_its_own_binomial_is_not_double_qualified(tmp_path, monkeypatch):
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Amazona viridigenalis", "amazona viridigenalis"],
+        {"Amazona viridigenalis": RED,
+         "amazona viridigenalis": {**BROWED, "common_name": ""}},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    assert labels == ["Amazona viridigenalis", "amazona viridigenalis (Amazona rhodocorytha)"]
+
+
+def test_two_taxon_ids_sharing_a_binomial_keep_separate_prompts(tmp_path, monkeypatch, db):
+    """Qualifying by scientific name alone would produce one string for
+    both, silently costing a class; the taxon form keeps them apart."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    twin = {**RED, "taxon_id": 99999}
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot", "parrot"], {"Parrot": RED, "parrot": twin},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    assert labels == ["Parrot (taxon 18976)", "parrot (taxon 99999)"]
+    assert labels.identities["Parrot (taxon 18976)"]["taxon_id"] == 18976
+    assert labels.identities["parrot (taxon 99999)"]["taxon_id"] == 99999
+    # The suffix is a form review already reads back as explicit evidence.
+    assert SpeciesResolver(db=db).display(labels[0]).key == "taxon:18976"
+
+
+def test_generated_prompt_cannot_take_a_name_another_taxon_already_uses(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    # Two taxa called "Parrot" qualify to "Parrot (Amazona viridigenalis)",
+    # which a third source already uses verbatim for a different species.
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot", "parrot", "Parrot (Amazona viridigenalis)"],
+        {"Parrot": RED, "parrot": BROWED,
+         "Parrot (Amazona viridigenalis)": LILAC},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    assert sorted(labels) == [
+        "Parrot (Amazona viridigenalis) (taxon 18993)",
+        "Parrot (taxon 18976)",
+        "parrot (Amazona rhodocorytha)",
+    ]
+    taxa = {e["taxon_id"] for e in labels.identities.values()}
+    assert taxa == {18976, 18993, 18997}, "no class may be lost to a name clash"
+
+
+def test_a_saved_taxon_qualified_prompt_regroups_with_a_bare_one(tmp_path, monkeypatch):
+    """The (taxon N) fallback is as persistable as the binomial one, so a
+    later merge has to see through it too."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    twin = {**RED, "taxon_id": 99999}
+    split = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot (taxon 18976)", "parrot (taxon 99999)"],
+        {"Parrot (taxon 18976)": RED, "parrot (taxon 99999)": twin},
+    ))
+    bare = save_labels("B", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
+    for order in ([split, bare], [bare, split]):
+        labels = load_merged_labels([{"labels_file": p} for p in order])
+        assert labels == ["Parrot (taxon 18976)", "parrot (taxon 99999)"], order
+        assert "Parrot" not in labels, "the bare prompt would answer for both"
+
+
+def test_a_generated_fallback_never_overwrites_another_taxon(tmp_path, monkeypatch):
+    """Second-order clash: the taxon-qualified fallback for one species is
+    already some third species' literal prompt."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    twin = {**RED, "taxon_id": 99999}
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot", "parrot", "Parrot (taxon 18976)"],
+        {"Parrot": RED, "parrot": twin, "Parrot (taxon 18976)": LILAC},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    # The prompt names 18976, so 18976 keeps it; the third species cannot
+    # answer to a string that reads as someone else and is reported dropped.
+    assert labels.identities["Parrot (taxon 18976)"]["taxon_id"] == 18976
+    assert labels.dropped_ambiguous == ["Parrot (taxon 18976)"]
+    assert len({keyword_match_key(n) for n in labels}) == len(labels)
+    assert LILAC["taxon_id"] not in {
+        e.get("taxon_id") for e in labels.identities.values()
+    }
+
+
+def test_irrecoverably_ambiguous_label_is_dropped_and_named(tmp_path, monkeypatch):
+    """A list written before the rewrite kept no scientific names to split by."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Honey Mushroom", "Lilac-crowned Parrot"],
+        {"Honey Mushroom": {"ambiguous": True}, "Lilac-crowned Parrot": LILAC},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    assert labels == ["Lilac-crowned Parrot"]
+    assert labels.dropped_ambiguous == ["Honey Mushroom"]
+    assert not [e for e in labels.identities.values() if e.get("ambiguous")]
+
+
+def test_legacy_text_spelling_fold_is_unchanged(tmp_path):
+    """No identities, no rewrite: cached runs keyed on this text stay valid."""
+    path = tmp_path / "hand-authored.txt"
+    path.write_text("Say's Phoebe\nSay's phoebe\nBosc's Fringe-toed lizard\n")
+    labels = load_merged_labels([{"labels_file": str(path)}])
+    assert labels == ["Bosc's Fringe-toed lizard", "Say's Phoebe"]
+    assert labels.identities == {}
+    assert labels.dropped_ambiguous == []
+
+
+def test_report_paths_load_the_list_the_classify_job_will_use(tmp_path, monkeypatch):
+    from labels import load_label_set
+
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot", "parrot"], {"Parrot": RED, "parrot": BROWED},
+    ))
+    # The raw file still holds the pre-merge prompts; every caller that only
+    # reports on a set (embedding matrix, precompute, readiness) must not.
+    assert read_label_file(path) == ["Parrot", "parrot"]
+    assert load_label_set(path) == load_merged_labels([{"labels_file": path}])
+
+    # Identity-free files too: every run the UI starts sends labels_files,
+    # which folds "Robin"/"robin" into one class, so reporting the raw pair
+    # would name a count and warm an identity the run never uses.
+    legacy = tmp_path / "hand-authored.txt"
+    legacy.write_text("Robin\nrobin\n")
+    assert read_label_file(str(legacy)) == ["Robin", "robin"]
+    assert load_label_set(str(legacy)) == ["Robin"]
+
+
+def test_a_file_that_backs_no_class_is_not_named_as_a_label_source(
+    tmp_path, monkeypatch,
+):
+    """Its prompts were all dropped, so it must not enter the fingerprint's
+    source list — deleting it later would otherwise make an unchanged merged
+    run look stale."""
+    from labels import load_merged_labels_with_metas
+
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    usable = save_labels("A", 14, "CA", ["birds"],
+                         SpeciesLabels(["Lilac-crowned Parrot"], {"Lilac-crowned Parrot": LILAC}))
+    useless = save_labels("B", 14, "CA", ["birds"], SpeciesLabels(
+        ["Honey Mushroom"], {"Honey Mushroom": {"ambiguous": True}},
+    ))
+    labels, metas = load_merged_labels_with_metas(
+        [{"labels_file": usable}, {"labels_file": useless}]
+    )
+    assert labels == ["Lilac-crowned Parrot"]
+    assert [m["labels_file"] for m in metas] == [usable]
+
+    # Same for a hand-authored bare name dropped because two source-backed
+    # files contested it: the qualified prompts are not its doing.
+    legacy = tmp_path / "hand-authored.txt"
+    legacy.write_text("Parrot\n")
+    split_a = save_labels("D", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
+    split_b = save_labels("E", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": BROWED}))
+    labels, metas = load_merged_labels_with_metas([
+        {"labels_file": split_a}, {"labels_file": split_b},
+        {"labels_file": str(legacy)},
+    ])
+    assert labels == ["Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)"]
+    assert [m["labels_file"] for m in metas] == [split_a, split_b]
+
+    # A source-backed file whose prompt loses a name clash outright is not
+    # credited either: the winning class is another taxon's.
+    twin = {**RED, "taxon_id": 99999}
+    clash_a = save_labels("F", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
+    clash_b = save_labels("G", 14, "CA", ["birds"], SpeciesLabels(["parrot"], {"parrot": twin}))
+    loser = save_labels("H", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot (taxon 18976)"], {"Parrot (taxon 18976)": LILAC},
+    ))
+    labels, metas = load_merged_labels_with_metas([
+        {"labels_file": clash_a}, {"labels_file": clash_b}, {"labels_file": loser},
+    ])
+    assert LILAC["taxon_id"] not in {e.get("taxon_id") for e in labels.identities.values()}
+    assert [m["labels_file"] for m in metas] == [clash_a, clash_b]
+
+    # ...and not when the same taxon survives through a different file:
+    # kept identities are merge-wide and say nothing about who produced them.
+    elsewhere = save_labels("I", 14, "CA", ["birds"], SpeciesLabels(
+        ["Lilac-crowned Parrot"], {"Lilac-crowned Parrot": LILAC},
+    ))
+    labels, metas = load_merged_labels_with_metas([
+        {"labels_file": clash_a}, {"labels_file": clash_b},
+        {"labels_file": loser}, {"labels_file": elsewhere},
+    ])
+    assert "Lilac-crowned Parrot" in labels
+    assert [m["labels_file"] for m in metas] == [clash_a, clash_b, elsewhere]
+
+    # A file whose only spelling loses a collision still backs the class.
+    variant = save_labels("C", 14, "CA", ["birds"],
+                          SpeciesLabels(["lilac-crowned parrot"], {"lilac-crowned parrot": LILAC}))
+    _labels, metas = load_merged_labels_with_metas(
+        [{"labels_file": usable}, {"labels_file": variant}]
+    )
+    assert [m["labels_file"] for m in metas] == [usable, variant]
+
+
+def test_classifier_still_refuses_an_ambiguous_label_set():
     with pytest.raises(ValueError, match="multiple taxa"):
-        Classifier(labels)
+        Classifier(SpeciesLabels(["Parrot"], {"Parrot": {"ambiguous": True}}))
 
 
 def test_merged_source_synonyms_do_not_split_softmax_probability(tmp_path, monkeypatch):

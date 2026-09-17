@@ -3488,7 +3488,9 @@ async function loadLabels(options) {
         cb.onchange = function() { updateReadiness(); schedulePlanRefresh(); };
         cb.style.cssText = 'accent-color:var(--accent);';
         label.appendChild(cb);
-        label.appendChild(document.createTextNode(' ' + l.name + ' (' + (l.species_count || 0) + ')'));
+        var usable = (l.usable_count !== undefined && l.usable_count !== null)
+          ? l.usable_count : (l.species_count || 0);
+        label.appendChild(document.createTextNode(' ' + l.name + ' (' + usable + ')'));
         div.appendChild(label);
       });
     }
@@ -3525,9 +3527,25 @@ async function updateReadiness() {
     // Labels status
     if (r.use_tol) {
       items.push('<span style="color:var(--info,#7ec8e3);">&#9679;</span> Labels: <b>Tree of Life</b> — classifying against all species (slower, less accurate than regional labels)');
+    } else if (r.labels_blocked) {
+      var blockedName = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
+      items.push('<span style="color:var(--danger,#e74c3c);">&#10007;</span> Labels: <b>' + escapeHtml(blockedName) +
+        '</b> — no usable species' +
+        (r.labels_skipped ? ' (all ' + r.labels_skipped.toLocaleString() + ' names are shared by several species)' : '') +
+        '. Classification will not run — ' +
+        (r.labels_skipped ? 'download the list again in Settings &rarr; Labels.'
+                          : 'download a species list in Settings &rarr; Labels, or untick this one there to use Tree of Life.'));
     } else if (r.labels_count > 0) {
       var labelDisplay = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
       items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + escapeHtml(labelDisplay) + '</b> — ' + r.labels_count.toLocaleString() + ' species');
+      // Some prompts dropped but others usable: the count above would
+      // otherwise read as "everything I picked", and a cross-file
+      // collision is invisible in the per-list Settings badge.
+      if (r.labels_skipped) {
+        items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> ' +
+          r.labels_skipped.toLocaleString() + ' name' + (r.labels_skipped === 1 ? ' is' : 's are') +
+          ' shared by several species and will not be classified — download the list again in Settings &rarr; Labels to split them by scientific name');
+      }
     }
 
     // Embeddings status

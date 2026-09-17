@@ -3050,6 +3050,42 @@ class Database:
         overrides["active_labels"] = labels_files
         self.update_workspace(self._ws_id(), config_overrides=overrides)
 
+    def forget_label_file(self, labels_file):
+        """Drop a deleted label set from every workspace's selection.
+
+        Deleting a set in Settings removes the file and the global active
+        list, but a workspace override pointing at it used to survive —
+        a selection naming a file that no longer exists, which no
+        checkbox can clear because the UI only lists files it can find.
+        Returns the number of workspaces changed.
+        """
+        rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE config_overrides IS NOT NULL"
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            try:
+                overrides = json.loads(row["config_overrides"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(overrides, dict):
+                continue
+            active = overrides.get("active_labels")
+            if not isinstance(active, list) or labels_file not in active:
+                continue
+            overrides["active_labels"] = [
+                path for path in active if path != labels_file
+            ]
+            self.conn.execute(
+                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                (json.dumps(overrides), row["id"]),
+            )
+            changed += 1
+        if changed:
+            self.conn.commit()
+        return changed
+
     def delete_workspace(self, workspace_id):
         """Delete a workspace and all its scoped data (cascade)."""
         try:

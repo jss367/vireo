@@ -29,9 +29,17 @@ def classification_readiness(db):
         )
         or active.get("model_type") == "timm"
     ))
+    # A fixed class head never reads a species list: classify_job returns
+    # before touching labels for timm, so a broken selection cannot block
+    # it. Every other model type consumes the selection when one exists,
+    # Tree-of-Life-capable ones included.
+    reads_labels = bool(active and active.get("model_type") != "timm")
     labels_ready = False
-    if model_downloaded and not label_free:
+    labels_blocked = False
+    if model_downloaded and reads_labels:
         try:
+            import os
+
             from labels import (
                 get_active_labels,
                 get_saved_labels,
@@ -55,10 +63,20 @@ def classification_readiness(db):
             # redirect to /browse and then block/fail at classify.
             merged = load_merged_labels(active_sets) if active_sets else []
             labels_ready = len(merged) > 0
+            # Asked even of a Tree-of-Life-ready model: a selection that
+            # exists and classifies nothing makes _load_labels raise, so
+            # this install cannot classify as configured however capable
+            # the model is at running without labels.
+            # Same rule as classify_job._any_present — a selection naming
+            # only deleted files is a fallback, not a block.
+            labels_blocked = not labels_ready and any(
+                os.path.exists(ls.get("labels_file", "")) for ls in active_sets
+            )
         except Exception:
             labels_ready = False
+            labels_blocked = False
 
-    usable = label_free or labels_ready
+    usable = (label_free or labels_ready) and not labels_blocked
     return {
         "active": active,
         "model_downloaded": model_downloaded,

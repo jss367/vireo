@@ -1201,12 +1201,22 @@ async function loadEmbeddingMatrix() {
     matrix.forEach(function(row) {
       html += '<tr>';
       html += '<td style="padding:6px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-secondary);">';
+      // species_count here is already the count a run receives (the
+      // endpoint normalizes), so it only needs the unusable case — same
+      // rule as the Settings matrix, which reads this one endpoint too.
       html += storageEscapeHtml(row.labels_name) + ' <span style="color:var(--text-ghost);">(' + row.species_count + ')</span>';
+      if (row.unusable) {
+        html += '<div style="font-size:11px;color:var(--warning,#d08700);">no usable species' +
+                (row.skipped ? ' — all ' + row.skipped + ' names are shared by several species' : '') +
+                '; download the list again in Settings &rarr; Labels</div>';
+      }
       html += '</td>';
       models.forEach(function(m) {
         var cell = row.models[m.id];
         html += '<td style="text-align:center;padding:6px 10px;border-bottom:1px solid var(--border-subtle);">';
-        if (cell && cell.cached) {
+        if (row.unusable) {
+          html += '<span style="color:var(--text-faint);">&mdash;</span>';
+        } else if (cell && cell.cached) {
           html += '<span style="color:var(--accent);">cached</span>';
         } else {
           html += '<button class="embedding-compute-btn" data-model-id="' + storageEscapeAttr(m.id) +

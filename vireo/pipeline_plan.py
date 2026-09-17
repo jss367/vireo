@@ -167,7 +167,15 @@ def _resolve_labels_for_models(models, labels_files, db):
 
     saved_by_file = {s["labels_file"]: s for s in get_saved_labels()}
 
+    selected = False
+
     def _load(active_sets):
+        nonlocal selected
+        # A selection naming only deleted files falls back rather than
+        # blocking — same rule as classify_job._any_present.
+        selected = any(
+            os.path.exists(ls.get("labels_file", "")) for ls in active_sets
+        )
         try:
             return load_merged_labels(active_sets) if active_sets else []
         except Exception as e:
@@ -191,6 +199,13 @@ def _resolve_labels_for_models(models, labels_files, db):
 
     from models import tree_of_life_ready
 
+    # A selected list that classifies nothing is not the same as no list at
+    # all: classify_job refuses that run rather than falling back to Tree of
+    # Life, so the plan must not promise all-species coverage the job will
+    # not deliver. True whether the prompts were dropped as ambiguous or the
+    # file holds none — the job refuses both.
+    unusable = bool(selected and not labels)
+
     out = {}
     for m in models:
         if m["model_type"] == "timm":
@@ -198,6 +213,8 @@ def _resolve_labels_for_models(models, labels_files, db):
             # computes the same sentinel by calling compute_fingerprint(None),
             # and the inventory page keys intrinsic timm coverage this way too.
             out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
+        elif unusable:
+            out[m["id"]] = {"fingerprint": None, "n": 0, "blocked": True}
         elif not labels:
             # tree_of_life_ready (not just supports_tree_of_life) so a
             # model whose ToL artifacts are declared optional and were

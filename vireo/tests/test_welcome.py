@@ -70,7 +70,7 @@ def test_models_status_tol_model_ready_without_labels(app_and_db, monkeypatch, t
     assert data["classification"]["model_name"] == "BioCLIP-2"
 
 
-def test_models_status_timm_model_ready_without_labels(app_and_db, monkeypatch):
+def test_models_status_timm_model_ready_without_labels(app_and_db, monkeypatch, tmp_path):
     """A timm classifier (e.g. iNat21) has a fixed intrinsic class head and
     runs without a species list, matching the planner / classify_job, which
     never block model_type == "timm". It must report ready with no labels."""
@@ -80,12 +80,21 @@ def test_models_status_timm_model_ready_without_labels(app_and_db, monkeypatch):
         "model_str": "hf-hub:timm/something", "model_type": "timm",
     })
 
-    app, _ = app_and_db
+    app, db = app_and_db
     client = app.test_client()
     resp = client.get("/api/models/status")
     data = resp.get_json()
     assert data["needs_setup"] is False
     assert data["classification"]["ready"] is True
+    assert data["classification"]["labels_ready"] is True
+
+    # Still ready with a broken selection: _load_labels returns before it
+    # looks at labels for timm, so nothing about the list can block it.
+    empty = tmp_path / "empty.txt"
+    empty.write_text("\n  \n")
+    db.set_workspace_active_labels([str(empty)])
+    data = client.get("/api/models/status").get_json()
+    assert data["needs_setup"] is False
     assert data["classification"]["labels_ready"] is True
 
 
@@ -151,6 +160,39 @@ def test_models_status_empty_label_file_not_ready(app_and_db, monkeypatch, tmp_p
     data = resp.get_json()
     assert data["needs_setup"] is True
     assert data["classification"]["labels_ready"] is False
+
+
+def test_models_status_tol_model_with_empty_selection_not_ready(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """A ToL-ready model classifies label-free — but not while a selected
+    list classifies nothing: _load_labels raises for that selection, so
+    reporting ready would redirect past onboarding into a run that fails."""
+    import models
+    weights = tmp_path / "bioclip-2"
+    weights.mkdir()
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
+        "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(weights),
+    })
+    empty_file = tmp_path / "empty.txt"
+    empty_file.write_text("\n  \n")
+
+    app, db = app_and_db
+    db.set_workspace_active_labels([str(empty_file)])
+    data = app.test_client().get("/api/models/status").get_json()
+    assert data["classification"]["labels_ready"] is False
+    assert data["needs_setup"] is True
+
+    # A selection naming only deleted files is a fallback, not a block —
+    # same rule as classify_job._any_present — so ToL reports ready again.
+    db.set_workspace_active_labels([str(tmp_path / "gone.txt")])
+    data = app.test_client().get("/api/models/status").get_json()
+    assert data["classification"]["labels_ready"] is True
+    assert data["needs_setup"] is False
 
 
 def test_index_redirects_to_welcome_when_no_model(app_and_db, monkeypatch):

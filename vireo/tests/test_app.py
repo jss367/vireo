@@ -8014,6 +8014,132 @@ def test_labels_list_returns_workspace_active(app_and_db, tmp_path):
         labels_mod.LABELS_DIR = orig_labels_dir
 
 
+def test_labels_list_reports_skipped_names_without_shipping_identities(app_and_db, tmp_path):
+    """The page must say a set holds unusable names, not carry the whole map."""
+    app, db = app_and_db
+
+    import json as _json
+
+    import labels as labels_mod
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir(exist_ok=True)
+    label_path = str(labels_dir / "ambiguous-birds.txt")
+    names = ["Honey Mushroom", "Robin"]
+    with open(label_path, "w") as f:
+        f.write("".join(name + "\n" for name in names))
+    with open(str(labels_dir / "ambiguous-birds.json"), "w") as f:
+        _json.dump({
+            "name": "Ambiguous Birds",
+            "labels_file": label_path,
+            "species_count": 2,
+            "label_identities": {
+                "Honey Mushroom": {"ambiguous": True},
+                "Robin": {"taxon_id": 13858, "scientific_name": "Turdus migratorius"},
+            },
+            "labels_text_sha256": labels_mod._text_identity(names),
+        }, f)
+
+    orig_labels_dir = labels_mod.LABELS_DIR
+    labels_mod.LABELS_DIR = str(labels_dir)
+    try:
+        with app.test_client() as c:
+            entry = next(
+                l for l in c.get("/api/labels").get_json()["labels"]
+                if l["labels_file"] == label_path
+            )
+    finally:
+        labels_mod.LABELS_DIR = orig_labels_dir
+    assert entry["ambiguous_count"] == 1
+    # species_count is what the file holds; usable_count is what a run gets.
+    assert entry["species_count"] == 2
+    assert entry["usable_count"] == 1
+    assert "label_identities" not in entry
+
+    # The summary is memoized per request, but an edit must invalidate it:
+    # the cache key is the two files' size and mtime.
+    with open(label_path, "w") as f:
+        f.write("Robin\n")
+    labels_mod.LABELS_DIR = str(labels_dir)
+    try:
+        with app.test_client() as c:
+            entry = next(
+                l for l in c.get("/api/labels").get_json()["labels"]
+                if l["labels_file"] == label_path
+            )
+    finally:
+        labels_mod.LABELS_DIR = orig_labels_dir
+    assert entry["usable_count"] == 1
+    assert entry["ambiguous_count"] == 0
+
+
+def test_species_search_does_not_offer_prompts_classification_refuses(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A name too ambiguous to classify must not be offered for hand-tagging
+    either — applying it by hand recreates exactly what the merge removed."""
+    import json as _json
+
+    import labels as labels_mod
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir(exist_ok=True)
+    label_path = str(labels_dir / "birds.txt")
+    names = ["Parrot", "Parakeet"]
+    with open(label_path, "w") as f:
+        f.write("".join(n + "\n" for n in names))
+    meta = {
+        "name": "Birds",
+        "labels_file": label_path,
+        "label_identities": {
+            "Parrot": {"ambiguous": True},
+            "Parakeet": {"taxon_id": 18976, "scientific_name": "Amazona viridigenalis"},
+        },
+        "labels_text_sha256": labels_mod._text_identity(names),
+    }
+    with open(str(labels_dir / "birds.json"), "w") as f:
+        _json.dump(meta, f)
+    monkeypatch.setattr("labels.get_active_labels", lambda: [meta])
+
+    app, _ = app_and_db
+    with app.test_client() as c:
+        assert c.get("/api/species/search?q=Para").get_json() == ["Parakeet"]
+        assert c.get("/api/species/search?q=Parr").get_json() == []
+
+
+def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_path):
+    """Otherwise the workspace keeps a selection naming a file that no
+    longer exists, which blocks classification with no checkbox to clear."""
+    import json as _json
+
+    import labels as labels_mod
+
+    app, db = app_and_db
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir(exist_ok=True)
+    # delete_labels() also rewrites the global active list under $HOME.
+    os.makedirs(os.path.expanduser("~/.vireo"), exist_ok=True)
+    label_path = str(labels_dir / "birds.txt")
+    with open(label_path, "w") as f:
+        f.write("Robin\n")
+    with open(str(labels_dir / "birds.json"), "w") as f:
+        _json.dump({"name": "Birds", "labels_file": label_path}, f)
+
+    db.set_workspace_active_labels([label_path])
+    other = db.create_workspace("Other", config_overrides={"active_labels": [label_path]})
+
+    orig = labels_mod.LABELS_DIR
+    labels_mod.LABELS_DIR = str(labels_dir)
+    try:
+        with app.test_client() as c:
+            assert c.delete("/api/labels", json={"labels_file": label_path}).status_code == 200
+    finally:
+        labels_mod.LABELS_DIR = orig
+
+    assert db.get_workspace_active_labels() == []
+    assert _json.loads(db.get_workspace(other)["config_overrides"])["active_labels"] == []
+
+
 def test_pipeline_page_init_includes_workspace_overrides(app_and_db):
     """page-init response includes workspace config overrides."""
     app, db = app_and_db
@@ -15949,6 +16075,51 @@ def test_embedding_matrix_excludes_timm_models(app_and_db, monkeypatch, tmp_path
     model_ids = [m["id"] for m in data["models"]]
     assert "bioclip-vit-b-16" in model_ids
     assert "timm-inat21-eva02-l" not in model_ids
+
+
+def test_embedding_matrix_marks_a_set_with_no_usable_species(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """No prompt survives, so there is nothing to embed — the row must say
+    so rather than offer a Compute button whose job can only fail."""
+    import json as _json
+
+    import labels as labels_mod
+
+    names = ["Honey Mushroom", "Shaggy Parasol"]
+    labels_file = tmp_path / "ambiguous.txt"
+    labels_file.write_text("".join(name + "\n" for name in names))
+    meta = {
+        "name": "Ambiguous",
+        "labels_file": str(labels_file),
+        "label_identities": {name: {"ambiguous": True} for name in names},
+        "labels_text_sha256": labels_mod._text_identity(names),
+    }
+    (tmp_path / "ambiguous.json").write_text(_json.dumps(meta))
+    monkeypatch.setattr(
+        "models.get_models",
+        lambda: [{"id": "bioclip-vit-b-16", "name": "BioCLIP",
+                  "model_type": "bioclip", "model_str": "ViT-B-16",
+                  "weights_path": str(tmp_path), "downloaded": True}],
+    )
+    monkeypatch.setattr("labels.get_saved_labels", lambda: [meta])
+
+    app, _ = app_and_db
+    client = app.test_client()
+    row = client.get("/api/embedding-matrix").get_json()["matrix"][0]
+    assert row["unusable"] is True
+    assert row["species_count"] == 0
+    assert row["skipped"] == 2
+
+    # And the job refuses it outright, so a stale page cannot start one.
+    resp = client.post(
+        "/api/jobs/precompute-embeddings",
+        json={"model_id": "bioclip-vit-b-16", "labels_file": str(labels_file)},
+    )
+    assert resp.status_code in (200, 202)
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "failed"
+    assert "no usable species" in (job.get("error") or "")
 
 
 def test_precompute_embeddings_rejects_timm_models(app_and_db, monkeypatch):

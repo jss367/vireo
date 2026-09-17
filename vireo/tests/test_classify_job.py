@@ -101,9 +101,14 @@ def test_taxonomy_returns_none_when_missing(tmp_path):
 
 
 def test_load_labels_from_file(tmp_path):
-    """Phase 2: labels loaded from a single file path."""
+    """Phase 2: labels loaded from a single file path.
+
+    Normalized exactly like a list of files — sorted and folded — so the
+    one file classifies as the same set of classes either way, and the
+    readiness/embedding-matrix surfaces that report the merged list are
+    describing the run this produces."""
     labels_file = tmp_path / "labels.txt"
-    labels_file.write_text("Northern Cardinal\nBlue Jay\nAmerican Robin\n")
+    labels_file.write_text("Northern Cardinal\nBlue Jay\nAmerican Robin\nblue jay\n")
 
     from classify_job import _load_labels
 
@@ -113,9 +118,14 @@ def test_load_labels_from_file(tmp_path):
         labels_file=str(labels_file),
         labels_files=None,
     )
-    assert labels == ["Northern Cardinal", "Blue Jay", "American Robin"]
+    assert labels == ["American Robin", "Blue Jay", "Northern Cardinal"]
     assert use_tol is False
     assert label_metas == [{"labels_file": str(labels_file)}]
+
+    from labels import load_merged_labels
+    assert list(labels) == list(
+        load_merged_labels([{"labels_file": str(labels_file)}])
+    ), "singular and plural requests must classify the same file the same way"
 
 
 def test_load_labels_tol_fallback(tmp_path):
@@ -166,6 +176,94 @@ def test_load_labels_raises_when_tol_artifacts_missing(tmp_path):
                 labels_files=None,
                 model_dir=str(tmp_path),
             )
+
+
+def test_load_labels_refuses_a_set_whose_every_name_is_ambiguous(tmp_path):
+    """Regression: an all-dropped list must not read as "no labels".
+
+    Falling through would silently classify against Tree of Life (all
+    species) for a user who selected one region."""
+    import json as _json
+    from unittest.mock import patch
+
+    import labels as labels_mod
+    from classify_job import _load_labels
+
+    names = ["Honey Mushroom", "Shaggy Parasol"]
+    labels_file = tmp_path / "all-ambiguous.txt"
+    labels_file.write_text("".join(name + "\n" for name in names))
+    (tmp_path / "all-ambiguous.json").write_text(_json.dumps({
+        "name": "All ambiguous",
+        "labels_file": str(labels_file),
+        "label_identities": {name: {"ambiguous": True} for name in names},
+        "labels_text_sha256": labels_mod._text_identity(names),
+    }))
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
+
+    with patch("classify_job.get_saved_labels", return_value=[]):
+        with pytest.raises(RuntimeError, match="shared by more than one"):
+            _load_labels(
+                model_type="bioclip",
+                model_str="hf-hub:imageomics/bioclip",
+                labels_file=str(labels_file),
+                labels_files=None,
+                model_dir=str(tmp_path),
+            )
+
+
+def test_load_labels_refuses_an_empty_selected_file(tmp_path):
+    """Selecting a list that holds nothing is not "no labels selected":
+    Tree of Life would classify the whole catalog against all species for
+    a user who asked for one region. The reporting surfaces call this set
+    unusable, so the run has to agree."""
+    from unittest.mock import patch
+
+    from classify_job import UnusableLabelsError, _load_labels
+
+    labels_file = tmp_path / "empty.txt"
+    labels_file.write_text("")
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
+
+    with patch("classify_job.get_saved_labels", return_value=[]):
+        with pytest.raises(UnusableLabelsError, match="contains no species"):
+            _load_labels(
+                model_type="bioclip",
+                model_str="hf-hub:imageomics/bioclip",
+                labels_file=str(labels_file),
+                labels_files=None,
+                model_dir=str(tmp_path),
+            )
+
+
+def test_a_deleted_label_selection_falls_back_instead_of_blocking(tmp_path):
+    """A workspace selection naming only deleted files must not lock
+    classification out: the UI lists files it can find, so there is no
+    checkbox left to untick."""
+    from unittest.mock import patch
+
+    from classify_job import _load_labels
+
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
+
+    class _StaleDb:
+        def get_workspace_active_labels(self):
+            return [str(tmp_path / "deleted.txt")]
+
+    with patch("classify_job.get_saved_labels", return_value=[]):
+        labels, use_tol, label_metas = _load_labels(
+            model_type="bioclip",
+            model_str="hf-hub:imageomics/bioclip",
+            labels_file=None,
+            labels_files=None,
+            db=_StaleDb(),
+            model_dir=str(tmp_path),
+        )
+    assert use_tol is True
+    assert not labels
+    assert label_metas == []
 
 
 def test_load_labels_timm_skips():
@@ -4836,6 +4934,41 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
         result = run_classify_job(job, runner, db_path, ws, params)
 
     return captured_photos, runner.events, result
+
+
+def test_cache_shortcut_does_not_swallow_an_unusable_label_set(tmp_path):
+    """The peek tolerates label-resolution failures on purpose, but not
+    this one: reporting cached success would reuse runs from a different
+    label space for a selection the job refuses."""
+    from unittest.mock import patch
+
+    from classify_job import ClassifyParams, UnusableLabelsError, run_classify_job
+
+    db_path, ws, col_id, _p1, _p2 = _setup_two_photo_classify_workspace(tmp_path)
+    fake_model = {
+        "id": "test-model", "name": "TestModel",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "weights_path": "/tmp/weights.bin",
+        "model_type": "bioclip", "downloaded": True,
+    }
+    params = ClassifyParams(
+        collection_id=col_id, labels_file=None, labels_files=None,
+        model_id=None, model_name="TestModel", grouping_window=10,
+        similarity_threshold=0.85, reclassify=False,
+    )
+    # Every photo looks cached, so without the re-raise the job would
+    # finish "successfully" without ever loading the real labels.
+    with patch("classify_job.get_active_model", return_value=fake_model), \
+         patch("classify_job.get_models", return_value=[fake_model]), \
+         patch("classify_job._load_taxonomy", return_value=None), \
+         patch("classify_job._all_photos_cache_satisfied", return_value=True), \
+         patch("classify_job._finalize_cached_only",
+               return_value={"classified": 2, "cached": True}) as finalize, \
+         patch("classify_job._load_labels",
+               side_effect=UnusableLabelsError("all names are shared")):
+        with pytest.raises(UnusableLabelsError):
+            run_classify_job(_make_job(), FakeRunner(), db_path, ws, params)
+    assert finalize.call_count == 0
 
 
 def test_classify_job_skips_photos_with_subject_keywords(tmp_path):

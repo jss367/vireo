@@ -311,6 +311,15 @@ def _verify_models(result: dict, config: dict) -> tuple[str, list[str]]:
 def _fetch_labels(result: dict, config: dict) -> tuple[str, list[str]]:
     count = _int(result, "species_count")
     details = []
+    shared = _int(result, "disambiguated")
+    if shared:
+        # Counts rewritten labels, not distinct names: one common name two
+        # species share produces two of them.
+        details.append(
+            f"{shared:,} label{'' if shared == 1 else 's'} whose common name "
+            "is used by more than one species — saved as “Common Name "
+            "(Scientific name)”"
+        )
     if result.get("labels_file"):
         details.append(f"Saved to {result['labels_file']}")
     return _n(count, "species label") + " fetched", details

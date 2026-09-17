@@ -1363,6 +1363,54 @@ def test_classify_plan_blocked_when_no_detections_and_no_labels(tmp_path, monkey
     assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
 
 
+def test_classify_plan_blocked_when_every_selected_label_is_ambiguous(
+    tmp_path, monkeypatch,
+):
+    """An all-dropped list is not "no list": the job refuses that run, so
+    the plan must not promise Tree of Life coverage instead."""
+    import json as _json
+
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+
+    import labels as labels_mod
+    import models as models_mod
+
+    names = ["Honey Mushroom", "Shaggy Parasol"]
+    labels_file = tmp_path / "all-ambiguous.txt"
+    labels_file.write_text("".join(name + "\n" for name in names))
+    (tmp_path / "all-ambiguous.json").write_text(_json.dumps({
+        "labels_file": str(labels_file),
+        "label_identities": {name: {"ambiguous": True} for name in names},
+        "labels_text_sha256": labels_mod._text_identity(names),
+    }))
+
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP 2", "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    # ToL artifacts present: without the guard this plan would claim
+    # all-species coverage for a user who selected one region.
+    monkeypatch.setattr(models_mod, "tree_of_life_ready", lambda *a, **k: True)
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_active_labels",
+                        lambda: [{"labels_file": str(labels_file)}])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked"
+    assert classify["detail"]["blocked_models"] == ["BioCLIP 2"]
+
+    # Same verdict for a selected file that simply holds nothing: the job
+    # refuses both, so the plan must not promise ToL for either.
+    empty = tmp_path / "empty.txt"
+    empty.write_text("")
+    monkeypatch.setattr(labels_mod, "get_active_labels",
+                        lambda: [{"labels_file": str(empty)}])
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    assert plan["stages"]["Classify"]["state"] == "blocked"
+
+
 def test_classify_plan_mixed_blocked_with_no_detections_emits_blocked(
     tmp_path, monkeypatch,
 ):

@@ -69,6 +69,18 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 
+class UnusableLabelsError(RuntimeError):
+    """Every prompt in the selected label set was dropped as ambiguous.
+
+    Its own class because the cache peek in ``run_classify_job``
+    deliberately swallows label-resolution failures (missing weights on a
+    fresh install, ToL artifacts absent) and falls back to model-only
+    cache filtering. Swallowing *this* one would let
+    ``_finalize_cached_only`` report success from a different label space
+    for a request the authoritative load refuses.
+    """
+
+
 @dataclass
 class ClassifyParams:
     """Parameters for a classification job, parsed from the request body."""
@@ -96,6 +108,20 @@ def _load_taxonomy(taxonomy_path):
             "Could not load taxonomy: %s — continuing without taxonomy enrichment", e
         )
         return None
+
+
+def _any_present(label_sets):
+    """Does this selection still name a file on disk?
+
+    A selection that names only deleted files is not a selection to
+    refuse — it is one to fall back from. Deleting a set in Settings now
+    clears it from every workspace, but a selection stored before that
+    fix (or removed outside the app) must not lock classification out
+    with no checkbox left to untick.
+    """
+    return any(
+        os.path.exists(ls.get("labels_file", "")) for ls in label_sets
+    )
 
 
 def _load_labels(
@@ -127,6 +153,11 @@ def _load_labels(
 
     labels = None
     label_metas: list[dict] = []
+    # Did the caller (or the workspace) actually choose a list? Not the
+    # same question as "did anything come back": a chosen list that
+    # classifies nothing must be refused, while choosing nothing is what
+    # the Tree-of-Life fallback is for.
+    selected = False
 
     # ``load_merged_labels_with_metas`` returns the metadata of the sets it
     # actually opened and read, filtered in the same pass — so a file
@@ -145,34 +176,30 @@ def _load_labels(
             saved_by_file.get(p, {"labels_file": p}) for p in labels_files
         ]
         labels, label_metas = load_merged_labels_with_metas(requested)
+        selected = _any_present(requested)
         log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
     elif labels_file and os.path.exists(labels_file):
-        # Legacy label files without saved identities are consumed in
-        # file order — merged label lists sort and dedupe, but a single
-        # hand-authored .txt has always been passed to the classifier as
-        # written. ``compute_fingerprint`` normalises via ``sorted(set)``
-        # so the cached-run key stays identical either way; the branch
-        # still preserves order for callers that observe ``labels``
-        # directly. When the file carries a ``.json`` sidecar of source
-        # identities, route through the atomic loader so identity
-        # dedupe applies and ``label_metas`` reflects a successful read.
+        # One file, same normalization as a list of them. A hand-authored
+        # .txt used to be passed to the classifier as written, which made
+        # ``Robin`` and ``robin`` two classes here and one through
+        # ``labels_files`` — so readiness, the embedding matrix and
+        # precompute (which all report the merged list) described a run
+        # this branch would not perform, and warmed an embedding identity
+        # it would not look up. There is one answer to "what does this
+        # file classify as" and it is the merged one.
         saved = get_saved_labels()
         saved_by_file = {s["labels_file"]: s for s in saved}
         single_meta = saved_by_file.get(labels_file, {"labels_file": labels_file})
-        try:
-            raw = read_label_file(labels_file)
-        except FileNotFoundError:
+        labels, label_metas = load_merged_labels_with_metas([single_meta])
+        selected = True
+        if not os.path.exists(labels_file):
+            # Racing DELETE between exists() above and the loader's read.
             log.warning(
                 "Label file vanished between exists() and read, skipping: %s",
                 labels_file,
             )
-            label_metas = []
+            selected = False
         else:
-            if getattr(raw, "identities", {}):
-                labels, label_metas = load_merged_labels_with_metas([single_meta])
-            else:
-                labels = raw
-                label_metas = [single_meta]
             log.info("Using %d labels from file: %s", len(labels), labels_file)
     else:
         # Try workspace-scoped active labels first
@@ -184,6 +211,7 @@ def _load_labels(
                 saved_by_file.get(p, {"labels_file": p}) for p in ws_labels
             ]
             labels, label_metas = load_merged_labels_with_metas(requested)
+            selected = _any_present(requested)
             names = [s.get("name", "?") for s in label_metas]
             log.info(
                 "Using %d merged labels from workspace active sets: %s",
@@ -194,6 +222,7 @@ def _load_labels(
             active_sets = get_active_labels()
             if active_sets:
                 labels, label_metas = load_merged_labels_with_metas(list(active_sets))
+                selected = _any_present(active_sets)
                 names = [s.get("name", "?") for s in label_metas]
                 log.info(
                     "Using %d merged labels from global active sets: %s",
@@ -210,6 +239,27 @@ def _load_labels(
         )
     else:
         log.info("Classification config: model=%s, no labels selected", model_str)
+
+    # A selected list that classifies nothing is not "no labels selected":
+    # falling through would silently classify the whole catalog against
+    # Tree of Life (all species) for a user who asked for one region. Why
+    # it is empty — every name shared between species, or the file itself
+    # holding none — changes the remedy, not the verdict, so both raise
+    # and the message names the cause.
+    if selected and not labels:
+        skipped = len(getattr(labels, "dropped_ambiguous", ()))
+        if skipped:
+            raise UnusableLabelsError(
+                f"Every name in the selected species list ({skipped:,}) is "
+                f"shared by more than one species, so none of them can "
+                f"identify a taxon. Go to Settings → Labels and download the "
+                f"list again to split them by scientific name."
+            )
+        raise UnusableLabelsError(
+            "The selected species list contains no species. Go to Settings → "
+            "Labels and download one, or untick it there to classify against "
+            "Tree of Life instead."
+        )
 
     from models import supports_tree_of_life, tree_of_life_ready
 
@@ -3418,6 +3468,12 @@ def run_classify_job(
             fp_full_peek = compute_full_fingerprint(peek_labels)
             if isinstance(fp_full_peek, str) and len(fp_full_peek) == 64:
                 desired_labels_fingerprint_full = fp_full_peek
+        except UnusableLabelsError:
+            # Same reasoning as the model_id_missing raise above: without
+            # this, the cache-only shortcut would accept runs from any
+            # previous label space and finish "successfully" for a
+            # selection the authoritative load below rejects.
+            raise
         except Exception:
             desired_labels_fingerprint = None
 

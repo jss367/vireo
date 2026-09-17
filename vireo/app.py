@@ -12110,7 +12110,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``docs/plans/2026-05-06-classification-inventory-design.md``.
         """
         import config as cfg
-        from labels import get_saved_labels, load_merged_labels, read_label_file
+        from labels import get_saved_labels, load_label_set, load_merged_labels
         from labels_fingerprint import TOL_SENTINEL, compute_fingerprint
         from models import get_models
 
@@ -12133,6 +12133,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Available label sets: read each saved .txt and recompute fingerprint
         # so the inventory's identity matches what the classify job would use.
         label_sets = []
+        unusable_label_sets = []
         seen_paths = set()
         for ls in get_saved_labels():
             path = ls.get("labels_file", "")
@@ -12140,13 +12141,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 continue
             seen_paths.add(path)
             try:
-                species = read_label_file(path)
-                if species.identities:
-                    species = load_merged_labels([ls])
+                species = load_label_set(path, ls)
             except OSError:
                 continue
+            name = ls.get("name") or os.path.splitext(os.path.basename(path))[0]
+            if not species:
+                # ``compute_fingerprint([])`` is the ToL sentinel, so an
+                # empty set would claim Tree of Life's row: its counts
+                # would be double-billed under the set's own name, and a
+                # non-ToL model would show an impossible regional pair.
+                # It classifies nothing — name it as unusable instead.
+                unusable_label_sets.append({
+                    "name": name,
+                    "filename": os.path.basename(path),
+                    "skipped": len(getattr(species, "dropped_ambiguous", ())),
+                })
+                continue
             label_sets.append({
-                "name": ls.get("name") or os.path.splitext(os.path.basename(path))[0],
+                "name": name,
                 "path": path,
                 "filename": os.path.basename(path),
                 "fingerprint": compute_fingerprint(species),
@@ -12318,6 +12330,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "total_photos": db.count_photos(),
             "models": models_out,
             "stale": stale,
+            # Saved sets that produce no usable prompt at all, so they have
+            # no inventory row of their own. Named rather than dropped in
+            # silence (CORE_PHILOSOPHY: no black boxes).
+            "unusable_label_sets": unusable_label_sets,
             "grand_total": {
                 "classified_dets": grand_classified_all,
                 "pending_dets": grand_pending,
@@ -18394,7 +18410,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_classify_readiness():
         """Check what's ready for classification and what will need work."""
         from classifier import _embedding_is_cached, _resolve_model_dir
-        from labels import get_active_labels, get_saved_labels, load_merged_labels, read_label_file
+        from labels import get_active_labels, get_saved_labels, load_label_set, load_merged_labels
         from models import get_active_model, get_models
 
         model_id = request.args.get("model_id", "")
@@ -18452,16 +18468,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         label_count = 0
         label_name = ""
         labels = []
+        labels_selected = False
 
         if labels_file:
             # Single file override from query param (classify page picker)
             if os.path.exists(labels_file):
-                labels = read_label_file(labels_file)
+                saved_meta = next(
+                    (ls for ls in get_saved_labels()
+                     if ls.get("labels_file") == labels_file), None,
+                )
+                labels = load_label_set(labels_file, saved_meta)
                 label_count = len(labels)
-                for ls in get_saved_labels():
-                    if ls.get("labels_file") == labels_file:
-                        label_name = ls.get("name", labels_file)
-                        break
+                labels_selected = True
+                if saved_meta:
+                    label_name = saved_meta.get("name", labels_file)
         elif labels_files:
             # Multiple files override from query param
             active_sets = []
@@ -18472,6 +18492,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 active_sets.append(meta)
             labels = load_merged_labels(active_sets)
             label_count = len(labels)
+            # Same rule as classify_job._any_present: an open tab can send
+            # a path deleted since it rendered, and that is a fallback, not
+            # a refusal — readiness must not promise a block the job will
+            # not perform.
+            labels_selected = any(
+                os.path.exists(ls.get("labels_file", "")) for ls in active_sets
+            )
             names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
             label_name = ", ".join(names)
         else:
@@ -18485,6 +18512,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if active_sets:
                 labels = load_merged_labels(active_sets)
                 label_count = len(labels)
+                labels_selected = True
                 names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
                 label_name = ", ".join(names)
             else:
@@ -18506,6 +18534,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 else:
                     label_name = "No labels — download a species list in Settings"
 
+        # A selection that classifies nothing is not "no labels":
+        # classify_job raises and the planner marks it blocked, so the
+        # preflight panel has to say so too rather than rendering nothing.
+        # ``labels_selected`` separates that from the genuine no-selection
+        # case, which still falls back to Tree of Life.
+        labels_skipped = len(getattr(labels, "dropped_ambiguous", ()))
+        labels_blocked = bool(labels_selected and not labels and not use_tol)
+
         # Check embedding cache
         embeddings_cached = False
         if model and not use_tol and labels:
@@ -18524,6 +18560,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "needs_download": needs_download,
                 "labels_name": label_name,
                 "labels_count": label_count,
+                "labels_blocked": labels_blocked,
+                "labels_skipped": labels_skipped,
                 "use_tol": use_tol,
                 "embeddings_cached": embeddings_cached,
                 "exiftool": exiftool_status,
@@ -20993,7 +21031,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_embedding_matrix():
         """Return which model+labels combinations have cached embeddings."""
         from classifier import _embedding_is_cached, _resolve_model_dir
-        from labels import get_saved_labels, read_label_file
+        from labels import get_saved_labels, normalized_label_set
         from models import get_models
 
         # Only BioCLIP-style models use per-label text embeddings. timm models
@@ -21011,11 +21049,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             labels_file = ls.get("labels_file", "")
             if not labels_file or not os.path.exists(labels_file):
                 continue
-            labels = read_label_file(labels_file)
+            # Cached on the files' stamps: both Settings and Storage load
+            # this matrix, and it needs every saved set's full list to ask
+            # whether its embeddings are cached.
+            labels = normalized_label_set(ls)
             row = {
                 "labels_name": ls.get("name", ""),
                 "labels_file": labels_file,
                 "species_count": len(labels),
+                # No prompt survived, so there is nothing to embed: the row
+                # stays visible (the set is on disk and the user is looking
+                # for it) but says why instead of offering a Compute button
+                # whose job can only fail.
+                "unusable": not labels,
+                "skipped": len(getattr(labels, "dropped_ambiguous", ())),
                 "models": {},
             }
             for m in models:
@@ -21046,7 +21093,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def work(job):
             from classifier import precompute_label_embeddings
-            from labels import read_label_file
+            from labels import get_saved_labels, load_label_set
             from models import get_models
 
             # Find the model
@@ -21075,7 +21122,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 },
             )
 
-            labels = read_label_file(labels_file)
+            # The same list the classify job will load, so the warmed
+            # cache is the one it looks for.
+            saved = {ls.get("labels_file"): ls for ls in get_saved_labels()}
+            labels = load_label_set(labels_file, saved.get(labels_file))
+            if not labels:
+                skipped = len(getattr(labels, "dropped_ambiguous", ()))
+                raise RuntimeError(
+                    f"{os.path.basename(labels_file)} has no usable species"
+                    + (f" — all {skipped:,} of its names are shared by more "
+                       "than one species" if skipped else "")
+                    + ". Download the list again in Settings → Labels to "
+                    "split them by scientific name."
+                )
 
             log.info(
                 "Pre-computing embeddings: %d labels with %s",
@@ -21598,7 +21657,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             name = f"{place_name} {group_names} ({filter_label})".strip()
 
         def work(job):
-            from labels import fetch_species_list, read_label_file, save_labels
+            from labels import fetch_species_list, load_label_set, save_labels
 
             def progress_cb(msg, current=None, total=None):
                 ctx.checkpoint(job)
@@ -21647,7 +21706,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 try:
                     from classifier import _embedding_is_cached, _resolve_model_dir
 
-                    labels = read_label_file(labels_path)
+                    labels = load_label_set(labels_path)
                     model_dir = _resolve_model_dir(
                         active_model["model_str"], active_model.get("weights_path")
                     )
@@ -21672,6 +21731,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return {
                 "species_count": len(set(species)),
                 "labels_file": labels_path,
+                # Common names iNaturalist gives to more than one taxon,
+                # saved as "Common Name (Scientific name)" so each species
+                # keeps its own prompt. Reported so the list the user sees
+                # matches the names they will get back.
+                "disambiguated": len(getattr(species, "disambiguated", [])),
                 "embedding_precompute": precompute,
             }
 
@@ -27918,7 +27982,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if len(q) < 2:
             return jsonify([])
 
-        from labels import get_active_labels, read_label_file
+        from labels import get_active_labels, normalized_label_set
 
         matches = []
         seen = set()
@@ -27927,7 +27991,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not labels_file or not os.path.exists(labels_file):
                 continue
             try:
-                for name in read_label_file(labels_file):
+                # The normalized set, not the raw file: a prompt
+                # classification refuses to attribute must not be offered
+                # for hand-tagging either, and the qualified spellings are
+                # what predictions will be named.
+                for name in normalized_label_set(label_set):
                     name_key = name.casefold()
                     if (
                         text_search_match(name, q, match_case, whole_word)

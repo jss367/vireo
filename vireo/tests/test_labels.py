@@ -408,3 +408,100 @@ def test_load_merged_labels_preserves_okina_letters(tmp_path):
 
     result = load_merged_labels([{"labels_file": txt}])
     assert result == ["Hawaiʻi ʻamakihi", "ʻApapane"]
+
+
+def test_label_set_summaries_survive_a_full_scan(tmp_path, monkeypatch):
+    """Every saved set is summarized on each Settings and Pipeline load, so
+    a cache that cannot hold one whole scan never gets a hit — the ninth
+    miss would evict the first eight before the next pass reaches them."""
+    import labels as labels_mod
+
+    metas = []
+    for i in range(12):
+        path = str(tmp_path / f"set{i}.txt")
+        with open(path, "w") as f:
+            f.write(f"Species {i}\n")
+        metas.append({"labels_file": path})
+
+    labels_mod._SUMMARY_CACHE.clear()
+    calls = []
+    real = labels_mod.load_merged_labels
+
+    def counting(label_sets):
+        calls.append(label_sets)
+        return real(label_sets)
+
+    monkeypatch.setattr(labels_mod, "load_merged_labels", counting)
+
+    first = [labels_mod.label_set_summary(m) for m in metas]
+    assert len(calls) == len(metas)
+    second = [labels_mod.label_set_summary(m) for m in metas]
+    assert second == first
+    assert len(calls) == len(metas), "a second scan must not recompute anything"
+
+    # An edit still invalidates: the key carries size and mtime.
+    with open(metas[0]["labels_file"], "w") as f:
+        f.write("Species 0\nSpecies 0b\n")
+    assert labels_mod.label_set_summary(metas[0]) == (2, 0)
+
+
+def test_label_cache_reads_and_writes_take_the_lock(tmp_path, monkeypatch):
+    """The eviction race is real but not reliably reproducible under the
+    GIL — the window between ``get`` and ``move_to_end`` is a few bytecodes
+    — so pin the requirement itself: every cache read and write is inside
+    the lock."""
+    from collections import OrderedDict
+
+    import labels as labels_mod
+
+    held = []
+
+    class _Recording:
+        def __enter__(self):
+            held.append(True)
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(labels_mod, "_CACHE_LOCK", _Recording())
+    cache = OrderedDict()
+    labels_mod._cache_put(cache, "k", "v", 4)
+    assert len(held) == 1
+    assert labels_mod._cache_get(cache, "k") == "v"
+    assert len(held) == 2
+    assert labels_mod._cache_get(cache, "missing") is None
+    assert len(held) == 3
+
+
+def test_label_caches_survive_concurrent_readers(tmp_path):
+    """Waitress serves the label endpoints on 16 threads, and the caches are
+    process-wide: a reader that looks up a key another thread is evicting
+    must not raise."""
+    import threading
+
+    import labels as labels_mod
+
+    metas = []
+    for i in range(40):  # far more sets than either cache holds
+        path = str(tmp_path / f"set{i}.txt")
+        with open(path, "w") as f:
+            f.write(f"Species {i}\n")
+        metas.append({"labels_file": path})
+
+    errors = []
+
+    def hammer():
+        try:
+            for _ in range(20):
+                for meta in metas:
+                    assert labels_mod.label_set_summary(meta) == (1, 0)
+                    assert len(labels_mod.normalized_label_set(meta)) == 1
+        except Exception as e:  # noqa: BLE001 - reported, not swallowed
+            errors.append(e)
+
+    threads = [threading.Thread(target=hammer) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[:3]
