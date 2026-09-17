@@ -70,7 +70,7 @@ def test_models_status_tol_model_ready_without_labels(app_and_db, monkeypatch, t
     assert data["classification"]["model_name"] == "BioCLIP-2"
 
 
-def test_models_status_timm_model_ready_without_labels(app_and_db, monkeypatch):
+def test_models_status_timm_model_ready_without_labels(app_and_db, monkeypatch, tmp_path):
     """A timm classifier (e.g. iNat21) has a fixed intrinsic class head and
     runs without a species list, matching the planner / classify_job, which
     never block model_type == "timm". It must report ready with no labels."""
@@ -80,12 +80,21 @@ def test_models_status_timm_model_ready_without_labels(app_and_db, monkeypatch):
         "model_str": "hf-hub:timm/something", "model_type": "timm",
     })
 
-    app, _ = app_and_db
+    app, db = app_and_db
     client = app.test_client()
     resp = client.get("/api/models/status")
     data = resp.get_json()
     assert data["needs_setup"] is False
     assert data["classification"]["ready"] is True
+    assert data["classification"]["labels_ready"] is True
+
+    # Still ready with a broken selection: _load_labels returns before it
+    # looks at labels for timm, so nothing about the list can block it.
+    empty = tmp_path / "empty.txt"
+    empty.write_text("\n  \n")
+    db.set_workspace_active_labels([str(empty)])
+    data = client.get("/api/models/status").get_json()
+    assert data["needs_setup"] is False
     assert data["classification"]["labels_ready"] is True
 
 
