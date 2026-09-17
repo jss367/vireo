@@ -23293,6 +23293,8 @@ function snapshot(coverId) {
     badgeRefreshes: badgeRefreshes.slice(),
     expanded: expandedBrowseStacks.has(coverId),
     needsRecheck: browseStackCoverRecheck.has(coverId),
+    refreshes: refreshes,
+    bars: bars,
   };
 }
 var results = {};
@@ -23301,22 +23303,30 @@ var results = {};
 //     lightbox. The cover (50) still lists 52 in browse_stack.photo_ids,
 //     the count is still 4, and the hydration cache still carries the
 //     dead entry. The handler must prune all three and repaint the badge
-//     so a later cover click does not resurrect the id.
+//     so a later cover click does not resurrect the id, and — because
+//     ``lightboxDelete`` has already dropped the id from ``selectedPhotos``
+//     without touching the batch bar or the ``stack-partial`` paint —
+//     refresh the card visuals and the batch bar in the same step so both
+//     stop advertising a photo the user just deleted.
+//     Codex P2 on PR #1672.
 photos = [{id: 50, browse_stack: {photo_ids: [50, 51, 52, 53], count: 4}}];
 browseStackMembers = {"50": [{id: 50}, {id: 51}, {id: 52}, {id: 53}]};
 expandedBrowseStacks = new Set([50]);
 browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
+refreshes = 0; bars = 0;
 capturedListener({detail: {photoId: 52}});
 results.prunedHiddenMember = snapshot(50);
 
 // (b) The deleted id belongs to no cover on the grid — nothing to prune,
-//     no badge repaint, no crash on an untouched stack.
+//     no badge repaint, no refresh, no bar update, no crash on an
+//     untouched stack; the pruning path is what triggers the visual work.
 photos = [{id: 60, browse_stack: {photo_ids: [60, 61], count: 2}}];
 browseStackMembers = {"60": [{id: 60}, {id: 61}]};
 expandedBrowseStacks = new Set();
 browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
+refreshes = 0; bars = 0;
 capturedListener({detail: {photoId: 999}});
 results.unrelatedDelete = snapshot(60);
 
@@ -23331,6 +23341,7 @@ browseStackMembers = {};
 expandedBrowseStacks = new Set();
 browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
+refreshes = 0; bars = 0;
 capturedListener({detail: {photoId: 72}});
 results.mixedGridSolo = snapshot(70);
 results.mixedGridStack = snapshot(71);
@@ -23349,6 +23360,7 @@ browseStackMembers = {"80": [{id: 80}, {id: 81}]};
 expandedBrowseStacks = new Set([80]);
 browseStackCoverRecheck = new Set([80]);
 badgeRefreshes = [];
+refreshes = 0; bars = 0;
 capturedListener({detail: {photoId: 81}});
 results.stackShrinksToOne = snapshot(80);
 
@@ -23360,6 +23372,7 @@ browseStackMembers = {"90": [{id: 90}, {id: 91}]};
 expandedBrowseStacks = new Set();
 browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
+refreshes = 0; bars = 0;
 capturedListener({detail: null});
 results.nullDetail = snapshot(90);
 
@@ -23373,11 +23386,14 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [50],
         "expanded": True,
         "needsRecheck": False,
+        "refreshes": 1,
+        "bars": 1,
     }, (
         "the deleted hidden member must leave the cover metadata and the "
         "hydration cache in the same step, so a later cover click reads "
         "the pruned list; an expansion that still holds enough members "
-        "stays live"
+        "stays live, and the card visuals and batch bar must be refreshed "
+        "in the same step so neither keeps advertising the deleted id"
     )
     assert result["unrelatedDelete"] == {
         "stack": {"photo_ids": [60, 61], "count": 2},
@@ -23385,13 +23401,20 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [],
         "expanded": False,
         "needsRecheck": False,
-    }, "an unrelated delete must leave every stack — and every badge — alone"
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "an unrelated delete must leave every stack — and every badge — "
+        "alone; the pruning path is what triggers the visual work"
+    )
     assert result["mixedGridSolo"] == {
         "stack": None,
         "cachedMembers": [],
         "badgeRefreshes": [71],
         "expanded": False,
         "needsRecheck": False,
+        "refreshes": 1,
+        "bars": 1,
     }, "a solo card with no browse_stack must be skipped without a crash"
     assert result["mixedGridStack"] == {
         "stack": None,
@@ -23399,6 +23422,8 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [71],
         "expanded": False,
         "needsRecheck": False,
+        "refreshes": 1,
+        "bars": 1,
     }, (
         "pruning drops the affected stack to a single member, so it "
         "dissolves — the cover no longer stands for anyone but itself"
@@ -23409,6 +23434,8 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [80],
         "expanded": False,
         "needsRecheck": False,
+        "refreshes": 1,
+        "bars": 1,
     }, (
         "a stack shrinking to a single member has to dissolve: the cover no "
         "longer stands for anyone but itself, so ``browse_stack``, the "
@@ -23423,6 +23450,8 @@ process.stdout.write(JSON.stringify(results));
         "badgeRefreshes": [],
         "expanded": False,
         "needsRecheck": False,
+        "refreshes": 0,
+        "bars": 0,
     }, "a null detail must short-circuit before the prune loop touches anything"
 
 

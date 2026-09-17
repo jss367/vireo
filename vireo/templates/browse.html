@@ -13471,6 +13471,24 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   if (badgesToRefresh.length && typeof refreshBrowseStackBadge === 'function') {
     badgesToRefresh.forEach(refreshBrowseStackBadge);
   }
+  // Pruning the cover metadata is only half of what the tray-member delete
+  // needs. ``lightboxDelete`` has already dropped the deleted id from
+  // ``selectedPhotos`` / ``selectedPhotoId`` and rendered the grid, but the
+  // batch bar's "N selected" text was written from the pre-delete count and
+  // never rewrites itself, and a cover whose remaining live members are all
+  // selected stays painted ``stack-partial`` from that same pre-delete
+  // state — because the deleted id was in the members list back then, the
+  // whole-stack check that would repaint it as ``selected`` said no. Refresh
+  // both from the surviving selection so the count and the paint match what
+  // the user can see. Codex P2 on PR #1672.
+  if (badgesToRefresh.length) {
+    if (typeof refreshCardSelectionVisuals === 'function') {
+      refreshCardSelectionVisuals();
+    }
+    if (typeof updateBatchBar === 'function') {
+      updateBatchBar();
+    }
+  }
   if (!spent) return;
   if (spent.epoch !== anchorRestoreEpoch) return;
   if (spent.ids.indexOf(deletedId) === -1) return;
