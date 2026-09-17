@@ -167,7 +167,11 @@ def _resolve_labels_for_models(models, labels_files, db):
 
     saved_by_file = {s["labels_file"]: s for s in get_saved_labels()}
 
+    selected = False
+
     def _load(active_sets):
+        nonlocal selected
+        selected = bool(active_sets)
         try:
             return load_merged_labels(active_sets) if active_sets else []
         except Exception as e:
@@ -191,12 +195,12 @@ def _resolve_labels_for_models(models, labels_files, db):
 
     from models import tree_of_life_ready
 
-    # A selected list whose every prompt was dropped as ambiguous is not the
-    # same as no list at all: classify_job refuses that run rather than
-    # falling back to Tree of Life, so the plan must not promise all-species
-    # coverage the job will not deliver.
-    unusable = bool(labels is not None and not labels
-                    and getattr(labels, "dropped_ambiguous", ()))
+    # A selected list that classifies nothing is not the same as no list at
+    # all: classify_job refuses that run rather than falling back to Tree of
+    # Life, so the plan must not promise all-species coverage the job will
+    # not deliver. True whether the prompts were dropped as ambiguous or the
+    # file holds none — the job refuses both.
+    unusable = bool(selected and not labels)
 
     out = {}
     for m in models:

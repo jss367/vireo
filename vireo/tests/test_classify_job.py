@@ -212,6 +212,31 @@ def test_load_labels_refuses_a_set_whose_every_name_is_ambiguous(tmp_path):
             )
 
 
+def test_load_labels_refuses_an_empty_selected_file(tmp_path):
+    """Selecting a list that holds nothing is not "no labels selected":
+    Tree of Life would classify the whole catalog against all species for
+    a user who asked for one region. The reporting surfaces call this set
+    unusable, so the run has to agree."""
+    from unittest.mock import patch
+
+    from classify_job import UnusableLabelsError, _load_labels
+
+    labels_file = tmp_path / "empty.txt"
+    labels_file.write_text("")
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
+
+    with patch("classify_job.get_saved_labels", return_value=[]):
+        with pytest.raises(UnusableLabelsError, match="contains no species"):
+            _load_labels(
+                model_type="bioclip",
+                model_str="hf-hub:imageomics/bioclip",
+                labels_file=str(labels_file),
+                labels_files=None,
+                model_dir=str(tmp_path),
+            )
+
+
 def test_load_labels_timm_skips():
     """Phase 2: timm models skip label loading entirely."""
     from classify_job import _load_labels

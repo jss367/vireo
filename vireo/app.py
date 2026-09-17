@@ -18444,6 +18444,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         label_count = 0
         label_name = ""
         labels = []
+        labels_selected = False
 
         if labels_file:
             # Single file override from query param (classify page picker)
@@ -18454,6 +18455,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 labels = load_label_set(labels_file, saved_meta)
                 label_count = len(labels)
+                labels_selected = True
                 if saved_meta:
                     label_name = saved_meta.get("name", labels_file)
         elif labels_files:
@@ -18466,6 +18468,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 active_sets.append(meta)
             labels = load_merged_labels(active_sets)
             label_count = len(labels)
+            labels_selected = bool(active_sets)
             names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
             label_name = ", ".join(names)
         else:
@@ -18479,6 +18482,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if active_sets:
                 labels = load_merged_labels(active_sets)
                 label_count = len(labels)
+                labels_selected = True
                 names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
                 label_name = ", ".join(names)
             else:
@@ -18500,11 +18504,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 else:
                     label_name = "No labels — download a species list in Settings"
 
-        # A selection whose every prompt was dropped is not "no labels":
+        # A selection that classifies nothing is not "no labels":
         # classify_job raises and the planner marks it blocked, so the
         # preflight panel has to say so too rather than rendering nothing.
+        # ``labels_selected`` separates that from the genuine no-selection
+        # case, which still falls back to Tree of Life.
         labels_skipped = len(getattr(labels, "dropped_ambiguous", ()))
-        labels_blocked = bool(not labels and labels_skipped and not use_tol)
+        labels_blocked = bool(labels_selected and not labels and not use_tol)
 
         # Check embedding cache
         embeddings_cached = False

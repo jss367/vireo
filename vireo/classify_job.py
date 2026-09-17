@@ -139,6 +139,11 @@ def _load_labels(
 
     labels = None
     label_metas: list[dict] = []
+    # Did the caller (or the workspace) actually choose a list? Not the
+    # same question as "did anything come back": a chosen list that
+    # classifies nothing must be refused, while choosing nothing is what
+    # the Tree-of-Life fallback is for.
+    selected = False
 
     # ``load_merged_labels_with_metas`` returns the metadata of the sets it
     # actually opened and read, filtered in the same pass — so a file
@@ -157,6 +162,7 @@ def _load_labels(
             saved_by_file.get(p, {"labels_file": p}) for p in labels_files
         ]
         labels, label_metas = load_merged_labels_with_metas(requested)
+        selected = True
         log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
     elif labels_file and os.path.exists(labels_file):
         # One file, same normalization as a list of them. A hand-authored
@@ -171,12 +177,14 @@ def _load_labels(
         saved_by_file = {s["labels_file"]: s for s in saved}
         single_meta = saved_by_file.get(labels_file, {"labels_file": labels_file})
         labels, label_metas = load_merged_labels_with_metas([single_meta])
-        if not label_metas:
+        selected = True
+        if not os.path.exists(labels_file):
             # Racing DELETE between exists() above and the loader's read.
             log.warning(
                 "Label file vanished between exists() and read, skipping: %s",
                 labels_file,
             )
+            selected = False
         else:
             log.info("Using %d labels from file: %s", len(labels), labels_file)
     else:
@@ -189,6 +197,7 @@ def _load_labels(
                 saved_by_file.get(p, {"labels_file": p}) for p in ws_labels
             ]
             labels, label_metas = load_merged_labels_with_metas(requested)
+            selected = bool(requested)
             names = [s.get("name", "?") for s in label_metas]
             log.info(
                 "Using %d merged labels from workspace active sets: %s",
@@ -199,6 +208,7 @@ def _load_labels(
             active_sets = get_active_labels()
             if active_sets:
                 labels, label_metas = load_merged_labels_with_metas(list(active_sets))
+                selected = True
                 names = [s.get("name", "?") for s in label_metas]
                 log.info(
                     "Using %d merged labels from global active sets: %s",
@@ -216,17 +226,25 @@ def _load_labels(
     else:
         log.info("Classification config: model=%s, no labels selected", model_str)
 
-    # A selected list whose every prompt was dropped as ambiguous is not
-    # "no labels selected": falling through would silently classify the
-    # whole catalog against Tree of Life (all species) when the user asked
-    # for one region. Say what happened and how to fix it instead.
-    if labels is not None and not labels and getattr(labels, "dropped_ambiguous", ()):
+    # A selected list that classifies nothing is not "no labels selected":
+    # falling through would silently classify the whole catalog against
+    # Tree of Life (all species) for a user who asked for one region. Why
+    # it is empty — every name shared between species, or the file itself
+    # holding none — changes the remedy, not the verdict, so both raise
+    # and the message names the cause.
+    if selected and not labels:
+        skipped = len(getattr(labels, "dropped_ambiguous", ()))
+        if skipped:
+            raise UnusableLabelsError(
+                f"Every name in the selected species list ({skipped:,}) is "
+                f"shared by more than one species, so none of them can "
+                f"identify a taxon. Go to Settings → Labels and download the "
+                f"list again to split them by scientific name."
+            )
         raise UnusableLabelsError(
-            f"Every name in the selected species list "
-            f"({len(labels.dropped_ambiguous):,}) is shared by more than one "
-            f"species, so none of them can identify a taxon. Go to Settings → "
-            f"Labels and download the list again to split them by scientific "
-            f"name."
+            "The selected species list contains no species. Go to Settings → "
+            "Labels to download one, or deselect it to classify against "
+            "Tree of Life instead."
         )
 
     from models import supports_tree_of_life, tree_of_life_ready

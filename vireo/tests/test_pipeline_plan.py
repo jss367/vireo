@@ -1401,6 +1401,15 @@ def test_classify_plan_blocked_when_every_selected_label_is_ambiguous(
     assert classify["state"] == "blocked"
     assert classify["detail"]["blocked_models"] == ["BioCLIP 2"]
 
+    # Same verdict for a selected file that simply holds nothing: the job
+    # refuses both, so the plan must not promise ToL for either.
+    empty = tmp_path / "empty.txt"
+    empty.write_text("")
+    monkeypatch.setattr(labels_mod, "get_active_labels",
+                        lambda: [{"labels_file": str(empty)}])
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    assert plan["stages"]["Classify"]["state"] == "blocked"
+
 
 def test_classify_plan_mixed_blocked_with_no_detections_emits_blocked(
     tmp_path, monkeypatch,

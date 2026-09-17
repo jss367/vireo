@@ -888,6 +888,17 @@ def test_readiness_reports_an_all_dropped_label_set_as_blocked(
     assert data["labels_skipped"] == 2
     assert data["use_tol"] is False
 
+    # An explicitly selected empty file is blocked too — the job refuses it
+    # rather than falling back to Tree of Life — but with nothing skipped.
+    empty = tmp_path / "empty.txt"
+    empty.write_text("")
+    with app.test_client() as client:
+        data = client.get(
+            "/api/classify/readiness?labels_file=" + str(empty)
+        ).get_json()
+    assert data["labels_blocked"] is True
+    assert data["labels_skipped"] == 0
+
 
 def test_readiness_reports_partially_dropped_prompts(app_and_db, tmp_path, monkeypatch):
     """A cross-file collision drops one prompt but keeps the rest. No per-list
