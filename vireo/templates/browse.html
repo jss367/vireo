@@ -11108,6 +11108,24 @@ async function batchDelete() {
     return;
   }
   if (seq !== _batchDeleteRequestSeq) return;
+  // The lightbox's Delete button calls showDeleteDialog() through a
+  // different code path (_navbar.html's lightboxDelete), so it does not
+  // advance _batchDeleteRequestSeq. If the user pressed E while our count
+  // was in flight and clicked the lightbox Delete, the modal is already
+  // open backed by a single photo id; calling showDeleteDialog() again
+  // here would overwrite that dialog's ids and callback with the batch's,
+  // and confirming what looked like a one-photo delete would delete the
+  // whole batch. Refuse to open on top of any open delete dialog rather
+  // than trying to coordinate seq across every showDeleteDialog caller.
+  // Codex P1 on PR #1672.
+  var modal = document.getElementById('deleteModal');
+  if (modal && modal.classList.contains('open')) {
+    showToast(
+      'Another delete dialog is already open. Close it and click Delete again.',
+      'info'
+    );
+    return;
+  }
   // Compared as sorted keys, not by scanning one list for each id of the
   // other: a Select all can hand this tens of thousands of ids, and the
   // quadratic version of this check would stall the UI thread on exactly the

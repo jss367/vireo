@@ -22668,6 +22668,14 @@ def test_batch_delete_discards_a_companion_count_for_a_stale_selection(
     (a newer Delete owns the dialog now), and a snapshot that no longer
     matches the current selection tells the user to click Delete again.
     Codex P1 on PR #1672.
+
+    Case (c) covers a related P1: the lightbox's Delete button opens its
+    own single-photo dialog through a different code path that does not
+    advance _batchDeleteRequestSeq. If the batch's count then comes back
+    with the same seq and an unchanged selection, calling showDeleteDialog
+    again would overwrite the open dialog's ids and callback — confirming
+    what looked like a one-photo delete would delete the whole batch. The
+    batch reply must refuse to open on top of any open delete dialog.
     """
     app, _ = app_and_db
     html = app.test_client().get("/browse").get_data(as_text=True)
@@ -22681,6 +22689,17 @@ var _batchDeleteRequestSeq = 0;
 var _activeSelection = [1, 2, 3];
 var _pending = [];
 var dialogs = [], toasts = [];
+var _modalOpen = false;
+global.document = {
+  getElementById: function(id) {
+    if (id !== 'deleteModal') return null;
+    return {
+      classList: {
+        contains: function(cls) { return cls === 'open' && _modalOpen; },
+      },
+    };
+  },
+};
 function getActiveSelection() { return _activeSelection.slice(); }
 function safeFetch(url, opts) {
   var body = JSON.parse(opts.body);
@@ -22690,19 +22709,29 @@ function safeFetch(url, opts) {
 }
 function showDeleteDialog(ids, companionCount) {
   dialogs.push({ids: ids.slice(), companionCount: companionCount});
+  _modalOpen = true;
 }
 function showToast(message, kind) { toasts.push({message: message, kind: kind}); }
 function browseStacksEnabled() { return false; }
+function snapshot() {
+  var out = {dialogs: dialogs.slice(), toasts: toasts.slice()};
+  dialogs.length = 0;
+  toasts.length = 0;
+  return out;
+}
 """,
         body,
         """
 (async function() {
+  var cases = {};
+
   // (a) selection changes while the count is in flight → no dialog, info toast.
   var pStale = batchDelete();
   var staleReq = _pending.shift();
   _activeSelection = [1, 2];
   staleReq.resolve({count: 2});
   await pStale;
+  cases.staleSelection = snapshot();
 
   // (b) two Deletes overlap: the newer request retires the older one, so a
   //     late reply for the older cannot overwrite the newer dialog.
@@ -22715,29 +22744,61 @@ function browseStacksEnabled() { return false; }
   await pFirst;
   secondReq.resolve({count: 2});
   await pSecond;
+  cases.overlap = snapshot();
+
+  // (c) lightbox Delete opens its own dialog while our count is in flight.
+  //     _batchDeleteRequestSeq is not advanced by that caller and the
+  //     selection did not move, so the seq and selection-key checks both
+  //     pass — but the modal is already open backed by the lightbox's
+  //     single id, and the batch's reply must not overwrite it.
+  _modalOpen = false;
+  _activeSelection = [7, 8, 9];
+  var pBatch = batchDelete();
+  var batchReq = _pending.shift();
+  showDeleteDialog([99], 0);  // simulate the lightbox's own open call
+  batchReq.resolve({count: 3});
+  await pBatch;
+  cases.dialogAlreadyOpen = snapshot();
 
   process.stdout.write(JSON.stringify({
-    dialogs: dialogs,
-    toasts: toasts,
-    requestIds: [staleReq.ids, firstReq.ids, secondReq.ids],
+    cases: cases,
+    requestIds: [staleReq.ids, firstReq.ids, secondReq.ids, batchReq.ids],
   }));
 })();
 """,
     ])
     result = _run_node(source, [])
-    # Only one dialog opens: the newer of the two overlapping Deletes.
-    assert result["dialogs"] == [{"ids": [4, 5, 6], "companionCount": 2}]
-    # The stale-selection case surfaces an info toast; the superseded first
-    # request is dropped silently rather than surprising the user with a
-    # second toast about a Delete they did not know had been queued.
-    assert result["toasts"] == [{
-        "message":
-            "Selection changed while checking for companion files. Click Delete again.",
-        "kind": "info",
-    }]
+    # (a) stale selection: no dialog, info toast telling the user to retry.
+    assert result["cases"]["staleSelection"] == {
+        "dialogs": [],
+        "toasts": [{
+            "message":
+                "Selection changed while checking for companion files. Click Delete again.",
+            "kind": "info",
+        }],
+    }
+    # (b) overlap: only the newer of the two overlapping Deletes opens; the
+    #     superseded first request is dropped silently rather than surprising
+    #     the user with a toast about a Delete they did not know had been queued.
+    assert result["cases"]["overlap"] == {
+        "dialogs": [{"ids": [4, 5, 6], "companionCount": 2}],
+        "toasts": [],
+    }
+    # (c) delete dialog already open (lightbox pressed Delete while our
+    #     count was in flight): the batch's reply must not overwrite the
+    #     open single-photo dialog. Only the lightbox's dialog is present,
+    #     and the batch surfaces an info toast explaining why nothing happened.
+    assert result["cases"]["dialogAlreadyOpen"] == {
+        "dialogs": [{"ids": [99], "companionCount": 0}],
+        "toasts": [{
+            "message":
+                "Another delete dialog is already open. Close it and click Delete again.",
+            "kind": "info",
+        }],
+    }
     # Each request asked the server about the ids that were selected when it
     # started, not whatever the selection happens to be now.
-    assert result["requestIds"] == [[1, 2, 3], [4, 5, 6], [4, 5, 6]]
+    assert result["requestIds"] == [[1, 2, 3], [4, 5, 6], [4, 5, 6], [7, 8, 9]]
 
 
 def test_empty_lightbox_close_drops_a_stacks_dangling_members(app_and_db):
