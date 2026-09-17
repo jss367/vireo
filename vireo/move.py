@@ -2430,6 +2430,88 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     return {"moved": moved, "errors": errors, "destination_folder_id": dest_folder_id}
 
 
+def _plan_moved_file_mtimes(db, src_path, dest_path,
+                            progress_cb=None, total_files=0):
+    """Plan re-stamping ``photos.file_mtime`` from the copy at ``dest_path``.
+
+    A copy does not always carry the source's timestamp across. rsync
+    writes each file under a temp name, sets the times on it, then renames
+    it into place -- and a rename is not guaranteed to preserve the mtime.
+    On a macOS smbfs mount against a Synology share (measured: ``copy2``
+    to the final name keeps the timestamp, the same file renamed into
+    place comes back stamped with the current time) every transferred file
+    lands with a fresh mtime, so the catalog is left describing a
+    timestamp that no file on disk has.
+
+    That matters because the incremental scan's "unchanged" test is
+    ``file_mtime`` + ``file_size`` (see ``scanner.scan``). A folder whose
+    recorded timestamps no longer match disk is re-hashed and re-phashed
+    in full on the next scan, only to discover that nothing changed --
+    tens of GB read back over the wire for a folder of RAWs on a network
+    mount.
+
+    Only rows the catalog still describes accurately are re-stamped: the
+    source file must still carry the stored ``file_mtime`` and
+    ``file_size``. A photo edited since its last scan fails that test and
+    keeps its stale timestamp, so the next scan still reprocesses it.
+    Adopting the destination's timestamp for those would be worse than the
+    problem being fixed here -- the row would look current while its hash,
+    phash and metadata still described the pre-edit bytes, and no later
+    scan would ever revisit it.
+
+    Best effort, and never fatal: anything that cannot be stat'd on either
+    side is left alone, which is exactly the pre-existing behavior (a
+    stale timestamp that a later scan repairs). Call after the copy is
+    verified and before the originals are removed, while both sides are
+    still readable and the rows still name the source files.
+
+    Returns ``executemany`` parameters for the rows to re-stamp. Read-only
+    itself: the caller applies them once the catalog update it belongs
+    with has gone through, so a cascade that fails leaves no half-applied
+    timestamps behind.
+    """
+    rows = db.conn.execute(
+        """SELECT p.id, p.filename, p.file_mtime, p.file_size,
+                  f.path AS folder_path
+           FROM photos p JOIN folders f ON f.id = p.folder_id
+           WHERE f.path = ? OR f.path LIKE ?""",
+        (src_path, src_path + "/%"),
+    ).fetchall()
+    updates = []
+    for index, row in enumerate(rows):
+        # One stat per side per photo, on a mount that may be slow enough
+        # for that to be visible. Keep the phase label on screen rather
+        # than letting the transfer look wedged between "Verifying copy"
+        # and "Updating catalog".
+        if progress_cb and index % 100 == 0:
+            progress_cb(total_files, total_files, row["filename"],
+                        "Checking timestamps")
+        stored_mtime, stored_size = row["file_mtime"], row["file_size"]
+        if stored_mtime is None or stored_size is None:
+            continue
+        src_file = os.path.join(row["folder_path"], row["filename"])
+        dst_file = os.path.join(dest_path, os.path.relpath(src_file, src_path))
+        try:
+            src_st = os.stat(src_file)
+            dst_st = os.stat(dst_file)
+        except OSError:
+            continue
+        if src_st.st_mtime != stored_mtime or src_st.st_size != stored_size:
+            # The row does not describe the file being moved -- it was
+            # edited (or replaced) since its last scan. Leave it stale so
+            # the scan that would have caught that still does.
+            continue
+        if dst_st.st_size != stored_size or dst_st.st_mtime == stored_mtime:
+            # Either the timestamp already survived the copy (nothing to
+            # do) or the destination file is not the one we just verified
+            # -- on a merge, rsync's ``--ignore-existing`` leaves a
+            # same-name file it did not write, and that file's timestamp
+            # is not ours to adopt.
+            continue
+        updates.append((dst_st.st_mtime, row["id"], stored_mtime, stored_size))
+    return updates
+
+
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 merge=False, remote=None, reject_tracked_ancestor=False,
                 allow_tracked_merge=False, destination_name="", verify_contents=False,
@@ -2980,6 +3062,26 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         progress_cb(total_files, total_files, "", "Updating catalog")
     if pre_commit_check:
         pre_commit_check()
+    # Before the path cascade, while the rows still name the source files:
+    # the guard in ``_refresh_moved_file_mtimes`` compares each row against
+    # the file it was scanned from, which the cascade below is about to
+    # rewrite. The merge path reparents staged photo rows rather than
+    # recreating them, so a timestamp stamped here survives it.
+    #
+    # Local destinations only. For a remote move ``transfer_dest`` lives on
+    # the far side of an SSH connection and cannot be stat'd, and reaching
+    # the same files back through ``catalog_path`` would walk a mount that
+    # need not even be mounted for the transfer to have succeeded -- for a
+    # rename rsync performed on the remote filesystem, where the timestamp
+    # is preserved anyway.
+    mtime_updates = []
+    if not remote:
+        mtime_updates = _plan_moved_file_mtimes(
+            db, src_path, transfer_dest,
+            progress_cb=progress_cb, total_files=total_files,
+        )
+        if progress_cb and mtime_updates:
+            progress_cb(total_files, total_files, "", "Updating catalog")
     merge_counts = None
     if merge_into_tracked is not None:
         # Destination is a tracked archive and the caller opted into merging:
@@ -2993,6 +3095,26 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     else:
         db.move_folder_path(folder_id, catalog_path, new_name=landing_name)
     db.update_folder_counts()
+
+    # Only now that the rows live at the destination. Guarded on the values
+    # the plan was built from, so a concurrent scan that committed a fresh
+    # stat of its own meanwhile wins instead of being overwritten from a
+    # stale snapshot -- and an id the merge dropped as an already-present
+    # collision simply matches nothing.
+    mtimes_refreshed = 0
+    if mtime_updates:
+        cursor = db.conn.executemany(
+            "UPDATE photos SET file_mtime = ? "
+            "WHERE id = ? AND file_mtime IS ? AND file_size IS ?",
+            mtime_updates,
+        )
+        mtimes_refreshed = cursor.rowcount
+        db.conn.commit()
+        log.info(
+            "Re-stamped file_mtime for %d photo(s) under %s from the copy "
+            "at %s -- the transfer did not carry their timestamps across",
+            mtimes_refreshed, src_path, catalog_path,
+        )
 
     # Rebase any developed-output subdirs nested under the configured
     # darktable_output_dir. `developed_folder_key` hashes the folder's
@@ -3053,7 +3175,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     if progress_cb:
         progress_cb(total_files, total_files, folder_name, "Done")
 
-    result = {"moved": total_photos, "errors": []}
+    result = {"moved": total_photos, "errors": [],
+              "mtimes_refreshed": mtimes_refreshed}
     if merge_into_tracked is not None:
         # ``dropped_photo_ids`` is a cleanup handle for the caller (thumbnails,
         # previews, offline copies of the deleted staged photos), not a

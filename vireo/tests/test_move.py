@@ -5698,3 +5698,210 @@ def test_rsync_streamed_closes_pty_fds_when_popen_fails(monkeypatch):
     for fd in opened:
         with pytest.raises(OSError):
             os.fstat(fd)  # closed: fstat on a closed fd raises EBADF
+
+
+def _catalog_folder_with_current_stats(tmp_path, names=("a.jpg", "b.jpg")):
+    """A folder whose rows describe its files exactly: a scan would skip it.
+
+    Timestamps are pinned to a fixed past value so a copy that stamps the
+    destination with the current time is distinguishable from one that
+    carried the source's timestamp across -- on a fast filesystem, files
+    written and copied inside one test can otherwise share an mtime.
+    """
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+
+    src = tmp_path / "shoot"
+    src.mkdir()
+    dst = tmp_path / "archive"
+    dst.mkdir()
+    fid = db.add_folder(str(src), name="shoot")
+
+    ids = {}
+    for index, name in enumerate(names):
+        path_ = src / name
+        path_.write_bytes(b"\xff\xd8" + b"\x00" * (64 + index))
+        os.utime(path_, (1577880000, 1577880000))
+        st = path_.stat()
+        ids[name] = db.add_photo(
+            folder_id=fid, filename=name, extension=".jpg",
+            file_size=st.st_size, file_mtime=st.st_mtime,
+        )
+    # Leave nothing else for a scan to do: with a hash and extracted
+    # metadata on every row, the timestamp is the only thing that can send
+    # a file back through feature computation.
+    db.conn.execute(
+        "UPDATE photos SET file_hash = 'hash-' || id, exif_data = '{}'")
+    db.conn.commit()
+    return db, src, dst, fid, ids
+
+
+def _lose_timestamps_in_transfer(monkeypatch):
+    """Copy the tree's bytes without its timestamps.
+
+    Stands in for what rsync's temp-write-then-rename does on a mount that
+    stamps the renamed file with the current time (measured on macOS smbfs
+    against a Synology share) — the copy is byte-for-byte correct and every
+    destination file carries a fresh mtime.
+    """
+    import shutil
+
+    import move as move_mod
+
+    def fake_transfer(src_path, dest_spec, rsync_flags, total_files,
+                      progress_cb, **kwargs):
+        for root, _dirs, files in os.walk(src_path):
+            rel = os.path.relpath(root, src_path)
+            target = dest_spec if rel == "." else os.path.join(dest_spec, rel)
+            os.makedirs(target, exist_ok=True)
+            for fn in files:
+                # copyfile, not copy2: bytes land, timestamps do not.
+                shutil.copyfile(os.path.join(root, fn),
+                                os.path.join(target, fn))
+        return 0, "", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_transfer)
+
+
+def _count_feature_computations(monkeypatch):
+    """Record every file the scanner recomputes hash/phash for."""
+    import scanner
+
+    computed = []
+    real = scanner._compute_file_features
+
+    def counting(path_str):
+        computed.append(os.path.basename(path_str))
+        return real(path_str)
+
+    monkeypatch.setattr(scanner, "_compute_file_features", counting)
+    return computed
+
+
+def test_move_folder_restamps_mtimes_a_copy_did_not_preserve(tmp_path, monkeypatch):
+    """A timestamp the copy dropped is re-read from the destination.
+
+    Without this the catalog describes an mtime no file on disk has, and
+    the next incremental scan re-hashes the whole folder to find out
+    nothing changed.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    _lose_timestamps_in_transfer(monkeypatch)
+
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert result["mtimes_refreshed"] == len(ids)
+    landing = dst / "shoot"
+    for name, photo_id in ids.items():
+        row = db.conn.execute(
+            "SELECT file_mtime FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        assert row["file_mtime"] == os.stat(landing / name).st_mtime
+        assert row["file_mtime"] != 1577880000
+
+
+def test_scan_after_a_timestamp_losing_move_recomputes_nothing(tmp_path, monkeypatch):
+    """The point of the re-stamp: the next scan skips the moved files."""
+    import scanner
+    from move import move_folder
+
+    db, _src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    _lose_timestamps_in_transfer(monkeypatch)
+    move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    computed = _count_feature_computations(monkeypatch)
+    scanner.scan(str(dst / "shoot"), db, incremental=True)
+
+    assert computed == []
+
+
+def test_move_folder_leaves_a_source_edited_since_its_last_scan_stale(
+        tmp_path, monkeypatch):
+    """A row that no longer describes its source keeps its stale timestamp.
+
+    Adopting the destination's timestamp there would make the row look
+    current while its hash and metadata still described the pre-edit bytes,
+    and no later scan would ever revisit it.
+    """
+    import scanner
+    from move import move_folder
+
+    db, src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    edited = src / "a.jpg"
+    size = edited.stat().st_size
+    edited.write_bytes(b"\xff\xd8" + b"\x01" * (size - 2))
+    os.utime(edited, (1600000000, 1600000000))
+    stale = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (ids["a.jpg"],)
+    ).fetchone()["file_mtime"]
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    # Only the untouched photo is re-stamped.
+    assert result["mtimes_refreshed"] == 1
+    assert db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (ids["a.jpg"],)
+    ).fetchone()["file_mtime"] == stale
+
+    computed = _count_feature_computations(monkeypatch)
+    scanner.scan(str(dst / "shoot"), db, incremental=True)
+    assert computed == ["a.jpg"]
+
+
+def test_move_folder_leaves_preserved_timestamps_alone(tmp_path):
+    """A copy that carried the timestamps across needs no catalog write."""
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert result["mtimes_refreshed"] == 0
+    for name, photo_id in ids.items():
+        row = db.conn.execute(
+            "SELECT file_mtime FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        assert row["file_mtime"] == 1577880000
+        assert os.stat(dst / "shoot" / name).st_mtime == 1577880000
+
+
+def test_tracked_merge_restamps_mtimes_a_copy_did_not_preserve(
+        tmp_path, monkeypatch):
+    """The send-to-NAS shape re-stamps too.
+
+    A merge into a tracked archive reconciles the staged rows into the
+    archive instead of cascading their folder path. The reconcile
+    reparents those rows rather than recreating them, so timestamps
+    planned before it still land on the right rows afterwards -- and the
+    archive's own photos, which never moved, are left alone.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    landing = dst / "shoot"
+    landing.mkdir()
+    (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    fid_archive = db.add_folder(str(landing), name="shoot")
+    prior = db.add_photo(folder_id=fid_archive, filename="prior.jpg",
+                         extension=".jpg", file_size=52, file_mtime=3.0)
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst),
+                         merge=True, allow_tracked_merge=True)
+
+    assert result["errors"] == []
+    assert result["mtimes_refreshed"] == len(ids)
+    for name, photo_id in ids.items():
+        row = db.conn.execute(
+            "SELECT file_mtime FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        assert row["file_mtime"] == os.stat(landing / name).st_mtime
+    # Never moved, never re-stamped.
+    assert db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (prior,)
+    ).fetchone()["file_mtime"] == 3.0
