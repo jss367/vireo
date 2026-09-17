@@ -891,9 +891,14 @@ function renderClassificationInventory(data) {
     });
     html += '</tbody></table></details>';
   } else {
-    var allComplete = data.models.every(function(m) {
-      return m.legacy || m.pairs.every(function(p) { return p.status === 'complete'; });
-    });
+    // Unusable sets are deliberately absent from data.models, so they
+    // cannot make this false on their own — and "all combinations
+    // classified" directly above "this set cannot be classified" is a
+    // contradiction the user has to resolve.
+    var allComplete = !(data.unusable_label_sets || []).length &&
+      data.models.every(function(m) {
+        return m.legacy || m.pairs.every(function(p) { return p.status === 'complete'; });
+      });
     if (allComplete && data.total_real_detections > 0) {
       html += '<div class="all-good" style="margin-top:14px;">✓ All combinations classified.</div>';
     }

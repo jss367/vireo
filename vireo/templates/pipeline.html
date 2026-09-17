@@ -3488,7 +3488,9 @@ async function loadLabels(options) {
         cb.onchange = function() { updateReadiness(); schedulePlanRefresh(); };
         cb.style.cssText = 'accent-color:var(--accent);';
         label.appendChild(cb);
-        label.appendChild(document.createTextNode(' ' + l.name + ' (' + (l.species_count || 0) + ')'));
+        var usable = (l.usable_count !== undefined && l.usable_count !== null)
+          ? l.usable_count : (l.species_count || 0);
+        label.appendChild(document.createTextNode(' ' + l.name + ' (' + usable + ')'));
         div.appendChild(label);
       });
     }

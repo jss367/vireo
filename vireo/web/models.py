@@ -560,17 +560,20 @@ def create_models_blueprint(
             """Drop the per-label identity map, keep what it implies.
 
             ``label_identities`` is megabytes on a regional list and the
-            page never reads it — but the page must still say when a set
-            holds names the classifier cannot use, so the set's own
-            skipped-prompt count travels in its place.
+            page never reads it — but the page must still say how many
+            species this set contributes and how many of its names the
+            classifier cannot use, so both counts travel in its place.
+            ``species_count`` is what the file holds; ``usable_count`` is
+            what a run receives, and they differ exactly when names are
+            shared between species.
             """
             trimmed = {k: v for k, v in meta.items() if k != "label_identities"}
             path = meta.get("labels_file")
             if path and os.path.exists(path):
                 try:
-                    trimmed["ambiguous_count"] = len(
-                        load_merged_labels([meta]).dropped_ambiguous
-                    )
+                    merged = load_merged_labels([meta])
+                    trimmed["usable_count"] = len(merged)
+                    trimmed["ambiguous_count"] = len(merged.dropped_ambiguous)
                 except Exception:
                     log.warning(
                         "Could not inspect %s for ambiguous labels", path,

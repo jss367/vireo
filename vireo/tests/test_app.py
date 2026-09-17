@@ -8051,6 +8051,9 @@ def test_labels_list_reports_skipped_names_without_shipping_identities(app_and_d
     finally:
         labels_mod.LABELS_DIR = orig_labels_dir
     assert entry["ambiguous_count"] == 1
+    # species_count is what the file holds; usable_count is what a run gets.
+    assert entry["species_count"] == 2
+    assert entry["usable_count"] == 1
     assert "label_identities" not in entry
 
 

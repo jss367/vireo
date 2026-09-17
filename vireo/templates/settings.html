@@ -4096,7 +4096,11 @@ async function loadLabels() {
               (isActive ? ' checked' : '') + ' onchange="updateActiveLabels()" style="accent-color:var(--accent);">';
       html += '<div>';
       html += '<span style="font-size:13px;color:var(--text-primary);font-weight:600;">' + escapeHtml(l.name) + '</span>';
-      html += '<div style="font-size:11px;color:var(--text-dim);">' + (l.species_count || 0) + ' species &middot; ' + groups + '</div>';
+      // The count a run receives, not the count on disk: they differ when
+      // names are shared between species, and the warning below says so.
+      var usable = (l.usable_count !== undefined && l.usable_count !== null)
+        ? l.usable_count : (l.species_count || 0);
+      html += '<div style="font-size:11px;color:var(--text-dim);">' + usable + ' species &middot; ' + groups + '</div>';
       if (l.ambiguous_count) {
         html += '<div style="font-size:11px;color:var(--warning,#d08700);margin-top:2px;">' +
                 l.ambiguous_count + ' name' + (l.ambiguous_count > 1 ? 's' : '') +
@@ -4112,7 +4116,10 @@ async function loadLabels() {
     });
 
     // Summary line
-    var totalSpecies = active.reduce(function(sum, a) { return sum + (a.species_count || 0); }, 0);
+    var totalSpecies = active.reduce(function(sum, a) {
+      return sum + ((a.usable_count !== undefined && a.usable_count !== null)
+        ? a.usable_count : (a.species_count || 0));
+    }, 0);
     if (active.length > 0) {
       html += '<div style="padding:8px 0;font-size:12px;color:var(--accent);">' +
               active.length + ' label set' + (active.length > 1 ? 's' : '') + ' active &middot; ~' +

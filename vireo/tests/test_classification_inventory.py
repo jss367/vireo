@@ -555,6 +555,10 @@ def test_endpoint_excludes_a_label_set_with_no_usable_species(
 
     assert [u["name"] for u in body["unusable_label_sets"]] == ["ambiguous"]
     assert body["unusable_label_sets"][0]["skipped"] == 2
+    # The stats page keys its "All combinations classified" line off this
+    # list, so an unusable set must stay reported even when every emitted
+    # pair is complete.
+    assert body["unusable_label_sets"], "the page needs this to stay honest"
     from labels_fingerprint import TOL_SENTINEL
     for m in body["models"]:
         if m.get("legacy"):
