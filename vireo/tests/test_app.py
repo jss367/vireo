@@ -23263,6 +23263,8 @@ var browseLightboxStackGestureSpent = null;
 var anchorRestoreEpoch = 0;
 var photos = [];
 var browseStackMembers = {};
+var expandedBrowseStacks = new Set();
+var browseStackCoverRecheck = new Set();
 var badgeRefreshes = [];
 var refreshes = 0, bars = 0;
 function refreshCardSelectionVisuals() { refreshes += 1; }
@@ -23289,6 +23291,8 @@ function snapshot(coverId) {
       function(m) { return m.id; }
     ),
     badgeRefreshes: badgeRefreshes.slice(),
+    expanded: expandedBrowseStacks.has(coverId),
+    needsRecheck: browseStackCoverRecheck.has(coverId),
   };
 }
 var results = {};
@@ -23300,6 +23304,8 @@ var results = {};
 //     so a later cover click does not resurrect the id.
 photos = [{id: 50, browse_stack: {photo_ids: [50, 51, 52, 53], count: 4}}];
 browseStackMembers = {"50": [{id: 50}, {id: 51}, {id: 52}, {id: 53}]};
+expandedBrowseStacks = new Set([50]);
+browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
 capturedListener({detail: {photoId: 52}});
 results.prunedHiddenMember = snapshot(50);
@@ -23308,6 +23314,8 @@ results.prunedHiddenMember = snapshot(50);
 //     no badge repaint, no crash on an untouched stack.
 photos = [{id: 60, browse_stack: {photo_ids: [60, 61], count: 2}}];
 browseStackMembers = {"60": [{id: 60}, {id: 61}]};
+expandedBrowseStacks = new Set();
+browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
 capturedListener({detail: {photoId: 999}});
 results.unrelatedDelete = snapshot(60);
@@ -23315,20 +23323,31 @@ results.unrelatedDelete = snapshot(60);
 // (c) A mixed grid — a solo photo alongside an affected stack. The solo
 //     card has no ``browse_stack`` at all, so reading ``photo_ids`` off
 //     ``undefined`` would throw; the handler has to skip it and still
-//     prune the stack behind it.
+//     prune the stack behind it. Pruning drops the affected stack to a
+//     single member (the cover), so it must dissolve — see case (d) for
+//     the same rule with a hydrated cache.
 photos = [{id: 70}, {id: 71, browse_stack: {photo_ids: [71, 72], count: 2}}];
 browseStackMembers = {};
+expandedBrowseStacks = new Set();
+browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
 capturedListener({detail: {photoId: 72}});
 results.mixedGridSolo = snapshot(70);
 results.mixedGridStack = snapshot(71);
 
 // (d) The last hidden member is deleted, dropping the count below 2:
-//     ``renderBrowseStackBadge`` hides the badge from then on and
-//     ``browseStackMemberIdsFor`` returns null, so a later cover click is
-//     just a solo selection — no stale id resurrection possible.
+//     the cover no longer stands for anyone but itself, so the stack has
+//     to dissolve. Leaving ``browse_stack`` truthy keeps ``has-browse-stack``
+//     on the tile and ``restoreExpandedBrowseStacks`` re-inserts a tray for
+//     a stack with one member — the cover, or worse the deleted id from a
+//     stale hydration cache before the pruning above ran. The hydration
+//     cache, ``expandedBrowseStacks`` and ``browseStackCoverRecheck`` all
+//     have to be cleared for that cover in the same step.
+//     Codex P2 on PR #1672.
 photos = [{id: 80, browse_stack: {photo_ids: [80, 81], count: 2}}];
 browseStackMembers = {"80": [{id: 80}, {id: 81}]};
+expandedBrowseStacks = new Set([80]);
+browseStackCoverRecheck = new Set([80]);
 badgeRefreshes = [];
 capturedListener({detail: {photoId: 81}});
 results.stackShrinksToOne = snapshot(80);
@@ -23338,6 +23357,8 @@ results.stackShrinksToOne = snapshot(80);
 //     prune loop.
 photos = [{id: 90, browse_stack: {photo_ids: [90, 91], count: 2}}];
 browseStackMembers = {"90": [{id: 90}, {id: 91}]};
+expandedBrowseStacks = new Set();
+browseStackCoverRecheck = new Set();
 badgeRefreshes = [];
 capturedListener({detail: null});
 results.nullDetail = snapshot(90);
@@ -23350,38 +23371,58 @@ process.stdout.write(JSON.stringify(results));
         "stack": {"photo_ids": [50, 51, 53], "count": 3},
         "cachedMembers": [50, 51, 53],
         "badgeRefreshes": [50],
+        "expanded": True,
+        "needsRecheck": False,
     }, (
         "the deleted hidden member must leave the cover metadata and the "
         "hydration cache in the same step, so a later cover click reads "
-        "the pruned list"
+        "the pruned list; an expansion that still holds enough members "
+        "stays live"
     )
     assert result["unrelatedDelete"] == {
         "stack": {"photo_ids": [60, 61], "count": 2},
         "cachedMembers": [60, 61],
         "badgeRefreshes": [],
+        "expanded": False,
+        "needsRecheck": False,
     }, "an unrelated delete must leave every stack — and every badge — alone"
     assert result["mixedGridSolo"] == {
         "stack": None,
         "cachedMembers": [],
         "badgeRefreshes": [71],
+        "expanded": False,
+        "needsRecheck": False,
     }, "a solo card with no browse_stack must be skipped without a crash"
     assert result["mixedGridStack"] == {
-        "stack": {"photo_ids": [71], "count": 1},
+        "stack": None,
         "cachedMembers": [],
         "badgeRefreshes": [71],
-    }, "the affected stack is pruned even when the cache never held it"
-    assert result["stackShrinksToOne"] == {
-        "stack": {"photo_ids": [80], "count": 1},
-        "cachedMembers": [80],
-        "badgeRefreshes": [80],
+        "expanded": False,
+        "needsRecheck": False,
     }, (
-        "a stack shrinking to a single member is fine — count < 2 hides the "
-        "badge and turns the card back into a solo click"
+        "pruning drops the affected stack to a single member, so it "
+        "dissolves — the cover no longer stands for anyone but itself"
+    )
+    assert result["stackShrinksToOne"] == {
+        "stack": None,
+        "cachedMembers": [],
+        "badgeRefreshes": [80],
+        "expanded": False,
+        "needsRecheck": False,
+    }, (
+        "a stack shrinking to a single member has to dissolve: the cover no "
+        "longer stands for anyone but itself, so ``browse_stack``, the "
+        "hydration cache, ``expandedBrowseStacks`` and "
+        "``browseStackCoverRecheck`` must all clear together — otherwise "
+        "``restoreExpandedBrowseStacks`` re-inserts a tray with one member "
+        "the cover already shows"
     )
     assert result["nullDetail"] == {
         "stack": {"photo_ids": [90, 91], "count": 2},
         "cachedMembers": [90, 91],
         "badgeRefreshes": [],
+        "expanded": False,
+        "needsRecheck": False,
     }, "a null detail must short-circuit before the prune loop touches anything"
 
 

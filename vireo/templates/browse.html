@@ -13442,6 +13442,30 @@ document.addEventListener('lightbox:photodeleted', function(event) {
         return member.id !== deletedId;
       });
     }
+    // A two-photo stack that loses its last hidden member has no frames left to
+    // stand for, so its cover is now an ordinary card. Leaving
+    // ``photo.browse_stack`` truthy keeps ``has-browse-stack`` on the tile and
+    // lets ``restoreExpandedBrowseStacks`` re-insert a tray with a single
+    // member (the cover, or worse the deleted id from a stale hydration cache
+    // before ``browseStackMembers`` was pruned above). Dissolve the stack
+    // instead: drop the cache, retire the expansion, remove any live tray,
+    // and repaint the card so it stops advertising a stack that no longer
+    // exists. Codex P2 on PR #1672.
+    if (stack.count < 2) {
+      photo.browse_stack = null;
+      delete browseStackMembers[cacheKey];
+      expandedBrowseStacks.delete(photo.id);
+      browseStackCoverRecheck.delete(photo.id);
+      var tray = document.querySelector(
+        '.browse-stack-tray[data-stack-cover-id="' + photo.id + '"]');
+      if (tray) tray.remove();
+      var card = document.querySelector(
+        '.grid-card[data-id="' + photo.id + '"]');
+      if (card) {
+        card.classList.remove('has-browse-stack');
+        card.classList.remove('stack-partial');
+      }
+    }
     badgesToRefresh.push(photo.id);
   });
   if (badgesToRefresh.length && typeof refreshBrowseStackBadge === 'function') {
