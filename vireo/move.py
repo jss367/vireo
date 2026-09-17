@@ -3186,10 +3186,34 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # collision simply matches nothing.
     mtimes_refreshed = 0
     if mtime_updates:
+        # Carry the mtime-pinned working-copy markers along with the
+        # correction. Both record "the ``file_mtime`` this decision was made
+        # against": ``working_copy_evicted_mtime`` marks a rendition the
+        # quota deliberately dropped (scanner's backfill clause treats
+        # ``!= file_mtime`` as "the file changed, redo it"), and
+        # ``working_copy_failed_mtime`` marks one whose extraction failed
+        # (``render_source`` retries as soon as the two differ). Re-stamping
+        # ``file_mtime`` alone would silently invalidate both, and every
+        # moved folder would re-read its RAWs over the NAS to regenerate
+        # renditions that were dropped on purpose, or to retry extractions
+        # that will fail exactly as before.
+        #
+        # Only a marker pinned to the timestamp being corrected moves. The
+        # bytes are unchanged, so those decisions still hold; anything
+        # recorded against a different timestamp -- including the ``-1``
+        # sentinel used when a row had no mtime at all -- was made against a
+        # state this correction knows nothing about, and is left alone.
         cursor = db.conn.executemany(
-            "UPDATE photos SET file_mtime = ? "
-            "WHERE id = ? AND file_mtime IS ? AND file_size IS ?",
-            mtime_updates,
+            "UPDATE photos SET file_mtime = ?,"
+            " working_copy_evicted_mtime = CASE"
+            "   WHEN working_copy_evicted_mtime IS ? THEN ?"
+            "   ELSE working_copy_evicted_mtime END,"
+            " working_copy_failed_mtime = CASE"
+            "   WHEN working_copy_failed_mtime IS ? THEN ?"
+            "   ELSE working_copy_failed_mtime END"
+            " WHERE id = ? AND file_mtime IS ? AND file_size IS ?",
+            [(fresh, stale, fresh, stale, fresh, photo_id, stale, size)
+             for fresh, photo_id, stale, size in mtime_updates],
         )
         mtimes_refreshed = cursor.rowcount
         db.conn.commit()

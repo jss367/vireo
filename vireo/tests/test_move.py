@@ -6178,3 +6178,69 @@ def test_a_failed_merge_never_removes_a_pre_existing_destination(
     assert result["moved"] == 0
     assert (landing / "theirs.jpg").exists()
     assert (src / "a.jpg").exists()
+
+
+def test_restamping_carries_the_working_copy_markers_along(
+        tmp_path, monkeypatch):
+    """Markers pinned to the corrected timestamp move with it.
+
+    ``working_copy_evicted_mtime`` and ``working_copy_failed_mtime`` both
+    record the ``file_mtime`` a decision was made against. Correcting
+    ``file_mtime`` alone would read as "the file changed", so every moved
+    folder would re-read its RAWs over the NAS to regenerate renditions the
+    quota dropped on purpose, and to retry extractions that will fail again.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    evicted, failed = ids["a.jpg"], ids["b.jpg"]
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path = NULL,"
+        " working_copy_evicted_mtime = file_mtime WHERE id = ?", (evicted,))
+    db.conn.execute(
+        "UPDATE photos SET working_copy_failed_at = datetime('now'),"
+        " working_copy_failed_mtime = file_mtime WHERE id = ?", (failed,))
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+    assert result["errors"] == []
+
+    rows = {r["id"]: r for r in db.conn.execute(
+        "SELECT id, file_mtime, working_copy_evicted_mtime,"
+        " working_copy_failed_mtime FROM photos").fetchall()}
+    # Still pinned: the bytes never changed, so the decisions still hold.
+    assert (rows[evicted]["working_copy_evicted_mtime"]
+            == rows[evicted]["file_mtime"] != 1577880000)
+    assert (rows[failed]["working_copy_failed_mtime"]
+            == rows[failed]["file_mtime"] != 1577880000)
+
+
+def test_restamping_leaves_unrelated_marker_timestamps_alone(
+        tmp_path, monkeypatch):
+    """A marker recorded against some other timestamp is not ours to move.
+
+    Only a marker pinned to the exact timestamp being corrected describes
+    the same state; anything else — including the ``-1`` sentinel used when
+    a row had no mtime at all — was decided against something this
+    correction knows nothing about.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    db.conn.execute(
+        "UPDATE photos SET working_copy_evicted_mtime = -1,"
+        " working_copy_failed_mtime = 12345.0 WHERE id = ?", (ids["a.jpg"],))
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    assert move_folder(db=db, folder_id=fid,
+                       destination=str(dst))["errors"] == []
+
+    row = db.conn.execute(
+        "SELECT file_mtime, working_copy_evicted_mtime,"
+        " working_copy_failed_mtime FROM photos WHERE id = ?",
+        (ids["a.jpg"],)).fetchone()
+    assert row["file_mtime"] != 1577880000
+    assert row["working_copy_evicted_mtime"] == -1
+    assert row["working_copy_failed_mtime"] == 12345.0
