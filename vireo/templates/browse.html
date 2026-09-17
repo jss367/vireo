@@ -8020,6 +8020,10 @@ var browseLightboxStackGesture = null;
 // never claims it). See the ``lightbox:photodeleted`` listener.
 var browseLightboxStackGestureSpent = null;
 
+// The stack the photo in that same close stood for, if it was a cover. Read
+// by the ``lightbox:photodeleted`` listener and dropped on a cancel.
+var browseLightboxDeleteRepresented = null;
+
 // The selection as it stood before the first click of the most recent click
 // sequence. Captured in ``selectPhoto`` and consulted by the grid double-click
 // handler so it can tell "these clicks made the selection" from "these clicks
@@ -13350,8 +13354,31 @@ function scrollToCard(idx) {
 document.addEventListener('lightbox:photodeleted', function(event) {
   var deletedId = event && event.detail ? event.detail.photoId : null;
   var spent = browseLightboxStackGestureSpent;
+  var represented = browseLightboxDeleteRepresented;
   browseLightboxStackGestureSpent = null;
-  if (!spent || deletedId == null) return;
+  browseLightboxDeleteRepresented = null;
+  if (deletedId == null) return;
+  // The deleted photo was a stack cover, so the frames behind it just lost
+  // the only card standing for them — lightboxDelete splices the cover out of
+  // `photos` and nothing reprojects the stack. Selected frames have to go
+  // with it, or the batch bar keeps counting photos no shortcut can show and
+  // the next rating lands on them unseen. Codex P2 on PR #1672.
+  if (represented && represented.indexOf(deletedId) !== -1) {
+    var dropped = false;
+    represented.forEach(function(id) {
+      if (selectedPhotos.delete(id)) dropped = true;
+    });
+    if (selectedPhotoId != null && represented.indexOf(selectedPhotoId) !== -1) {
+      selectedPhotoId = null;
+      selectedIndex = -1;
+      dropped = true;
+    }
+    if (dropped) {
+      refreshCardSelectionVisuals();
+      updateBatchBar();
+    }
+  }
+  if (!spent) return;
   if (spent.epoch !== anchorRestoreEpoch) return;
   if (spent.ids.indexOf(deletedId) === -1) return;
   browseLightboxStackGesture = spent;
@@ -13438,9 +13465,19 @@ document.addEventListener('lightbox:closed', function(event) {
   // happens — which reopens the lightbox on the next photo, so there is a
   // real close still to come. Codex P2 on PR #1672.
   var stackGesture = browseLightboxStackGesture;
-  browseLightboxStackGestureSpent = document.querySelector('#deleteModal.open')
-    ? stackGesture : null;
+  var deleteDialogOpen = !!document.querySelector('#deleteModal.open');
+  browseLightboxStackGestureSpent = deleteDialogOpen ? stackGesture : null;
   browseLightboxStackGesture = null;
+  // A cover is the only card its hidden frames have, and this close is the
+  // one the Delete button caused — so record what this photo stands for
+  // while `photos` still holds it. If the delete goes through, those frames
+  // lose their card and have to leave the selection with it; nothing else
+  // reprojects the stack, and a selection may not name photos with no card.
+  // Bounded to this one stack on purpose: a general "drop everything
+  // unreachable" sweep would empty a Select all that reaches past the loaded
+  // page. Codex P2 on PR #1672.
+  browseLightboxDeleteRepresented = deleteDialogOpen
+    ? browseStackMemberIds(photoId) : null;
   if (selectedPhotos.size > 0) {
     // Viewing shortcuts can open the lightbox without collapsing an existing
     // batch. Preserve that batch instead of replacing it with the viewed
@@ -13833,6 +13870,12 @@ document.addEventListener('contextmenu', function(e) {
   });
   var ids;
   if (stackIds.length > 1 && !wholeStackSelected) {
+    // A selection change like any other: the generation has to move, or a
+    // restore still waiting on stack hydration (undo/redo) considers itself
+    // current and merges the pre-undo ids into the stack just chosen.
+    // selectPhoto() and selectBrowseStackAll() bump it for the same reason.
+    // Codex P2 on PR #1672.
+    anchorRestoreEpoch++;
     selectedPhotos = new Set(stackIds);
     selectedPhotoId = null;
     selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
