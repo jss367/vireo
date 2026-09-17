@@ -339,6 +339,7 @@ def test_move_folder_job_passes_explicit_destination_name(
         remote=None,
         destination_name="",
         allow_tracked_merge=False,
+        **_kwargs,
     ):
         captured["destination_name"] = destination_name
         return {"moved": 1, "errors": []}
@@ -422,6 +423,7 @@ def test_move_folder_job_invalidates_missing_originals_cache(
         remote=None,
         destination_name="",
         allow_tracked_merge=False,
+        **_kwargs,
     ):
         assert folder_id == fid
         assert destination == str(dst)

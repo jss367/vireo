@@ -15,8 +15,10 @@ import time
 from datetime import datetime
 
 try:
+    from .db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
     from .proc import no_window_kwargs
 except ImportError:
+    from db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
     from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
@@ -2430,10 +2432,166 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     return {"moved": moved, "errors": errors, "destination_folder_id": dest_folder_id}
 
 
+def _plan_moved_file_mtimes(db, src_path, dest_path,
+                            progress_cb=None, total_files=0):
+    """Plan re-stamping ``photos.file_mtime`` from the copy at ``dest_path``.
+
+    A copy does not always carry the source's timestamp across. rsync
+    writes each file under a temp name, sets the times on it, then renames
+    it into place -- and a rename is not guaranteed to preserve the mtime.
+    On a macOS smbfs mount against a Synology share (measured: ``copy2``
+    to the final name keeps the timestamp, the same file renamed into
+    place comes back stamped with the current time) every transferred file
+    lands with a fresh mtime, so the catalog is left describing a
+    timestamp that no file on disk has.
+
+    That matters because the incremental scan's "unchanged" test is
+    ``file_mtime`` + ``file_size`` (see ``scanner.scan``). A folder whose
+    recorded timestamps no longer match disk is re-hashed and re-phashed
+    in full on the next scan, only to discover that nothing changed --
+    tens of GB read back over the wire for a folder of RAWs on a network
+    mount.
+
+    Only rows the catalog still describes accurately are re-stamped: the
+    source file must still carry the stored ``file_mtime`` and
+    ``file_size``. A photo edited since its last scan fails that test and
+    keeps its stale timestamp, so the next scan still reprocesses it.
+    Adopting the destination's timestamp for those would be worse than the
+    problem being fixed here -- the row would look current while its hash,
+    phash and metadata still described the pre-edit bytes, and no later
+    scan would ever revisit it.
+
+    A source file that cannot be stat'd is skipped: verification walked the
+    source tree, so it never made a claim about a row whose file is already
+    gone, and there is nothing to re-stamp. A DESTINATION file that cannot
+    be stat'd is different -- see below.
+
+    Call after the copy is verified and before the originals are removed,
+    while both sides are still readable and the rows still name the source
+    files.
+
+    Returns ``(updates, unreadable)``. ``updates`` is ``executemany``
+    parameters for the rows to re-stamp; read-only itself, so the caller
+    applies them once the catalog update it belongs with has gone through
+    and a cascade that fails leaves no half-applied timestamps behind.
+    ``problem`` describes a destination file that contradicts what
+    verification established -- missing, unreadable, or a different size
+    from the source still sitting next to it -- or None.
+
+    That second return value exists because this pass is the last thing
+    that looks at the destination before ``shutil.rmtree`` deletes the
+    originals. Verification established "every source file is present at
+    the destination" minutes earlier; a source that is still here whose
+    copy has since vanished or gone unreadable means that no longer holds,
+    and ``check_staged_mount`` will not notice -- it re-checks mount
+    identity and availability, not the files. Swallowing that would throw
+    away first-hand evidence at the worst possible moment, so it is handed
+    back for the caller to treat as a verification failure.
+    """
+    # The repo's literal subtree predicate, not a raw LIKE: LIKE would read
+    # ``_`` and ``%`` in a real folder path as wildcards and match
+    # case-insensitively, pulling in sibling trees this move never touched --
+    # and their rows would then resolve to files outside ``dest_path``. It
+    # also normalizes separators, so Windows descendants stored with
+    # backslashes are matched rather than silently skipped.
+    #
+    # It is a PREFILTER, not the authority. ``_path_for_subtree_match`` folds
+    # ``\\`` to ``/`` on every platform, and ``\\`` is a legal filename
+    # character on POSIX -- so moving ``/photos/shoot\\1`` normalizes to the
+    # same prefix as the unrelated ``/photos/shoot/1`` tree. Every row is
+    # re-checked below against the move module's own alias-folding
+    # containment test (symlinks, Windows case folding, case-insensitive
+    # POSIX), which is FS truth rather than string shape.
+    prefix = _subtree_prefix(src_path)
+    rows = db.conn.execute(
+        """SELECT p.id, p.filename, p.file_mtime, p.file_size,
+                  f.path AS folder_path
+           FROM photos p JOIN folders f ON f.id = p.folder_id
+           WHERE f.path = ?
+              OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
+        (src_path, len(prefix), prefix),
+    ).fetchall()
+    updates = []
+    # Hoisted: the probe is per-ancestor, and the containment answer depends
+    # only on the folder, so a tree of thousands of photos costs one realpath
+    # per distinct folder rather than one per photo.
+    ci_root = _case_insensitive_root(src_path)
+    contained = {}
+    for index, row in enumerate(rows):
+        # One stat per side per photo, on a mount that may be slow enough
+        # for that to be visible. Keep the phase label on screen rather
+        # than letting the transfer look wedged between "Verifying copy"
+        # and "Updating catalog".
+        if progress_cb and index % 100 == 0:
+            progress_cb(total_files, total_files, row["filename"],
+                        "Checking timestamps")
+        folder_path = row["folder_path"]
+        if folder_path not in contained:
+            contained[folder_path] = _path_equal_or_descends(
+                folder_path, src_path, ci_root)
+        if not contained[folder_path]:
+            # Prefilter slack: this row is not actually in the moved tree.
+            continue
+        stored_mtime, stored_size = row["file_mtime"], row["file_size"]
+        if stored_mtime is None or stored_size is None:
+            continue
+        src_file = os.path.join(folder_path, row["filename"])
+        if os.path.islink(src_file):
+            # Scanner discovery admits file symlinks, and ``os.stat`` below
+            # follows them -- but a relative target resolves against the
+            # directory holding the link, so the same target string can point
+            # at a different file once the link has moved. Re-stamping from
+            # whatever the destination-side link resolves to would tell the
+            # incremental scanner that bytes it has never seen are unchanged,
+            # leaving this row's hash and metadata describing the wrong file.
+            # Leave it stale; a rescan resolves the link itself.
+            continue
+        # Prefix-strip rather than ``os.path.relpath``: relpath is happy to
+        # walk out of the subtree with ``..`` if a row ever slipped past the
+        # predicate above, which would point this at a file the move never
+        # copied.
+        relative = _subtree_relative(folder_path, src_path)
+        dst_file = _join_subtree_path(
+            dest_path,
+            f"{relative}/{row['filename']}" if relative else row["filename"],
+        )
+        try:
+            src_st = os.stat(src_file)
+        except OSError:
+            # A row whose file is already gone: not something this move
+            # copied, and not something verification vouched for.
+            continue
+        try:
+            dst_st = os.stat(dst_file)
+        except OSError:
+            return [], (f"'{dst_file}' is missing or unreadable at the "
+                        f"destination")
+        if src_st.st_mtime != stored_mtime or src_st.st_size != stored_size:
+            # The row does not describe the file being moved -- it was
+            # edited (or replaced) since its last scan. Leave it stale so
+            # the scan that would have caught that still does.
+            continue
+        if dst_st.st_size != stored_size:
+            # The guard above already confirmed the source still matches the
+            # row, so a differently sized copy differs from the file this
+            # move is about to delete. On a merge the verification below
+            # rejects it; a fresh local move only compares file counts, so
+            # nothing else ever would, and the rmtree would take the intact
+            # original with it. Skipping the row would leave that damage
+            # unreported -- the same mistake as swallowing a failed stat.
+            return [], (f"'{dst_file}' does not match the source's size at "
+                        f"the destination")
+        if dst_st.st_mtime == stored_mtime:
+            # The timestamp survived the copy: nothing to correct.
+            continue
+        updates.append((dst_st.st_mtime, row["id"], stored_mtime, stored_size))
+    return updates, None
+
+
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 merge=False, remote=None, reject_tracked_ancestor=False,
                 allow_tracked_merge=False, destination_name="", verify_contents=False,
-                pre_commit_check=None):
+                pre_commit_check=None, thumb_cache_dir=None):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name unless
@@ -2495,6 +2653,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             moves keep the default refusal. The result then carries ``merge``
             (the reconciliation counts) and ``merged_into_existing`` (the
             tracked archive path).
+        thumb_cache_dir: optional path to the thumbnail cache directory. When
+            a timestamp-losing transfer advances a row's ``file_mtime``, the
+            thumbnail endpoint's freshness invariant (``cached_mtime >=
+            file_mtime``) treats the existing cached thumbnail as stale and
+            regenerates on first access. If this is set, the corresponding
+            thumbnail files are ``os.utime``d alongside the DB update so the
+            already-correct pixels stay served without a regeneration.
 
     Returns dict with keys: moved (int), errors (list of str). When the
     catalog has already been repointed at the new destination but deleting
@@ -2909,6 +3074,50 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     if returncode != 0:
         return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
 
+    # Read the destination's timestamps BEFORE verifying, not after.
+    #
+    # This pass stats every catalogued photo on both sides, which on a
+    # network mount is minutes of wall clock. Running it between
+    # verification and the ``rmtree`` below would push those minutes into
+    # the one window where a destination file going missing, or being
+    # replaced, is never noticed before the originals are deleted. Ordering
+    # it ahead of verification means the byte-level check remains the last
+    # thing that touches the destination, exactly as it was before this pass
+    # existed -- so no re-verification is owed, and the expensive one never
+    # runs twice.
+    #
+    # Safe to read this early: rsync has finished, so the destination is
+    # final, and the plan is read-only until it is applied after the cascade.
+    #
+    # Local destinations only. For a remote move ``transfer_dest`` lives on
+    # the far side of an SSH connection and cannot be stat'd, and reaching
+    # the same files back through ``catalog_path`` would walk a mount that
+    # need not even be mounted for the transfer to have succeeded -- for a
+    # rename rsync performed on the remote filesystem, where the timestamp
+    # is preserved anyway.
+    mtime_updates = []
+    if not remote:
+        mtime_updates, problem = _plan_moved_file_mtimes(
+            db, src_path, transfer_dest,
+            progress_cb=progress_cb, total_files=total_files,
+        )
+        if problem is not None:
+            # Verification below would catch this too. Failing here just
+            # spares the user a full byte-for-byte pass over a destination
+            # already known to be incomplete.
+            #
+            # Clean up the same way the fresh-move count check does. A
+            # destination this move created is ours to remove, and leaving a
+            # partial tree behind would turn the documented all-or-nothing
+            # retry into one that demands a merge. A destination that was
+            # already there is never removed -- it may hold the user's own
+            # files.
+            if not dest_exists:
+                shutil.rmtree(transfer_dest, ignore_errors=True)
+            return {"moved": 0, "errors": [
+                f"Verification failed: {problem}. Originals preserved."
+            ]}
+
     # Verify before deleting originals.
     if progress_cb:
         progress_cb(total_files, total_files, "", "Verifying copy")
@@ -2942,19 +3151,79 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 f"or symlinked at destination. Originals preserved."
             ]}
     else:
-        # Fresh move into a destination we created: a whole-tree file
-        # count is a cheap, sufficient integrity check. Recount the source
-        # here rather than reusing the pre-copy `total_files` — if a file
-        # appeared in the source after that upfront count (and rsync didn't
-        # pick it up), a stale count could spuriously match `dst_count` and
-        # the rmtree below would delete the never-copied file. The fresh
-        # walk catches that mismatch and preserves the originals.
-        src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
-        dst_count = sum(1 for _, _, files in os.walk(transfer_dest) for _ in files)
-        if src_count != dst_count:
+        # Fresh move into a destination we created: walk the source and check
+        # each file has a same-sized counterpart at the destination. Recount
+        # the source here rather than reusing the pre-copy `total_files` — if
+        # a file appeared in the source after that upfront count (and rsync
+        # didn't pick it up), a stale count could spuriously match a naive
+        # dst_count and the rmtree below would delete the never-copied file.
+        #
+        # A whole-tree file count alone is not sufficient: ``_plan_moved_file_mtimes``
+        # above stats every catalog photo sequentially and can run for minutes
+        # on a network mount, so a destination photo stat'd early in that pass
+        # could be truncated or replaced afterwards while the pass keeps working
+        # through the rest of the tree. Neither the pass's remaining iterations
+        # nor a count-only check would notice, and rmtree(src) would then delete
+        # the intact original. Per-file size verification is the last thing
+        # that touches the destination before the catalog update, closing the
+        # window opened by the planning pass.
+        #
+        # Symlinks are matched structurally: rsync -a (and the shutil fallback)
+        # preserves source symlinks as destination symlinks with the same
+        # target string; os.path.getsize would follow the link, so lstat sizes
+        # and readlink targets are compared instead.
+        verify_error = None
+        src_count = 0
+        for root, _dirs, files in os.walk(src_path):
+            rel = os.path.relpath(root, src_path)
+            for fn in files:
+                src_count += 1
+                src_file = os.path.join(root, fn)
+                rel_name = fn if rel == "." else os.path.join(rel, fn)
+                dst_file = os.path.join(transfer_dest, rel_name)
+                if not os.path.lexists(dst_file):
+                    verify_error = f"'{rel_name}' missing at destination"
+                    break
+                src_is_link = os.path.islink(src_file)
+                dst_is_link = os.path.islink(dst_file)
+                if src_is_link != dst_is_link:
+                    verify_error = (
+                        f"'{rel_name}' type mismatch (symlink vs regular file) "
+                        f"at destination")
+                    break
+                if src_is_link:
+                    if os.readlink(src_file) != os.readlink(dst_file):
+                        verify_error = (
+                            f"'{rel_name}' symlink target mismatch at destination")
+                        break
+                    continue
+                try:
+                    src_size = os.stat(src_file, follow_symlinks=False).st_size
+                    dst_size = os.stat(dst_file, follow_symlinks=False).st_size
+                except OSError:
+                    verify_error = f"'{rel_name}' unreadable at destination"
+                    break
+                if src_size != dst_size:
+                    verify_error = (
+                        f"'{rel_name}' size mismatch at destination "
+                        f"(source={src_size}, dest={dst_size})")
+                    break
+            if verify_error:
+                break
+        if verify_error is None:
+            # Extras at destination — a leftover rsync temp file, or anything
+            # else the source-driven walk above never looked for — would leave
+            # the fresh destination in a state we do not fully understand.
+            # Count both sides after the size check so a mismatch that a
+            # per-source-file walk catches is not attributed to a stray extra.
+            dst_count = sum(1 for _, _, f in os.walk(transfer_dest) for _ in f)
+            if src_count != dst_count:
+                verify_error = (
+                    f"file count mismatch: source={src_count}, dest={dst_count}")
+        if verify_error is not None:
             shutil.rmtree(transfer_dest, ignore_errors=True)
             return {"moved": 0, "errors": [
-                f"File count mismatch: source={src_count}, dest={dst_count}. Originals preserved."
+                f"Verification failed: {verify_error}. Originals preserved."
             ]}
 
     # Count photos for progress
@@ -2993,6 +3262,117 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     else:
         db.move_folder_path(folder_id, catalog_path, new_name=landing_name)
     db.update_folder_counts()
+
+    # Only now that the rows live at the destination. Guarded on the values
+    # the plan was built from, so a concurrent scan that committed a fresh
+    # stat of its own meanwhile wins instead of being overwritten from a
+    # stale snapshot -- and an id the merge dropped as an already-present
+    # collision simply matches nothing.
+    mtimes_refreshed = 0
+    if mtime_updates:
+        # Carry the mtime-pinned working-copy markers along with the
+        # correction. Both record "the ``file_mtime`` this decision was made
+        # against": ``working_copy_evicted_mtime`` marks a rendition the
+        # quota deliberately dropped (scanner's backfill clause treats
+        # ``!= file_mtime`` as "the file changed, redo it"), and
+        # ``working_copy_failed_mtime`` marks one whose extraction failed
+        # (``render_source`` retries as soon as the two differ). Re-stamping
+        # ``file_mtime`` alone would silently invalidate both, and every
+        # moved folder would re-read its RAWs over the NAS to regenerate
+        # renditions that were dropped on purpose, or to retry extractions
+        # that will fail exactly as before.
+        #
+        # Only a marker pinned to the timestamp being corrected moves. The
+        # bytes are unchanged, so those decisions still hold; anything
+        # recorded against a different timestamp -- including the ``-1``
+        # sentinel used when a row had no mtime at all -- was made against a
+        # state this correction knows nothing about, and is left alone.
+        cursor = db.conn.executemany(
+            "UPDATE photos SET file_mtime = ?,"
+            " working_copy_evicted_mtime = CASE"
+            "   WHEN working_copy_evicted_mtime IS ? THEN ?"
+            "   ELSE working_copy_evicted_mtime END,"
+            " working_copy_failed_mtime = CASE"
+            "   WHEN working_copy_failed_mtime IS ? THEN ?"
+            "   ELSE working_copy_failed_mtime END"
+            " WHERE id = ? AND file_mtime IS ? AND file_size IS ?",
+            [(fresh, stale, fresh, stale, fresh, photo_id, stale, size)
+             for fresh, photo_id, stale, size in mtime_updates],
+        )
+        mtimes_refreshed = cursor.rowcount
+        # Same reasoning as the working-copy markers, one table over.
+        # ``offline_originals.source_mtime`` records the ``file_mtime`` its
+        # cached copy was taken from, and ``offline_cache`` treats a
+        # mismatch as "the original changed" -- so correcting ``file_mtime``
+        # alone would mark every cached original stale and have the next
+        # cache preparation re-copy bytes that never changed. Only a row
+        # pinned to the timestamp being corrected, for a file of the same
+        # size, moves with it.
+        db.conn.executemany(
+            "UPDATE offline_originals SET source_mtime = ?"
+            " WHERE photo_id = ? AND source_mtime IS ? AND source_size IS ?",
+            mtime_updates,
+        )
+        db.conn.commit()
+        log.info(
+            "Re-stamped file_mtime for %d photo(s) under %s from the copy "
+            "at %s -- the transfer did not carry their timestamps across",
+            mtimes_refreshed, src_path, catalog_path,
+        )
+        # The thumbnail endpoint gates cache freshness on ``cached_mtime >=
+        # photos.file_mtime``, and ``generate_thumbnail`` pegs a rendered
+        # thumbnail's file mtime to the source ``file_mtime`` it was made
+        # from. Advancing ``file_mtime`` alone would leave every cached
+        # thumbnail in the moved folder pinned below the new value: the next
+        # fetch would treat it as stale and regenerate, even though the
+        # pixels still describe the same unchanged bytes. Touch each
+        # thumbnail file to the corrected timestamp so the invariant
+        # continues to hold. Best-effort: a failure to touch is non-fatal --
+        # the worst case is a one-shot regeneration on next access, exactly
+        # the pre-fix behavior.
+        #
+        # Everything here runs AFTER the catalog commit above, so it is
+        # wrapped whole: an exception escaping at this point would leave the
+        # catalog repointed at the destination, the originals still sitting
+        # at the source, and the move reported as failed. Nothing about
+        # thumbnail freshness is worth that half-state, so any failure is
+        # logged and swallowed -- the cost is one regeneration on next
+        # access, which is exactly the behaviour without this block.
+        if thumb_cache_dir and mtime_updates:
+            try:
+                fresh_by_id = {photo_id: fresh
+                               for fresh, photo_id, _, _ in mtime_updates}
+                # Chunked: a folder of a few thousand photos would otherwise
+                # bind one variable per id and trip SQLite's
+                # SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) -- and the
+                # transfer this exists for moved 1099 in one go.
+                thumb_rows = []
+                for chunk in _chunks(list(fresh_by_id)):
+                    placeholders = ",".join(["?"] * len(chunk))
+                    thumb_rows.extend(db.conn.execute(
+                        f"SELECT id, thumb_path FROM photos"
+                        f" WHERE id IN ({placeholders})"
+                        f" AND thumb_path IS NOT NULL",
+                        chunk,
+                    ).fetchall())
+                for row in thumb_rows:
+                    fresh = fresh_by_id.get(row["id"])
+                    if fresh is None:
+                        continue
+                    thumb_file = os.path.join(
+                        thumb_cache_dir, row["thumb_path"])
+                    try:
+                        os.utime(thumb_file, (fresh, fresh))
+                    except OSError:
+                        log.debug(
+                            "Could not align thumbnail mtime for photo %s "
+                            "at %s", row["id"], thumb_file, exc_info=True,
+                        )
+            except Exception:
+                log.exception(
+                    "Could not align thumbnail mtimes under %s after the "
+                    "move; they will regenerate on next access", src_path,
+                )
 
     # Rebase any developed-output subdirs nested under the configured
     # darktable_output_dir. `developed_folder_key` hashes the folder's
@@ -3053,7 +3433,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     if progress_cb:
         progress_cb(total_files, total_files, folder_name, "Done")
 
-    result = {"moved": total_photos, "errors": []}
+    result = {"moved": total_photos, "errors": [],
+              "mtimes_refreshed": mtimes_refreshed}
     if merge_into_tracked is not None:
         # ``dropped_photo_ids`` is a cleanup handle for the caller (thumbnails,
         # previews, offline copies of the deleted staged photos), not a

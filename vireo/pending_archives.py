@@ -85,6 +85,7 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
         developed_dir=db.get_effective_config(config.load()).get("darktable_output_dir", "") or "",
         merge=True, remote=remote, allow_tracked_merge=True,
         verify_contents=remote is None,
+        thumb_cache_dir=os.path.join(vireo_dir, "thumbnails"),
         **({"pre_commit_check": check_mount} if check_mount else {}),
     )
     if result.get("errors") or result.get("needs_merge"):

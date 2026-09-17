@@ -1,6 +1,7 @@
 """Tests for photo move operations."""
 
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -5698,3 +5699,829 @@ def test_rsync_streamed_closes_pty_fds_when_popen_fails(monkeypatch):
     for fd in opened:
         with pytest.raises(OSError):
             os.fstat(fd)  # closed: fstat on a closed fd raises EBADF
+
+
+def _catalog_folder_with_current_stats(tmp_path, names=("a.jpg", "b.jpg"),
+                                       root_name="shoot"):
+    """A folder whose rows describe its files exactly: a scan would skip it.
+
+    Timestamps are pinned to a fixed past value so a copy that stamps the
+    destination with the current time is distinguishable from one that
+    carried the source's timestamp across -- on a fast filesystem, files
+    written and copied inside one test can otherwise share an mtime.
+    """
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+
+    src = tmp_path / root_name
+    src.mkdir()
+    dst = tmp_path / "archive"
+    dst.mkdir()
+    fid = db.add_folder(str(src), name=root_name)
+
+    ids = {}
+    for index, name in enumerate(names):
+        path_ = src / name
+        path_.write_bytes(b"\xff\xd8" + b"\x00" * (64 + index))
+        os.utime(path_, (1577880000, 1577880000))
+        st = path_.stat()
+        ids[name] = db.add_photo(
+            folder_id=fid, filename=name, extension=".jpg",
+            file_size=st.st_size, file_mtime=st.st_mtime,
+        )
+    # Leave nothing else for a scan to do: with a hash and extracted
+    # metadata on every row, the timestamp is the only thing that can send
+    # a file back through feature computation.
+    db.conn.execute(
+        "UPDATE photos SET file_hash = 'hash-' || id, exif_data = '{}'")
+    db.conn.commit()
+    return db, src, dst, fid, ids
+
+
+def _lose_timestamps_in_transfer(monkeypatch, skip=None):
+    """Copy the tree's bytes without its timestamps.
+
+    Stands in for what rsync's temp-write-then-rename does on a mount that
+    stamps the renamed file with the current time (measured on macOS smbfs
+    against a Synology share) — the copy is byte-for-byte correct and every
+    destination file carries a fresh mtime.
+
+    ``skip`` omits one basename from the copy, standing in for a destination
+    file that never arrived or vanished before the timestamps were read.
+    """
+    import shutil
+
+    import move as move_mod
+
+    def fake_transfer(src_path, dest_spec, rsync_flags, total_files,
+                      progress_cb, **kwargs):
+        for root, _dirs, files in os.walk(src_path):
+            rel = os.path.relpath(root, src_path)
+            target = dest_spec if rel == "." else os.path.join(dest_spec, rel)
+            os.makedirs(target, exist_ok=True)
+            for fn in files:
+                if fn == skip:
+                    continue
+                # copyfile, not copy2: bytes land, timestamps do not.
+                shutil.copyfile(os.path.join(root, fn),
+                                os.path.join(target, fn))
+        return 0, "", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_transfer)
+
+
+def _count_feature_computations(monkeypatch):
+    """Record every file the scanner recomputes hash/phash for."""
+    import scanner
+
+    computed = []
+    real = scanner._compute_file_features
+
+    def counting(path_str):
+        computed.append(os.path.basename(path_str))
+        return real(path_str)
+
+    monkeypatch.setattr(scanner, "_compute_file_features", counting)
+    return computed
+
+
+def test_move_folder_restamps_mtimes_a_copy_did_not_preserve(tmp_path, monkeypatch):
+    """A timestamp the copy dropped is re-read from the destination.
+
+    Without this the catalog describes an mtime no file on disk has, and
+    the next incremental scan re-hashes the whole folder to find out
+    nothing changed.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    _lose_timestamps_in_transfer(monkeypatch)
+
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert result["mtimes_refreshed"] == len(ids)
+    landing = dst / "shoot"
+    for name, photo_id in ids.items():
+        row = db.conn.execute(
+            "SELECT file_mtime FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        assert row["file_mtime"] == os.stat(landing / name).st_mtime
+        assert row["file_mtime"] != 1577880000
+
+
+def test_scan_after_a_timestamp_losing_move_recomputes_nothing(tmp_path, monkeypatch):
+    """The point of the re-stamp: the next scan skips the moved files."""
+    import scanner
+    from move import move_folder
+
+    db, _src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    _lose_timestamps_in_transfer(monkeypatch)
+    move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    computed = _count_feature_computations(monkeypatch)
+    scanner.scan(str(dst / "shoot"), db, incremental=True)
+
+    assert computed == []
+
+
+def test_move_folder_leaves_a_source_edited_since_its_last_scan_stale(
+        tmp_path, monkeypatch):
+    """A row that no longer describes its source keeps its stale timestamp.
+
+    Adopting the destination's timestamp there would make the row look
+    current while its hash and metadata still described the pre-edit bytes,
+    and no later scan would ever revisit it.
+    """
+    import scanner
+    from move import move_folder
+
+    db, src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    edited = src / "a.jpg"
+    size = edited.stat().st_size
+    edited.write_bytes(b"\xff\xd8" + b"\x01" * (size - 2))
+    os.utime(edited, (1600000000, 1600000000))
+    stale = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (ids["a.jpg"],)
+    ).fetchone()["file_mtime"]
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    # Only the untouched photo is re-stamped.
+    assert result["mtimes_refreshed"] == 1
+    assert db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (ids["a.jpg"],)
+    ).fetchone()["file_mtime"] == stale
+
+    computed = _count_feature_computations(monkeypatch)
+    scanner.scan(str(dst / "shoot"), db, incremental=True)
+    assert computed == ["a.jpg"]
+
+
+def test_move_folder_leaves_preserved_timestamps_alone(tmp_path):
+    """A copy that carried the timestamps across needs no catalog write."""
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert result["mtimes_refreshed"] == 0
+    for name, photo_id in ids.items():
+        row = db.conn.execute(
+            "SELECT file_mtime FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        assert row["file_mtime"] == 1577880000
+        assert os.stat(dst / "shoot" / name).st_mtime == 1577880000
+
+
+def test_tracked_merge_restamps_mtimes_a_copy_did_not_preserve(
+        tmp_path, monkeypatch):
+    """The send-to-NAS shape re-stamps too.
+
+    A merge into a tracked archive reconciles the staged rows into the
+    archive instead of cascading their folder path. The reconcile
+    reparents those rows rather than recreating them, so timestamps
+    planned before it still land on the right rows afterwards -- and the
+    archive's own photos, which never moved, are left alone.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    landing = dst / "shoot"
+    landing.mkdir()
+    (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    fid_archive = db.add_folder(str(landing), name="shoot")
+    prior = db.add_photo(folder_id=fid_archive, filename="prior.jpg",
+                         extension=".jpg", file_size=52, file_mtime=3.0)
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst),
+                         merge=True, allow_tracked_merge=True)
+
+    assert result["errors"] == []
+    assert result["mtimes_refreshed"] == len(ids)
+    for name, photo_id in ids.items():
+        row = db.conn.execute(
+            "SELECT file_mtime FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        assert row["file_mtime"] == os.stat(landing / name).st_mtime
+    # Never moved, never re-stamped.
+    assert db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (prior,)
+    ).fetchone()["file_mtime"] == 3.0
+
+
+def test_mtime_plan_ignores_a_sibling_tree_a_like_pattern_would_match(
+        tmp_path, monkeypatch):
+    """A folder name containing ``_`` must not drag in sibling subtrees.
+
+    ``LIKE '<src>/%'`` reads ``_`` as "any character", so ``shoot_1/%`` also
+    matches ``shootX1/sub`` — and that row resolves through ``..`` to a file
+    outside the destination this move wrote. Re-stamping it would hand an
+    untouched photo the timestamp of an unrelated file.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, _ids = _catalog_folder_with_current_stats(
+        tmp_path, names=("a.jpg", "b.jpg"), root_name="shoot_1")
+
+    # Sibling tree the wildcard would sweep in, catalogued accurately.
+    decoy_dir = tmp_path / "shootX1" / "sub"
+    decoy_dir.mkdir(parents=True)
+    decoy = decoy_dir / "decoy.jpg"
+    decoy.write_bytes(b"\xff\xd8" + b"\x00" * 64)
+    os.utime(decoy, (1577880000, 1577880000))
+    fid_decoy = db.add_folder(str(decoy_dir), name="sub")
+    decoy_id = db.add_photo(
+        folder_id=fid_decoy, filename="decoy.jpg", extension=".jpg",
+        file_size=decoy.stat().st_size, file_mtime=decoy.stat().st_mtime)
+
+    # The file the escaped path would land on: same size, different mtime.
+    escaped = dst / "shootX1" / "sub"
+    escaped.mkdir(parents=True)
+    (escaped / "decoy.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 64)
+    os.utime(escaped / "decoy.jpg", (1600000000, 1600000000))
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (decoy_id,)
+    ).fetchone()["file_mtime"] == 1577880000
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="A literal backslash in a folder name is only possible on POSIX — "
+    "on Windows it is a path separator, so the two trees under test would "
+    "resolve to the same directory and could not be distinct.",
+)
+def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
+    """A POSIX folder named ``shoot\\1`` must not sweep in ``shoot/1``.
+
+    The SQL prefilter normalizes ``\\`` to ``/`` on every platform, and ``\\``
+    is a legal POSIX filename character, so those two distinct trees share a
+    normalized prefix. They can also agree on a relative path, which without
+    a real containment check lets a photo that never moved be re-stamped
+    from a file under the destination.
+
+    Exercises the planner directly rather than a whole ``move_folder``: the
+    same normalization lives in ``db.move_folder_path``'s cascade, where
+    this layout raises ``UNIQUE constraint failed: folders.path`` on ``main``
+    today. That is a pre-existing bug in a different module — this test pins
+    the planner's own behavior without depending on it.
+    """
+    import move as move_mod
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+
+    def _add(folder_id, directory, name, mtime=1577880000):
+        path_ = directory / name
+        path_.write_bytes(b"\xff\xd8" + b"\x00" * 64)
+        os.utime(path_, (mtime, mtime))
+        st = path_.stat()
+        return db.add_photo(folder_id=folder_id, filename=name,
+                            extension=".jpg", file_size=st.st_size,
+                            file_mtime=st.st_mtime)
+
+    # The tree being moved: one directory whose NAME contains a backslash.
+    src = tmp_path / "shoot\\1"
+    sub = src / "sub"
+    sub.mkdir(parents=True)
+    fid = db.add_folder(str(src), name="shoot\\1")
+    fid_sub = db.add_folder(str(sub), name="sub", parent_id=fid)
+    moved_id = _add(fid_sub, sub, "d.jpg")
+
+    # Unrelated tree that normalizes to the same prefix, at the same relative
+    # path so the escaped lookup would find a same-sized file.
+    decoy_dir = tmp_path / "shoot" / "1" / "sub"
+    decoy_dir.mkdir(parents=True)
+    fid_decoy = db.add_folder(str(decoy_dir), name="sub")
+    decoy_id = _add(fid_decoy, decoy_dir, "d.jpg")
+
+    # The copy as the transfer left it: same bytes, a fresh timestamp.
+    dest = tmp_path / "archive" / "shoot\\1"
+    (dest / "sub").mkdir(parents=True)
+    (dest / "sub" / "d.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 64)
+    os.utime(dest / "sub" / "d.jpg", (1600000000, 1600000000))
+
+    updates, problem = move_mod._plan_moved_file_mtimes(
+        db, str(src), str(dest))
+
+    assert problem is None
+    assert [u[1] for u in updates] == [moved_id]
+    assert decoy_id not in [u[1] for u in updates]
+
+
+def test_move_folder_tolerates_a_catalog_row_whose_source_is_gone(
+        tmp_path, monkeypatch):
+    """A stale row is skipped, not treated as a missing copy.
+
+    Verification walks the source tree, so it never vouched for a row whose
+    file was deleted outside Vireo. Aborting on those would make an
+    unrelated stale row block every future move of the folder.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    ghost = db.add_photo(folder_id=fid, filename="ghost.jpg", extension=".jpg",
+                         file_size=66, file_mtime=1577880000)
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert result["mtimes_refreshed"] == len(ids)
+    assert db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (ghost,)
+    ).fetchone()["file_mtime"] == 1577880000
+
+
+def test_timestamp_plan_runs_before_the_copy_is_verified(tmp_path, monkeypatch):
+    """Verification must remain the last thing that touches the destination.
+
+    The plan stats every photo on both sides — minutes on a network mount.
+    Run after verification, those minutes would land in the one window where
+    a destination file going missing is never noticed before ``rmtree``
+    deletes the originals. Run before it, the byte-level check still has the
+    final word and nothing is owed a second pass.
+    """
+    import move as move_mod
+
+    db, _src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    order = []
+    real_plan = move_mod._plan_moved_file_mtimes
+    real_verify = move_mod._first_missing_source_file
+
+    def traced_plan(*a, **kw):
+        order.append("plan")
+        return real_plan(*a, **kw)
+
+    def traced_verify(*a, **kw):
+        order.append("verify")
+        return real_verify(*a, **kw)
+
+    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes", traced_plan)
+    monkeypatch.setattr(move_mod, "_first_missing_source_file", traced_verify)
+    _lose_timestamps_in_transfer(monkeypatch)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
+                                 merge=True, verify_contents=True)
+
+    assert result["errors"] == []
+    assert order == ["plan", "verify"]
+
+
+def test_a_copy_lost_during_planning_still_aborts_the_move(
+        tmp_path, monkeypatch):
+    """Anything lost while timestamps are read is caught by verification.
+
+    Covers the files the plan itself never looks at — an ``.xmp`` sidecar is
+    not a catalog row — which is the reason the plan cannot be the thing
+    standing between the copy and the delete.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    (src / "a.xmp").write_text("<xmp/>")
+    real_plan = move_mod._plan_moved_file_mtimes
+
+    def plan_then_lose_a_sidecar(*a, **kw):
+        result = real_plan(*a, **kw)
+        # As if the share dropped the file mid-pass, mount still healthy.
+        (dst / "shoot" / "a.xmp").unlink()
+        return result
+
+    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes",
+                        plan_then_lose_a_sidecar)
+    _lose_timestamps_in_transfer(monkeypatch)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
+                                 merge=True, verify_contents=True)
+
+    assert result["moved"] == 0
+    assert any("Originals preserved" in e for e in result["errors"])
+    assert (src / "a.xmp").exists()
+    assert (src / "a.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["path"] == str(src)
+
+
+def test_mtime_plan_reports_an_unreadable_destination_file(tmp_path):
+    """The plan fails fast rather than reading bytes it already knows are gone.
+
+    Verification would catch this anyway; reporting it here just spares a
+    full byte-for-byte pass over a destination already known to be
+    incomplete. A missing *source*, by contrast, is a stale catalog row that
+    verification never vouched for, and must not block the move.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    landing = dst / "shoot"
+    landing.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        (landing / name).write_bytes((src / name).read_bytes())
+
+    updates, problem = move_mod._plan_moved_file_mtimes(
+        db, str(src), str(landing))
+    assert problem is None
+    assert len(updates) == len(ids)
+
+    (landing / "a.jpg").unlink()
+    updates, problem = move_mod._plan_moved_file_mtimes(
+        db, str(src), str(landing))
+    assert str(landing / "a.jpg") in problem
+    assert "unreadable" in problem
+    assert updates == []
+
+
+def test_a_failed_fresh_move_leaves_no_partial_destination(
+        tmp_path, monkeypatch):
+    """All-or-nothing survives the early return.
+
+    The fresh-move contract is that a failure leaves nothing behind, so a
+    retry is another fresh move rather than one that demands a merge. The
+    count check downstream removes the tree it created; this earlier exit
+    has to do the same.
+    """
+    from move import move_folder
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    _lose_timestamps_in_transfer(monkeypatch, skip="a.jpg")
+
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("Originals preserved" in e for e in result["errors"])
+    assert not (dst / "shoot").exists()
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+
+
+def test_a_failed_merge_never_removes_a_pre_existing_destination(
+        tmp_path, monkeypatch):
+    """...but a destination we did not create is not ours to delete.
+
+    A merge target can hold the user's own files, so the cleanup above must
+    not fire for one.
+    """
+    from move import move_folder
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    landing = dst / "shoot"
+    landing.mkdir()
+    (landing / "theirs.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 32)
+
+    _lose_timestamps_in_transfer(monkeypatch, skip="a.jpg")
+    result = move_folder(db=db, folder_id=fid, destination=str(dst),
+                         merge=True)
+
+    assert result["moved"] == 0
+    assert (landing / "theirs.jpg").exists()
+    assert (src / "a.jpg").exists()
+
+
+def test_restamping_carries_the_working_copy_markers_along(
+        tmp_path, monkeypatch):
+    """Markers pinned to the corrected timestamp move with it.
+
+    ``working_copy_evicted_mtime`` and ``working_copy_failed_mtime`` both
+    record the ``file_mtime`` a decision was made against. Correcting
+    ``file_mtime`` alone would read as "the file changed", so every moved
+    folder would re-read its RAWs over the NAS to regenerate renditions the
+    quota dropped on purpose, and to retry extractions that will fail again.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    evicted, failed = ids["a.jpg"], ids["b.jpg"]
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path = NULL,"
+        " working_copy_evicted_mtime = file_mtime WHERE id = ?", (evicted,))
+    db.conn.execute(
+        "UPDATE photos SET working_copy_failed_at = datetime('now'),"
+        " working_copy_failed_mtime = file_mtime WHERE id = ?", (failed,))
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+    assert result["errors"] == []
+
+    rows = {r["id"]: r for r in db.conn.execute(
+        "SELECT id, file_mtime, working_copy_evicted_mtime,"
+        " working_copy_failed_mtime FROM photos").fetchall()}
+    # Still pinned: the bytes never changed, so the decisions still hold.
+    assert (rows[evicted]["working_copy_evicted_mtime"]
+            == rows[evicted]["file_mtime"] != 1577880000)
+    assert (rows[failed]["working_copy_failed_mtime"]
+            == rows[failed]["file_mtime"] != 1577880000)
+
+
+def test_restamping_leaves_unrelated_marker_timestamps_alone(
+        tmp_path, monkeypatch):
+    """A marker recorded against some other timestamp is not ours to move.
+
+    Only a marker pinned to the exact timestamp being corrected describes
+    the same state; anything else — including the ``-1`` sentinel used when
+    a row had no mtime at all — was decided against something this
+    correction knows nothing about.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    db.conn.execute(
+        "UPDATE photos SET working_copy_evicted_mtime = -1,"
+        " working_copy_failed_mtime = 12345.0 WHERE id = ?", (ids["a.jpg"],))
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    assert move_folder(db=db, folder_id=fid,
+                       destination=str(dst))["errors"] == []
+
+    row = db.conn.execute(
+        "SELECT file_mtime, working_copy_evicted_mtime,"
+        " working_copy_failed_mtime FROM photos WHERE id = ?",
+        (ids["a.jpg"],)).fetchone()
+    assert row["file_mtime"] != 1577880000
+    assert row["working_copy_evicted_mtime"] == -1
+    assert row["working_copy_failed_mtime"] == 12345.0
+
+
+def test_a_differently_sized_copy_stops_a_fresh_move(tmp_path, monkeypatch):
+    """A damaged copy is reported, not skipped.
+
+    A fresh local move verifies by file count, so a truncated or replaced
+    destination file passes that check. The timestamp pass is the only thing
+    that compares sizes, and skipping the row would let the rmtree delete
+    the intact original.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    real = move_mod._run_rsync_streamed
+
+    def truncating_transfer(src_path, dest_spec, rsync_flags, total_files,
+                            progress_cb, **kwargs):
+        import shutil
+        os.makedirs(dest_spec, exist_ok=True)
+        for name in os.listdir(src_path):
+            shutil.copyfile(os.path.join(src_path, name),
+                            os.path.join(dest_spec, name))
+        # As if the copy were truncated after rsync reported success.
+        with open(os.path.join(dest_spec, "a.jpg"), "wb") as handle:
+            handle.write(b"\xff\xd8")
+        return 0, "", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", truncating_transfer)
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("does not match the source's size" in e
+               for e in result["errors"])
+    assert (src / "a.jpg").exists()
+    assert not (dst / "shoot").exists()
+
+
+def test_a_destination_truncated_after_planning_stops_a_fresh_move(
+        tmp_path, monkeypatch):
+    """A destination file truncated after the planning pass is caught.
+
+    ``_plan_moved_file_mtimes`` stats every catalogued photo sequentially,
+    and on a network mount that takes minutes. A destination photo stat'd
+    early in the pass could be truncated or replaced while the pass keeps
+    working through the rest of the tree — the pass's later iterations
+    never revisit it, and a count-only fresh-move verification would still
+    match, so ``rmtree(src)`` would delete the intact original. Per-file
+    size verification is the last thing that touches the destination
+    before the catalog update, closing that window.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    transfer_dest = dst / "shoot"
+    real_plan = move_mod._plan_moved_file_mtimes
+
+    def plan_then_truncate(db_, src_path, dest_path, **kwargs):
+        result = real_plan(db_, src_path, dest_path, **kwargs)
+        # As if the mount truncated a.jpg after the planning pass had
+        # already stat'd it and moved on.
+        with open(os.path.join(dest_path, "a.jpg"), "wb") as handle:
+            handle.write(b"\xff\xd8")
+        return result
+
+    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes", plan_then_truncate)
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("size mismatch" in e for e in result["errors"])
+    # All-or-nothing: originals preserved, fresh destination removed.
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+    assert not transfer_dest.exists()
+
+
+def test_restamping_carries_the_offline_cache_row(tmp_path, monkeypatch):
+    """A cached original stays fresh across the correction.
+
+    ``offline_originals.source_mtime`` records the ``file_mtime`` its cached
+    copy was taken from. Leaving it behind would mark every cached original
+    stale and have the next cache preparation re-copy bytes that never
+    changed — over the same slow link this PR exists to spare.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    kept, unrelated = ids["a.jpg"], ids["b.jpg"]
+    size = db.conn.execute("SELECT file_size FROM photos WHERE id = ?",
+                           (kept,)).fetchone()["file_size"]
+    db.conn.execute(
+        "INSERT INTO offline_originals (photo_id, original_path, source_size,"
+        " source_mtime, cached_at, status)"
+        " VALUES (?, ?, ?, ?, datetime('now'), 'ready')",
+        (kept, "offline/a.jpg", size, 1577880000))
+    # Pinned to some other timestamp: not this correction's to move.
+    db.conn.execute(
+        "INSERT INTO offline_originals (photo_id, original_path, source_size,"
+        " source_mtime, cached_at, status)"
+        " VALUES (?, ?, ?, ?, datetime('now'), 'ready')",
+        (unrelated, "offline/b.jpg", size, 999.0))
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    assert move_folder(db=db, folder_id=fid,
+                       destination=str(dst))["errors"] == []
+
+    rows = {r["photo_id"]: r["source_mtime"] for r in db.conn.execute(
+        "SELECT photo_id, source_mtime FROM offline_originals").fetchall()}
+    fresh = db.conn.execute("SELECT file_mtime FROM photos WHERE id = ?",
+                            (kept,)).fetchone()["file_mtime"]
+    assert rows[kept] == fresh != 1577880000
+    assert rows[unrelated] == 999.0
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Relative file symlinks in a catalog are a POSIX concern here; "
+    "Windows needs privileges to create them and the scanner path differs.",
+)
+def test_a_symlinked_photo_row_is_never_restamped(tmp_path, monkeypatch):
+    """A relative symlink resolves differently once it has moved.
+
+    ``os.stat`` follows the link, so the planner would read whatever the
+    destination-side target happens to be. If that is a same-sized file the
+    re-stamp would tell the incremental scanner that bytes it has never seen
+    are unchanged, leaving the row's hash and metadata on the wrong file.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+
+    # 'link.jpg' points at 'target.jpg' *relatively*, so it resolves to a
+    # different file at the source than at the destination.
+    (src / "target.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 64)
+    os.utime(src / "target.jpg", (1577880000, 1577880000))
+    os.symlink("target.jpg", src / "link.jpg")
+    st = os.stat(src / "link.jpg")
+    link_id = db.add_photo(folder_id=fid, filename="link.jpg",
+                           extension=".jpg", file_size=st.st_size,
+                           file_mtime=st.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash = 'hash-' || id,"
+                    " exif_data = '{}' WHERE id = ?", (link_id,))
+    db.conn.commit()
+
+    landing = dst / "shoot"
+    landing.mkdir()
+    for name in ("a.jpg", "b.jpg", "target.jpg"):
+        (landing / name).write_bytes((src / name).read_bytes())
+    # The destination-side target: same size, different bytes and timestamp.
+    os.utime(landing / "target.jpg", (1600000000, 1600000000))
+    os.symlink("target.jpg", landing / "link.jpg")
+
+    updates, problem = move_mod._plan_moved_file_mtimes(
+        db, str(src), str(landing))
+
+    assert problem is None
+    assert link_id not in [u[1] for u in updates]
+    assert sorted(u[1] for u in updates) == sorted(ids.values())
+
+
+def test_restamped_photo_thumbnails_stay_fresh(tmp_path, monkeypatch):
+    """A cached thumbnail is touched to the corrected mtime.
+
+    ``generate_thumbnail`` pegs its output's file mtime to the source's
+    ``file_mtime`` so the endpoint's ``cached_mtime >= file_mtime`` check
+    treats it as fresh on the next request. Advancing ``file_mtime`` here
+    without touching the thumbnail would mark every cached thumbnail in the
+    moved folder stale, and the first fetch of each would regenerate it --
+    for pixels that describe the same unchanged bytes.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    thumb_files = {}
+    for pid in ids.values():
+        thumb_name = f"{pid}.jpg"
+        thumb = thumb_dir / thumb_name
+        thumb.write_bytes(b"\xff\xd8thumb")
+        os.utime(thumb, (1577880000, 1577880000))
+        db.conn.execute("UPDATE photos SET thumb_path = ? WHERE id = ?",
+                        (thumb_name, pid))
+        thumb_files[pid] = thumb
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst),
+                         thumb_cache_dir=str(thumb_dir))
+    assert result["errors"] == []
+
+    for pid, thumb in thumb_files.items():
+        fresh = db.conn.execute(
+            "SELECT file_mtime FROM photos WHERE id = ?",
+            (pid,)).fetchone()["file_mtime"]
+        assert fresh != 1577880000
+        # Freshness invariant: cached mtime >= source file_mtime.
+        assert os.path.getmtime(str(thumb)) >= fresh
+
+
+def test_thumbnail_touch_without_thumb_cache_dir_is_a_no_op(tmp_path, monkeypatch):
+    """Callers that don't pass ``thumb_cache_dir`` see the pre-fix behavior.
+
+    Not every caller has the thumbnail cache directory to hand, and a
+    missing one is not a reason to fail the move. The touch pass is
+    strictly opt-in, so leaving the argument off keeps the on-disk
+    thumbnails untouched -- the worst case is a one-shot regeneration on
+    next access, exactly what happens on ``main`` today.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    thumb = thumb_dir / f"{ids['a.jpg']}.jpg"
+    thumb.write_bytes(b"\xff\xd8thumb")
+    os.utime(thumb, (1577880000, 1577880000))
+    db.conn.execute("UPDATE photos SET thumb_path = ? WHERE id = ?",
+                    (thumb.name, ids["a.jpg"]))
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+    assert result["errors"] == []
+    # No touch requested, so the thumbnail keeps its original mtime.
+    assert os.path.getmtime(str(thumb)) == 1577880000
+
+
+def test_thumbnail_alignment_never_fails_a_committed_move(
+        tmp_path, monkeypatch):
+    """Nothing after the catalog commit may fail the move.
+
+    The thumbnail pass runs once the folder paths and mtimes are already
+    committed, so an exception escaping it would leave the catalog pointing
+    at the destination, the originals still at the source, and the move
+    reported failed. A stale thumbnail is not worth that half-state.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    db.conn.execute("UPDATE photos SET thumb_path = 't.jpg'")
+    db.conn.commit()
+
+    def explode(*_a, **_kw):
+        raise sqlite3.OperationalError("too many SQL variables")
+
+    monkeypatch.setattr(move_mod, "_chunks", explode)
+    _lose_timestamps_in_transfer(monkeypatch)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
+                                 thumb_cache_dir=str(thumb_dir))
+
+    assert result["errors"] == []
+    assert result["moved"] >= 1
+    # The move completed: originals gone, catalog at the destination.
+    assert not src.exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["path"] == str(dst / "shoot")
+
+
+def test_thumbnail_lookup_is_chunked_under_the_sqlite_bind_limit(tmp_path):
+    """Photo ids are bound in bounded chunks, not one variable per photo."""
+    import move as move_mod
+
+    seen = []
+    for chunk in move_mod._chunks(list(range(2500))):
+        seen.append(len(chunk))
+    assert max(seen) <= 999
+    assert sum(seen) == 2500
