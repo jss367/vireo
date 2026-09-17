@@ -756,6 +756,37 @@ def load_merged_labels(label_sets):
     return labels
 
 
+_SUMMARY_CACHE = {}
+
+
+def label_set_summary(meta):
+    """``(usable_count, skipped_count)`` for one saved set, memoized.
+
+    Normalizing a 26k-species list costs ~0.5s, and the labels endpoint
+    answers for every saved set each time Settings or Pipeline loads. The
+    answer depends only on the two files' contents, so key the cache on
+    their size and mtime: an edit, a re-download or a restore changes one
+    of those, and nothing else can change the result.
+    """
+    path = meta.get("labels_file", "")
+    stamps = []
+    for candidate in (path, os.path.splitext(path)[0] + ".json"):
+        try:
+            stat = os.stat(candidate)
+            stamps.append((stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            stamps.append(None)
+    key = (path, tuple(stamps))
+    cached = _SUMMARY_CACHE.get(key)
+    if cached is None:
+        merged = load_merged_labels([meta])
+        cached = (len(merged), len(merged.dropped_ambiguous))
+        if len(_SUMMARY_CACHE) > 64:
+            _SUMMARY_CACHE.clear()  # bounded; recomputing is cheap enough
+        _SUMMARY_CACHE[key] = cached
+    return cached
+
+
 def load_label_set(path, meta=None):
     """One file's labels exactly as the classify job will see them.
 

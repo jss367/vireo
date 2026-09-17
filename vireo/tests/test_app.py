@@ -8056,6 +8056,22 @@ def test_labels_list_reports_skipped_names_without_shipping_identities(app_and_d
     assert entry["usable_count"] == 1
     assert "label_identities" not in entry
 
+    # The summary is memoized per request, but an edit must invalidate it:
+    # the cache key is the two files' size and mtime.
+    with open(label_path, "w") as f:
+        f.write("Robin\n")
+    labels_mod.LABELS_DIR = str(labels_dir)
+    try:
+        with app.test_client() as c:
+            entry = next(
+                l for l in c.get("/api/labels").get_json()["labels"]
+                if l["labels_file"] == label_path
+            )
+    finally:
+        labels_mod.LABELS_DIR = orig_labels_dir
+    assert entry["usable_count"] == 1
+    assert entry["ambiguous_count"] == 0
+
 
 def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_path):
     """Otherwise the workspace keeps a selection naming a file that no

@@ -18468,7 +18468,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 active_sets.append(meta)
             labels = load_merged_labels(active_sets)
             label_count = len(labels)
-            labels_selected = bool(active_sets)
+            # Same rule as classify_job._any_present: an open tab can send
+            # a path deleted since it rendered, and that is a fallback, not
+            # a refusal — readiness must not promise a block the job will
+            # not perform.
+            labels_selected = any(
+                os.path.exists(ls.get("labels_file", "")) for ls in active_sets
+            )
             names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
             label_name = ", ".join(names)
         else:

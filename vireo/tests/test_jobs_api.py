@@ -899,6 +899,14 @@ def test_readiness_reports_an_all_dropped_label_set_as_blocked(
     assert data["labels_blocked"] is True
     assert data["labels_skipped"] == 0
 
+    # A path deleted since the tab rendered is a fallback, not a refusal —
+    # readiness must say what classify_job._any_present would do.
+    with app.test_client() as client:
+        data = client.get(
+            "/api/classify/readiness?labels_files=" + str(tmp_path / "gone.txt")
+        ).get_json()
+    assert data["labels_blocked"] is False
+
 
 def test_readiness_reports_partially_dropped_prompts(app_and_db, tmp_path, monkeypatch):
     """A cross-file collision drops one prompt but keeps the rest. No per-list

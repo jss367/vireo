@@ -554,7 +554,7 @@ def create_models_blueprint(
     @blueprint.route("/api/labels")
     def api_labels_list():
         from labels import get_active_labels as get_global_active_labels
-        from labels import get_saved_labels, load_merged_labels
+        from labels import get_saved_labels, label_set_summary
 
         def summarize(meta):
             """Drop the per-label identity map, keep what it implies.
@@ -571,9 +571,13 @@ def create_models_blueprint(
             path = meta.get("labels_file")
             if path and os.path.exists(path):
                 try:
-                    merged = load_merged_labels([meta])
-                    trimmed["usable_count"] = len(merged)
-                    trimmed["ambiguous_count"] = len(merged.dropped_ambiguous)
+                    # Memoized on the files' size+mtime: this endpoint
+                    # answers for every saved set on each Settings and
+                    # Pipeline load, and normalizing a regional list is
+                    # ~0.5s of work that only changes when the files do.
+                    usable, skipped = label_set_summary(meta)
+                    trimmed["usable_count"] = usable
+                    trimmed["ambiguous_count"] = skipped
                 except Exception:
                     log.warning(
                         "Could not inspect %s for ambiguous labels", path,
