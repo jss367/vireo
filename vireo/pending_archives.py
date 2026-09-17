@@ -32,7 +32,8 @@ def get_pending_archive(db, archive_id):
 
 def active_archive_jobs(runner, workspace_id):
     # A move must wait for processing, exports, deletions, and other writers.
-    # Observational jobs opt out through blocks_local_transitions.
+    # Jobs that touch no photo or folder path opt out through
+    # blocks_local_transitions (jobs.CATALOG_INDEPENDENT_JOB_TYPES).
     return [j for j in runner.list_jobs()
             if j.get("workspace_id") == workspace_id
             and j.get("status") in LIVE_STATUSES

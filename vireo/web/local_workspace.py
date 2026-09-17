@@ -48,9 +48,11 @@ def create_local_workspace_blueprint(
         # scan/import is paused would silently orphan rows the manifest
         # doesn't cover once the paused job resumes.
         for job in get_runner().list_jobs():
-            # Observational jobs can opt out when their cache invalidation
-            # already makes an in-flight result from the old path layout
-            # harmless. The automatic new-images walk uses this path.
+            # Jobs that hold no pre-rebase photo/folder paths opt out: the
+            # model/label downloads and embedding precomputes listed in
+            # jobs.CATALOG_INDEPENDENT_JOB_TYPES, and observational jobs
+            # whose cache invalidation already makes an in-flight result
+            # from the old path layout harmless.
             if job.get("blocks_local_transitions") is False:
                 continue
             if (

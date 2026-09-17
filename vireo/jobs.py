@@ -35,6 +35,55 @@ _NO_SLEEP_ASSERTION_JOB_TYPES = frozenset({
     "verify-models",
 })
 
+# Job types that never read or write catalog rows keyed by a photo, folder,
+# or file path, and therefore do not block a Work Locally stage/sync/discard.
+#
+# That block exists for exactly one hazard: a local transition rebases
+# ``folders.path`` for a whole tree inside one transaction, so a job that
+# captured photo ids and absolute paths before the rebase can commit rows
+# against a layout that no longer exists. Jobs listed here operate on files
+# under ``~/.vireo`` (models, label lists, embedding caches) or on
+# identity-keyed rows that survive a rebase untouched, so blocking them buys
+# nothing and strands the user behind a download that has no bearing on the
+# folder they want to work on.
+#
+# Deliberately NOT listed:
+#  - ``download-taxonomy``: identity-keyed writes, but it holds one open
+#    write transaction across hundreds of thousands of taxa inserts, which a
+#    transition's ``BEGIN IMMEDIATE`` would have to wait out or fail against.
+#  - anything that scans, imports, moves, renders, classifies or exports
+#    photos — all of those carry pre-rebase paths in worker memory.
+#
+# The default is to block, so a job type added later is safe until someone
+# makes the call to list it here.
+CATALOG_INDEPENDENT_JOB_TYPES = frozenset({
+    "download-darktable",
+    "download-megadetector",
+    "download-model",
+    "fetch-labels",
+    "new_images_walk",
+    "precompute-embeddings",
+    "verify-models",
+})
+
+
+def _resolve_blocking(job_type, blocks_local_transitions):
+    """Resolve an explicit flag, falling back to the job type's policy."""
+    if blocks_local_transitions is None:
+        return job_type_blocks_local_transitions(job_type)
+    return bool(blocks_local_transitions)
+
+
+def job_type_blocks_local_transitions(job_type):
+    """Whether ``job_type`` blocks Work Locally transitions by default.
+
+    Call sites may still pass ``blocks_local_transitions`` explicitly — used
+    by the pipeline-model downloads, whose job type embeds the model id
+    (``download-sam2``) and so cannot be enumerated here.
+    """
+    return str(job_type) not in CATALOG_INDEPENDENT_JOB_TYPES
+
+
 # How long to keep completed/failed jobs in memory before eviction (seconds)
 _JOB_RETENTION_SECS = 3600  # 1 hour
 
@@ -868,7 +917,7 @@ class JobRunner:
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
               ephemeral=False, runtime_warning=None, counts_for_badge=True,
-              pausable=False, blocks_local_transitions=True,
+              pausable=False, blocks_local_transitions=None,
               workspace_transfer_batch=None):
         """Start a background job.
 
@@ -893,8 +942,11 @@ class JobRunner:
                       that checks cancellation at safe boundaries.
             blocks_local_transitions: if False, Work Locally stage/sync/discard
                       actions may proceed while this job runs. Reserve this
-                      for observational jobs whose results are safely dropped
-                      when a local transition invalidates their cache.
+                      for jobs that carry no pre-rebase photo/folder paths.
+                      Defaults to the job type's policy — see
+                      CATALOG_INDEPENDENT_JOB_TYPES — so the answer to "does
+                      this block Work Locally?" lives in one place rather
+                      than being re-decided at every launcher.
             workspace_transfer_batch: identifies automatic moves whose workers
                       call wait_for_workspace_transfer before touching originals.
 
@@ -966,6 +1018,9 @@ class JobRunner:
         # starts in the same millisecond can't collide — a collision makes
         # the second registration overwrite the first in _jobs/_events and
         # clobber its history row.
+        blocks_local_transitions = _resolve_blocking(
+            job_type, blocks_local_transitions,
+        )
         with self._lock:
             if self._shutting_down:
                 raise RuntimeError("JobRunner is shut down")
@@ -1089,7 +1144,7 @@ class JobRunner:
     def start_singleton(self, job_type, work_fn, *, singleton_key,
                         config=None, workspace_id=None, ephemeral=False,
                         runtime_warning=None, counts_for_badge=True,
-                        pausable=False, blocks_local_transitions=True,
+                        pausable=False, blocks_local_transitions=None,
                         exclusive_workspace=False):
         """Start a job unless one with the same (type, singleton_key) is active.
 
@@ -1117,6 +1172,9 @@ class JobRunner:
             )
             if existing_id is not None:
                 return existing_id, True, self._snapshot_job(existing)
+            blocks_local_transitions = _resolve_blocking(
+                job_type, blocks_local_transitions,
+            )
             self._check_workspace_admission_locked(workspace_id, blocks_local_transitions, exclusive_workspace)
             # No active singleton — register inline while still holding the
             # lock so a second caller arriving between our check and our

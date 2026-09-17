@@ -2895,3 +2895,66 @@ def test_local_folder_blocker_fingerprint_tracks_residency_transitions(tmp_path,
         # missed the job window still refreshes.
         assert cleared["residency_fingerprint"] == ""
         assert cleared["residency_fingerprint"] != active["residency_fingerprint"]
+
+
+def test_catalog_independent_job_does_not_block_work_locally(tmp_path, monkeypatch):
+    """A model/label download in the same workspace must not gate staging.
+
+    The block protects against a stage rebasing ``folders.path`` underneath a
+    job that captured pre-rebase paths. A label-embedding precompute holds no
+    such paths — it reads a labels file and writes the embedding cache — so
+    blocking it only stranded the user behind work unrelated to the folder.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Only")
+    folder_id = db.add_folder(str(source), name="photos", link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, folder_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    started = threading.Event()
+    release = threading.Event()
+
+    def embedding_work(_job):
+        started.set()
+        assert release.wait(timeout=10)
+        return {"labels": 3}
+
+    with app.test_client() as client:
+        assert client.post(
+            f"/api/workspaces/{workspace_id}/activate", json={}
+        ).status_code == 200
+        job_id = app._job_runner.start(
+            "precompute-embeddings", embedding_work, workspace_id=workspace_id,
+        )
+        try:
+            assert started.wait(timeout=2)
+            blocker = client.get(
+                "/api/workspaces/active/local-folders/blocker"
+            ).get_json()
+            assert blocker["blocking_job"] is None
+            assert blocker["folder_blocking_jobs"] == {}
+
+            stage = client.post(
+                "/api/workspaces/active/local-folders/stage",
+                json={"folder_ids": [folder_id]},
+            )
+            assert stage.status_code == 202, stage.get_json()
+            assert wait_for_job_via_client(
+                client, stage.get_json()["job_id"]
+            )["status"] == "completed"
+        finally:
+            release.set()
+        assert wait_for_job_via_client(client, job_id)["status"] == "completed"

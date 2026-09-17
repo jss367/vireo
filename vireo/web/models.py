@@ -753,7 +753,14 @@ def create_models_blueprint(
             })
             return {"status": "downloaded", "model_id": model_id}
 
-        return ctx.start(f"download-{model_id}", work, config={"model_id": model_id})
+        # The job type embeds the model id, so it cannot be enumerated in
+        # CATALOG_INDEPENDENT_JOB_TYPES. Downloading ONNX weights into
+        # ~/.vireo/models touches no catalog row, so it must not hold Work
+        # Locally hostage.
+        return ctx.start(
+            f"download-{model_id}", work, config={"model_id": model_id},
+            blocks_local_transitions=False,
+        )
 
     @blueprint.route("/api/models/pipeline/delete", methods=["POST"])
     def api_models_pipeline_delete():
