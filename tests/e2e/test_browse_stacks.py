@@ -504,6 +504,48 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     assert abs(top_after - top_before) < 4
 
 
+def test_cover_dropped_from_the_tray_leaves_a_partial_mark(live_server, page):
+    """A card may not claim frames a batch action would skip.
+
+    Cmd-clicking the cover out of an expanded stack's tray removes just that
+    frame; collapsing then pins single-photo focus to the cover so grid
+    navigation resolves in the top-level list. Reading focus and set as an
+    "or" painted the whole stack as selected, while ``getActiveSelection()``
+    — and so every rating, flag and delete — skipped the very frame on top.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(cover).to_have_class("grid-card has-browse-stack selected")
+
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    expect(tray.locator(".browse-stack-member")).to_have_count(3)
+    tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]').click(
+        modifiers=["Meta"]
+    )
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+
+    # Two of three frames are actionable, and the card says so.
+    assert page.evaluate("() => getActiveSelection().length") == 2
+    expect(page.locator("#batchCount")).to_have_text("2 selected")
+    expect(cover).to_have_class("grid-card has-browse-stack stack-partial")
+
+
 def test_delete_dialog_refuses_a_selection_that_moved_under_it(
     live_server, page,
 ):

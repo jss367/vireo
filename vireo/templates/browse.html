@@ -3384,15 +3384,27 @@ function browseStackMemberRange(anchorId, targetId) {
     .map(function(member) { return member.id; });
 }
 
+// Whether a batch action would touch this photo — the same set-over-focus
+// precedence getActiveSelection() applies, and it has to be the same or a
+// card paints a claim the action will not honour. Cmd-clicking a stack's
+// cover out of the tray and then collapsing leaves the focus on that cover
+// while the set holds only the other frames, and reading the two as an "or"
+// painted the whole stack as selected while a rating would have skipped the
+// frame on top. Codex P2 on PR #1672.
+function browseSelectionIncludes(id) {
+  return selectedPhotos.size > 0
+    ? selectedPhotos.has(id)
+    : id === selectedPhotoId;
+}
+
 // Which of this card's photos are in the active selection. A stack card
 // paints the full selected ring only when the whole stack is in.
 function browseCardSelectionClass(photo) {
-  var inSelection = function(id) {
-    return id === selectedPhotoId || selectedPhotos.has(id);
-  };
   var members = browseStackMemberIdsFor(photo);
-  if (!members) return photo && inSelection(photo.id) ? ' selected' : '';
-  var chosen = members.filter(inSelection).length;
+  if (!members) {
+    return photo && browseSelectionIncludes(photo.id) ? ' selected' : '';
+  }
+  var chosen = members.filter(browseSelectionIncludes).length;
   if (chosen === members.length) return ' selected';
   return chosen ? ' stack-partial' : '';
 }
@@ -3563,7 +3575,7 @@ function renderPhotoCard(p, idx) {
 }
 
 function renderBrowseStackMember(p, coverId) {
-  var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  var selectedClass = browseSelectionIncludes(p.id) ? ' selected' : '';
   if (typeof window.vireoRememberPhotoPair === 'function') {
     window.vireoRememberPhotoPair(p);
   }
@@ -13565,7 +13577,7 @@ function refreshCardSelectionVisuals() {
     // Tray members are single photos even when their cover is a stack card,
     // so they never take the stack-wide rule: address them by id only.
     var state = el.classList.contains('browse-stack-member')
-      ? ((cardId === selectedPhotoId || selectedPhotos.has(cardId)) ? ' selected' : '')
+      ? (browseSelectionIncludes(cardId) ? ' selected' : '')
       : browseCardSelectionClass(byId.get(cardId));
     el.classList.toggle('selected', state === ' selected');
     el.classList.toggle('stack-partial', state === ' stack-partial');

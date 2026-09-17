@@ -22376,6 +22376,7 @@ def _browse_selection_js(html, body):
         _browse_js_function_body(html, "function browseStackMemberIds("),
         _browse_js_function_body(html, "function browseSelectionIdsForClick("),
         _browse_js_function_body(html, "function browseStackMemberRange("),
+        _browse_js_function_body(html, "function browseSelectionIncludes("),
         _browse_js_function_body(html, "function browseCardSelectionClass("),
         _browse_js_function_body(html, "function browseSelectionStackNote("),
         _browse_js_function_body(html, "function selectPhoto("),
@@ -22527,9 +22528,15 @@ seedGrid();
 selectedPhotos = new Set([12]);
 var oneMember = browseCardSelectionClass(photos[0]);
 var single = browseCardSelectionClass(photos[2]);
+seedGrid();
+// Cmd-clicked out of the tray, then collapsed: the focus sits on the cover
+// while the set holds only the other frames.
+selectedPhotos = new Set([11, 12]);
+selectedPhotoId = 10;
+var focusOutsideSet = browseCardSelectionClass(photos[0]);
 process.stdout.write(JSON.stringify({
   none: none, whole: whole, coverFocusOnly: coverFocusOnly,
-  oneMember: oneMember, single: single,
+  oneMember: oneMember, single: single, focusOutsideSet: focusOutsideSet,
 }));
 """), [])
     assert result == {
@@ -22537,6 +22544,10 @@ process.stdout.write(JSON.stringify({
         "whole": " selected",
         "coverFocusOnly": " stack-partial",
         "oneMember": " stack-partial",
+        # A batch action would skip the focused cover, so the card must not
+        # claim the whole stack. Same set-over-focus precedence as
+        # getActiveSelection. Codex P2 on PR #1672.
+        "focusOutsideSet": " stack-partial",
         "single": "",
     }
 
