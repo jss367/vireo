@@ -12086,7 +12086,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``docs/plans/2026-05-06-classification-inventory-design.md``.
         """
         import config as cfg
-        from labels import get_saved_labels, load_merged_labels, read_label_file
+        from labels import get_saved_labels, load_label_set, load_merged_labels
         from labels_fingerprint import TOL_SENTINEL, compute_fingerprint
         from models import get_models
 
@@ -12116,9 +12116,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 continue
             seen_paths.add(path)
             try:
-                species = read_label_file(path)
-                if species.identities:
-                    species = load_merged_labels([ls])
+                species = load_label_set(path, ls)
             except OSError:
                 continue
             label_sets.append({
@@ -18370,7 +18368,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_classify_readiness():
         """Check what's ready for classification and what will need work."""
         from classifier import _embedding_is_cached, _resolve_model_dir
-        from labels import get_active_labels, get_saved_labels, load_merged_labels, read_label_file
+        from labels import get_active_labels, get_saved_labels, load_label_set, load_merged_labels
         from models import get_active_model, get_models
 
         model_id = request.args.get("model_id", "")
@@ -18432,12 +18430,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if labels_file:
             # Single file override from query param (classify page picker)
             if os.path.exists(labels_file):
-                labels = read_label_file(labels_file)
+                saved_meta = next(
+                    (ls for ls in get_saved_labels()
+                     if ls.get("labels_file") == labels_file), None,
+                )
+                labels = load_label_set(labels_file, saved_meta)
                 label_count = len(labels)
-                for ls in get_saved_labels():
-                    if ls.get("labels_file") == labels_file:
-                        label_name = ls.get("name", labels_file)
-                        break
+                if saved_meta:
+                    label_name = saved_meta.get("name", labels_file)
         elif labels_files:
             # Multiple files override from query param
             active_sets = []
@@ -20969,7 +20969,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_embedding_matrix():
         """Return which model+labels combinations have cached embeddings."""
         from classifier import _embedding_is_cached, _resolve_model_dir
-        from labels import get_saved_labels, read_label_file
+        from labels import get_saved_labels, load_label_set
         from models import get_models
 
         # Only BioCLIP-style models use per-label text embeddings. timm models
@@ -20987,7 +20987,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             labels_file = ls.get("labels_file", "")
             if not labels_file or not os.path.exists(labels_file):
                 continue
-            labels = read_label_file(labels_file)
+            labels = load_label_set(labels_file, ls)
             row = {
                 "labels_name": ls.get("name", ""),
                 "labels_file": labels_file,
@@ -21022,7 +21022,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def work(job):
             from classifier import precompute_label_embeddings
-            from labels import read_label_file
+            from labels import get_saved_labels, load_label_set
             from models import get_models
 
             # Find the model
@@ -21051,7 +21051,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 },
             )
 
-            labels = read_label_file(labels_file)
+            # The same list the classify job will load, so the warmed
+            # cache is the one it looks for.
+            saved = {ls.get("labels_file"): ls for ls in get_saved_labels()}
+            labels = load_label_set(labels_file, saved.get(labels_file))
 
             log.info(
                 "Pre-computing embeddings: %d labels with %s",
@@ -21574,7 +21577,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             name = f"{place_name} {group_names} ({filter_label})".strip()
 
         def work(job):
-            from labels import fetch_species_list, read_label_file, save_labels
+            from labels import fetch_species_list, load_label_set, save_labels
 
             def progress_cb(msg, current=None, total=None):
                 ctx.checkpoint(job)
@@ -21623,7 +21626,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 try:
                     from classifier import _embedding_is_cached, _resolve_model_dir
 
-                    labels = read_label_file(labels_path)
+                    labels = load_label_set(labels_path)
                     model_dir = _resolve_model_dir(
                         active_model["model_str"], active_model.get("weights_path")
                     )
@@ -21648,6 +21651,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return {
                 "species_count": len(set(species)),
                 "labels_file": labels_path,
+                # Common names iNaturalist gives to more than one taxon,
+                # saved as "Common Name (Scientific name)" so each species
+                # keeps its own prompt. Reported so the list the user sees
+                # matches the names they will get back.
+                "disambiguated": len(getattr(species, "disambiguated", [])),
                 "embedding_precompute": precompute,
             }
 

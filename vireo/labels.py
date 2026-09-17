@@ -24,28 +24,147 @@ LABELS_DIR = os.path.expanduser("~/.vireo/labels")
 
 
 class SpeciesLabels(list):
-    """Prompt strings plus optional source identities; text remains unchanged."""
+    """Prompt strings plus optional source identities; text remains unchanged.
 
-    def __init__(self, names=(), identities=None):
+    ``disambiguated`` and ``dropped_ambiguous`` record what
+    :func:`disambiguate_labels` did to prompts two taxa would otherwise
+    share, so callers can say so instead of presenting a silently shorter
+    list (CORE_PHILOSOPHY: no black boxes). Both are plain lists of the
+    final prompt strings and are not part of the label text itself.
+    """
+
+    def __init__(self, names=(), identities=None, disambiguated=(), dropped=()):
         super().__init__(names)
         self.identities = identities or {}
+        self.disambiguated = list(disambiguated)
+        self.dropped_ambiguous = list(dropped)
 
 
 def _text_identity(names):
     return hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()
 
 
-def _merge_identity(identities, name, entry):
-    previous = identities.get(name)
-    if previous is None:
-        identities[name] = entry
-    elif (previous.get("ambiguous") or entry.get("ambiguous")
-          or previous.get("taxon_id") != entry.get("taxon_id")):
-        identities[name] = {"ambiguous": True}
-    else:
-        # Names and ranks can change without changing the source taxon.
-        # Keep metadata selection deterministic across label-set order.
-        identities[name] = min((previous, entry), key=lambda value: json.dumps(value, sort_keys=True))
+def _preferred_spelling(variants):
+    """Pick one spelling for prompts that fold to the same keyword key.
+
+    Prefer a spelling ``normalize_keyword_display`` leaves unchanged (i.e.
+    already in the storage form, so the classifier's label and what
+    ``add_prediction`` writes agree byte-for-byte). Sort first so both the
+    preference and the fallback are deterministic regardless of label-set
+    order.
+    """
+    from keyword_normalization import normalize_keyword_display
+
+    if len(variants) == 1:
+        return variants[0]
+    ordered = sorted(variants)
+    return next(
+        (v for v in ordered if normalize_keyword_display(v) == v), ordered[0]
+    )
+
+
+def _representative_entry(members):
+    """One identity for a taxon named by several sources.
+
+    Names and ranks can change without changing the source taxon, so keep
+    metadata selection deterministic across label-set order.
+    """
+    return min(
+        (entry for _name, entry in members),
+        key=lambda value: json.dumps(value, sort_keys=True),
+    )
+
+
+def _qualified_name(name, scientific_name):
+    """``Common Name (Scientific name)`` — the prompt for a shared name."""
+    from keyword_normalization import keyword_match_key
+
+    if not scientific_name:
+        return name
+    if keyword_match_key(name) == keyword_match_key(scientific_name):
+        return name  # the prompt already *is* the binomial
+    if keyword_match_key(name).endswith(keyword_match_key(f"({scientific_name})")):
+        return name  # already qualified by an earlier pass
+    return f"{name} ({scientific_name})"
+
+
+def disambiguate_labels(records):
+    """Split prompts that two different taxa would otherwise share.
+
+    iNaturalist's ``preferred_common_name`` is not unique: a single
+    regional list gives "Honey Mushroom" to several *Armillaria* species,
+    and case-only variants (``Chia`` = *Salvia columbariae* vs ``chia`` =
+    *Salvia hispanica*) collide again once folded through
+    ``keyword_match_key``. Feeding the classifier one prompt for two taxa
+    means every prediction on it is unattributable, so ``Classifier``
+    refuses the whole label set.
+
+    ``records`` is a list of ``(name, identity_or_None)`` in source order.
+    Groups that name a single taxon (or carry no source identity at all)
+    are collapsed exactly as before, so their prompt text — and therefore
+    ``compute_fingerprint`` and every cached run keyed on it — is
+    unchanged. A group naming two or more taxa is rewritten to ``Common
+    Name (Scientific name)`` per taxon, which ``SpeciesResolver`` already
+    reads back as explicit taxon evidence.
+
+    Returns ``(names, identities, disambiguated, dropped)``. ``dropped``
+    holds prompts no source can pin to one taxon — a label file written
+    before this rewrite existed stores only ``{"ambiguous": True}`` for
+    those, discarding the scientific names needed to split them, so they
+    are left out rather than poisoning the run. Re-downloading the list
+    recovers them.
+    """
+    # Import here rather than at module load: ``labels.py`` is imported
+    # from environments (packaging, first-run bootstrap) that don't yet
+    # have ``vireo/`` on ``sys.path``, and this helper is only reachable
+    # once the app is running. Same for the other keyword_normalization
+    # imports in this module.
+    from keyword_normalization import keyword_match_key
+
+    groups = {}
+    for name, entry in records:
+        groups.setdefault(keyword_match_key(name) or name, []).append(
+            (name, entry or {})
+        )
+
+    names, identities, disambiguated, dropped = [], {}, [], []
+    for group in groups.values():
+        by_taxon = {}
+        unattributed = []
+        for name, entry in group:
+            scientific_name = entry.get("scientific_name")
+            if entry.get("ambiguous") or not scientific_name:
+                unattributed.append((name, entry))
+            else:
+                # Identity first, binomial as the fallback key: a source
+                # that names a species without an iNat ID still has to
+                # count as its own taxon here.
+                taxon = entry.get("taxon_id") or scientific_name.casefold()
+                by_taxon.setdefault(taxon, []).append((name, entry))
+        contested = len(by_taxon) > 1 or any(
+            entry.get("ambiguous") for _name, entry in unattributed
+        )
+        if not contested:
+            # One taxon, or none at all: keep the historical spelling fold.
+            spelling = _preferred_spelling([name for name, _entry in group])
+            names.append(spelling)
+            members = next(iter(by_taxon.values()), [])
+            if members:
+                identities[spelling] = _representative_entry(members)
+            continue
+        for members in by_taxon.values():
+            spelling = _preferred_spelling([name for name, _entry in members])
+            entry = _representative_entry(members)
+            qualified = _qualified_name(spelling, entry.get("scientific_name"))
+            names.append(qualified)
+            identities[qualified] = entry
+            disambiguated.append(qualified)
+        # A prompt with no scientific name in a contested group cannot be
+        # qualified — and must not stand, because it would answer for
+        # whichever taxon the model happened to mean.
+        dropped.extend(name for name, _entry in unattributed)
+    return names, identities, disambiguated, dropped
+
 
 # Major taxonomic groups with their iNaturalist taxon IDs
 TAXON_GROUPS = {
@@ -126,14 +245,17 @@ def fetch_species_list(
         progress_callback: optional callable(message, current=None, total=None)
 
     Returns:
-        list of species common names
+        SpeciesLabels of species prompts. Names two taxa share are
+        rewritten to ``Common Name (Scientific name)`` by
+        ``disambiguate_labels`` before the list is returned, so a fetch
+        that spans plants and fungi cannot hand the classifier one prompt
+        for several species.
     """
     filter_params = OBSERVATION_FILTERS.get(
         observation_filter, OBSERVATION_FILTERS["research"]
     )["params"]
 
-    all_species = []
-    identities = {}
+    records = []
 
     for gi, group_key in enumerate(taxon_groups):
         group = TAXON_GROUPS.get(group_key)
@@ -209,13 +331,15 @@ def fetch_species_list(
                 name = common_name or scientific_name
                 if name:
                     group_species.append(name)
+                    entry = None
                     if scientific_name and isinstance(taxon.get("id"), int):
-                        _merge_identity(identities, name, {
+                        entry = {
                             "taxon_id": taxon["id"],
                             "scientific_name": scientific_name,
                             "common_name": common_name,
                             "rank": taxon.get("rank"),
-                        })
+                        }
+                    records.append((name, entry))
 
             fetched = (page - 1) * per_page + len(results)
 
@@ -236,16 +360,22 @@ def fetch_species_list(
             group_name,
             place_id,
         )
-        all_species.extend(group_species)
+
+    names, identities, disambiguated, dropped = disambiguate_labels(records)
+    if disambiguated:
+        log.info(
+            "%d fetched prompts shared a common name with another taxon and "
+            "were qualified with its scientific name", len(disambiguated),
+        )
 
     if progress_callback:
         progress_callback(
-            f"Done — {len(all_species)} total species",
-            len(all_species),
-            len(all_species),
+            f"Done — {len(names)} total species",
+            len(names),
+            len(names),
         )
 
-    return SpeciesLabels(all_species, identities)
+    return SpeciesLabels(names, identities, disambiguated, dropped)
 
 
 def save_labels(name, place_id, place_name, taxon_groups, species,
@@ -327,8 +457,12 @@ def read_label_file(path):
         # Do not attach an old source identity after a user edits the prompts,
         # or during the small window between the two atomic file replacements.
         if meta.get("labels_text_sha256") == _text_identity(names):
+            # Set membership, not ``in names``: a 26k-species regional list
+            # otherwise costs 26k linear scans (~2s per read, on every
+            # classify job and readiness check).
+            present = set(names)
             for name, entry in meta.get("label_identities", {}).items():
-                if name not in names or not isinstance(entry, dict):
+                if name not in present or not isinstance(entry, dict):
                     continue
                 if entry.get("ambiguous"):
                     identities[name] = {"ambiguous": True}
@@ -510,6 +644,23 @@ def load_merged_labels(label_sets):
     return labels
 
 
+def load_label_set(path, meta=None):
+    """One file's labels exactly as the classify job will see them.
+
+    ``read_label_file`` returns the raw prompt text; classification routes
+    every source-backed set through ``load_merged_labels``, which folds
+    spelling variants, drops duplicate taxa and splits names two species
+    share into ``Common Name (Scientific name)``. Callers that only
+    *report* on a set — the embedding matrix, the cached-embedding check,
+    the classify readiness panel — must ask the same question the job
+    answers, or they describe a list that is never classified.
+    """
+    species = read_label_file(path)
+    if species.identities:
+        species = load_merged_labels([meta or {"labels_file": path}])
+    return species
+
+
 def load_merged_labels_with_metas(label_sets):
     """Read and merge species, returning the metadata of the sets consumed.
 
@@ -524,17 +675,8 @@ def load_merged_labels_with_metas(label_sets):
     DELETE endpoint can retire a label file while the classify job is
     loading, so any two-pass check disagrees with reality.
     """
-    # Import here rather than at module load: ``labels.py`` is imported
-    # from environments (packaging, first-run bootstrap) that don't yet
-    # have ``vireo/`` on ``sys.path``, and this helper is only reachable
-    # once the app is running.
-    from keyword_normalization import (
-        keyword_match_key,
-        normalize_keyword_display,
-    )
-
-    all_species = set()
-    identities = {}
+    seen = set()
+    records = []
     consumed_metas = []
     for ls in label_sets:
         path = ls.get("labels_file", "")
@@ -550,52 +692,51 @@ def load_merged_labels_with_metas(label_sets):
             log.warning("Label file vanished during read, skipping: %s", path)
             continue
         consumed_metas.append(ls)
-        for name, entry in labels.identities.items():
-            _merge_identity(identities, keyword_match_key(name), entry)
         for name in labels:
-            all_species.add(name)
-    # Group by the ASCII-NOCASE key so case-only variants collapse the
-    # same way SQLite's ``COLLATE NOCASE`` does, then collapse only the
-    # groups that actually have more than one raw spelling.
-    by_key = {}
-    for name in all_species:
-        by_key.setdefault(keyword_match_key(name) or name, []).append(name)
-    merged = []
-    for variants in by_key.values():
-        if len(variants) == 1:
-            # No collision: preserve the source spelling so the fingerprint
-            # is byte-identical to what earlier runs hashed.
-            merged.append(variants[0])
-        else:
-            # Genuine variant collision: prefer a spelling that
-            # ``normalize_keyword_display`` leaves unchanged (i.e. one
-            # already in the storage form, so the classifier's label and
-            # what ``add_prediction`` writes agree byte-for-byte). Sort
-            # first so both the primary preference and the fallback are
-            # deterministic regardless of label-set order.
-            ordered = sorted(variants)
-            merged.append(next(
-                (v for v in ordered if normalize_keyword_display(v) == v),
-                ordered[0],
-            ))
-    merged_identities = {
-        name: identities[keyword_match_key(name)] for name in merged
-        if keyword_match_key(name) in identities
-    }
+            entry = labels.identities.get(name)
+            key = (name, json.dumps(entry, sort_keys=True))
+            if key in seen:
+                continue  # the same set listed twice contributes once
+            seen.add(key)
+            records.append((name, entry))
+    # ``disambiguate_labels`` groups by the ASCII-NOCASE key so case-only
+    # variants collapse the same way SQLite's ``COLLATE NOCASE`` does,
+    # keeps the source spelling of every group that names one taxon, and
+    # splits the groups where two sources — or two entries of one source —
+    # mean different species by the same name.
+    merged, merged_identities, disambiguated, dropped = disambiguate_labels(
+        records
+    )
+    if dropped:
+        log.warning(
+            "Skipping %d label(s) whose name refers to multiple taxa with no "
+            "scientific name on record; re-download the list to restore them: %s",
+            len(dropped), ", ".join(sorted(set(dropped))[:20]),
+        )
     # Two regional lists can use different names for the same taxon. A
     # duplicate softmax class would split its probability before thresholding.
     # Only source-backed identities justify dropping a prompt; legacy text
     # keeps the historical spelling/fingerprint behavior above.
     seen_taxa = set()
+    seen_names = set()
     unique = []
     for name in sorted(merged):
         tid = merged_identities.get(name, {}).get("taxon_id")
         if tid is not None and tid in seen_taxa:
             continue
+        if name in seen_names:
+            continue  # a qualified name can meet a source that already used it
         if tid is not None:
             seen_taxa.add(tid)
+        seen_names.add(name)
         unique.append(name)
+    kept = set(unique)
     return (
-        SpeciesLabels(unique, {name: merged_identities[name] for name in unique if name in merged_identities}),
+        SpeciesLabels(
+            unique,
+            {name: merged_identities[name] for name in unique if name in merged_identities},
+            [name for name in sorted(set(disambiguated)) if name in kept],
+            sorted(set(dropped)),
+        ),
         consumed_metas,
     )

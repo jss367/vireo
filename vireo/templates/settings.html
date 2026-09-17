@@ -4097,6 +4097,12 @@ async function loadLabels() {
       html += '<div>';
       html += '<span style="font-size:13px;color:var(--text-primary);font-weight:600;">' + escapeHtml(l.name) + '</span>';
       html += '<div style="font-size:11px;color:var(--text-dim);">' + (l.species_count || 0) + ' species &middot; ' + groups + '</div>';
+      if (l.ambiguous_count) {
+        html += '<div style="font-size:11px;color:var(--warning,#d08700);margin-top:2px;">' +
+                l.ambiguous_count + ' name' + (l.ambiguous_count > 1 ? 's' : '') +
+                ' shared by several species and skipped when classifying &middot; ' +
+                'download this list again to split them by scientific name</div>';
+      }
       html += '</div>';
       html += '</label>';
       html += '<button onclick="deleteLabelSet(\'' + escapeAttr(l.labels_file) + '\',\'' + escapeAttr(l.name) + '\')" ' +

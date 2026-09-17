@@ -554,21 +554,48 @@ def create_models_blueprint(
     @blueprint.route("/api/labels")
     def api_labels_list():
         from labels import get_active_labels as get_global_active_labels
-        from labels import get_saved_labels
+        from labels import get_saved_labels, load_merged_labels
+
+        def summarize(meta):
+            """Drop the per-label identity map, keep what it implies.
+
+            ``label_identities`` is megabytes on a regional list and the
+            page never reads it — but the page must still say when a set
+            holds names the classifier cannot use, so the set's own
+            skipped-prompt count travels in its place.
+            """
+            trimmed = {k: v for k, v in meta.items() if k != "label_identities"}
+            path = meta.get("labels_file")
+            if path and os.path.exists(path):
+                try:
+                    trimmed["ambiguous_count"] = len(
+                        load_merged_labels([meta]).dropped_ambiguous
+                    )
+                except Exception:
+                    log.warning(
+                        "Could not inspect %s for ambiguous labels", path,
+                        exc_info=True,
+                    )
+            return trimmed
 
         db = get_db()
-        saved = get_saved_labels()
+        saved = [summarize(meta) for meta in get_saved_labels()]
+        saved_by_file = {s["labels_file"]: s for s in saved if s.get("labels_file")}
         ws_labels = db.get_workspace_active_labels()
         if ws_labels is not None:
             # Resolve workspace labels to metadata
-            saved_by_file = {s["labels_file"]: s for s in saved}
             active = []
             for p in ws_labels:
                 if os.path.exists(p):
                     meta = saved_by_file.get(p, {"labels_file": p})
                     active.append(meta)
         else:
-            active = get_global_active_labels()
+            # Same trimmed objects as ``saved`` so the identity map is not
+            # re-attached through the active list.
+            active = [
+                saved_by_file.get(meta.get("labels_file"), summarize(meta))
+                for meta in get_global_active_labels()
+            ]
         return jsonify(
             {
                 "labels": saved,

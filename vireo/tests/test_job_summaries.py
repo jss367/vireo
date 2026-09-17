@@ -103,6 +103,12 @@ def test_regroup_and_fetch_labels_details():
     assert out["details"] == ["4 keep, 5 review, 1 reject", "2 photos protected as rare species"]
     out = describe_result("fetch-labels", {"species_count": 3, "labels_file": "/x/y.txt"})
     assert out["details"] == ["Saved to /x/y.txt"]
+    out = describe_result("fetch-labels", {"species_count": 3, "labels_file": "/x/y.txt",
+                                           "disambiguated": 2})
+    assert out["details"][0] == (
+        "2 common names used by more than one species — saved as "
+        "“Common Name (Scientific name)”"
+    )
 
 
 def test_explicit_summary_wins():

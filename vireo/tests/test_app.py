@@ -8014,6 +8014,46 @@ def test_labels_list_returns_workspace_active(app_and_db, tmp_path):
         labels_mod.LABELS_DIR = orig_labels_dir
 
 
+def test_labels_list_reports_skipped_names_without_shipping_identities(app_and_db, tmp_path):
+    """The page must say a set holds unusable names, not carry the whole map."""
+    app, db = app_and_db
+
+    import json as _json
+
+    import labels as labels_mod
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir(exist_ok=True)
+    label_path = str(labels_dir / "ambiguous-birds.txt")
+    names = ["Honey Mushroom", "Robin"]
+    with open(label_path, "w") as f:
+        f.write("".join(name + "\n" for name in names))
+    with open(str(labels_dir / "ambiguous-birds.json"), "w") as f:
+        _json.dump({
+            "name": "Ambiguous Birds",
+            "labels_file": label_path,
+            "species_count": 2,
+            "label_identities": {
+                "Honey Mushroom": {"ambiguous": True},
+                "Robin": {"taxon_id": 13858, "scientific_name": "Turdus migratorius"},
+            },
+            "labels_text_sha256": labels_mod._text_identity(names),
+        }, f)
+
+    orig_labels_dir = labels_mod.LABELS_DIR
+    labels_mod.LABELS_DIR = str(labels_dir)
+    try:
+        with app.test_client() as c:
+            entry = next(
+                l for l in c.get("/api/labels").get_json()["labels"]
+                if l["labels_file"] == label_path
+            )
+    finally:
+        labels_mod.LABELS_DIR = orig_labels_dir
+    assert entry["ambiguous_count"] == 1
+    assert "label_identities" not in entry
+
+
 def test_pipeline_page_init_includes_workspace_overrides(app_and_db):
     """page-init response includes workspace config overrides."""
     app, db = app_and_db
