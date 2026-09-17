@@ -23091,6 +23091,45 @@ browseReconcileEmptyLightboxClose();
 results.windowStartsLate = snapshot();
 earliestPage = 1;
 
+// (h) Two collapsed stacks are selected. The user expands one and opens its
+//     tray lightbox, deletes every member — `_lightboxPhotoList` empties and
+//     `closeLightbox(null)` fires. The untouched second stack's cover (30)
+//     is still on the grid with its hidden members (31, 32) in
+//     `browse_stack.photo_ids`, but that stack was never expanded so
+//     `browseStackMembers` has no entry for it. The reachable sweep must
+//     honor what the card represents, not only what the hydration cache
+//     happens to hold — otherwise the surviving stack silently shrinks to
+//     its cover and later batch actions touch one frame of four.
+//     Codex P2 on PR #1672.
+selectedPhotos = new Set([30, 31, 32]);
+selectedPhotoId = 30;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 30, browse_stack: {photo_ids: [30, 31, 32], count: 3}}];
+browseStackMembers = {};
+allLoaded = true;
+earliestPage = 1;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.uncachedStackReachable = snapshot();
+
+// (i) The focus lives on an uncached collapsed stack's hidden member (a
+//     selectedPhotoId that is not the cover). The focus reachability check
+//     must also honor `browse_stack.photo_ids`, or an unrelated empty close
+//     would null the focus even though the stack card still represents it.
+//     Codex P2 on PR #1672.
+selectedPhotos = new Set();
+selectedPhotoId = 32;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 30, browse_stack: {photo_ids: [30, 31, 32], count: 3}}];
+browseStackMembers = {};
+allLoaded = true;
+earliestPage = 1;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.uncachedFocusReachable = snapshot();
+
 process.stdout.write(JSON.stringify(results));
 """,
     ])
@@ -23158,6 +23197,29 @@ process.stdout.write(JSON.stringify(results));
         "refreshes": 0,
         "bars": 0,
     }, "a selection still represented on the grid must survive an empty close"
+    assert result["uncachedStackReachable"] == {
+        "selected": [30, 31, 32],
+        "focus": 30,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "hidden members of an uncached collapsed stack are still represented "
+        "by the cover card; the reachable sweep must honor "
+        "browse_stack.photo_ids, not only the hydration cache"
+    )
+    assert result["uncachedFocusReachable"] == {
+        "selected": [],
+        "focus": 32,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "a focus on an uncached stack's hidden member must survive an empty "
+        "close — the cover card still stands for it"
+    )
 
 
 _APOSTROPHE_SPECIES = "Say's Phoebe"

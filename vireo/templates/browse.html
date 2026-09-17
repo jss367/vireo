@@ -13464,6 +13464,16 @@ function browseReconcileEmptyLightboxClose() {
     var reachable = new Set();
     photos.forEach(function(photo) {
       reachable.add(photo.id);
+      // A collapsed stack that has never been expanded has no entries in
+      // ``browseStackMembers``, but the card still represents every id in
+      // ``photo.browse_stack.photo_ids``. Reading only the hydrated cache
+      // would treat those hidden members as unreachable and drop them from a
+      // batch the surviving card still stands for — for example, select two
+      // collapsed stacks, expand one, delete every member from its tray
+      // lightbox: this empty close would then reduce the untouched second
+      // stack to its cover. Codex P2 on PR #1672.
+      var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
+      stackIds.forEach(function(id) { reachable.add(id); });
       var members = browseStackMembers[String(photo.id)] || [];
       members.forEach(function(member) { reachable.add(member.id); });
     });
@@ -13477,6 +13487,11 @@ function browseReconcileEmptyLightboxClose() {
   if (selectedPhotoId != null && allLoaded && earliestPage === 1) {
     var focusStillReachable = photos.some(function(photo) {
       if (photo.id === selectedPhotoId) return true;
+      // Same reasoning as the reachable sweep: a hidden member of an
+      // uncached collapsed stack is still represented by its cover card.
+      // Codex P2 on PR #1672.
+      var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
+      if (stackIds.indexOf(selectedPhotoId) !== -1) return true;
       var members = browseStackMembers[String(photo.id)] || [];
       return members.some(function(member) { return member.id === selectedPhotoId; });
     });
