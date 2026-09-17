@@ -339,6 +339,7 @@ POST         /api/photos/<int:photo_id>/rating
 POST         /api/photos/<int:photo_id>/wildlife_excluded
 POST         /api/photos/best-batch
 POST         /api/photos/by-ids
+POST         /api/photos/companion-count
 POST         /api/photos/edit-recipe/apply
 POST         /api/photos/missing/check
 POST         /api/photos/missing/delete-sidecars

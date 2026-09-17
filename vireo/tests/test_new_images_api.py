@@ -382,13 +382,17 @@ def test_api_new_images_records_job_and_history_on_cache_cold(app_and_db, monkey
         release.set()
 
     # After the walk finishes, its work remains visible in job history.
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
-        jobs_data = client.get("/api/jobs").get_json()
-        if not any(j["type"] == "new_images_walk" and j["status"] == "running"
-                   for j in jobs_data["active"]):
-            break
-        time.sleep(0.02)
+    # ``_record_job_started`` writes a running row before the work begins,
+    # and ``_persist_job`` overwrites it with the terminal status once the
+    # worker's finally clause runs. The in-memory status transitions to
+    # "completed" before that overwrite, so a poll on ``/api/jobs`` alone
+    # races the persist: ``/api/jobs/history`` (which filters to terminal
+    # statuses) misses a row that ``_record_job_started`` already wrote as
+    # ``running``. ``wait_for_job_via_client(wait_for_history=True)`` blocks
+    # until ``job["_persisted"]`` fires — the same synchronization the
+    # shared helper documents for this exact class of reader.
+    from wait import wait_for_job_via_client
+    wait_for_job_via_client(client, job["id"], wait_for_history=True)
     history_rows = db.conn.execute(
         "SELECT id FROM job_history WHERE type = 'new_images_walk'"
     ).fetchall()

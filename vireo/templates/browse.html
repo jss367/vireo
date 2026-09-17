@@ -422,6 +422,17 @@ body.sidebar-resizing {
 .grid-card.has-browse-stack.selected {
   box-shadow: 0 0 0 1px var(--accent), 3px 3px 0 var(--bg-tertiary), 6px 6px 0 var(--border-primary);
 }
+/* The full ring on a stack card means "every frame behind this card is
+   selected", because that is what clicking the card does. Some-but-not-all
+   (a frame picked out of the tray, a focus handed back by a collapse) gets
+   its own softer, dashed mark instead of borrowing a ring that would
+   overstate the count the batch bar is about to act on. */
+.grid-card.has-browse-stack.stack-partial {
+  border-style: dashed;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+              3px 3px 0 var(--bg-tertiary), 6px 6px 0 var(--border-primary);
+}
 .grid-card.offline {
   cursor: default;
   opacity: 0.78;
@@ -2012,7 +2023,7 @@ body.sidebar-resizing {
                  oninput="updateThumbSize(this.value)">
           <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
         </label>
-        <label class="browse-stack-toggle" title="Collapse exact duplicates and camera bursts. A burst is a run of consecutive frames from one folder taken within the burst time gap that share the same species and location keywords — an untagged frame inside a tagged run stays its own item. Gap and keyword handling are in Settings › Display.">
+        <label class="browse-stack-toggle" title="Collapse exact duplicates and camera bursts. A burst is a run of consecutive frames from one folder taken within the burst time gap that share the same species and location keywords — an untagged frame inside a tagged run stays its own item. A stacked card stands for every frame in it, so selecting one selects them all; expand a stack to work on single frames. Gap and keyword handling are in Settings › Display.">
           <input type="checkbox" id="browseStacksToggle"
                  data-view-preference="vireo.browse.stacks"
                  onchange="toggleBrowseStacks()">
@@ -3462,6 +3473,118 @@ function browseStackLabel(kind) {
   return kind === 'duplicate' ? 'Exact duplicates' : 'Burst';
 }
 
+// A collapsed stack card stands for its whole stack, not for the one frame
+// whose thumbnail it borrows: the badge counts the frames behind it, and a
+// species, rating, flag or color the user applies while looking at that card
+// is meant for all of them. So clicking it selects every member — the count
+// in the batch bar and the selection panel then states exactly what the next
+// action will touch, instead of silently acting on 1 of 11 (CORE_PHILOSOPHY,
+// "no black boxes"). Working frame by frame is what expanding the stack is
+// for: the tray selects members individually.
+//
+// Members are the filter-scoped ones the badge counted, and the projection
+// never puts an offline frame in a stack (see ``_browse_stack_query_parts``),
+// so every id returned here is actionable. The cover leads the list for the
+// same reason Select-all flattens cover-first: Best Batch, burst review and
+// the export preview all start from the card the user can see.
+function browseStackMemberIdsFor(photo) {
+  var stack = photo && photo.browse_stack;
+  if (!stack || stack.count < 2) return null;
+  var members = (stack.photo_ids || []).filter(function(id) {
+    return id !== photo.id;
+  });
+  if (!members.length) return null;
+  return [photo.id].concat(members);
+}
+
+// By id, for the callers that only have one. Stack cards are top-level grid
+// cards, so an id that is not in ``photos`` — a tray member — is a single
+// photo by construction.
+function browseStackMemberIds(photoId) {
+  return browseStackMemberIdsFor(photos.find(function(p) {
+    return p.id === photoId;
+  }));
+}
+
+// The ids one click acts on: the whole stack for a collapsed stack card, the
+// single photo for anything else. ``stackAware: false`` is for the callers
+// that are restoring a focus rather than making a selection — a tray member
+// click, a collapsing tray, a closing lightbox — where expanding to the
+// stack would escalate a view action into a 15-photo batch.
+function browseSelectionIdsForClick(photoId, opts) {
+  if (opts && opts.stackAware === false) return [photoId];
+  return browseStackMemberIds(photoId) || [photoId];
+}
+
+// Shift-clicking from one tray member to another: both ends report the
+// cover's grid slot, so the top-level range loop cannot tell them apart and
+// would take the whole stack. Range over the tray's own member order
+// instead, which is the order the user is looking at.
+function browseStackMemberRange(anchorId, targetId) {
+  if (anchorId == null) return null;
+  var coverId = browseStackCoverIdForPhoto(targetId);
+  if (coverId == null || browseStackCoverIdForPhoto(anchorId) !== coverId) return null;
+  var members = browseStackMembers[String(coverId)] || [];
+  var anchorAt = -1, targetAt = -1;
+  members.forEach(function(member, at) {
+    if (member.id === anchorId) anchorAt = at;
+    if (member.id === targetId) targetAt = at;
+  });
+  if (anchorAt < 0 || targetAt < 0) return null;
+  return members
+    .slice(Math.min(anchorAt, targetAt), Math.max(anchorAt, targetAt) + 1)
+    .map(function(member) { return member.id; });
+}
+
+// Whether a batch action would touch this photo — the same set-over-focus
+// precedence getActiveSelection() applies, and it has to be the same or a
+// card paints a claim the action will not honour. Cmd-clicking a stack's
+// cover out of the tray and then collapsing leaves the focus on that cover
+// while the set holds only the other frames, and reading the two as an "or"
+// painted the whole stack as selected while a rating would have skipped the
+// frame on top. Codex P2 on PR #1672.
+function browseSelectionIncludes(id) {
+  return selectedPhotos.size > 0
+    ? selectedPhotos.has(id)
+    : id === selectedPhotoId;
+}
+
+// Which of this card's photos are in the active selection. A stack card
+// paints the full selected ring only when the whole stack is in.
+function browseCardSelectionClass(photo) {
+  var members = browseStackMemberIdsFor(photo);
+  if (!members) {
+    return photo && browseSelectionIncludes(photo.id) ? ' selected' : '';
+  }
+  var chosen = members.filter(browseSelectionIncludes).length;
+  if (chosen === members.length) return ' selected';
+  return chosen ? ' stack-partial' : '';
+}
+
+// "12 photos selected · 2 stacks" — the sentence a stack click has to be able
+// to answer, since one click now moves the count by more than one. It is only
+// printable when the stacks and singles currently in the grid account for
+// every selected photo: counting the stacks that happen to be loaded out of a
+// selection that reaches past the window would be a proxy, not an answer, so
+// that case says nothing rather than something cheaper.
+function browseSelectionStackNote(ids) {
+  if (!ids.length) return '';
+  var remaining = new Set(ids);
+  var stacks = 0;
+  photos.forEach(function(photo) {
+    var stack = photo.browse_stack;
+    var members = (stack && stack.count >= 2 && stack.photo_ids) || [];
+    if (!members.length) return;
+    if (!members.every(function(id) { return remaining.has(id); })) return;
+    stacks++;
+    members.forEach(function(id) { remaining.delete(id); });
+  });
+  if (!stacks) return '';
+  photos.forEach(function(photo) { remaining.delete(photo.id); });
+  if (remaining.size) return '';
+  return ' · ' + stacks + (stacks === 1 ? ' stack' : ' stacks');
+}
+
 function renderBrowseStackBadge(p) {
   var stack = p && p.browse_stack;
   if (!stack || stack.count < 2) return '';
@@ -3471,7 +3594,8 @@ function renderBrowseStackBadge(p) {
   // pre-edit cover on screen. Say that on the badge itself: the toast that
   // reported it is long gone by the time the user looks back at the grid.
   var needsRecheck = browseStackCoverRecheck.has(p.id);
-  var title = label + ' · ' + stack.count + ' photos';
+  var title = label + ' · ' + stack.count + ' photos · clicking the card selects all '
+    + stack.count + ', this badge expands the stack to pick single frames';
   if (needsRecheck) {
     title += ' · cover may be out of date after a recent edit — expand to refresh';
   }
@@ -3526,7 +3650,7 @@ function renderDetectionBoxes(p) {
 }
 
 function renderPhotoCard(p, idx) {
-  var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  var selectedClass = browseCardSelectionClass(p);
   // Offline members render first and unconditionally: they are read-only
   // placeholders with no thumbnail, and the server never lets one join a
   // stack, so there is no stack chrome to preserve here.
@@ -3604,7 +3728,7 @@ function renderPhotoCard(p, idx) {
 }
 
 function renderBrowseStackMember(p, coverId) {
-  var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  var selectedClass = browseSelectionIncludes(p.id) ? ' selected' : '';
   if (typeof window.vireoRememberPhotoPair === 'function') {
     window.vireoRememberPhotoPair(p);
   }
@@ -4033,7 +4157,12 @@ async function toggleBrowseStack(event, coverId) {
         selectedIndex = coverIndex;
         refreshCardSelectionVisuals();
       } else {
-        selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false}, coverId, coverIndex);
+        // stackAware: false — collapsing a tray is a view action. It hands
+        // the focus back to the visible cover; it does not turn one frame
+        // the user was looking at into a stack-wide selection. The cover
+        // card paints the partial mark for exactly this state.
+        selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+                    coverId, coverIndex, { stackAware: false });
       }
     } else if (batchHasHiddenMembers) {
       // Preserve the batch (Select all) selection but pin single-photo focus
@@ -4179,11 +4308,14 @@ function selectBrowseStackMember(event, photoId, coverId) {
   // card). selectPhoto's shift branch folds the click target into the
   // resulting range so the hidden member always ends up in the selection.
   // Codex P2 on PR #1561.
+  // stackAware: false — a tray click is the way to pick one frame out of a
+  // stack, including the cover frame, so it must never expand back to the
+  // whole stack the way clicking the collapsed card does.
   selectPhoto({
     shiftKey: !!(event && event.shiftKey),
     metaKey: !!(event && event.metaKey),
     ctrlKey: !!(event && event.ctrlKey),
-  }, photoId, coverIndex);
+  }, photoId, coverIndex, { stackAware: false });
 }
 
 function selectBrowseStackAll(event, coverId) {
@@ -4196,8 +4328,12 @@ function selectBrowseStackAll(event, coverId) {
   anchorRestoreEpoch++;
   selectedPhotoId = null;
   selectedIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
-  selectedPhotos = new Set(cover.browse_stack.photo_ids || []);
-  hideDetailPanel();
+  // Same list, in the same cover-first order, that clicking the collapsed
+  // card produces — the tray button and the card must not disagree.
+  selectedPhotos = new Set(
+    browseStackMemberIds(coverId) || cover.browse_stack.photo_ids || []
+  );
+  abandonDetailFocusForBatch();
   refreshCardSelectionVisuals();
   updateBatchBar();
 }
@@ -8136,6 +8272,41 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
   if (!card || card.classList.contains('offline')) return;
   var id = parseInt(card.dataset.id, 10);
   var filename = card.dataset.filename || '';
+  // Provenance for the close handler. A double-click on a stack card runs its
+  // own two clicks through selectPhoto first, so the stack is selected by the
+  // time the lightbox opens — a selection this viewing gesture made, not a
+  // batch the user assembled, and the only one the close handler may replace.
+  // Recording the opener is the only way to tell those apart: the selected ids
+  // are identical either way.
+  //
+  // Except on the stack badge, whose two clicks expand and collapse the stack
+  // and stop propagating, so they never reach selectPhoto and never make a
+  // selection. The dblclick still bubbles here, and an identical id set would
+  // otherwise let a deliberate batch be claimed by a gesture that did not
+  // create it.
+  //
+  // And a card dblclick over a batch the user already assembled (tray Select
+  // all + collapse) still runs through selectPhoto, so the resulting ids also
+  // read the same as the gesture case even though the two clicks reaffirmed
+  // the batch rather than creating it. Consult the pre-first-click snapshot:
+  // only mark the gesture when the clicks actually moved the selection onto
+  // this stack. Codex P2 on PR #1672.
+  var gestureIds = e.target.closest('.browse-stack-badge')
+    ? null : browseStackMemberIds(id);
+  var preState = browseSelectionBeforeStackDblClickStart;
+  browseSelectionBeforeStackDblClickStart = null;
+  var preStateWasThisStack = !!(
+    preState && gestureIds
+    && preState.size === gestureIds.length
+    && gestureIds.every(function(memberId) { return preState.has(memberId); })
+  );
+  browseLightboxStackGestureSpent = null;
+  browseLightboxStackGesture = (
+    !preStateWasThisStack
+    && gestureIds
+    && gestureIds.length === selectedPhotos.size
+    && gestureIds.every(function(memberId) { return selectedPhotos.has(memberId); })
+  ) ? { ids: gestureIds.slice(), epoch: anchorRestoreEpoch } : null;
   // Top-level grid cards navigate the grid, matching pre-stacks behaviour;
   // an expanded stack's members live in ``.browse-stack-member`` cards and
   // open against their own member list instead.
@@ -8257,6 +8428,39 @@ function browseKeyMatchesConfiguredShortcut(e) {
    at the same boundary and advance as soon as the page is available. */
 var browseLightboxBoundaryRetry = null;
 var browseLightboxSession = 0;
+// Set by the grid double-click handler when the gesture's own clicks selected
+// the stack it opened: {ids, epoch}. It is spent by the close of the lightbox
+// it opened, so a later viewing shortcut over the same selection is a viewing
+// shortcut over a batch. ``epoch`` is the selection generation the gesture was
+// made in, so any selection action in between — a click, a Select all, a
+// Clear — also retires it, without every one of those paths having to know
+// this marker exists.
+var browseLightboxStackGesture = null;
+// The gesture a delete-button close just retired, held only until the delete
+// that caused it either completes (and hands it back) or is cancelled (and
+// never claims it). See the ``lightbox:photodeleted`` listener.
+var browseLightboxStackGestureSpent = null;
+
+// What each photo viewed in this lightbox session stands for, for the covers
+// among them: {photoId: memberIds}. Recorded while the photo is on screen,
+// because once it is deleted its stack is gone from ``photos`` and nothing
+// can say what it stood for. Keyed by photo rather than held in a single
+// slot so the reopen that follows a delete cannot overwrite the entry the
+// delete still needs. Read by the ``lightbox:photodeleted`` listener, and
+// dropped when the lightbox is really closed. Codex P2 on PR #1672.
+var browseLightboxRepresentedByPhoto = {};
+
+// The selection as it stood before the first click of the most recent click
+// sequence. Captured in ``selectPhoto`` and consulted by the grid double-click
+// handler so it can tell "these clicks made the selection" from "these clicks
+// reaffirmed a selection the user already had": a deliberate tray Select all
+// + collapse leaves the stack members in ``selectedPhotos``, and a plain
+// click on the collapsed cover then sets the same set again, so the
+// resulting ``selectedPhotos`` is byte-for-byte identical either way. Without
+// this snapshot the dblclick handler would mark that pre-existing batch as
+// gesture-generated and the close handler would then replace it with the
+// finished-on photo. Codex P2 on PR #1672.
+var browseSelectionBeforeStackDblClickStart = null;
 
 function browseLightboxOwnsLoadedWindow() {
   return (
@@ -8322,6 +8526,13 @@ function continueBrowseLightboxAcrossBoundary(delta, currentId, session) {
 }
 
 document.addEventListener('lightbox:photochanged', function(event) {
+  // Before the window check below: this has to happen for every photo the
+  // user actually sees, whoever owns the loaded window.
+  var shownId = event && event.detail && event.detail.photoId;
+  if (shownId != null) {
+    var shownStack = browseStackMemberIds(shownId);
+    if (shownStack) browseLightboxRepresentedByPhoto[String(shownId)] = shownStack;
+  }
   if (!browseLightboxOwnsLoadedWindow() || loading) return;
   var photoId = event && event.detail && event.detail.photoId;
   var lightboxPhotos = window._lightboxPhotoList;
@@ -8562,17 +8773,40 @@ gridContainer.addEventListener('wheel', function(e) {
 }, { passive: true });
 
 /* ---------- Photo Selection & Detail ---------- */
-function selectPhoto(e, id, idx) {
+function selectPhoto(e, id, idx, opts) {
+  // Snapshot the pre-click selection so the grid dblclick handler can tell
+  // "these clicks made the selection" from "these clicks reaffirmed an
+  // existing one" — the two produce identical ``selectedPhotos`` when the
+  // click lands on the stack that was already selected. Only the first click
+  // of a click sequence records: the browser numbers sequential clicks in
+  // ``event.detail`` (1 for the first, 2 for the second of a dblclick), so
+  // detail > 1 preserves the pre-first-click snapshot through the second.
+  // Codex P2 on PR #1672.
+  if (!(e && e.detail > 1)) {
+    browseSelectionBeforeStackDblClickStart = new Set(selectedPhotos);
+  }
   anchorRestoreEpoch++;
   lastClickedPhotoId = id;
+  // A collapsed stack card is its whole stack (see browseStackMemberIds), so
+  // every branch below acts on this list rather than on `id` alone.
+  var clickIds = browseSelectionIdsForClick(id, opts);
   if (e.shiftKey && selectedIndex >= 0) {
     // Shift-click: range select
-    var start = Math.min(selectedIndex, idx);
-    var end = Math.max(selectedIndex, idx);
-    for (var i = start; i <= end; i++) {
-      if (photos[i] && (!photos[i].folder_status ||
-          photos[i].folder_status === 'ok' || photos[i].folder_status === 'partial')) {
-        selectedPhotos.add(photos[i].id);
+    var memberRange = browseStackMemberRange(selectedPhotoId, id);
+    if (memberRange) {
+      memberRange.forEach(function(memberId) { selectedPhotos.add(memberId); });
+    } else {
+      var start = Math.min(selectedIndex, idx);
+      var end = Math.max(selectedIndex, idx);
+      for (var i = start; i <= end; i++) {
+        if (photos[i] && (!photos[i].folder_status ||
+            photos[i].folder_status === 'ok' || photos[i].folder_status === 'partial')) {
+          // Each card in the range contributes what clicking it would: a
+          // stack card contributes its frames, not just its cover.
+          browseSelectionIdsForClick(photos[i].id).forEach(function(rangeId) {
+            selectedPhotos.add(rangeId);
+          });
+        }
       }
     }
     // The anchor of a range is always part of that range. Usually it is
@@ -8592,7 +8826,7 @@ function selectPhoto(e, id, idx) {
     // only reach the cover. Fold the target in so a Shift-click on a hidden
     // stack member always ends up in the resulting range. Codex P2 on
     // PR #1561.
-    selectedPhotos.add(id);
+    clickIds.forEach(function(clickId) { selectedPhotos.add(clickId); });
   } else if (e.metaKey || e.ctrlKey) {
     // Cmd/Ctrl-click: toggle in selection. Fold the focused photo into the
     // set so batch operations include it (otherwise the highlighted
@@ -8600,18 +8834,31 @@ function selectPhoto(e, id, idx) {
     if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
       selectedPhotos.add(selectedPhotoId);
     }
-    if (selectedPhotos.has(id)) {
-      selectedPhotos.delete(id);
-    } else {
-      selectedPhotos.add(id);
-    }
+    // A stack toggles as a unit, and it only leaves the selection when every
+    // one of its frames is in it: Cmd-clicking a stack whose tray contributed
+    // three frames adds the rest rather than removing those three.
+    var alreadySelected = clickIds.every(function(clickId) {
+      return selectedPhotos.has(clickId);
+    });
+    clickIds.forEach(function(clickId) {
+      if (alreadySelected) selectedPhotos.delete(clickId);
+      else selectedPhotos.add(clickId);
+    });
     // If the toggle dropped the focused photo out of a non-empty set, its
     // highlight/detail focus is now stale: the card still paints "selected"
     // via the selectedPhotoId branch of the highlight rule, yet
     // getActiveSelection() returns the set — so destructive actions
     // (delete/export/develop) would target the set while the user is staring
     // at a different, visibly-focused card. Reconcile by dropping the focus.
-    if (selectedPhotoId !== null && selectedPhotos.size > 0 && !selectedPhotos.has(selectedPhotoId)) {
+    //
+    // The same applies when this toggle empties the set entirely and the
+    // focused photo is one of the ids it just removed: collapsing an expanded
+    // stack pins the focus to its cover, so Cmd-clicking that stack off left
+    // getActiveSelection() falling back to the cover — a stack the user
+    // deselected as a unit coming back as a one-photo partial selection.
+    // Codex P2 on PR #1672.
+    if (selectedPhotoId !== null && !selectedPhotos.has(selectedPhotoId)
+        && (selectedPhotos.size > 0 || clickIds.indexOf(selectedPhotoId) !== -1)) {
       selectedPhotoId = null;
       selectedIndex = -1;
       var detail = document.getElementById('detailContent');
@@ -8638,6 +8885,16 @@ function selectPhoto(e, id, idx) {
       // into the batch inspector. Codex P2 on PR #1097 (17:04Z follow-up).
       window._detailPhotoId = null;
     }
+  } else if (clickIds.length > 1) {
+    // Normal click on a stack card: select the stack, the same state the
+    // tray's "Select all" produces. There is no single photo to focus — the
+    // card stands for all of them — so the panel opens as the batch
+    // inspector rather than showing one frame's detail as if it were the
+    // thing being acted on.
+    selectedPhotos = new Set(clickIds);
+    selectedPhotoId = null;
+    selectedIndex = idx;
+    abandonDetailFocusForBatch();
   } else {
     // Normal click: single select
     selectedPhotos.clear();
@@ -8944,7 +9201,8 @@ function updateBatchBar() {
       }
       bar.style.display = 'flex';
     }
-    document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
+    document.getElementById('batchCount').textContent =
+      ids.length.toLocaleString() + ' selected' + browseSelectionStackNote(ids);
   } else {
     if (batchBarActivateTimer) {
       clearTimeout(batchBarActivateTimer);
@@ -9190,7 +9448,8 @@ function updateSelectionPanel(ids) {
     detail.classList.add('batch-mode');
   }
   panel.classList.remove('hidden');
-  document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
+  document.getElementById('selectionCount').textContent =
+    ids.length.toLocaleString() + ' photos selected' + browseSelectionStackNote(ids);
   updatePasteEditSection(ids);
   renderSelectionWildlifeState(ids);
   // Keep any EXIF suggestion fetched for the anchor photo: Accept is
@@ -10245,20 +10504,40 @@ window.afterHistoryChange = async function() {
   var loaded = await resetAndLoad({preserveAnchor: true, preserveCollection: true});
   if (loaded === false) throw new Error('Could not reload Browse');
   if (loaded !== true) return;
+  // resetAndLoad has cleared selection; the reload settled with the grid
+  // interactive. If the user clicks another card while we hydrate uncached
+  // stack members below, selectPhoto() bumps anchorRestoreEpoch — the same
+  // signal every other async selection path (Select all, keyword suggestions,
+  // batch-delete companion count) uses to know its captured ids no longer
+  // reflect what the user wants. Snapshot the epoch here so the restore
+  // below can bail out instead of folding the pre-undo ids back into the
+  // fresh selection, which would replace a new single-card pick or merge
+  // into a new batch. Codex P2 on PR #1672.
+  var restoreEpoch = anchorRestoreEpoch;
   var windowIsCurrent = observeBrowseWindow();
   for (var cover of photos.slice()) {
     var memberIds = cover.browse_stack && cover.browse_stack.photo_ids;
-    if (memberIds && memberIds.some(function(id) { return cachedMemberIds.has(id); })) {
+    // Selected members count as much as cached ones. A stack selected by a
+    // click on its collapsed card has never been expanded, so its hidden
+    // frames are in `previousSelection` and in no member cache; without
+    // hydrating them, the restore below finds only the cover and the whole
+    // stack quietly shrinks to one frame across an undo.
+    // Codex P2 on PR #1672.
+    if (memberIds && memberIds.some(function(id) {
+      return cachedMemberIds.has(id) || previousSelection.has(id);
+    })) {
       var status = await hydrateBrowseStackCoverMembers(cover, windowIsCurrent);
       if (!windowIsCurrent()) return;
       if (status === 'unresolved') throw new Error('Could not reload stack members');
     }
   }
-  // Restore only selections that still belong to the refreshed query.
-  previousSelection.forEach(function(id) {
-    var photo = findBrowsePhoto(id);
-    if (photo && browsePhotoIsAvailable(photo)) selectedPhotos.add(id);
-  });
+  if (anchorRestoreEpoch === restoreEpoch) {
+    // Restore only selections that still belong to the refreshed query.
+    previousSelection.forEach(function(id) {
+      var photo = findBrowsePhoto(id);
+      if (photo && browsePhotoIsAvailable(photo)) selectedPhotos.add(id);
+    });
+  }
   refreshCardSelectionVisuals();
   updateBatchBar();
   refreshBrowseSidebarPanels();
@@ -11299,15 +11578,78 @@ async function confirmBatchKeyword() {
   showUndoToast();
 }
 
-function batchDelete() {
+var _batchDeleteRequestSeq = 0;
+
+async function batchDelete() {
   var ids = getActiveSelection();
   if (ids.length === 0) return;
-  var companionCount = 0;
-  ids.forEach(function(id) {
-    var p = findBrowsePhoto(id);
-    if (p && p.companion_path) companionCount++;
-  });
-  showDeleteDialog(ids, companionCount, function(data) {
+  // Ask the server how many of these carry a companion file. A selection can
+  // hold photos Browse has never loaded — every frame of a collapsed stack,
+  // or a Select all that reaches past the loaded page — and counting the
+  // loaded ones only hides the "Also delete N companion files" checkbox, so a
+  // disk delete silently leaves those companions behind. Refuse to open the
+  // dialog rather than open it with a count that cannot be trusted: a wrong
+  // number here is a file left on disk. Codex P2 on PR #1672.
+  //
+  // The request is async and the grid stays interactive, so the selection can
+  // move under us while the count is in flight. A confirm on a dialog backed
+  // by the old ids would permanently delete photos the user no longer has
+  // selected, and a second Delete pressed before the first response arrives
+  // could open a dialog and then be overwritten by the earlier reply landing
+  // late. Stamp each request with a monotonic seq and snapshot the ids it
+  // asked about — a later request retires the earlier one, and a selection
+  // that no longer matches the snapshot means the user has moved on and gets
+  // a fresh ask rather than a stale dialog. Codex P1 on PR #1672.
+  var seq = ++_batchDeleteRequestSeq;
+  var capturedIds = ids.slice();
+  var companionCount;
+  try {
+    var counted = await safeFetch('/api/photos/companion-count', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: capturedIds}),
+    }, { toast: false });
+    companionCount = counted.count || 0;
+  } catch (e) {
+    if (seq !== _batchDeleteRequestSeq) return;
+    showToast(
+      'Could not check these photos for companion files, so nothing was '
+        + 'deleted. Try again: ' + (e.message || e),
+      'error'
+    );
+    return;
+  }
+  if (seq !== _batchDeleteRequestSeq) return;
+  // The lightbox's Delete button calls showDeleteDialog() through a
+  // different code path (_navbar.html's lightboxDelete), so it does not
+  // advance _batchDeleteRequestSeq. If the user pressed E while our count
+  // was in flight and clicked the lightbox Delete, the modal is already
+  // open backed by a single photo id; calling showDeleteDialog() again
+  // here would overwrite that dialog's ids and callback with the batch's,
+  // and confirming what looked like a one-photo delete would delete the
+  // whole batch. Refuse to open on top of any open delete dialog rather
+  // than trying to coordinate seq across every showDeleteDialog caller.
+  // Codex P1 on PR #1672.
+  var modal = document.getElementById('deleteModal');
+  if (modal && modal.classList.contains('open')) {
+    showToast(
+      'Another delete dialog is already open. Close it and click Delete again.',
+      'info'
+    );
+    return;
+  }
+  // Compared as sorted keys, not by scanning one list for each id of the
+  // other: a Select all can hand this tens of thousands of ids, and the
+  // quadratic version of this check would stall the UI thread on exactly the
+  // selections that most need a delete confirmation.
+  if (selectionIdsKey(getActiveSelection()) !== selectionIdsKey(capturedIds)) {
+    showToast(
+      'Selection changed while checking for companion files. Click Delete again.',
+      'info'
+    );
+    return;
+  }
+  showDeleteDialog(capturedIds, companionCount, function(data) {
     // The server may have retained rows whose Trash step failed (and the
     // user declined the permanent-delete fallback). Keep those rows visible
     // — dropping them from ``photos`` would hide files still on disk until
@@ -11723,9 +12065,11 @@ function clearSelection() {
   // batch inspector — clicking it would apply A's EXIF place to every
   // selected photo. Codex P2 on PR #1097 (17:04Z follow-up).
   window._detailPhotoId = null;
-  document.querySelectorAll('.grid-card, .browse-stack-member').forEach(function(el) {
-    el.classList.remove('selected');
-  });
+  // Repaint from the (now empty) selection rather than stripping one class by
+  // hand: a stack card can also be carrying the dashed partial mark, and a
+  // hand-rolled scrub that only knew about `selected` left that mark on a
+  // cleared grid. One rule, one function. Codex P2 on PR #1672.
+  refreshCardSelectionVisuals();
   // If the detail panel is still open after clearing, its actions (setFlag,
   // setColorLabel, addKeyword, etc.) early-return on the null selectedPhotoId
   // and silently do nothing. Hide it so there is no ghost UI to interact with.
@@ -12067,6 +12411,21 @@ function filterMetadata(query) {
 function hideDetailPanel() {
   document.getElementById('detailContent').classList.remove('visible');
   document.getElementById('summaryPanel').classList.remove('hidden');
+}
+
+// Trading a single-photo detail focus for a batch. The panel is not the only
+// thing that has to go: the EXIF suggestion element keeps its data-photo-id
+// and its Accept button, and an in-flight reverse-geocode keeps
+// window._detailPhotoId as its owner check — so a later selection that still
+// contains the abandoned photo would resurrect its Accept line for the whole
+// batch, and one click would apply that one photo's place to every selected
+// photo. closeDetail() and clearSelection() have retired both since Codex P2
+// on PR #1097; the paths that enter a stack selection need it for the same
+// reason. Codex P1 on PR #1672.
+function abandonDetailFocusForBatch() {
+  hideDetailPanel();
+  clearExifSuggestion();
+  window._detailPhotoId = null;
 }
 
 function closeDetail() {
@@ -13493,17 +13852,307 @@ function scrollToCard(idx) {
 // with Browse only when the overlay closes so returning to the grid focuses
 // the photo the user finished on, without reloading the detail panel on every
 // Previous/Next step while the lightbox is still open.
+// A delete that actually happened reopens the lightbox on the next photo, so
+// the gesture the delete-button close set aside continues into that session —
+// but only if this delete is the one it was set aside for. Deleting some other
+// photo later (after a cancel, say) must not inherit it.
+document.addEventListener('lightbox:photodeleted', function(event) {
+  var deletedId = event && event.detail ? event.detail.photoId : null;
+  var spent = browseLightboxStackGestureSpent;
+  browseLightboxStackGestureSpent = null;
+  if (deletedId == null) return;
+  var represented = browseLightboxRepresentedByPhoto[String(deletedId)];
+  delete browseLightboxRepresentedByPhoto[String(deletedId)];
+  // The deleted photo was a stack cover, so the frames behind it just lost
+  // the only card standing for them — lightboxDelete splices the cover out of
+  // `photos` and nothing reprojects the stack. Selected frames have to go
+  // with it, or the batch bar keeps counting photos no shortcut can show and
+  // the next rating lands on them unseen. Codex P2 on PR #1672.
+  if (represented) {
+    // Recorded while the deleted photo was on screen, and a stack can be
+    // reprojected in between: a rating or flag in the lightbox promotes
+    // another member, so deleting the demoted photo leaves the stack standing
+    // under its new cover. Drop only the ids that no card represents *now* —
+    // a bounded check, over this one stack's ids rather than the whole
+    // selection. Codex P2 on PR #1672.
+    var representedNow = new Set();
+    photos.forEach(function(photo) {
+      representedNow.add(photo.id);
+      var stack = photo.browse_stack;
+      ((stack && stack.photo_ids) || []).forEach(function(id) {
+        representedNow.add(id);
+      });
+      (browseStackMembers[String(photo.id)] || []).forEach(function(member) {
+        representedNow.add(member.id);
+      });
+    });
+    var orphaned = represented.filter(function(id) {
+      return !representedNow.has(id);
+    });
+    var dropped = false;
+    orphaned.forEach(function(id) {
+      if (selectedPhotos.delete(id)) dropped = true;
+    });
+    if (selectedPhotoId != null && orphaned.indexOf(selectedPhotoId) !== -1) {
+      selectedPhotoId = null;
+      selectedIndex = -1;
+      dropped = true;
+    }
+    if (dropped) {
+      refreshCardSelectionVisuals();
+      updateBatchBar();
+    }
+  }
+  // A hidden tray member deleted from its own lightbox is not in ``photos``,
+  // so the splice in ``lightboxDelete`` never runs and nothing above updates
+  // the cover: its ``browse_stack.photo_ids`` and ``count`` still carry the
+  // deleted id, and the ``browseStackMembers`` hydration cache still lists it.
+  // The ``represented`` block above skips this case because the deleted photo
+  // was not itself a top-level representation. After the tray collapses, a
+  // click on the cover reads that stale ``photo_ids`` and puts the deleted
+  // id back into ``selectedPhotos``: the batch bar overcounts, and an
+  // Add Keyword then commits every live id before the stale id trips a
+  // foreign-key failure — partial writes the user cannot see coming.
+  // Prune the deleted id from each cover's stack metadata (and cached
+  // members) so what the card stands for matches what still exists, then
+  // repaint the affected badge so its count matches the pruned list.
+  // Codex P2 on PR #1672.
+  var badgesToRefresh = [];
+  photos.forEach(function(photo) {
+    var stack = photo.browse_stack;
+    var stackIds = stack && stack.photo_ids;
+    if (!Array.isArray(stackIds)) return;
+    var idx = stackIds.indexOf(deletedId);
+    if (idx === -1) return;
+    stackIds.splice(idx, 1);
+    if (typeof stack.count === 'number') {
+      stack.count = Math.max(0, stack.count - 1);
+    }
+    var cacheKey = String(photo.id);
+    var members = browseStackMembers[cacheKey];
+    if (Array.isArray(members)) {
+      browseStackMembers[cacheKey] = members.filter(function(member) {
+        return member.id !== deletedId;
+      });
+    }
+    // A two-photo stack that loses its last hidden member has no frames left to
+    // stand for, so its cover is now an ordinary card. Leaving
+    // ``photo.browse_stack`` truthy keeps ``has-browse-stack`` on the tile and
+    // lets ``restoreExpandedBrowseStacks`` re-insert a tray with a single
+    // member (the cover, or worse the deleted id from a stale hydration cache
+    // before ``browseStackMembers`` was pruned above). Dissolve the stack
+    // instead: drop the cache, retire the expansion, remove any live tray,
+    // and repaint the card so it stops advertising a stack that no longer
+    // exists. Codex P2 on PR #1672.
+    if (stack.count < 2) {
+      photo.browse_stack = null;
+      delete browseStackMembers[cacheKey];
+      expandedBrowseStacks.delete(photo.id);
+      browseStackCoverRecheck.delete(photo.id);
+      var tray = document.querySelector(
+        '.browse-stack-tray[data-stack-cover-id="' + photo.id + '"]');
+      if (tray) tray.remove();
+      var card = document.querySelector(
+        '.grid-card[data-id="' + photo.id + '"]');
+      if (card) {
+        card.classList.remove('has-browse-stack');
+        card.classList.remove('stack-partial');
+      }
+    }
+    badgesToRefresh.push(photo.id);
+  });
+  if (badgesToRefresh.length && typeof refreshBrowseStackBadge === 'function') {
+    badgesToRefresh.forEach(refreshBrowseStackBadge);
+  }
+  // Pruning the cover metadata is only half of what the tray-member delete
+  // needs. ``lightboxDelete`` has already dropped the deleted id from
+  // ``selectedPhotos`` / ``selectedPhotoId`` and rendered the grid, but the
+  // batch bar's "N selected" text was written from the pre-delete count and
+  // never rewrites itself, and a cover whose remaining live members are all
+  // selected stays painted ``stack-partial`` from that same pre-delete
+  // state — because the deleted id was in the members list back then, the
+  // whole-stack check that would repaint it as ``selected`` said no. Refresh
+  // both from the surviving selection so the count and the paint match what
+  // the user can see. Codex P2 on PR #1672.
+  if (badgesToRefresh.length) {
+    if (typeof refreshCardSelectionVisuals === 'function') {
+      refreshCardSelectionVisuals();
+    }
+    if (typeof updateBatchBar === 'function') {
+      updateBatchBar();
+    }
+  }
+  if (!spent) return;
+  if (spent.epoch !== anchorRestoreEpoch) return;
+  if (spent.ids.indexOf(deletedId) === -1) return;
+  browseLightboxStackGesture = spent;
+});
+
+// Reconcile browse selection state for a null-photo close. The only caller
+// of ``closeLightbox(null)`` is ``lightboxDelete()`` after its splice emptied
+// ``_lightboxPhotoList`` — a stack cover was the deleted photo's only
+// top-level representation, and its hidden members are still in
+// ``selectedPhotos`` with no card left on the grid to stand for them. The
+// ``lightbox:photodeleted`` handler that runs immediately after this would
+// otherwise re-arm the set-aside gesture, leaving the batch bar counting
+// photos a shortcut cannot see — see the stack-gesture rules for why this
+// close has to actively clean up rather than return unchanged.
+// Codex P2 on PR #1672.
+function browseReconcileEmptyLightboxClose() {
+  var pending = browseLightboxStackGesture || browseLightboxStackGestureSpent;
+  browseLightboxStackGesture = null;
+  browseLightboxStackGestureSpent = null;
+  var touched = false;
+  if (pending) {
+    pending.ids.forEach(function(id) {
+      if (selectedPhotos.delete(id)) touched = true;
+    });
+    if (selectedPhotoId != null && pending.ids.indexOf(selectedPhotoId) !== -1) {
+      selectedPhotoId = null;
+      touched = true;
+    }
+  }
+  // Even with no gesture in either slot, an empty close means the deleted
+  // photo was the only top-level lightbox entry — and when that photo was
+  // a stack cover selected by a single click (or the tray's Select all),
+  // its hidden members are still in ``selectedPhotos`` but no card on the
+  // grid represents them any more. Batch shortcuts would then act on
+  // photos the user cannot see. Drop any selected id whose cover has left
+  // ``photos`` so the selection matches what is on screen — CORE_PHILOSOPHY
+  // "no black boxes", the batch bar has to count photos the user can see.
+  // Codex P2 on PR #1672.
+  // Only when the grid holds the whole result set — both ends of it.
+  // ``allLoaded`` says the tail is exhausted, which a focused or deep-linked
+  // window reaches while ``earliestPage`` is still past 1 and the pages
+  // before it have never been fetched. "Not in ``photos``" means
+  // "no card on screen" only once there are no more pages to load: with a
+  // Select all that reaches past the loaded window, every id from a later
+  // page looks unreachable here and the sweep would quietly delete most of
+  // the user's selection — photos that exist and are still perfectly valid
+  // members of it. The bounded drop in the ``lightbox:photodeleted`` handler
+  // covers the partial-window case, because it knows which ids the deleted
+  // cover actually stood for. Codex P2 on PR #1672.
+  if (selectedPhotos.size > 0 && allLoaded && earliestPage === 1) {
+    var reachable = new Set();
+    photos.forEach(function(photo) {
+      reachable.add(photo.id);
+      // A collapsed stack that has never been expanded has no entries in
+      // ``browseStackMembers``, but the card still represents every id in
+      // ``photo.browse_stack.photo_ids``. Reading only the hydrated cache
+      // would treat those hidden members as unreachable and drop them from a
+      // batch the surviving card still stands for — for example, select two
+      // collapsed stacks, expand one, delete every member from its tray
+      // lightbox: this empty close would then reduce the untouched second
+      // stack to its cover. Codex P2 on PR #1672.
+      var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
+      stackIds.forEach(function(id) { reachable.add(id); });
+      var members = browseStackMembers[String(photo.id)] || [];
+      members.forEach(function(member) { reachable.add(member.id); });
+    });
+    Array.from(selectedPhotos).forEach(function(id) {
+      if (!reachable.has(id)) {
+        selectedPhotos.delete(id);
+        touched = true;
+      }
+    });
+  }
+  if (selectedPhotoId != null && allLoaded && earliestPage === 1) {
+    var focusStillReachable = photos.some(function(photo) {
+      if (photo.id === selectedPhotoId) return true;
+      // Same reasoning as the reachable sweep: a hidden member of an
+      // uncached collapsed stack is still represented by its cover card.
+      // Codex P2 on PR #1672.
+      var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
+      if (stackIds.indexOf(selectedPhotoId) !== -1) return true;
+      var members = browseStackMembers[String(photo.id)] || [];
+      return members.some(function(member) { return member.id === selectedPhotoId; });
+    });
+    if (!focusStillReachable) {
+      selectedPhotoId = null;
+      touched = true;
+    }
+  }
+  if (touched) {
+    if (typeof refreshCardSelectionVisuals === 'function') {
+      refreshCardSelectionVisuals();
+    }
+    if (typeof updateBatchBar === 'function') updateBatchBar();
+  }
+}
+
 document.addEventListener('lightbox:closed', function(event) {
   var photoId = event && event.detail ? event.detail.photoId : null;
-  // Viewing shortcuts can open the lightbox without collapsing an existing
-  // batch. Preserve that batch instead of replacing it with the viewed photo.
-  if (photoId == null || selectedPhotos.size > 0) return;
+  if (photoId == null) {
+    browseReconcileEmptyLightboxClose();
+    return;
+  }
+  // Every close retires the gesture — including the one the lightbox's own
+  // Delete button causes on its way to the delete dialog (it sits inside the
+  // overlay and does not stop propagating). That close only looks
+  // intermediate: cancelling the dialog reopens nothing, so a gesture held
+  // across it would outlive its lightbox and be mistaken for the next one. It
+  // is set aside instead, and handed back only by a delete that actually
+  // happens — which reopens the lightbox on the next photo, so there is a
+  // real close still to come. Codex P2 on PR #1672.
+  var stackGesture = browseLightboxStackGesture;
+  var deleteDialogOpen = !!document.querySelector('#deleteModal.open');
+  browseLightboxStackGestureSpent = deleteDialogOpen ? stackGesture : null;
+  browseLightboxStackGesture = null;
+  // The delete dialog is open over this close and the lightbox will reopen on
+  // the next photo, so what the viewed photos stood for is still needed. Any
+  // other close is the end of the session. Codex P2 on PR #1672.
+  if (!deleteDialogOpen) browseLightboxRepresentedByPhoto = {};
+  if (selectedPhotos.size > 0) {
+    // Viewing shortcuts can open the lightbox without collapsing an existing
+    // batch. Preserve that batch instead of replacing it with the viewed
+    // photo — unless this lightbox was opened by a double-click on a stack
+    // card and the selection is still the one that gesture made, which is the
+    // only "batch" the user did not assemble. Same ids, different provenance:
+    // an intentional stack selection (tray Select all, then E) bumps the
+    // selection epoch and so still reads as a batch.
+    //
+    // "Still the one that gesture made" allows shrinkage: deleting a photo in
+    // the lightbox drops it from the selection, and that is this gesture's
+    // selection mutated, not someone's batch. Without that, deleting a
+    // stack's cover — its only top-level card — left the hidden members
+    // selected with nothing on screen representing them, and the next batch
+    // shortcut would act on photos the user cannot see.
+    // Codex P2 on PR #1672.
+    var gestureIds = stackGesture && stackGesture.epoch === anchorRestoreEpoch
+      ? new Set(stackGesture.ids) : null;
+    if (!gestureIds || !Array.from(selectedPhotos).every(function(id) {
+      return gestureIds.has(id);
+    })) return;
+    // Finished inside that stack: the viewing gesture ended where it began,
+    // so the stack stays selected rather than shrinking to one frame. The
+    // gesture is spent either way — reopening the same stack with a viewing
+    // shortcut afterwards is a viewing shortcut over a batch, and batches are
+    // preserved. Codex P2 on PR #1672.
+    if (selectedPhotos.has(photoId)) {
+      var stackCoverId = browseStackCoverIdForPhoto(photoId);
+      var stackIdx = photos.findIndex(function(photo) {
+        return photo.id === photoId || photo.id === stackCoverId;
+      });
+      if (stackIdx >= 0) {
+        selectedIndex = stackIdx;
+        scrollToCard(stackIdx);
+      }
+      return;
+    }
+  }
   var idx = photos.findIndex(function(photo) { return photo.id === photoId; });
   if (idx < 0) {
     var coverId = browseStackCoverIdForPhoto(photoId);
     idx = photos.findIndex(function(photo) { return photo.id === coverId; });
   }
+  // Nothing to reconcile to — leave every bit of state alone.
   if (idx < 0 || !findBrowsePhoto(photoId)) return;
+  // Past the guard above, so the gesture's selection is replaced by the photo
+  // the user actually finished on.
+  if (selectedPhotos.size > 0) {
+    selectedPhotos.clear();
+    browseLightboxStackGesture = null;
+  }
   // Skip `selectPhoto` when the focused photo is already the one being
   // returned to: it calls `loadDetail`, which refetches and rerenders the
   // detail panel and would silently discard an unsubmitted `#locationInput`
@@ -13514,7 +14163,11 @@ document.addEventListener('lightbox:closed', function(event) {
     scrollToCard(idx);
     return;
   }
-  selectPhoto({ shiftKey: false, metaKey: false, ctrlKey: false }, photoId, idx);
+  // stackAware: false — this restores the grid focus to the photo the user
+  // finished viewing. Closing the lightbox on a stack cover must not silently
+  // promote a single-photo view into a stack-wide batch.
+  selectPhoto({ shiftKey: false, metaKey: false, ctrlKey: false }, photoId, idx,
+              { stackAware: false });
   scrollToCard(idx);
 });
 
@@ -13660,9 +14313,16 @@ async function copyPhotoPaths(photoIds) {
 // of selectPhoto(); factored out so the context-menu handler can coerce
 // selection without paying the full selectPhoto side-effects.
 function refreshCardSelectionVisuals() {
+  var byId = new Map(photos.map(function(photo) { return [photo.id, photo]; }));
   document.querySelectorAll('.grid-card, .browse-stack-member').forEach(function(el) {
     var cardId = parseInt(el.dataset.id, 10);
-    el.classList.toggle('selected', cardId === selectedPhotoId || selectedPhotos.has(cardId));
+    // Tray members are single photos even when their cover is a stack card,
+    // so they never take the stack-wide rule: address them by id only.
+    var state = el.classList.contains('browse-stack-member')
+      ? (browseSelectionIncludes(cardId) ? ' selected' : '')
+      : browseCardSelectionClass(byId.get(cardId));
+    el.classList.toggle('selected', state === ' selected');
+    el.classList.toggle('stack-partial', state === ' stack-partial');
   });
 }
 
@@ -13823,7 +14483,41 @@ document.addEventListener('contextmenu', function(e) {
   if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
     selectedPhotos.add(selectedPhotoId);
   }
-  var ids = coerceSelectionOnContext(selectedPhotos, pid);
+  // The "item" a collapsed stack card offers is the stack, so coercion
+  // replaces the selection with every frame behind it unless they are all in
+  // the selection already. A tray member coerces to itself: that is how a
+  // single frame gets a context menu of its own.
+  var stackIds = card.classList.contains('browse-stack-member')
+    ? [pid]
+    : browseSelectionIdsForClick(pid);
+  var wholeStackSelected = stackIds.every(function(stackId) {
+    return selectedPhotos.has(stackId);
+  });
+  var ids;
+  if (stackIds.length > 1 && !wholeStackSelected) {
+    // A selection change like any other: the generation has to move, or a
+    // restore still waiting on stack hydration (undo/redo) considers itself
+    // current and merges the pre-undo ids into the stack just chosen.
+    // selectPhoto() and selectBrowseStackAll() bump it for the same reason.
+    // Codex P2 on PR #1672.
+    anchorRestoreEpoch++;
+    selectedPhotos = new Set(stackIds);
+    selectedPhotoId = null;
+    selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
+    abandonDetailFocusForBatch();
+    ids = stackIds;
+  } else {
+    var beforeCoercion = selectionIdsKey(Array.from(selectedPhotos));
+    ids = coerceSelectionOnContext(selectedPhotos, pid);
+    // Coercion replacing the selection is a selection change like any other,
+    // so the generation moves with it — otherwise a restore still waiting on
+    // stack hydration (undo/redo) considers itself current and merges the
+    // pre-undo ids into the card just right-clicked. Only when it actually
+    // changed: right-clicking inside the selection keeps it, and retiring a
+    // pending restore for that would lose a selection nobody replaced.
+    // Codex P2 on PR #1672.
+    if (selectionIdsKey(ids) !== beforeCoercion) anchorRestoreEpoch++;
+  }
   // If coercion replaced the set, align selectedPhotoId (so the detail panel
   // reflects the right-clicked photo) and selectedIndex (the Shift-range
   // anchor — a subsequent Shift-click must range-select from this card).

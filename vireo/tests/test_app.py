@@ -21894,6 +21894,43 @@ def test_browse_sidebar_panels_refresh_on_undo_and_redo(app_and_db):
     ), "stale selection key would make the keyword refresh a no-op"
 
 
+def test_browse_undo_bails_when_selection_moves_during_hydration(app_and_db):
+    """The undo restore is captured before ``resetAndLoad`` and would
+    otherwise fold those pre-undo ids back into whatever the user picked
+    while we hydrated uncached stack members. ``selectPhoto`` bumps
+    ``anchorRestoreEpoch`` — the same async-selection signal the batch
+    delete's companion count and Select all already use — so the handler
+    snapshots the epoch after the reload and gates the restore on it
+    still matching before writing to ``selectedPhotos``. Without that
+    gate, a click that lands in the async gap either merges the old
+    stack into a new batch or gets replaced outright. Codex P2 on PR
+    #1672.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/browse").get_data(as_text=True)
+    handler = _browse_js_function_body(
+        html, "window.afterHistoryChange = async function("
+    )
+    reset_at = handler.find("await resetAndLoad(")
+    assert reset_at != -1, "the handler must reload the query"
+    snapshot_at = handler.find("restoreEpoch = anchorRestoreEpoch", reset_at)
+    assert snapshot_at != -1, (
+        "the handler must snapshot anchorRestoreEpoch after resetAndLoad "
+        "so the restore below can tell a mid-hydration click apart"
+    )
+    guard_at = handler.find(
+        "anchorRestoreEpoch === restoreEpoch", snapshot_at
+    )
+    assert guard_at != -1, (
+        "the previousSelection restore must be gated on the snapshot"
+    )
+    restore_at = handler.find("previousSelection.forEach(", guard_at)
+    assert restore_at != -1 and restore_at > guard_at, (
+        "the restore body has to sit inside the epoch guard, not beside it"
+    )
+
+
 def test_browse_review_deep_link_clears_persisted_filters(app_and_db):
     """``/review?photo_id=N`` alone is not the scope the pill advertises.
 
@@ -22299,6 +22336,1123 @@ def _run_detail_prediction_panel(html, mode, payload):
     import json as _json
 
     return _run_node(source, [mode, _json.dumps(payload)])
+
+
+_STACK_SELECTION_STUB = """
+// Minimal stand-ins for the Browse globals the selection code reads. Every
+// side effect is captured rather than performed, so the assertions are about
+// what the selection *is* after a click.
+var __detail = {visible: false, photoId: null};
+var __document = {
+  getElementById: function() { return {classList: {
+    contains: function() { return false; },
+    add: function() {}, remove: function() {},
+  }}; },
+  querySelectorAll: function() { return []; },
+};
+var document = __document;
+var window = {};
+var anchorRestoreEpoch = 0;
+var lastClickedPhotoId = null;
+var selectedPhotos = new Set();
+var selectedPhotoId = null;
+var selectedIndex = -1;
+var photos = [];
+var browseStackMembers = {};
+var __batchUpdates = 0;
+function loadDetail(id) { __detail.visible = true; __detail.photoId = id; }
+function hideDetailPanel() { __detail.visible = false; __detail.photoId = null; }
+function loadSummary() {}
+function clearExifSuggestion() {}
+function refreshCardSelectionVisuals() {}
+function noteFocusedCardVisibility() {}
+function updateBatchBar() { __batchUpdates++; }
+function browseStackCoverIdForPhoto(photoId) {
+  var coverIds = Object.keys(browseStackMembers);
+  for (var i = 0; i < coverIds.length; i++) {
+    if ((browseStackMembers[coverIds[i]] || []).some(function(member) {
+      return member.id === photoId;
+    })) return Number(coverIds[i]);
+  }
+  return null;
+}
+// Two burst stacks and a single, the shape of the screenshot that started
+// this: one card per stack, each standing for several frames.
+function seedGrid() {
+  photos = [
+    {id: 10, browse_stack: {kind: 'burst', count: 3, photo_ids: [11, 10, 12]}},
+    {id: 20, browse_stack: {kind: 'burst', count: 2, photo_ids: [20, 21]}},
+    {id: 30, browse_stack: null},
+  ];
+  browseStackMembers = {};
+  selectedPhotos = new Set();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  __detail.visible = false;
+  __detail.photoId = null;
+}
+function state() {
+  return {
+    selected: Array.from(selectedPhotos),
+    focused: selectedPhotoId,
+    index: selectedIndex,
+    detail: __detail.photoId,
+  };
+}
+var CLICK = {shiftKey: false, metaKey: false, ctrlKey: false};
+var CMD_CLICK = {shiftKey: false, metaKey: true, ctrlKey: false};
+var SHIFT_CLICK = {shiftKey: true, metaKey: false, ctrlKey: false};
+"""
+
+
+def _browse_selection_js(html, body):
+    """Browse's real selection functions over a stubbed grid."""
+    return "\n".join([
+        _STACK_SELECTION_STUB,
+        _browse_js_function_body(html, "function browseStackMemberIdsFor("),
+        _browse_js_function_body(html, "function browseStackMemberIds("),
+        _browse_js_function_body(html, "function browseSelectionIdsForClick("),
+        _browse_js_function_body(html, "function browseStackMemberRange("),
+        _browse_js_function_body(html, "function abandonDetailFocusForBatch("),
+        _browse_js_function_body(html, "function browseSelectionIncludes("),
+        _browse_js_function_body(html, "function browseCardSelectionClass("),
+        _browse_js_function_body(html, "function browseSelectionStackNote("),
+        _browse_js_function_body(html, "function selectPhoto("),
+        body,
+    ])
+
+
+def test_clicking_a_stack_card_selects_every_frame_behind_it(app_and_db):
+    """A collapsed stack card is the stack, not the frame on top of it.
+
+    The badge says "3 photos", so a species, rating or flag applied while
+    looking at that card has to reach all three. Selecting only the cover
+    would make every count in the batch bar and the selection panel — the
+    ones the user reads as "what the next action will do" — describe 1 of 3
+    (CORE_PHILOSOPHY.md, "no black boxes"). The cover leads the list so
+    Best Batch, burst review and the export preview start from the card the
+    user can actually see.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+selectPhoto(CLICK, 10, 0);
+var stackClick = state();
+seedGrid();
+selectPhoto(CLICK, 30, 2);
+var singleClick = state();
+process.stdout.write(JSON.stringify(
+  {stackClick: stackClick, singleClick: singleClick}
+));
+"""), [])
+    assert result["stackClick"] == {
+        # Cover first, then the rest of the stack in grid order.
+        "selected": [10, 11, 12],
+        # No single photo is being acted on, so nothing claims the focus and
+        # the panel opens as the batch inspector instead of one frame's detail.
+        "focused": None,
+        "index": 0,
+        "detail": None,
+    }
+    # A card that is not a stack is untouched: one photo, focused, detail open.
+    assert result["singleClick"] == {
+        "selected": [], "focused": 30, "index": 2, "detail": 30,
+    }
+
+
+def test_stack_cards_toggle_and_range_select_as_whole_stacks(app_and_db):
+    """Cmd-click and Shift-range follow the same rule as a plain click.
+
+    A stack leaves the selection only when every frame is in it, so
+    Cmd-clicking a stack that contributed three frames from its tray fills
+    the stack in rather than subtracting those three — the count moves the
+    way the card the user clicked says it should.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+selectPhoto(CLICK, 10, 0);
+selectPhoto(CMD_CLICK, 20, 1);
+var twoStacks = state();
+selectPhoto(CMD_CLICK, 20, 1);
+var afterUntoggle = state();
+seedGrid();
+selectedPhotos = new Set([11]);
+selectPhoto(CMD_CLICK, 10, 0);
+var partialFilledIn = state();
+seedGrid();
+selectPhoto(CLICK, 10, 0);
+selectPhoto(SHIFT_CLICK, 30, 2);
+var range = state();
+process.stdout.write(JSON.stringify({
+  twoStacks: twoStacks.selected, afterUntoggle: afterUntoggle.selected,
+  partialFilledIn: partialFilledIn.selected, range: range.selected,
+}));
+"""), [])
+    assert result["twoStacks"] == [10, 11, 12, 20, 21]
+    assert result["afterUntoggle"] == [10, 11, 12]
+    # One frame of the stack was already in, so the Cmd-click completes the
+    # stack; treating it as "already selected" would silently remove frames.
+    assert result["partialFilledIn"] == [11, 10, 12]
+    # The range sweeps three cards: two stacks and a single, six photos.
+    assert sorted(result["range"]) == [10, 11, 12, 20, 21, 30]
+
+
+def test_restoring_focus_to_a_stack_card_does_not_select_the_stack(app_and_db):
+    """``stackAware: false`` is for the callers that restore a focus.
+
+    A tray click is how the user picks one frame out of a stack — including
+    the cover frame, which is why there is no modifier for it — and a
+    collapsing tray or a closing lightbox is a view action. None of them may
+    turn one photo into a stack-wide batch.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+selectPhoto(CLICK, 10, 0, {stackAware: false});
+process.stdout.write(JSON.stringify(state()));
+"""), [])
+    assert result == {"selected": [], "focused": 10, "index": 0, "detail": 10}
+    body = _browse_js_function_body(html, "function selectBrowseStackMember(")
+    assert "stackAware: false" in body, (
+        "a tray member click must stay a single-photo selection"
+    )
+
+
+def test_shift_click_inside_a_tray_ranges_over_the_trays_own_members(
+    app_and_db,
+):
+    """Every member of an expanded stack reports the cover's grid slot.
+
+    The top-level range loop therefore cannot tell two members apart, and
+    without a member-order range a Shift-click between two frames of one
+    burst would take the whole stack — the opposite of what expanding it
+    was for.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+browseStackMembers['10'] = [{id: 11}, {id: 10}, {id: 12}];
+selectPhoto(CLICK, 11, 0, {stackAware: false});
+selectPhoto(SHIFT_CLICK, 10, 0, {stackAware: false});
+process.stdout.write(JSON.stringify(state()));
+"""), [])
+    assert sorted(result["selected"]) == [10, 11]
+
+
+def test_stack_card_paints_a_partial_mark_for_a_partial_selection(app_and_db):
+    """The full ring on a stack card means the whole stack.
+
+    It has to, now that clicking the card selects the whole stack. A frame
+    picked out of the tray, or the focus a collapsing tray hands back to the
+    cover, leaves some-but-not-all selected — that state gets its own mark
+    rather than a ring that would overstate what the batch bar will act on.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+var none = browseCardSelectionClass(photos[0]);
+selectPhoto(CLICK, 10, 0);
+var whole = browseCardSelectionClass(photos[0]);
+seedGrid();
+selectedPhotoId = 10;
+var coverFocusOnly = browseCardSelectionClass(photos[0]);
+seedGrid();
+selectedPhotos = new Set([12]);
+var oneMember = browseCardSelectionClass(photos[0]);
+var single = browseCardSelectionClass(photos[2]);
+seedGrid();
+// Cmd-clicked out of the tray, then collapsed: the focus sits on the cover
+// while the set holds only the other frames.
+selectedPhotos = new Set([11, 12]);
+selectedPhotoId = 10;
+var focusOutsideSet = browseCardSelectionClass(photos[0]);
+process.stdout.write(JSON.stringify({
+  none: none, whole: whole, coverFocusOnly: coverFocusOnly,
+  oneMember: oneMember, single: single, focusOutsideSet: focusOutsideSet,
+}));
+"""), [])
+    assert result == {
+        "none": "",
+        "whole": " selected",
+        "coverFocusOnly": " stack-partial",
+        "oneMember": " stack-partial",
+        # A batch action would skip the focused cover, so the card must not
+        # claim the whole stack. Same set-over-focus precedence as
+        # getActiveSelection. Codex P2 on PR #1672.
+        "focusOutsideSet": " stack-partial",
+        "single": "",
+    }
+
+
+def test_stack_dblclick_snapshot_distinguishes_a_preselected_stack(app_and_db):
+    """The dblclick provenance marker cannot come from the resulting ids alone.
+
+    A double-click on a stack card runs its two clicks through ``selectPhoto``
+    first, so the stack is selected by the time the lightbox opens. That is
+    also the state a tray Select all + Collapse leaves behind, so the two
+    clicks then reaffirm a selection rather than creating one — and the close
+    handler would silently swap that user-assembled batch for the finished-on
+    photo if the dblclick were still marked as gesture-generated. Capturing
+    ``selectedPhotos`` before the first click of a sequence is what lets the
+    handler tell those cases apart: ``event.detail`` numbers the sequence, so
+    only ``detail === 1`` records, and ``detail === 2`` preserves that snapshot
+    through the second click. Codex P2 on PR #1672.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+var FIRST = Object.assign({detail: 1}, CLICK);
+var SECOND = Object.assign({detail: 2}, CLICK);
+// Fresh gesture: pre-state is empty, so the dblclick's two clicks made the
+// stack selection and its provenance should be recorded.
+selectPhoto(FIRST, 10, 0);
+var afterFirst = new Set(browseSelectionBeforeStackDblClickStart);
+selectPhoto(SECOND, 10, 0);
+var freshGesture = {
+  pre: Array.from(browseSelectionBeforeStackDblClickStart).sort(),
+  afterFirst: Array.from(afterFirst).sort(),
+};
+seedGrid();
+// Deliberate batch preselects the stack; a subsequent dblclick has to see
+// that the pre-first-click state was already the stack, so the two clicks
+// only reaffirmed it. Codex P2 on PR #1672.
+selectedPhotos = new Set([10, 11, 12]);
+selectPhoto(FIRST, 10, 0);
+selectPhoto(SECOND, 10, 0);
+var preselected = {
+  pre: Array.from(browseSelectionBeforeStackDblClickStart).sort(),
+};
+seedGrid();
+// A single click captures its own pre-state; the next first-of-a-sequence
+// overwrites it with whatever the earlier click left behind.
+selectPhoto(FIRST, 10, 0);
+var afterSingle = Array.from(browseSelectionBeforeStackDblClickStart).sort();
+var LATER_FIRST = Object.assign({detail: 1}, CLICK);
+selectPhoto(LATER_FIRST, 30, 2);
+var afterLater = Array.from(browseSelectionBeforeStackDblClickStart).sort();
+process.stdout.write(JSON.stringify({
+  freshGesture: freshGesture,
+  preselected: preselected,
+  afterSingle: afterSingle,
+  afterLater: afterLater,
+}));
+"""), [])
+    # A fresh gesture's pre-state is empty on both clicks — the second click
+    # preserves the first's snapshot rather than overwriting it.
+    assert result["freshGesture"] == {"pre": [], "afterFirst": []}
+    # The preselected stack's pre-state is the stack, byte-for-byte — enough
+    # for the dblclick handler to see the batch was already there.
+    assert result["preselected"] == {"pre": [10, 11, 12]}
+    # First click captured an empty pre-state; the LATER_FIRST click then
+    # overwrote that with what the first click had left behind (the stack).
+    assert result["afterSingle"] == []
+    assert result["afterLater"] == [10, 11, 12]
+
+
+def test_selection_count_names_stacks_only_when_the_grid_accounts_for_all(
+    app_and_db,
+):
+    """"12 photos selected · 2 stacks" answers the question one click now
+    raises: why did the count move by more than one.
+
+    It is only printable while the stacks and singles in the loaded grid
+    account for every selected photo. Counting the stacks that happen to be
+    on screen out of a Select-all that reaches past the window would be a
+    proxy for the composition of the selection rather than an answer, so
+    that case says nothing instead.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+process.stdout.write(JSON.stringify({
+  oneStack: browseSelectionStackNote([10, 11, 12]),
+  twoStacksAndASingle: browseSelectionStackNote([10, 11, 12, 20, 21, 30]),
+  partialStack: browseSelectionStackNote([10, 11]),
+  singlesOnly: browseSelectionStackNote([30]),
+  pastTheWindow: browseSelectionStackNote([10, 11, 12, 999]),
+  empty: browseSelectionStackNote([]),
+}));
+"""), [])
+    assert result == {
+        "oneStack": " · 1 stack",
+        "twoStacksAndASingle": " · 2 stacks",
+        # Two frames of a three-frame stack are not "1 stack".
+        "partialStack": "",
+        "singlesOnly": "",
+        "pastTheWindow": "",
+        "empty": "",
+    }
+
+
+def test_clicking_a_stack_card_scrubs_the_previous_detail_owner(app_and_db):
+    """A stack-select click has to clear the same async-anchor state that
+    closeDetail does.
+
+    ``hideDetailPanel`` is CSS-only. If photo A had detail focus with a
+    reverse-geocode in flight, and the user then clicks an unrelated collapsed
+    stack card, ``window._detailPhotoId`` still points at A and the EXIF-
+    suggestion element still carries A's ``data-photo-id``. A subsequent
+    Select All (or any batch that folds A back in) satisfies
+    ``maybeShowExifSuggestion``'s owner check when the fetch finally lands and
+    resurrects A's Accept line into the batch inspector — clicking it would
+    apply A's GPS place to every selected photo. Codex P1 on PR #1672; same
+    reasoning as the drop-anchor and closeDetail paths.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    result = _run_node(_browse_selection_js(html, """
+var __clearCalls = 0;
+clearExifSuggestion = function() { __clearCalls++; };
+seedGrid();
+// Photo 30 is a single: click it to give the detail panel an owner and
+// stand in for a reverse-geocode that has not yet resolved.
+selectPhoto(CLICK, 30, 2);
+window._detailPhotoId = 30;
+var beforeStackClick = {
+  detailOwner: window._detailPhotoId,
+  clearCalls: __clearCalls,
+};
+// The click that would otherwise leave A's owner pointer behind.
+selectPhoto(CLICK, 10, 0);
+process.stdout.write(JSON.stringify({
+  before: beforeStackClick,
+  after: {
+    selected: Array.from(selectedPhotos),
+    detailOwner: window._detailPhotoId,
+    clearCalls: __clearCalls,
+  },
+}));
+"""), [])
+    assert result["before"] == {"detailOwner": 30, "clearCalls": 0}
+    # The stack click selected the stack, dropped the ambient owner pointer,
+    # and scrubbed the pending suggestion element so a late reverse-geocode
+    # for photo 30 cannot repaint its Accept line into the batch inspector.
+    assert result["after"] == {
+        "selected": [10, 11, 12],
+        "detailOwner": None,
+        "clearCalls": 1,
+    }
+
+
+def test_right_click_stack_branch_scrubs_the_previous_detail_owner(app_and_db):
+    """The right-click stack-coercion branch has the same anchor cleanup as
+    the left-click one — reading the source is enough here, since the
+    contextmenu handler is a document-level closure the node harness
+    cannot exercise the way ``selectPhoto`` is exercised above.
+
+    Codex P1 on PR #1672 flagged both branches together; the failure mode is
+    identical, so the right-click stack path has to make the same retirement
+    — through the shared helper the left-click path and the tray's Select all
+    also call, with this test pinning what that helper does.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    # Slice the contextmenu handler out of the file: it opens with the
+    # document-level addEventListener and runs to the corresponding closing
+    # ``});``. That is enough to look for the stack-coercion branch and its
+    # cleanup calls without depending on the exact line numbers.
+    marker = "document.addEventListener('contextmenu', function(e) {"
+    start = html.find(marker)
+    assert start != -1, "contextmenu handler not found in browse.html"
+    stack_branch_marker = "if (stackIds.length > 1 && !wholeStackSelected) {"
+    branch_start = html.find(stack_branch_marker, start)
+    assert branch_start != -1, "right-click stack branch not found"
+    branch = html[branch_start:branch_start + 1200]
+    assert "abandonDetailFocusForBatch();" in branch, (
+        "the right-click stack branch must retire the abandoned detail focus "
+        "the same way the left-click one and closeDetail do"
+    )
+    # ...and that helper is what actually has to do the three things. Asserted
+    # here rather than inline in each branch so the paths can share one
+    # implementation instead of three copies that can drift apart.
+    helper = _browse_js_function_body(
+        html, "function abandonDetailFocusForBatch(",
+    )
+    assert "hideDetailPanel();" in helper
+    assert "clearExifSuggestion();" in helper, (
+        "entering a batch must scrub the pending EXIF suggestion, or a late "
+        "reverse-geocode can repaint A's Accept line for the whole batch"
+    )
+    assert "window._detailPhotoId = null" in helper, (
+        "entering a batch must null the ambient detail-photo pointer, which "
+        "is the other half of that same owner check"
+    )
+
+
+def test_batch_delete_discards_a_companion_count_for_a_stale_selection(
+    app_and_db,
+):
+    """The count request keeps the grid interactive while it is in flight.
+
+    A user who clicks Delete, changes the selection, and then sees a dialog
+    backed by the earlier ids would permanently delete photos they no longer
+    have selected. A second Delete pressed before the first count returns
+    can also open a dialog and then be overwritten by the earlier reply
+    landing late. Each batchDelete stamps its request with a monotonic seq
+    and snapshots the ids it asked about; a stale seq is dropped silently
+    (a newer Delete owns the dialog now), and a snapshot that no longer
+    matches the current selection tells the user to click Delete again.
+    Codex P1 on PR #1672.
+
+    Case (c) covers a related P1: the lightbox's Delete button opens its
+    own single-photo dialog through a different code path that does not
+    advance _batchDeleteRequestSeq. If the batch's count then comes back
+    with the same seq and an unchanged selection, calling showDeleteDialog
+    again would overwrite the open dialog's ids and callback — confirming
+    what looked like a one-photo delete would delete the whole batch. The
+    batch reply must refuse to open on top of any open delete dialog.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    body = _browse_js_function_body(html, "async function batchDelete(")
+    source = "\n".join([
+        # The real selection-key helper, not a stand-in: the staleness check
+        # is exactly a comparison of these keys.
+        _browse_js_function_body(html, "function selectionIdsKey("),
+        """
+var _batchDeleteRequestSeq = 0;
+var _activeSelection = [1, 2, 3];
+var _pending = [];
+var dialogs = [], toasts = [];
+var _modalOpen = false;
+global.document = {
+  getElementById: function(id) {
+    if (id !== 'deleteModal') return null;
+    return {
+      classList: {
+        contains: function(cls) { return cls === 'open' && _modalOpen; },
+      },
+    };
+  },
+};
+function getActiveSelection() { return _activeSelection.slice(); }
+function safeFetch(url, opts) {
+  var body = JSON.parse(opts.body);
+  return new Promise(function(resolve, reject) {
+    _pending.push({url: url, ids: body.photo_ids, resolve: resolve, reject: reject});
+  });
+}
+function showDeleteDialog(ids, companionCount) {
+  dialogs.push({ids: ids.slice(), companionCount: companionCount});
+  _modalOpen = true;
+}
+function showToast(message, kind) { toasts.push({message: message, kind: kind}); }
+function browseStacksEnabled() { return false; }
+function snapshot() {
+  var out = {dialogs: dialogs.slice(), toasts: toasts.slice()};
+  dialogs.length = 0;
+  toasts.length = 0;
+  return out;
+}
+""",
+        body,
+        """
+(async function() {
+  var cases = {};
+
+  // (a) selection changes while the count is in flight → no dialog, info toast.
+  var pStale = batchDelete();
+  var staleReq = _pending.shift();
+  _activeSelection = [1, 2];
+  staleReq.resolve({count: 2});
+  await pStale;
+  cases.staleSelection = snapshot();
+
+  // (b) two Deletes overlap: the newer request retires the older one, so a
+  //     late reply for the older cannot overwrite the newer dialog.
+  _activeSelection = [4, 5, 6];
+  var pFirst = batchDelete();
+  var firstReq = _pending.shift();
+  var pSecond = batchDelete();
+  var secondReq = _pending.shift();
+  firstReq.resolve({count: 1});
+  await pFirst;
+  secondReq.resolve({count: 2});
+  await pSecond;
+  cases.overlap = snapshot();
+
+  // (c) lightbox Delete opens its own dialog while our count is in flight.
+  //     _batchDeleteRequestSeq is not advanced by that caller and the
+  //     selection did not move, so the seq and selection-key checks both
+  //     pass — but the modal is already open backed by the lightbox's
+  //     single id, and the batch's reply must not overwrite it.
+  _modalOpen = false;
+  _activeSelection = [7, 8, 9];
+  var pBatch = batchDelete();
+  var batchReq = _pending.shift();
+  showDeleteDialog([99], 0);  // simulate the lightbox's own open call
+  batchReq.resolve({count: 3});
+  await pBatch;
+  cases.dialogAlreadyOpen = snapshot();
+
+  process.stdout.write(JSON.stringify({
+    cases: cases,
+    requestIds: [staleReq.ids, firstReq.ids, secondReq.ids, batchReq.ids],
+  }));
+})();
+""",
+    ])
+    result = _run_node(source, [])
+    # (a) stale selection: no dialog, info toast telling the user to retry.
+    assert result["cases"]["staleSelection"] == {
+        "dialogs": [],
+        "toasts": [{
+            "message":
+                "Selection changed while checking for companion files. Click Delete again.",
+            "kind": "info",
+        }],
+    }
+    # (b) overlap: only the newer of the two overlapping Deletes opens; the
+    #     superseded first request is dropped silently rather than surprising
+    #     the user with a toast about a Delete they did not know had been queued.
+    assert result["cases"]["overlap"] == {
+        "dialogs": [{"ids": [4, 5, 6], "companionCount": 2}],
+        "toasts": [],
+    }
+    # (c) delete dialog already open (lightbox pressed Delete while our
+    #     count was in flight): the batch's reply must not overwrite the
+    #     open single-photo dialog. Only the lightbox's dialog is present,
+    #     and the batch surfaces an info toast explaining why nothing happened.
+    assert result["cases"]["dialogAlreadyOpen"] == {
+        "dialogs": [{"ids": [99], "companionCount": 0}],
+        "toasts": [{
+            "message":
+                "Another delete dialog is already open. Close it and click Delete again.",
+            "kind": "info",
+        }],
+    }
+    # Each request asked the server about the ids that were selected when it
+    # started, not whatever the selection happens to be now.
+    assert result["requestIds"] == [[1, 2, 3], [4, 5, 6], [4, 5, 6], [7, 8, 9]]
+
+
+def test_empty_lightbox_close_drops_a_stacks_dangling_members(app_and_db):
+    """Deleting a stack cover that is the only top-level lightbox entry
+    emptied ``_lightboxPhotoList`` and fires ``closeLightbox(null)`` — no
+    successor lightbox to reopen against, so nothing else consumes the
+    stack gesture the delete-button close set aside. The hidden members are
+    still in ``selectedPhotos`` but their cover is gone from the grid, and
+    the ``lightbox:photodeleted`` handler right after would re-arm that
+    gesture, leaving batch shortcuts pointing at photos with no card.
+
+    ``browseReconcileEmptyLightboxClose`` clears both the armed and set-
+    aside slots and drops the gesture's ids from the selection so nothing
+    is left dangling. CORE_PHILOSOPHY.md, "no black boxes": the batch bar's
+    count has to describe photos the user can see.
+    Codex P2 on PR #1672.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    body = _browse_js_function_body(html, "function browseReconcileEmptyLightboxClose(")
+    # The extractor's boundary is ``\nfunction ``, so the body carries the
+    # `lightbox:closed` addEventListener call that follows. Stub the DOM
+    # instead of the extractor's boundary rule: the fix under test is the
+    # named function, not its wiring.
+    source = "\n".join([
+        """
+var selectedPhotos = new Set();
+var selectedPhotoId = null;
+var browseLightboxStackGesture = null;
+var browseLightboxStackGestureSpent = null;
+var photos = [];
+var allLoaded = true;
+var earliestPage = 1;
+var browseStackMembers = {};
+var refreshes = 0, bars = 0;
+function refreshCardSelectionVisuals() { refreshes += 1; }
+function updateBatchBar() { bars += 1; }
+global.document = { addEventListener: function() {}, querySelector: function() { return null; } };
+""",
+        body,
+        """
+function snapshot() {
+  return {
+    selected: Array.from(selectedPhotos).sort(function(a, b){ return a - b; }),
+    focus: selectedPhotoId,
+    armed: browseLightboxStackGesture,
+    spent: browseLightboxStackGestureSpent,
+    refreshes: refreshes,
+    bars: bars,
+  };
+}
+var results = {};
+
+// (a) Delete flow: the delete-button close set the gesture aside as
+//     spent. `closeLightbox(null)` fires next, and its handler has to
+//     drop the dangling hidden members and retire the spent gesture so
+//     lightbox:photodeleted cannot re-arm it. The deleted cover (10) is
+//     already gone from `photos`; the hidden members (11, 12) live under
+//     its orphaned browseStackMembers entry with no cover to represent
+//     them on the grid.
+selectedPhotos = new Set([11, 12]);
+selectedPhotoId = 10;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = {ids: [10, 11, 12], epoch: 3};
+photos = [];
+browseStackMembers = {"10": [{id: 11}, {id: 12}]};
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.spentDeleteFlow = snapshot();
+
+// (b) The gesture may still be armed if the delete-button close did not
+//     set it aside (no `#deleteModal.open`). Same cleanup applies.
+selectedPhotos = new Set([11, 12]);
+selectedPhotoId = null;
+browseLightboxStackGesture = {ids: [10, 11, 12], epoch: 7};
+browseLightboxStackGestureSpent = null;
+photos = [];
+browseStackMembers = {"10": [{id: 11}, {id: 12}]};
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.armedFallback = snapshot();
+
+// (c) No gesture in either slot, no lingering selection — nothing to
+//     touch and no visible refresh should fire.
+selectedPhotos = new Set();
+selectedPhotoId = null;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [];
+browseStackMembers = {};
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.nothingPending = snapshot();
+
+// (d) The P2 scenario: user picks a collapsed stack by single-clicking its
+//     card (all members go into `selectedPhotos` via the stack-click rule,
+//     no gesture is recorded), opens the lightbox with `E`, deletes the
+//     cover. `_lightboxPhotoList` was just that stack so it empties,
+//     `closeLightbox(null)` fires with neither gesture slot populated. The
+//     empty-close path still has to drop the hidden members (11, 12) so
+//     batch shortcuts do not act on photos with no card on screen.
+selectedPhotos = new Set([11, 12]);
+selectedPhotoId = null;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 20}, {id: 21}];
+browseStackMembers = {"10": [{id: 11}, {id: 12}]};
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.noGestureOrphaned = snapshot();
+
+// (e) The same empty-close on a selection that is still fully reachable
+//     from the grid must leave it alone — an unrelated stack cover was
+//     deleted; the surviving batch of another stack is not orphaned.
+selectedPhotos = new Set([20, 21]);
+selectedPhotoId = 20;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 20}, {id: 21}];
+browseStackMembers = {};
+allLoaded = true;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.noGestureReachable = snapshot();
+
+// (f) The window is only part of the result set — a Select all that reaches
+//     past the loaded page. "Not in `photos`" then means "not loaded yet",
+//     not "no card on screen", and sweeping on it would delete most of a
+//     selection whose photos are all perfectly valid. The bounded drop in
+//     the lightbox:photodeleted handler covers the real orphans here.
+//     Codex P2 on PR #1672.
+selectedPhotos = new Set([11, 12, 900, 901]);
+selectedPhotoId = null;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 20}, {id: 21}];
+browseStackMembers = {};
+allLoaded = false;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.partialWindow = snapshot();
+
+// (g) The tail is exhausted but the window starts past page 1 — a focused or
+//     deep-linked load. The earlier pages have never been fetched, so their
+//     selected ids are no more unreachable than (f)'s.
+//     Codex P2 on PR #1672.
+selectedPhotos = new Set([11, 12, 900, 901]);
+selectedPhotoId = null;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 20}, {id: 21}];
+browseStackMembers = {};
+allLoaded = true;
+earliestPage = 4;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.windowStartsLate = snapshot();
+earliestPage = 1;
+
+// (h) Two collapsed stacks are selected. The user expands one and opens its
+//     tray lightbox, deletes every member — `_lightboxPhotoList` empties and
+//     `closeLightbox(null)` fires. The untouched second stack's cover (30)
+//     is still on the grid with its hidden members (31, 32) in
+//     `browse_stack.photo_ids`, but that stack was never expanded so
+//     `browseStackMembers` has no entry for it. The reachable sweep must
+//     honor what the card represents, not only what the hydration cache
+//     happens to hold — otherwise the surviving stack silently shrinks to
+//     its cover and later batch actions touch one frame of four.
+//     Codex P2 on PR #1672.
+selectedPhotos = new Set([30, 31, 32]);
+selectedPhotoId = 30;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 30, browse_stack: {photo_ids: [30, 31, 32], count: 3}}];
+browseStackMembers = {};
+allLoaded = true;
+earliestPage = 1;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.uncachedStackReachable = snapshot();
+
+// (i) The focus lives on an uncached collapsed stack's hidden member (a
+//     selectedPhotoId that is not the cover). The focus reachability check
+//     must also honor `browse_stack.photo_ids`, or an unrelated empty close
+//     would null the focus even though the stack card still represents it.
+//     Codex P2 on PR #1672.
+selectedPhotos = new Set();
+selectedPhotoId = 32;
+browseLightboxStackGesture = null;
+browseLightboxStackGestureSpent = null;
+photos = [{id: 30, browse_stack: {photo_ids: [30, 31, 32], count: 3}}];
+browseStackMembers = {};
+allLoaded = true;
+earliestPage = 1;
+refreshes = 0; bars = 0;
+browseReconcileEmptyLightboxClose();
+results.uncachedFocusReachable = snapshot();
+
+process.stdout.write(JSON.stringify(results));
+""",
+    ])
+    result = _run_node(source, [])
+    assert result["spentDeleteFlow"] == {
+        "selected": [],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 1,
+        "bars": 1,
+    }, "the spent gesture's ids must be dropped so photodeleted cannot re-arm them"
+    assert result["armedFallback"] == {
+        "selected": [],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 1,
+        "bars": 1,
+    }, "an armed gesture with no spent slot must clean up the same way"
+    assert result["nothingPending"] == {
+        "selected": [],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, "an empty close with nothing pending must not touch the batch-bar UI"
+    assert result["noGestureOrphaned"] == {
+        "selected": [],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 1,
+        "bars": 1,
+    }, "hidden members whose cover was deleted must be dropped even without a gesture"
+    assert result["windowStartsLate"] == {
+        "selected": [11, 12, 900, 901],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "allLoaded only says the tail is exhausted; a window starting past "
+        "page 1 has never seen the pages before it"
+    )
+    assert result["partialWindow"] == {
+        "selected": [11, 12, 900, 901],
+        "focus": None,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "a selection reaching past the loaded window must survive: unloaded "
+        "is not unreachable, and the bounded photodeleted drop handles the "
+        "ids the deleted cover actually stood for"
+    )
+    assert result["noGestureReachable"] == {
+        "selected": [20, 21],
+        "focus": 20,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, "a selection still represented on the grid must survive an empty close"
+    assert result["uncachedStackReachable"] == {
+        "selected": [30, 31, 32],
+        "focus": 30,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "hidden members of an uncached collapsed stack are still represented "
+        "by the cover card; the reachable sweep must honor "
+        "browse_stack.photo_ids, not only the hydration cache"
+    )
+    assert result["uncachedFocusReachable"] == {
+        "selected": [],
+        "focus": 32,
+        "armed": None,
+        "spent": None,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "a focus on an uncached stack's hidden member must survive an empty "
+        "close — the cover card still stands for it"
+    )
+
+
+def test_photodeleted_prunes_hidden_member_from_cover_metadata(app_and_db):
+    """A hidden tray member deleted from its own lightbox is not in
+    ``photos`` — ``lightboxDelete``'s splice never runs for it, so nothing
+    up the chain updates the cover. The cover's ``browse_stack.photo_ids``
+    and ``count`` and the hydrated ``browseStackMembers`` entry still
+    carry the deleted id, and the ``represented`` block in the handler
+    skips this case because the deleted photo was not itself a top-level
+    representation.
+
+    After the tray collapses, a click on the cover reads that stale
+    ``photo_ids`` through ``browseStackMemberIdsFor`` and puts the
+    deleted id back into ``selectedPhotos`` — the batch bar overcounts,
+    and an Add Keyword then commits every live id individually before
+    the stale id trips a foreign-key failure. The handler must prune the
+    deleted id from each cover's stack metadata and cached members and
+    repaint the affected badge so what the card stands for matches what
+    still exists. CORE_PHILOSOPHY.md, "no black boxes": the badge's
+    count and the click-selects-all rule must not diverge from reality.
+    Codex P2 on PR #1672.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    marker = "document.addEventListener('lightbox:photodeleted', function(event) {"
+    start = html.find(marker)
+    assert start != -1, "the lightbox:photodeleted handler must exist"
+    end_marker = "\n});\n"
+    end = html.find(end_marker, start)
+    assert end != -1, "the handler must terminate with a top-level `});`"
+    handler_registration = html[start:end + len(end_marker)]
+
+    source = "\n".join([
+        """
+var selectedPhotos = new Set();
+var selectedPhotoId = null;
+var selectedIndex = -1;
+var browseLightboxRepresentedByPhoto = {};
+var browseLightboxStackGesture = null;
+var browseLightboxStackGestureSpent = null;
+var anchorRestoreEpoch = 0;
+var photos = [];
+var browseStackMembers = {};
+var expandedBrowseStacks = new Set();
+var browseStackCoverRecheck = new Set();
+var badgeRefreshes = [];
+var refreshes = 0, bars = 0;
+function refreshCardSelectionVisuals() { refreshes += 1; }
+function updateBatchBar() { bars += 1; }
+function refreshBrowseStackBadge(id) { badgeRefreshes.push(id); }
+var capturedListener = null;
+global.document = {
+  addEventListener: function(name, fn) {
+    if (name === 'lightbox:photodeleted') capturedListener = fn;
+  },
+  querySelector: function() { return null; },
+};
+""",
+        handler_registration,
+        """
+function snapshot(coverId) {
+  var photo = photos.find(function(p) { return p.id === coverId; });
+  return {
+    stack: photo && photo.browse_stack ? {
+      photo_ids: photo.browse_stack.photo_ids.slice(),
+      count: photo.browse_stack.count,
+    } : null,
+    cachedMembers: (browseStackMembers[String(coverId)] || []).map(
+      function(m) { return m.id; }
+    ),
+    badgeRefreshes: badgeRefreshes.slice(),
+    expanded: expandedBrowseStacks.has(coverId),
+    needsRecheck: browseStackCoverRecheck.has(coverId),
+    refreshes: refreshes,
+    bars: bars,
+  };
+}
+var results = {};
+
+// (a) The P2 scenario: a hidden member (52) is deleted from the tray
+//     lightbox. The cover (50) still lists 52 in browse_stack.photo_ids,
+//     the count is still 4, and the hydration cache still carries the
+//     dead entry. The handler must prune all three and repaint the badge
+//     so a later cover click does not resurrect the id, and — because
+//     ``lightboxDelete`` has already dropped the id from ``selectedPhotos``
+//     without touching the batch bar or the ``stack-partial`` paint —
+//     refresh the card visuals and the batch bar in the same step so both
+//     stop advertising a photo the user just deleted.
+//     Codex P2 on PR #1672.
+photos = [{id: 50, browse_stack: {photo_ids: [50, 51, 52, 53], count: 4}}];
+browseStackMembers = {"50": [{id: 50}, {id: 51}, {id: 52}, {id: 53}]};
+expandedBrowseStacks = new Set([50]);
+browseStackCoverRecheck = new Set();
+badgeRefreshes = [];
+refreshes = 0; bars = 0;
+capturedListener({detail: {photoId: 52}});
+results.prunedHiddenMember = snapshot(50);
+
+// (b) The deleted id belongs to no cover on the grid — nothing to prune,
+//     no badge repaint, no refresh, no bar update, no crash on an
+//     untouched stack; the pruning path is what triggers the visual work.
+photos = [{id: 60, browse_stack: {photo_ids: [60, 61], count: 2}}];
+browseStackMembers = {"60": [{id: 60}, {id: 61}]};
+expandedBrowseStacks = new Set();
+browseStackCoverRecheck = new Set();
+badgeRefreshes = [];
+refreshes = 0; bars = 0;
+capturedListener({detail: {photoId: 999}});
+results.unrelatedDelete = snapshot(60);
+
+// (c) A mixed grid — a solo photo alongside an affected stack. The solo
+//     card has no ``browse_stack`` at all, so reading ``photo_ids`` off
+//     ``undefined`` would throw; the handler has to skip it and still
+//     prune the stack behind it. Pruning drops the affected stack to a
+//     single member (the cover), so it must dissolve — see case (d) for
+//     the same rule with a hydrated cache.
+photos = [{id: 70}, {id: 71, browse_stack: {photo_ids: [71, 72], count: 2}}];
+browseStackMembers = {};
+expandedBrowseStacks = new Set();
+browseStackCoverRecheck = new Set();
+badgeRefreshes = [];
+refreshes = 0; bars = 0;
+capturedListener({detail: {photoId: 72}});
+results.mixedGridSolo = snapshot(70);
+results.mixedGridStack = snapshot(71);
+
+// (d) The last hidden member is deleted, dropping the count below 2:
+//     the cover no longer stands for anyone but itself, so the stack has
+//     to dissolve. Leaving ``browse_stack`` truthy keeps ``has-browse-stack``
+//     on the tile and ``restoreExpandedBrowseStacks`` re-inserts a tray for
+//     a stack with one member — the cover, or worse the deleted id from a
+//     stale hydration cache before the pruning above ran. The hydration
+//     cache, ``expandedBrowseStacks`` and ``browseStackCoverRecheck`` all
+//     have to be cleared for that cover in the same step.
+//     Codex P2 on PR #1672.
+photos = [{id: 80, browse_stack: {photo_ids: [80, 81], count: 2}}];
+browseStackMembers = {"80": [{id: 80}, {id: 81}]};
+expandedBrowseStacks = new Set([80]);
+browseStackCoverRecheck = new Set([80]);
+badgeRefreshes = [];
+refreshes = 0; bars = 0;
+capturedListener({detail: {photoId: 81}});
+results.stackShrinksToOne = snapshot(80);
+
+// (e) A null detail must not throw; the handler already returns on a
+//     missing id above, and its guard has to survive alongside the new
+//     prune loop.
+photos = [{id: 90, browse_stack: {photo_ids: [90, 91], count: 2}}];
+browseStackMembers = {"90": [{id: 90}, {id: 91}]};
+expandedBrowseStacks = new Set();
+browseStackCoverRecheck = new Set();
+badgeRefreshes = [];
+refreshes = 0; bars = 0;
+capturedListener({detail: null});
+results.nullDetail = snapshot(90);
+
+process.stdout.write(JSON.stringify(results));
+""",
+    ])
+    result = _run_node(source, [])
+    assert result["prunedHiddenMember"] == {
+        "stack": {"photo_ids": [50, 51, 53], "count": 3},
+        "cachedMembers": [50, 51, 53],
+        "badgeRefreshes": [50],
+        "expanded": True,
+        "needsRecheck": False,
+        "refreshes": 1,
+        "bars": 1,
+    }, (
+        "the deleted hidden member must leave the cover metadata and the "
+        "hydration cache in the same step, so a later cover click reads "
+        "the pruned list; an expansion that still holds enough members "
+        "stays live, and the card visuals and batch bar must be refreshed "
+        "in the same step so neither keeps advertising the deleted id"
+    )
+    assert result["unrelatedDelete"] == {
+        "stack": {"photo_ids": [60, 61], "count": 2},
+        "cachedMembers": [60, 61],
+        "badgeRefreshes": [],
+        "expanded": False,
+        "needsRecheck": False,
+        "refreshes": 0,
+        "bars": 0,
+    }, (
+        "an unrelated delete must leave every stack — and every badge — "
+        "alone; the pruning path is what triggers the visual work"
+    )
+    assert result["mixedGridSolo"] == {
+        "stack": None,
+        "cachedMembers": [],
+        "badgeRefreshes": [71],
+        "expanded": False,
+        "needsRecheck": False,
+        "refreshes": 1,
+        "bars": 1,
+    }, "a solo card with no browse_stack must be skipped without a crash"
+    assert result["mixedGridStack"] == {
+        "stack": None,
+        "cachedMembers": [],
+        "badgeRefreshes": [71],
+        "expanded": False,
+        "needsRecheck": False,
+        "refreshes": 1,
+        "bars": 1,
+    }, (
+        "pruning drops the affected stack to a single member, so it "
+        "dissolves — the cover no longer stands for anyone but itself"
+    )
+    assert result["stackShrinksToOne"] == {
+        "stack": None,
+        "cachedMembers": [],
+        "badgeRefreshes": [80],
+        "expanded": False,
+        "needsRecheck": False,
+        "refreshes": 1,
+        "bars": 1,
+    }, (
+        "a stack shrinking to a single member has to dissolve: the cover no "
+        "longer stands for anyone but itself, so ``browse_stack``, the "
+        "hydration cache, ``expandedBrowseStacks`` and "
+        "``browseStackCoverRecheck`` must all clear together — otherwise "
+        "``restoreExpandedBrowseStacks`` re-inserts a tray with one member "
+        "the cover already shows"
+    )
+    assert result["nullDetail"] == {
+        "stack": {"photo_ids": [90, 91], "count": 2},
+        "cachedMembers": [90, 91],
+        "badgeRefreshes": [],
+        "expanded": False,
+        "needsRecheck": False,
+        "refreshes": 0,
+        "bars": 0,
+    }, "a null detail must short-circuit before the prune loop touches anything"
 
 
 _APOSTROPHE_SPECIES = "Say's Phoebe"

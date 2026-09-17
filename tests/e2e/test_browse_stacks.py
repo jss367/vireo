@@ -202,7 +202,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     expect(tray).to_be_visible()
 
     tray.get_by_role("button", name="Select all").click()
-    expect(page.locator("#batchCount")).to_have_text("3 selected")
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
     for photo_id in burst_ids:
         expect(
             tray.locator(f'.browse-stack-member[data-id="{photo_id}"]')
@@ -313,18 +313,34 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     # A collapsed stack has no hydrated member cache. Rejecting its current
     # cover still hydrates that one group and promotes the correct replacement.
     assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+    # A collapsed stack card stands for its whole stack, so one click selects
+    # every frame behind it and the panel opens as the batch inspector. No
+    # member cache is needed: the cover carries its member ids.
     page.locator(f'.grid-card[data-id="{burst_ids[0]}"]').click()
+    page.wait_for_function(
+        """ids => selectedPhotoId === null && selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
+    )
+    expect(page.locator("#selectionCount")).to_have_text(
+        "3 photos selected \u00b7 1 stack"
+    )
     page.evaluate(
         "photoId => setFlagFor(photoId, 'rejected')",
         burst_ids[0],
     )
     expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_be_visible()
     expect(page.locator(f'.grid-card[data-id="{burst_ids[0]}"]')).to_have_count(0)
+    # Promoting a new cover moves no photo in or out of the stack, so the
+    # selection the click made survives it intact.
     page.wait_for_function(
-        "photoId => selectedPhotoId === photoId",
-        arg=burst_ids[1],
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
     )
-    expect(page.locator("#detailFilename")).to_have_text("hawk2.jpg")
+    expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_have_class(
+        "grid-card has-browse-stack selected"
+    )
 
     # Restore the original cover, then demote it while it remains part of a
     # batch. Exact selected IDs stay unchanged while preview maps the now-hidden
@@ -486,6 +502,966 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
           document.getElementById('gridContainer').getBoundingClientRect().top"""
     )
     assert abs(top_after - top_before) < 4
+
+
+def test_entering_a_stack_batch_retires_the_previous_detail_owner(
+    live_server, page,
+):
+    """A batch may not inherit the last focused photo's EXIF suggestion.
+
+    The suggestion element keeps its ``data-photo-id`` and Accept button,
+    and an in-flight reverse-geocode uses ``window._detailPhotoId`` as its
+    owner check. Leave either behind while entering a stack selection and a
+    later batch containing that photo resurrects its Accept line for the
+    whole batch — one click would then write one photo's place onto every
+    selected photo. Same retirement closeDetail() and clearSelection() have
+    done since Codex P2 on PR #1097. Codex P1 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    other = page.locator(f'.grid-card[data-id="{other_id}"]')
+
+    def focus_then(enter_stack):
+        other.click()
+        page.wait_for_function(
+            "photoId => window._detailPhotoId === photoId", arg=other_id,
+        )
+        # Stand in for a suggestion the detail panel had painted for it.
+        page.evaluate(
+            """photoId => {
+              var sugg = document.getElementById('locationExifSuggestion');
+              sugg.hidden = false;
+              sugg.innerHTML = '<button>Accept</button>';
+              sugg.dataset.photoId = String(photoId);
+            }""",
+            other_id,
+        )
+        enter_stack()
+        return page.evaluate(
+            """() => {
+              var sugg = document.getElementById('locationExifSuggestion');
+              return {
+                owner: window._detailPhotoId,
+                suggestionOwner: sugg.dataset.photoId || null,
+                suggestionHidden: sugg.hidden,
+              };
+            }"""
+        )
+
+    # Clicking the collapsed card...
+    assert focus_then(lambda: cover.click()) == {
+        "owner": None, "suggestionOwner": None, "suggestionHidden": True,
+    }
+    # ...right-clicking it...
+    def right_click():
+        cover.click(button="right")
+        page.evaluate("() => closeContextMenu()")
+
+    assert focus_then(right_click) == {
+        "owner": None, "suggestionOwner": None, "suggestionHidden": True,
+    }
+
+    # ...and the tray's Select all, which enters the same batch.
+    def tray_select_all():
+        cover.locator(".browse-stack-badge").click()
+        tray = page.locator(
+            f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+        )
+        expect(tray.locator(".browse-stack-member")).to_have_count(3)
+        tray.get_by_role("button", name="Select all").click()
+
+    assert focus_then(tray_select_all) == {
+        "owner": None, "suggestionOwner": None, "suggestionHidden": True,
+    }
+
+
+def test_cover_dropped_from_the_tray_leaves_a_partial_mark(live_server, page):
+    """A card may not claim frames a batch action would skip.
+
+    Cmd-clicking the cover out of an expanded stack's tray removes just that
+    frame; collapsing then pins single-photo focus to the cover so grid
+    navigation resolves in the top-level list. Reading focus and set as an
+    "or" painted the whole stack as selected, while ``getActiveSelection()``
+    — and so every rating, flag and delete — skipped the very frame on top.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(cover).to_have_class("grid-card has-browse-stack selected")
+
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    expect(tray.locator(".browse-stack-member")).to_have_count(3)
+    tray.locator(f'.browse-stack-member[data-id="{burst_ids[1]}"]').click(
+        modifiers=["Meta"]
+    )
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+
+    # Two of three frames are actionable, and the card says so.
+    assert page.evaluate("() => getActiveSelection().length") == 2
+    expect(page.locator("#batchCount")).to_have_text("2 selected")
+    expect(cover).to_have_class("grid-card has-browse-stack stack-partial")
+
+
+def test_delete_dialog_refuses_a_selection_that_moved_under_it(
+    live_server, page,
+):
+    """The delete dialog has to describe the selection that asked for it.
+
+    Counting companions is a round trip and the grid stays live across it,
+    so the user can select something else before the dialog appears — and
+    the dialog names only a number, so confirming it would delete photos
+    they can no longer see selected. For a disk delete that is not
+    recoverable. The unit coverage in test_app.py drives the function
+    directly; this walks it through the real grid.
+    Codex P1 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    # Select another photo while the companion count is still in flight —
+    # the same window a slow request opens for a real click.
+    outcome = page.evaluate(
+        """async otherId => {
+          var pending = batchDelete();
+          var idx = photos.findIndex(function(p) { return p.id === otherId; });
+          selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+                      otherId, idx);
+          await pending;
+          return {
+            modalOpen: document.getElementById('deleteModal')
+              .classList.contains('open'),
+            active: getActiveSelection(),
+            remaining: photos.length,
+          };
+        }""",
+        other_id,
+    )
+
+    assert outcome["modalOpen"] is False
+    # Nothing was deleted, and the newer selection is untouched.
+    assert outcome["active"] == [other_id]
+    assert outcome["remaining"] == 3
+    expect(page.locator("#toastContainer")).to_contain_text("Selection changed")
+
+
+def test_deleting_a_selected_stacks_cover_drops_its_orphaned_frames(
+    live_server, page,
+):
+    """Deleting a cover takes the only card its hidden frames have.
+
+    Nothing reprojects the stack after a lightbox delete: the cover is
+    spliced out of the grid and its frames are left in ``selectedPhotos``
+    with nothing on screen standing for them, so the batch bar keeps
+    counting photos no shortcut can show. That holds even when no gesture
+    was recorded — a stack selected on purpose and opened with ``E`` — and
+    even when another top-level photo survives, so the empty-close
+    reconciliation never sees it. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+
+    # Deliberate selection, and a viewing shortcut: no gesture is recorded.
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    expect(tray.locator(".browse-stack-member")).to_have_count(3)
+    tray.get_by_role("button", name="Select all").click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+
+    page.locator("#lightboxDeleteBtn").click()
+    expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
+    page.locator("#deleteConfirmBtn").click()
+    # Another top-level photo survives, so the lightbox reopens on it rather
+    # than closing empty.
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+
+    # Every frame of that stack is gone from the selection — the two hidden
+    # ones along with the deleted cover.
+    active = page.evaluate("() => getActiveSelection()")
+    assert all(pid not in active for pid in burst_ids), active
+    assert page.evaluate(f"() => photos.some(p => p.id === {other_id})") is True
+
+
+def test_native_menu_delete_of_a_cover_drops_its_orphaned_frames(
+    live_server, page,
+):
+    """The desktop menu's Delete calls lightboxDelete() directly.
+
+    No click bubbles through the overlay, so no ``lightbox:closed`` runs
+    before the delete — anything captured on that close is not there. What
+    a photo stands for is recorded while it is on screen instead, which
+    every delete path passes through. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    # Straight to the function, the way the native menu command does it.
+    page.evaluate("() => lightboxDelete()")
+    expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
+    # Confirmed through the handler rather than the button: the delete modal
+    # renders under the still-open lightbox overlay, so on this path the
+    # button cannot be clicked at all. That is a separate, pre-existing
+    # desktop problem — the Delete *button* only works because its click
+    # bubbles to the overlay and closes the lightbox on the way.
+    page.evaluate("() => confirmDelete()")
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+
+    active = page.evaluate("() => getActiveSelection()")
+    assert all(pid not in active for pid in burst_ids), active
+
+
+def test_cancelled_delete_does_not_leave_a_stack_gesture_armed(
+    live_server, page,
+):
+    """Cancelling turns the delete's "intermediate" close into the real one.
+
+    Clicking Delete closes the lightbox on its way to the dialog, and a
+    gesture held across that close outlives its lightbox when the user
+    cancels: nothing reopens, and the next viewing shortcut inherits it. The
+    gesture is set aside instead and handed back only by a delete that
+    actually happens. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+
+    page.locator("#lightboxDeleteBtn").click()
+    expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
+    page.locator("#deleteModal button", has_text="Cancel").click()
+    expect(page.locator("#deleteModal")).not_to_have_class("modal-overlay open")
+
+    # The stack is still selected, and the abandoned gesture must not be
+    # inherited by the next viewing session.
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        burst_ids,
+    )
+
+
+def test_badge_double_click_does_not_claim_a_deliberate_batch(live_server, page):
+    """The stack badge's clicks never make a selection.
+
+    Both of them expand/collapse the stack and stop propagating, so they
+    never reach selectPhoto — but the dblclick still bubbles to the grid and
+    opens the lightbox. With an identical id set, that would let a batch the
+    user assembled be claimed by a gesture that did not create it.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+
+    # Select the stack deliberately, from the tray.
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    tray.get_by_role("button", name="Select all").click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+
+    cover.locator(".browse-stack-badge").dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class(
+        re.compile(r"\bactive\b")
+    )
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        burst_ids,
+    )
+
+
+def test_delete_dialog_counts_companions_of_unloaded_stack_members(
+    live_server, page,
+):
+    """A stack selected by one click holds frames Browse never loaded.
+
+    Their metadata is not in any member cache, so counting companions in the
+    browser saw only the cover: the "Also delete N companion files" checkbox
+    never appeared and a disk delete would have left the hidden frames'
+    companions on disk. The count comes from the server, which can see every
+    row in the selection. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+        # The companion belongs to a hidden frame, not the cover.
+        db.conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            ("hawk3.nef", burst_ids[2]),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+
+    page.locator("#batchBar button", has_text="Delete").click()
+    expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
+    expect(page.locator("#deleteCompanionRow")).to_be_visible()
+    expect(page.locator("#deleteCompanionLabel")).to_have_text(
+        "Also delete 1 companion file"
+    )
+    page.locator("#deleteModal button", has_text="Cancel").click()
+
+
+def test_undo_keeps_a_whole_stack_selected(live_server, page):
+    """Undo reloads the grid, and the selection has to survive it whole.
+
+    Restoring a selection drops ids the refreshed query no longer has, which
+    it decides with ``findBrowsePhoto``. For a stack selected by one click on
+    its collapsed card, the hidden frames are in no member cache, so that
+    lookup failed for all but the cover and the stack quietly shrank to one
+    frame — the next rating or flag would then hit one photo instead of
+    three. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    # A colour label edits every frame without moving any of them between
+    # stacks, so the reload that follows the undo must hand the whole
+    # selection back.
+    page.evaluate("() => batchSetColorLabel('red')")
+    page.wait_for_function(
+        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        arg=burst_ids,
+    )
+    page.evaluate("() => doUndo()")
+    page.wait_for_function(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
+    )
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+
+def test_undo_hydration_does_not_clobber_a_fresh_selection(live_server, page):
+    """Selecting mid-hydration must not resurrect the pre-undo ids.
+
+    ``afterHistoryChange`` captures the selection before ``resetAndLoad``,
+    then hydrates every cover whose members it might need. An uncached
+    collapsed stack is exactly that case: its hidden frames have never
+    been fetched, so hydration awaits ``/api/photos/by-ids`` before the
+    restore loop can find them. If the user clicks another card during
+    that await, the restore would fold the pre-undo stack back into the
+    fresh selection, replacing a one-card pick or merging into a new
+    batch. ``anchorRestoreEpoch`` moves on every selection change, so the
+    handler snapshots it after the reload and refuses to restore when the
+    snapshot no longer matches. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected · 1 stack")
+    # The stack has never been expanded, so its hidden frames are in no
+    # member cache — the case the restore hydrates for.
+    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+
+    # Colour label edits every frame in the selection but does not move
+    # any of them between stacks, so the reload's own restore is what
+    # would put the stack back — the same handler under test.
+    page.evaluate("() => batchSetColorLabel('red')")
+    page.wait_for_function(
+        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        arg=burst_ids,
+    )
+
+    # Put the click inside the restore's async window by construction rather
+    # than by timing, so the race runs on every machine. The seam is the
+    # hydration call itself: wrapping window.fetch would do nothing here,
+    # because vireo-api.js binds the native fetch at load and replaces the
+    # global, so app requests never see a later patch.
+    page.evaluate(
+        """otherId => {
+          var orig = hydrateBrowseStackCoverMembers;
+          window.__pickedDuringHydration = false;
+          hydrateBrowseStackCoverMembers = function(cover, windowIsCurrent) {
+            if (!window.__pickedDuringHydration) {
+              window.__pickedDuringHydration = true;
+              var idx = photos.findIndex(function(p) { return p.id === otherId; });
+              selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+                          otherId, idx);
+            }
+            return orig.apply(this, arguments);
+          };
+          window.__restoreHydrate = function() {
+            hydrateBrowseStackCoverMembers = orig;
+            delete window.__restoreHydrate;
+          };
+        }""",
+        other_id,
+    )
+
+    try:
+        page.evaluate("async () => { await doUndo(); }")
+    finally:
+        page.evaluate("() => window.__restoreHydrate && window.__restoreHydrate()")
+
+    # The restore ran after the user had already chosen a card. A stale
+    # restore would push the burst ids back into selectedPhotos, and the bar
+    # would count them — a single-card pick leaves it reading one photo, with
+    # no stack note, since one card is still an actionable selection.
+    assert page.evaluate("() => window.__pickedDuringHydration") is True
+    assert page.evaluate("() => getActiveSelection()") == [other_id]
+    assert page.evaluate("() => selectedPhotoId") == other_id
+    expect(page.locator("#batchCount")).to_have_text("1 selected")
+
+
+def test_right_clicking_a_stack_mid_hydration_abandons_the_restore(
+    live_server, page,
+):
+    """Right-click coercion is a selection change, so it has to say so.
+
+    ``afterHistoryChange`` restores the pre-undo selection once stack
+    hydration lands, and abandons that restore when the selection
+    generation has moved. The right-click stack branch replaced the
+    selection without moving it, so a restore still in flight considered
+    itself current and merged the pre-undo ids into the stack the user had
+    just chosen. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_burst = live_server["data"]["photos"][3:5]
+    seed_browse_stack(db, burst_ids)
+    seed_browse_stack(db, other_burst)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+
+    page.evaluate("() => batchSetColorLabel('red')")
+    page.wait_for_function(
+        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        arg=burst_ids,
+    )
+
+    # Right-click the other stack the moment the restore starts hydrating.
+    page.evaluate(
+        """otherCoverId => {
+          var orig = hydrateBrowseStackCoverMembers;
+          window.__coercedDuringHydration = false;
+          hydrateBrowseStackCoverMembers = function() {
+            if (!window.__coercedDuringHydration) {
+              window.__coercedDuringHydration = true;
+              var card = document.querySelector(
+                '.grid-card[data-id="' + otherCoverId + '"]'
+              );
+              card.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true, cancelable: true, clientX: 10, clientY: 10,
+              }));
+              closeContextMenu();
+            }
+            return orig.apply(this, arguments);
+          };
+          window.__restoreHydrate = function() {
+            hydrateBrowseStackCoverMembers = orig;
+            delete window.__restoreHydrate;
+          };
+        }""",
+        other_burst[0],
+    )
+
+    try:
+        page.evaluate("async () => { await doUndo(); }")
+    finally:
+        page.evaluate("() => window.__restoreHydrate && window.__restoreHydrate()")
+
+    assert page.evaluate("() => window.__coercedDuringHydration") is True
+    # The right-clicked stack, and nothing from the pre-undo one.
+    active = sorted(page.evaluate("() => getActiveSelection()"))
+    assert active == sorted(other_burst), active
+
+
+def test_right_clicking_a_single_card_mid_hydration_abandons_the_restore(
+    live_server, page,
+):
+    """The same rule for the ordinary single-card coercion.
+
+    Right-clicking outside the selection replaces it Finder-style, which
+    ``coerceSelectionOnContext`` does without touching the selection
+    generation — so a restore waiting on stack hydration still considered
+    itself current and merged the pre-undo stack into the one card the user
+    had just pointed at. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    page.locator(f'.grid-card[data-id="{burst_ids[1]}"]').click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    page.evaluate("() => batchSetColorLabel('red')")
+    page.wait_for_function(
+        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        arg=burst_ids,
+    )
+
+    page.evaluate(
+        """otherId => {
+          var orig = hydrateBrowseStackCoverMembers;
+          window.__coercedDuringHydration = false;
+          hydrateBrowseStackCoverMembers = function() {
+            if (!window.__coercedDuringHydration) {
+              window.__coercedDuringHydration = true;
+              var card = document.querySelector(
+                '.grid-card[data-id="' + otherId + '"]'
+              );
+              card.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true, cancelable: true, clientX: 10, clientY: 10,
+              }));
+              closeContextMenu();
+            }
+            return orig.apply(this, arguments);
+          };
+          window.__restoreHydrate = function() {
+            hydrateBrowseStackCoverMembers = orig;
+            delete window.__restoreHydrate;
+          };
+        }""",
+        other_id,
+    )
+
+    try:
+        page.evaluate("async () => { await doUndo(); }")
+    finally:
+        page.evaluate("() => window.__restoreHydrate && window.__restoreHydrate()")
+
+    assert page.evaluate("() => window.__coercedDuringHydration") is True
+    assert page.evaluate("() => getActiveSelection()") == [other_id]
+
+
+def test_cmd_clicking_a_selected_stack_deselects_it_as_a_unit(live_server, page):
+    """Toggling a stack off has to take its focus with it.
+
+    Collapsing an expanded stack pins single-photo focus to the cover so
+    grid and preview navigation resolve in the top-level list. A Cmd-click
+    that then removes every frame emptied ``selectedPhotos`` but left that
+    focus behind, so ``getActiveSelection()`` fell back to the cover: a
+    stack the user deselected as a unit came back as a one-photo partial
+    selection. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    # Expand and collapse: the batch survives, with focus pinned to the cover.
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    expect(tray.locator(".browse-stack-member")).to_have_count(3)
+    tray.get_by_role("button", name="Collapse stack").click()
+    page.wait_for_function(
+        "coverId => selectedPhotoId === coverId && selectedPhotos.size === 3",
+        arg=burst_ids[1],
+    )
+
+    cover.click(modifiers=["Meta"])
+    page.wait_for_function(
+        "() => getActiveSelection().length === 0 && selectedPhotoId === null"
+    )
+    expect(page.locator("#batchBar")).to_be_hidden()
+    expect(cover).to_have_class("grid-card has-browse-stack")
+
+
+def test_deleting_a_stacks_cover_in_the_lightbox_drops_its_dangling_members(
+    live_server, page,
+):
+    """A stack's cover is the only card its hidden members have.
+
+    Deleting it from the lightbox removes just that id from the selection,
+    which would leave the rest of the double-click's stack selected with
+    nothing on screen representing them — the next rating or delete
+    shortcut would act on photos the user cannot see. A selection that only
+    ever shrank is still the gesture's own, so the close handler reconciles
+    it instead of mistaking it for an assembled batch.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+
+    page.locator("#lightboxDeleteBtn").click()
+    expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
+    page.locator("#deleteConfirmBtn").click()
+    expect(page.locator("#deleteModal")).not_to_have_class("modal-overlay open")
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+
+    page.wait_for_function(
+        "photoId => selectedPhotoId === photoId && selectedPhotos.size === 0",
+        arg=other_id,
+    )
+    assert page.evaluate("() => getActiveSelection()") == [other_id]
+
+
+def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
+    """A double-click on a stack card is a viewing gesture, not a batch.
+
+    Its two clicks run through ``selectPhoto`` before the lightbox opens, so
+    they leave the stack selected. The close handler preserves an existing
+    batch rather than replacing it with the viewed photo — correct for a
+    batch the user assembled card by card, wrong for the selection the
+    opening gesture itself just made, which would strand the grid on the
+    stack after the user navigated away and closed. A selection that is
+    exactly one stack may be replaced; finishing inside that same stack
+    leaves it alone rather than shrinking it to one frame.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    other_id = live_server["data"]["photos"][3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    expect(cover).to_be_visible()
+
+    # Close on the frame the gesture opened: the stack stays selected.
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
+    )
+
+    # Navigate out of the stack, and the grid follows the user home. The
+    # gesture has to be a fresh one: a double-click over a stack that was
+    # already selected reaffirms that batch rather than creating it, and
+    # batches are preserved (see the Select all case below).
+    page.evaluate("() => clearSelection()")
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "photoId => selectedPhotoId === photoId && selectedPhotos.size === 0",
+        arg=other_id,
+    )
+    expect(page.locator("#detailFilename")).to_have_text("robin1.jpg")
+
+    # The gesture is spent by its own close. Re-opening the same, untouched
+    # stack selection with a viewing shortcut afterwards is a viewing shortcut
+    # over a batch, so the batch is preserved.
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        arg=burst_ids,
+    )
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        burst_ids,
+    )
+
+    # Same ids, different provenance: a stack the user selected on purpose is
+    # a batch, and viewing it with a shortcut leaves it alone even when the
+    # user navigates away and closes somewhere else entirely.
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    tray.get_by_role("button", name="Select all").click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (\u2192)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        """ids => selectedPhotos.size === ids.length
+          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        burst_ids,
+    )
+
+
+def test_double_clicking_a_preselected_stack_preserves_the_batch(
+    live_server, page,
+):
+    """A dblclick on a stack the user already selected is a viewing gesture.
+
+    Its two clicks reaffirm the pre-existing selection rather than making a
+    new one, so the resulting ``selectedPhotos`` is byte-for-byte identical
+    to the gesture-generated case — a membership check at dblclick time
+    cannot tell them apart. Without capturing the pre-first-click state, the
+    close handler would consume the marker and silently replace the user's
+    tray Select all batch with the photo they navigated to.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    expect(cover).to_be_visible()
+
+    # Assemble a deliberate batch through the tray, then collapse.
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    tray.get_by_role("button", name="Select all").click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+    page.wait_for_function(
+        "ids => selectedPhotos.size === ids.length"
+        " && ids.every(function(id) { return selectedPhotos.has(id); })",
+        arg=burst_ids,
+    )
+
+    # Double-click the collapsed cover — a viewing gesture over an existing
+    # batch, not the batch itself. Navigating away and closing must leave
+    # the user's deliberate selection intact.
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        "ids => selectedPhotos.size === ids.length"
+        " && ids.every(function(id) { return selectedPhotos.has(id); })",
+        burst_ids,
+    )
+
+
+def test_clearing_the_selection_scrubs_a_stack_cards_partial_mark(
+    live_server, page,
+):
+    """Clear has to repaint from the selection, not strip one class by hand.
+
+    A frame picked out of a tray leaves its collapsed cover carrying the
+    dashed partial mark. A hand-rolled scrub that only knew about
+    ``selected`` left that mark on a grid with nothing selected — a card
+    still claiming a selection the batch bar had already dropped.
+    Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    expect(cover).to_be_visible()
+
+    cover.locator(".browse-stack-badge").click()
+    tray = page.locator(
+        f'.browse-stack-tray[data-stack-cover-id="{burst_ids[1]}"]'
+    )
+    expect(tray.locator(".browse-stack-member")).to_have_count(3)
+    tray.locator(f'.browse-stack-member[data-id="{burst_ids[2]}"]').click()
+    tray.get_by_role("button", name="Collapse stack").click()
+    expect(tray).to_be_hidden()
+    expect(cover).to_have_class("grid-card has-browse-stack stack-partial")
+
+    page.locator("#batchBar button", has_text="Clear").click()
+    expect(page.locator("#batchBar")).to_be_hidden()
+    expect(cover).to_have_class("grid-card has-browse-stack")
 
 
 def test_expanded_stack_paints_its_members_once(live_server, page):
@@ -782,8 +1758,10 @@ def test_shift_range_from_stack_member_keeps_selection_honest(live_server, page)
     # And the member the user actually clicked is still one of them.
     assert burst_ids[2] in selection_state["active"]
     expect(hidden_member).to_have_class("browse-stack-member selected")
+    # The range swept one whole stack and two singles, and the bar says so:
+    # a stack card in a Shift-range contributes every frame behind it.
     expect(page.locator("#batchCount")).to_have_text(
-        str(len(selection_state["active"])) + " selected"
+        str(len(selection_state["active"])) + " selected \u00b7 1 stack"
     )
 
     # The export modal snapshots the active selection, so the focused member

@@ -11071,6 +11071,39 @@ class Database:
                 raise
             log.exception("Failed to prune pipeline cache after delete")
 
+    def count_photos_with_companions(self, photo_ids):
+        """How many of ``photo_ids`` carry a companion file in the active
+        workspace.
+
+        The delete dialog offers "Also delete N companion files" off this
+        number, and the browser cannot compute it: a Browse selection can
+        hold photos it has never loaded — every frame of a collapsed stack,
+        or a Select-all that reaches past the loaded page — and a count taken
+        over only the loaded ones hides the checkbox, so a disk delete leaves
+        the companions of the rest behind. Counted here, where every row is
+        known. Chunked for the same reason as ``resolve_photos_for_delete``:
+        callers pass whole selections.
+
+        Ids whose folder is not visible in the active workspace do not count:
+        this endpoint sits next to ``/api/photos/by-ids``, which explicitly
+        scopes its ids to the caller's workspace, and metadata about other
+        workspaces' photos must not leak here either.
+        """
+        total = 0
+        ws_id = self._ws_id()
+        for chunk in _chunks(list(dict.fromkeys(photo_ids or []))):
+            placeholders = ",".join("?" for _ in chunk)
+            row = self.conn.execute(
+                f"SELECT COUNT(*) AS n FROM photos p "
+                f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+                f"WHERE p.id IN ({placeholders}) "
+                f"AND wf.workspace_id = ? "
+                f"AND NULLIF(p.companion_path, '') IS NOT NULL",
+                list(chunk) + [ws_id],
+            ).fetchone()
+            total += int(row["n"] or 0)
+        return total
+
     def resolve_photos_for_delete(self, photo_ids, include_companions=False):
         """Resolve photo ids to the rows and paths a delete would remove.
 
