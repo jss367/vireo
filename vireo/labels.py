@@ -756,17 +756,19 @@ def load_merged_labels(label_sets):
     return labels
 
 
-_SUMMARY_CACHE = {}
+_NORMALIZED_CACHE = {}
 
 
-def label_set_summary(meta):
-    """``(usable_count, skipped_count)`` for one saved set, memoized.
+def normalized_label_set(meta):
+    """One saved set as classification will use it, memoized.
 
-    Normalizing a 26k-species list costs ~0.5s, and the labels endpoint
-    answers for every saved set each time Settings or Pipeline loads. The
-    answer depends only on the two files' contents, so key the cache on
-    their size and mtime: an edit, a re-download or a restore changes one
-    of those, and nothing else can change the result.
+    Normalizing a 26k-species list costs ~0.5s, and the interactive
+    surfaces ask repeatedly: the labels endpoint answers for every saved
+    set each time Settings or Pipeline loads, and species autocomplete
+    asks again on each keystroke. The answer depends only on the two
+    files' contents, so key the cache on their size and mtime — an edit,
+    a re-download or a restore changes one of those, and nothing else can
+    change the result.
     """
     path = meta.get("labels_file", "")
     stamps = []
@@ -777,14 +779,21 @@ def label_set_summary(meta):
         except OSError:
             stamps.append(None)
     key = (path, tuple(stamps))
-    cached = _SUMMARY_CACHE.get(key)
+    cached = _NORMALIZED_CACHE.get(key)
     if cached is None:
-        merged = load_merged_labels([meta])
-        cached = (len(merged), len(merged.dropped_ambiguous))
-        if len(_SUMMARY_CACHE) > 64:
-            _SUMMARY_CACHE.clear()  # bounded; recomputing is cheap enough
-        _SUMMARY_CACHE[key] = cached
+        cached = load_merged_labels([meta])
+        if len(_NORMALIZED_CACHE) >= 8:
+            # Bounded: a regional list is megabytes of strings and
+            # recomputing one is half a second.
+            _NORMALIZED_CACHE.clear()
+        _NORMALIZED_CACHE[key] = cached
     return cached
+
+
+def label_set_summary(meta):
+    """``(usable_count, skipped_count)`` for one saved set."""
+    merged = normalized_label_set(meta)
+    return len(merged), len(merged.dropped_ambiguous)
 
 
 def load_label_set(path, meta=None):

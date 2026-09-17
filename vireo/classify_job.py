@@ -257,7 +257,7 @@ def _load_labels(
             )
         raise UnusableLabelsError(
             "The selected species list contains no species. Go to Settings → "
-            "Labels to download one, or deselect it to classify against "
+            "Labels and download one, or untick it there to classify against "
             "Tree of Life instead."
         )
 

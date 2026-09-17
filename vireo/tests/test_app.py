@@ -8073,6 +8073,40 @@ def test_labels_list_reports_skipped_names_without_shipping_identities(app_and_d
     assert entry["ambiguous_count"] == 0
 
 
+def test_species_search_does_not_offer_prompts_classification_refuses(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A name too ambiguous to classify must not be offered for hand-tagging
+    either — applying it by hand recreates exactly what the merge removed."""
+    import json as _json
+
+    import labels as labels_mod
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir(exist_ok=True)
+    label_path = str(labels_dir / "birds.txt")
+    names = ["Parrot", "Parakeet"]
+    with open(label_path, "w") as f:
+        f.write("".join(n + "\n" for n in names))
+    meta = {
+        "name": "Birds",
+        "labels_file": label_path,
+        "label_identities": {
+            "Parrot": {"ambiguous": True},
+            "Parakeet": {"taxon_id": 18976, "scientific_name": "Amazona viridigenalis"},
+        },
+        "labels_text_sha256": labels_mod._text_identity(names),
+    }
+    with open(str(labels_dir / "birds.json"), "w") as f:
+        _json.dump(meta, f)
+    monkeypatch.setattr("labels.get_active_labels", lambda: [meta])
+
+    app, _ = app_and_db
+    with app.test_client() as c:
+        assert c.get("/api/species/search?q=Para").get_json() == ["Parakeet"]
+        assert c.get("/api/species/search?q=Parr").get_json() == []
+
+
 def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_path):
     """Otherwise the workspace keeps a selection naming a file that no
     longer exists, which blocks classification with no checkbox to clear."""

@@ -27955,7 +27955,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if len(q) < 2:
             return jsonify([])
 
-        from labels import get_active_labels, read_label_file
+        from labels import get_active_labels, normalized_label_set
 
         matches = []
         seen = set()
@@ -27964,7 +27964,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not labels_file or not os.path.exists(labels_file):
                 continue
             try:
-                for name in read_label_file(labels_file):
+                # The normalized set, not the raw file: a prompt
+                # classification refuses to attribute must not be offered
+                # for hand-tagging either, and the qualified spellings are
+                # what predictions will be named.
+                for name in normalized_label_set(label_set):
                     name_key = name.casefold()
                     if (
                         text_search_match(name, q, match_case, whole_word)
