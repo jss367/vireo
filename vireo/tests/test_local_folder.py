@@ -2990,12 +2990,14 @@ def test_sync_reports_the_source_check_before_publishing(tmp_path):
 
         assert result["created_or_modified"] == 1
         assert result["deleted"] == 1
-        # One modified file plus one deletion to verify against the source,
-        # announced up front and then counted off one file at a time.
-        assert scanned[0] == (0, 2, "")
-        assert [item[0] for item in scanned] == [0, 1, 2]
-        assert all(item[1] == 2 for item in scanned)
-        assert {item[2] for item in scanned[1:]} == {"bird.jpg", "culled.jpg"}
+        # One modified file plus one deletion to verify against the source.
+        # Each entry is named before it is read and counted only once the
+        # comparison is done, so the count never runs ahead of the work.
+        assert scanned == [
+            (0, 2, "bird.jpg"),
+            (1, 2, "culled.jpg"),
+            (2, 2, ""),
+        ]
         # Checking finishes before publishing starts; the two never interleave.
         assert [item[0] for item in published] == [1, 2]
     finally:
@@ -3019,7 +3021,7 @@ def test_sync_scan_progress_counts_files_with_no_source_counterpart(tmp_path):
         )
 
         assert result["created_or_modified"] == 1
-        assert scanned == [(0, 1, ""), (1, 1, "new.jpg")]
+        assert scanned == [(0, 1, "new.jpg"), (1, 1, "")]
     finally:
         db.close()
 
@@ -3136,3 +3138,40 @@ def test_sync_conflict_marks_the_check_step_not_the_publish_step(tmp_path, monke
         assert sync_step["status"] == "pending"
 
     assert (source / "bird.jpg").read_bytes() == b"changed on the source since staging"
+
+
+def test_scan_counter_waits_for_the_read_it_is_reporting(tmp_path, monkeypatch):
+    """An entry is counted after it is compared, not when it is picked up.
+
+    Throughput and ETA are derived from the count, so counting on entry would
+    show a file as finished for the whole time it is being hashed — minutes,
+    for one large original on a network share.
+    """
+    import services.local_folder as local_folder_service
+
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    try:
+        stage_folder(db, folder_id, str(vireo_dir))
+        local_root = Path(db.get_folder(folder_id)["path"])
+        (local_root / "bird.jpg").write_bytes(b"local edit")
+
+        reports = []
+        seen_while_reading = []
+        real_source_state = local_folder_service._source_state
+
+        def watched_source_state(*args, **kwargs):
+            seen_while_reading.append(reports[-1])
+            return real_source_state(*args, **kwargs)
+
+        monkeypatch.setattr(local_folder_service, "_source_state", watched_source_state)
+        sync_folder(
+            db,
+            folder_id,
+            str(vireo_dir),
+            scan_progress=lambda current, total, path: reports.append((current, total, path)),
+        )
+
+        assert seen_while_reading == [(0, 1, "bird.jpg")]
+        assert reports[-1] == (1, 1, "")
+    finally:
+        db.close()
