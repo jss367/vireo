@@ -94,29 +94,39 @@ def _base_name(name, entry):
     for a second Armillaria are the same common name and must be weighed
     as one collision, or a merge of an already-qualified list with a list
     that never had to qualify would keep the bare prompt and hand the
-    classifier back the ambiguity this module exists to remove. Only a
-    suffix that is the entry's *own* binomial is stripped, so parentheses
+    classifier back the ambiguity this module exists to remove. Both
+    qualifiers this module writes count — the binomial and the
+    ``(taxon N)`` fallback, which is equally persistable — and only a
+    suffix that is the entry's *own* identity is stripped, so parentheses
     that belong to the name survive.
     """
-    scientific_name = (entry or {}).get("scientific_name")
-    if not scientific_name:
-        return name
-    suffix = f" ({scientific_name})"
-    if len(name) > len(suffix) and name.lower().endswith(suffix.lower()):
-        return name[: -len(suffix)]
+    entry = entry or {}
+    for qualifier in (entry.get("scientific_name"),
+                      f"taxon {entry['taxon_id']}" if entry.get("taxon_id") else None):
+        if not qualifier:
+            continue
+        suffix = f" ({qualifier})"
+        if len(name) > len(suffix) and name.lower().endswith(suffix.lower()):
+            return name[: -len(suffix)]
     return name
 
 
-def _qualified_name(name, scientific_name):
-    """``Common Name (Scientific name)`` — the prompt for a shared name."""
+def _qualified_name(name, entry):
+    """``Common Name (Scientific name)`` — the prompt for a shared name.
+
+    Takes the whole identity, not just the binomial: the name may arrive
+    carrying either qualifier this module writes, and re-qualifying
+    ``Parrot (taxon 99999)`` without stripping its own suffix first would
+    stack them.
+    """
     from keyword_normalization import keyword_match_key
 
+    scientific_name = (entry or {}).get("scientific_name")
     if not scientific_name:
         return name
     if keyword_match_key(name) == keyword_match_key(scientific_name):
         return name  # the prompt already *is* the binomial
-    base = _base_name(name, {"scientific_name": scientific_name})
-    return f"{base} ({scientific_name})"
+    return f"{_base_name(name, entry)} ({scientific_name})"
 
 
 def disambiguate_labels(records):
@@ -182,7 +192,7 @@ def disambiguate_labels(records):
         for members in by_taxon.values():
             spelling = _preferred_spelling([name for name, _entry in members])
             entry = _representative_entry(members)
-            qualified = _qualified_name(spelling, entry.get("scientific_name"))
+            qualified = _qualified_name(spelling, entry)
             emitted.append([qualified, entry, spelling, True])
         # A prompt with no scientific name in a contested group cannot be
         # qualified — and must not stand, because it would answer for
@@ -216,7 +226,9 @@ def disambiguate_labels(records):
                 # taxon that is not its own.
                 dropped.append(name)
                 continue
-            name = f"{spelling} (taxon {taxon_id})"
+            # Strip whichever qualifier the spelling already carries, so a
+            # reloaded fallback is re-qualified rather than stacked.
+            name = f"{_base_name(spelling, entry)} (taxon {taxon_id})"
             was_split = True
         settled.append([name, entry, spelling, was_split])
 

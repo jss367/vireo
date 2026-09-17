@@ -243,6 +243,22 @@ def test_generated_prompt_cannot_take_a_name_another_taxon_already_uses(
     assert taxa == {18976, 18993, 18997}, "no class may be lost to a name clash"
 
 
+def test_a_saved_taxon_qualified_prompt_regroups_with_a_bare_one(tmp_path, monkeypatch):
+    """The (taxon N) fallback is as persistable as the binomial one, so a
+    later merge has to see through it too."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    twin = {**RED, "taxon_id": 99999}
+    split = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot (taxon 18976)", "parrot (taxon 99999)"],
+        {"Parrot (taxon 18976)": RED, "parrot (taxon 99999)": twin},
+    ))
+    bare = save_labels("B", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
+    for order in ([split, bare], [bare, split]):
+        labels = load_merged_labels([{"labels_file": p} for p in order])
+        assert labels == ["Parrot (taxon 18976)", "parrot (taxon 99999)"], order
+        assert "Parrot" not in labels, "the bare prompt would answer for both"
+
+
 def test_a_generated_fallback_never_overwrites_another_taxon(tmp_path, monkeypatch):
     """Second-order clash: the taxon-qualified fallback for one species is
     already some third species' literal prompt."""
