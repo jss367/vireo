@@ -868,8 +868,12 @@ def load_label_set(path, meta=None):
     ``robin`` are two prompts on disk and one class at runtime, so
     reporting the raw pair would name a count and warm an embedding
     identity the run never uses.
+
+    Cached by :func:`normalized_label_set`, so every reporting surface
+    shares one answer per file version rather than each remembering to
+    ask for the cached flavour.
     """
-    return load_merged_labels([meta or {"labels_file": path}])
+    return normalized_label_set(meta or {"labels_file": path})
 
 
 def load_merged_labels_with_metas(label_sets):
