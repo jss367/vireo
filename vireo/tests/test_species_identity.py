@@ -314,6 +314,14 @@ def test_report_paths_load_the_list_the_classify_job_will_use(tmp_path, monkeypa
     assert read_label_file(path) == ["Parrot", "parrot"]
     assert load_label_set(path) == load_merged_labels([{"labels_file": path}])
 
+    # Identity-free files too: every run the UI starts sends labels_files,
+    # which folds "Robin"/"robin" into one class, so reporting the raw pair
+    # would name a count and warm an identity the run never uses.
+    legacy = tmp_path / "hand-authored.txt"
+    legacy.write_text("Robin\nrobin\n")
+    assert read_label_file(str(legacy)) == ["Robin", "robin"]
+    assert load_label_set(str(legacy)) == ["Robin"]
+
 
 def test_a_file_that_backs_no_class_is_not_named_as_a_label_source(
     tmp_path, monkeypatch,

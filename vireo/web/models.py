@@ -594,11 +594,14 @@ def create_models_blueprint(
                     active.append(meta)
         else:
             # Same trimmed objects as ``saved`` so the identity map is not
-            # re-attached through the active list.
-            active = [
-                saved_by_file.get(meta.get("labels_file"), summarize(meta))
-                for meta in get_global_active_labels()
-            ]
+            # re-attached through the active list. Look the entry up rather
+            # than passing ``summarize(meta)`` as a ``get`` default: that
+            # default is evaluated eagerly, so every active set would be
+            # re-read and re-merged even when its trimmed copy is in hand.
+            active = []
+            for meta in get_global_active_labels():
+                known = saved_by_file.get(meta.get("labels_file"))
+                active.append(known if known is not None else summarize(meta))
         return jsonify(
             {
                 "labels": saved,

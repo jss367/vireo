@@ -759,18 +759,21 @@ def load_merged_labels(label_sets):
 def load_label_set(path, meta=None):
     """One file's labels exactly as the classify job will see them.
 
-    ``read_label_file`` returns the raw prompt text; classification routes
-    every source-backed set through ``load_merged_labels``, which folds
-    spelling variants, drops duplicate taxa and splits names two species
-    share into ``Common Name (Scientific name)``. Callers that only
-    *report* on a set — the embedding matrix, the cached-embedding check,
-    the classify readiness panel — must ask the same question the job
-    answers, or they describe a list that is never classified.
+    ``read_label_file`` returns the raw prompt text. Every run the UI can
+    start sends ``labels_files``, which routes through
+    ``load_merged_labels``: it folds spelling variants, drops duplicate
+    taxa and splits names two species share into ``Common Name
+    (Scientific name)``. Callers that only *report* on a set — the
+    embedding matrix, the cached-embedding check, the classify readiness
+    panel — must ask the same question the job answers, or they describe
+    and precompute a list that is never classified.
+
+    That holds for a file with no identity sidecar too: ``Robin`` and
+    ``robin`` are two prompts on disk and one class at runtime, so
+    reporting the raw pair would name a count and warm an embedding
+    identity the run never uses.
     """
-    species = read_label_file(path)
-    if species.identities:
-        species = load_merged_labels([meta or {"labels_file": path}])
-    return species
+    return load_merged_labels([meta or {"labels_file": path}])
 
 
 def load_merged_labels_with_metas(label_sets):
