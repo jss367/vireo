@@ -10,6 +10,7 @@ import ssl
 import tempfile
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 
 import certifi
 
@@ -756,7 +757,45 @@ def load_merged_labels(label_sets):
     return labels
 
 
-_NORMALIZED_CACHE = {}
+# Two caches, because the two callers want different things. The labels
+# endpoint asks for counts for EVERY saved set on each load, so its cache
+# must survive a full scan — nine sets evicting each other in scan order
+# means nothing is ever reused. Counts are a few bytes, so it holds many.
+# The normalized lists are megabytes each and only the active sets are
+# ever asked for again (autocomplete), so that one stays small and
+# evicts least-recently-used rather than wiping itself.
+_SUMMARY_CACHE = OrderedDict()
+_SUMMARY_CACHE_MAX = 256
+_NORMALIZED_CACHE = OrderedDict()
+_NORMALIZED_CACHE_MAX = 4
+
+
+def _cache_stamp(meta):
+    """Cache key: the set's path plus the size and mtime of both files."""
+    path = meta.get("labels_file", "")
+    stamps = []
+    for candidate in (path, os.path.splitext(path)[0] + ".json"):
+        try:
+            stat = os.stat(candidate)
+            stamps.append((stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            stamps.append(None)
+    return (path, tuple(stamps))
+
+
+def _cache_get(cache, key):
+    value = cache.get(key)
+    if value is not None:
+        cache.move_to_end(key)
+    return value
+
+
+def _cache_put(cache, key, value, limit):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > limit:
+        cache.popitem(last=False)
+    return value
 
 
 def normalized_label_set(meta):
@@ -770,30 +809,36 @@ def normalized_label_set(meta):
     a re-download or a restore changes one of those, and nothing else can
     change the result.
     """
-    path = meta.get("labels_file", "")
-    stamps = []
-    for candidate in (path, os.path.splitext(path)[0] + ".json"):
-        try:
-            stat = os.stat(candidate)
-            stamps.append((stat.st_mtime_ns, stat.st_size))
-        except OSError:
-            stamps.append(None)
-    key = (path, tuple(stamps))
-    cached = _NORMALIZED_CACHE.get(key)
+    key = _cache_stamp(meta)
+    cached = _cache_get(_NORMALIZED_CACHE, key)
     if cached is None:
-        cached = load_merged_labels([meta])
-        if len(_NORMALIZED_CACHE) >= 8:
-            # Bounded: a regional list is megabytes of strings and
-            # recomputing one is half a second.
-            _NORMALIZED_CACHE.clear()
-        _NORMALIZED_CACHE[key] = cached
+        cached = _cache_put(
+            _NORMALIZED_CACHE, key, load_merged_labels([meta]),
+            _NORMALIZED_CACHE_MAX,
+        )
+        _cache_put(
+            _SUMMARY_CACHE, key,
+            (len(cached), len(cached.dropped_ambiguous)), _SUMMARY_CACHE_MAX,
+        )
     return cached
 
 
 def label_set_summary(meta):
-    """``(usable_count, skipped_count)`` for one saved set."""
-    merged = normalized_label_set(meta)
-    return len(merged), len(merged.dropped_ambiguous)
+    """``(usable_count, skipped_count)`` for one saved set.
+
+    Cached apart from the list it came from: every saved set is counted on
+    each Settings and Pipeline load, and a cache sized for megabyte lists
+    would evict each entry before the next scan could use it.
+    """
+    key = _cache_stamp(meta)
+    cached = _cache_get(_SUMMARY_CACHE, key)
+    if cached is None:
+        merged = load_merged_labels([meta])
+        cached = _cache_put(
+            _SUMMARY_CACHE, key,
+            (len(merged), len(merged.dropped_ambiguous)), _SUMMARY_CACHE_MAX,
+        )
+    return cached
 
 
 def load_label_set(path, meta=None):
