@@ -261,6 +261,19 @@ def test_a_file_that_backs_no_class_is_not_named_as_a_label_source(
     assert labels == ["Lilac-crowned Parrot"]
     assert [m["labels_file"] for m in metas] == [usable]
 
+    # Same for a hand-authored bare name dropped because two source-backed
+    # files contested it: the qualified prompts are not its doing.
+    legacy = tmp_path / "hand-authored.txt"
+    legacy.write_text("Parrot\n")
+    split_a = save_labels("D", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": RED}))
+    split_b = save_labels("E", 14, "CA", ["birds"], SpeciesLabels(["Parrot"], {"Parrot": BROWED}))
+    labels, metas = load_merged_labels_with_metas([
+        {"labels_file": split_a}, {"labels_file": split_b},
+        {"labels_file": str(legacy)},
+    ])
+    assert labels == ["Parrot (Amazona rhodocorytha)", "Parrot (Amazona viridigenalis)"]
+    assert [m["labels_file"] for m in metas] == [split_a, split_b]
+
     # A file whose only spelling loses a collision still backs the class.
     variant = save_labels("C", 14, "CA", ["birds"],
                           SpeciesLabels(["lilac-crowned parrot"], {"lilac-crowned parrot": LILAC}))

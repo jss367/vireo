@@ -664,20 +664,24 @@ def load_merged_labels(label_sets):
     return labels
 
 
-def _contributed(records, kept_names, kept_taxa, kept_keys):
+def _contributed(records, kept_names, kept_taxa, kept_keys, dropped_keys):
     """Did this file back any class in the merged list?
 
-    A prompt dropped as ambiguous reached no class, so a file holding only
-    those contributed nothing. Everything else counts, including a spelling
-    that lost a collision to another file's — the species is in the list
-    either way, and the historical source list says so.
+    A dropped prompt reached no class, whichever way it was dropped — an
+    ``{"ambiguous": True}`` entry, or a bare hand-authored name in a group
+    two source-backed files contested. Its file must not be credited for
+    the qualified prompts those other files produced. Everything not
+    dropped counts, including a spelling that merely lost a collision to
+    another file's — the species is in the list either way, and the
+    historical source list says so.
     """
     from keyword_normalization import keyword_match_key
 
     for name, entry in records:
         entry = entry or {}
-        if entry.get("ambiguous"):
-            continue
+        attributed = entry.get("scientific_name") and not entry.get("ambiguous")
+        if not attributed and keyword_match_key(name) in dropped_keys:
+            continue  # this prompt was dropped; it produced no class
         if name in kept_names:
             return True
         taxon = (entry.get("taxon_id")
@@ -795,9 +799,13 @@ def load_merged_labels_with_metas(label_sets):
         keyword_match_key(_base_name(name, kept_identities.get(name)))
         for name in kept
     }
+    # Dropped prompts are always unattributed, so their group key is just
+    # the folded name — enough to tell a dropped record from an attributed
+    # one that happens to share the spelling.
+    dropped_keys = {keyword_match_key(name) for name in dropped}
     consumed_metas = []
     for ls, own in read_sets:
-        if _contributed(own, kept, kept_taxa, kept_keys):
+        if _contributed(own, kept, kept_taxa, kept_keys, dropped_keys):
             consumed_metas.append(ls)
         else:
             log.warning(
