@@ -21010,6 +21010,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "labels_name": ls.get("name", ""),
                 "labels_file": labels_file,
                 "species_count": len(labels),
+                # No prompt survived, so there is nothing to embed: the row
+                # stays visible (the set is on disk and the user is looking
+                # for it) but says why instead of offering a Compute button
+                # whose job can only fail.
+                "unusable": not labels,
+                "skipped": len(getattr(labels, "dropped_ambiguous", ())),
                 "models": {},
             }
             for m in models:
@@ -21073,6 +21079,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # cache is the one it looks for.
             saved = {ls.get("labels_file"): ls for ls in get_saved_labels()}
             labels = load_label_set(labels_file, saved.get(labels_file))
+            if not labels:
+                skipped = len(getattr(labels, "dropped_ambiguous", ()))
+                raise RuntimeError(
+                    f"{os.path.basename(labels_file)} has no usable species"
+                    + (f" — all {skipped:,} of its names are shared by more "
+                       "than one species" if skipped else "")
+                    + ". Download the list again in Settings → Labels to "
+                    "split them by scientific name."
+                )
 
             log.info(
                 "Pre-computing embeddings: %d labels with %s",

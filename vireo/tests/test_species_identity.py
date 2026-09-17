@@ -241,6 +241,35 @@ def test_report_paths_load_the_list_the_classify_job_will_use(tmp_path, monkeypa
     assert load_label_set(path) == load_merged_labels([{"labels_file": path}])
 
 
+def test_a_file_that_backs_no_class_is_not_named_as_a_label_source(
+    tmp_path, monkeypatch,
+):
+    """Its prompts were all dropped, so it must not enter the fingerprint's
+    source list — deleting it later would otherwise make an unchanged merged
+    run look stale."""
+    from labels import load_merged_labels_with_metas
+
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    usable = save_labels("A", 14, "CA", ["birds"],
+                         SpeciesLabels(["Lilac-crowned Parrot"], {"Lilac-crowned Parrot": LILAC}))
+    useless = save_labels("B", 14, "CA", ["birds"], SpeciesLabels(
+        ["Honey Mushroom"], {"Honey Mushroom": {"ambiguous": True}},
+    ))
+    labels, metas = load_merged_labels_with_metas(
+        [{"labels_file": usable}, {"labels_file": useless}]
+    )
+    assert labels == ["Lilac-crowned Parrot"]
+    assert [m["labels_file"] for m in metas] == [usable]
+
+    # A file whose only spelling loses a collision still backs the class.
+    variant = save_labels("C", 14, "CA", ["birds"],
+                          SpeciesLabels(["lilac-crowned parrot"], {"lilac-crowned parrot": LILAC}))
+    _labels, metas = load_merged_labels_with_metas(
+        [{"labels_file": usable}, {"labels_file": variant}]
+    )
+    assert [m["labels_file"] for m in metas] == [usable, variant]
+
+
 def test_classifier_still_refuses_an_ambiguous_label_set():
     with pytest.raises(ValueError, match="multiple taxa"):
         Classifier(SpeciesLabels(["Parrot"], {"Parrot": {"ambiguous": True}}))

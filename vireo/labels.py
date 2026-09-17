@@ -664,6 +664,31 @@ def load_merged_labels(label_sets):
     return labels
 
 
+def _contributed(records, kept_names, kept_taxa, kept_keys):
+    """Did this file back any class in the merged list?
+
+    A prompt dropped as ambiguous reached no class, so a file holding only
+    those contributed nothing. Everything else counts, including a spelling
+    that lost a collision to another file's — the species is in the list
+    either way, and the historical source list says so.
+    """
+    from keyword_normalization import keyword_match_key
+
+    for name, entry in records:
+        entry = entry or {}
+        if entry.get("ambiguous"):
+            continue
+        if name in kept_names:
+            return True
+        taxon = (entry.get("taxon_id")
+                 or (entry.get("scientific_name") or "").casefold())
+        if taxon and taxon in kept_taxa:
+            return True
+        if not entry and keyword_match_key(_base_name(name, entry)) in kept_keys:
+            return True
+    return False
+
+
 def load_label_set(path, meta=None):
     """One file's labels exactly as the classify job will see them.
 
@@ -697,7 +722,7 @@ def load_merged_labels_with_metas(label_sets):
     """
     seen = set()
     records = []
-    consumed_metas = []
+    read_sets = []
     for ls in label_sets:
         path = ls.get("labels_file", "")
         if not path or not os.path.exists(path):
@@ -711,14 +736,16 @@ def load_merged_labels_with_metas(label_sets):
             # consumed_metas reflects only files we actually read.
             log.warning("Label file vanished during read, skipping: %s", path)
             continue
-        consumed_metas.append(ls)
+        own = []
         for name in labels:
             entry = labels.identities.get(name)
+            own.append((name, entry))
             key = (name, json.dumps(entry, sort_keys=True))
             if key in seen:
                 continue  # the same set listed twice contributes once
             seen.add(key)
             records.append((name, entry))
+        read_sets.append((ls, own))
     # ``disambiguate_labels`` groups by the ASCII-NOCASE key so case-only
     # variants collapse the same way SQLite's ``COLLATE NOCASE`` does,
     # keeps the source spelling of every group that names one taxon, and
@@ -751,10 +778,37 @@ def load_merged_labels_with_metas(label_sets):
         seen_names.add(name)
         unique.append(name)
     kept = set(unique)
+    # A file every one of whose prompts was dropped backs no class, so it
+    # must not be named as a source: ``describe_label_source`` would credit
+    # it, ``labels_fingerprints`` would record it, and later deleting that
+    # useless file would make an otherwise unchanged merged run look stale.
+    from keyword_normalization import keyword_match_key
+
+    kept_identities = {
+        name: merged_identities[name] for name in kept if name in merged_identities
+    }
+    kept_taxa = {
+        entry.get("taxon_id") or (entry.get("scientific_name") or "").casefold()
+        for entry in kept_identities.values()
+    }
+    kept_keys = {
+        keyword_match_key(_base_name(name, kept_identities.get(name)))
+        for name in kept
+    }
+    consumed_metas = []
+    for ls, own in read_sets:
+        if _contributed(own, kept, kept_taxa, kept_keys):
+            consumed_metas.append(ls)
+        else:
+            log.warning(
+                "Label file %s contributed no usable species to this merge; "
+                "not recording it as a label source",
+                ls.get("labels_file", ""),
+            )
     return (
         SpeciesLabels(
             unique,
-            {name: merged_identities[name] for name in unique if name in merged_identities},
+            kept_identities,
             [name for name in sorted(set(disambiguated)) if name in kept],
             sorted(set(dropped)),
         ),

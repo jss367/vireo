@@ -15991,6 +15991,51 @@ def test_embedding_matrix_excludes_timm_models(app_and_db, monkeypatch, tmp_path
     assert "timm-inat21-eva02-l" not in model_ids
 
 
+def test_embedding_matrix_marks_a_set_with_no_usable_species(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """No prompt survives, so there is nothing to embed — the row must say
+    so rather than offer a Compute button whose job can only fail."""
+    import json as _json
+
+    import labels as labels_mod
+
+    names = ["Honey Mushroom", "Shaggy Parasol"]
+    labels_file = tmp_path / "ambiguous.txt"
+    labels_file.write_text("".join(name + "\n" for name in names))
+    meta = {
+        "name": "Ambiguous",
+        "labels_file": str(labels_file),
+        "label_identities": {name: {"ambiguous": True} for name in names},
+        "labels_text_sha256": labels_mod._text_identity(names),
+    }
+    (tmp_path / "ambiguous.json").write_text(_json.dumps(meta))
+    monkeypatch.setattr(
+        "models.get_models",
+        lambda: [{"id": "bioclip-vit-b-16", "name": "BioCLIP",
+                  "model_type": "bioclip", "model_str": "ViT-B-16",
+                  "weights_path": str(tmp_path), "downloaded": True}],
+    )
+    monkeypatch.setattr("labels.get_saved_labels", lambda: [meta])
+
+    app, _ = app_and_db
+    client = app.test_client()
+    row = client.get("/api/embedding-matrix").get_json()["matrix"][0]
+    assert row["unusable"] is True
+    assert row["species_count"] == 0
+    assert row["skipped"] == 2
+
+    # And the job refuses it outright, so a stale page cannot start one.
+    resp = client.post(
+        "/api/jobs/precompute-embeddings",
+        json={"model_id": "bioclip-vit-b-16", "labels_file": str(labels_file)},
+    )
+    assert resp.status_code in (200, 202)
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "failed"
+    assert "no usable species" in (job.get("error") or "")
+
+
 def test_precompute_embeddings_rejects_timm_models(app_and_db, monkeypatch):
     """Hitting precompute-embeddings for a timm model must fail fast instead
     of trying to load a non-existent image_encoder.onnx from the timm dir."""

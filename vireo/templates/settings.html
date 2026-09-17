@@ -4794,11 +4794,18 @@ async function loadEmbeddingMatrix() {
       html += '<tr>';
       html += '<td style="padding:6px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-secondary);">';
       html += escapeHtml(row.labels_name) + ' <span style="color:var(--text-ghost);">(' + row.species_count + ')</span>';
+      if (row.unusable) {
+        html += '<div style="font-size:11px;color:var(--warning,#d08700);">no usable species' +
+                (row.skipped ? ' — all ' + row.skipped + ' names are shared by several species' : '') +
+                '; download the list again above</div>';
+      }
       html += '</td>';
       models.forEach(function(m) {
         var cell = row.models[m.id];
         html += '<td style="text-align:center;padding:6px 10px;border-bottom:1px solid var(--border-subtle);">';
-        if (cell && cell.cached) {
+        if (row.unusable) {
+          html += '<span style="color:var(--text-faint);">—</span>';
+        } else if (cell && cell.cached) {
           html += '<span style="color:var(--accent);">cached</span>';
         } else {
           html += '<button onclick="precomputeEmbeddings(\'' + escapeAttr(m.id) + '\',\'' + escapeAttr(row.labels_file) + '\')" ' +
