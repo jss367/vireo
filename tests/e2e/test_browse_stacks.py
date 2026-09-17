@@ -900,66 +900,45 @@ def test_undo_hydration_does_not_clobber_a_fresh_selection(live_server, page):
         arg=burst_ids,
     )
 
-    # Hold the hydration fetch open long enough for a user-scale click to
-    # land inside its await. Route interception fires per request; only
-    # the by-ids POSTs are held, and only until the click has cleared.
-    hydration_hold = "__hydrationHold"
-    other_card_id = other_id
+    # Put the click inside the restore's async window by construction rather
+    # than by timing, so the race runs on every machine. The seam is the
+    # hydration call itself: wrapping window.fetch would do nothing here,
+    # because vireo-api.js binds the native fetch at load and replaces the
+    # global, so app requests never see a later patch.
     page.evaluate(
-        """holdKey => {
-          window[holdKey] = new Promise(function(resolve) {
-            window[holdKey + 'Release'] = resolve;
-          });
-          var origFetch = window.fetch;
-          window[holdKey + 'OrigFetch'] = origFetch;
-          window.fetch = async function(input, init) {
-            var url = typeof input === 'string' ? input : input.url;
-            if (url && url.indexOf('/api/photos/by-ids') !== -1) {
-              await window[holdKey];
+        """otherId => {
+          var orig = hydrateBrowseStackCoverMembers;
+          window.__pickedDuringHydration = false;
+          hydrateBrowseStackCoverMembers = function(cover, windowIsCurrent) {
+            if (!window.__pickedDuringHydration) {
+              window.__pickedDuringHydration = true;
+              var idx = photos.findIndex(function(p) { return p.id === otherId; });
+              selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+                          otherId, idx);
             }
-            return origFetch.call(this, input, init);
+            return orig.apply(this, arguments);
+          };
+          window.__restoreHydrate = function() {
+            hydrateBrowseStackCoverMembers = orig;
+            delete window.__restoreHydrate;
           };
         }""",
-        hydration_hold,
+        other_id,
     )
 
     try:
-        page.evaluate("() => doUndo()")
-        # Grid re-renders once the initial photo list load returns; the
-        # hydration fetch behind it is still parked, so the click below
-        # lands in the async gap the handler snapshots the epoch for.
-        page.wait_for_function(
-            "() => photos.length > 0 && selectedPhotos.size === 0"
-        )
-        other_card = page.locator(f'.grid-card[data-id="{other_card_id}"]')
-        other_card.click()
-        page.wait_for_function(
-            "photoId => selectedPhotoId === photoId && selectedPhotos.size === 0",
-            arg=other_card_id,
-        )
+        page.evaluate("async () => { await doUndo(); }")
     finally:
-        page.evaluate(
-            """holdKey => {
-              window[holdKey + 'Release']();
-              window.fetch = window[holdKey + 'OrigFetch'];
-              delete window[holdKey + 'Release'];
-              delete window[holdKey + 'OrigFetch'];
-              delete window[holdKey];
-            }""",
-            hydration_hold,
-        )
+        page.evaluate("() => window.__restoreHydrate && window.__restoreHydrate()")
 
-    # Give the restore a chance to run: it was waiting on hydration.
-    # ``selectedPhotos.size === 0`` because the user chose a single card —
-    # a stale restore would push the burst ids into ``selectedPhotos``
-    # here, so waiting for a merge (or lack of one) covers both failure
-    # modes with the same assertion.
-    page.wait_for_timeout(400)
+    # The restore ran after the user had already chosen a card. A stale
+    # restore would push the burst ids back into selectedPhotos, and the bar
+    # would count them — a single-card pick leaves it reading one photo, with
+    # no stack note, since one card is still an actionable selection.
+    assert page.evaluate("() => window.__pickedDuringHydration") is True
     assert page.evaluate("() => getActiveSelection()") == [other_id]
     assert page.evaluate("() => selectedPhotoId") == other_id
-    # A merged batch would also revive the batch bar; a preserved
-    # single-card pick keeps it hidden.
-    expect(page.locator("#batchBar")).to_be_hidden()
+    expect(page.locator("#batchCount")).to_have_text("1 selected")
 
 
 def test_cmd_clicking_a_selected_stack_deselects_it_as_a_unit(live_server, page):
