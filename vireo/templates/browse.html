@@ -2001,6 +2001,10 @@ body.sidebar-resizing {
     <div class="filter-bar browse-filter-shell">
       {% include '_filterbar.html' %}
       <div class="browse-view-controls">
+        <!-- A native select is as wide as its longest option, and this row shares
+             one line with the filter bar's chip row. Keep option labels about as
+             long as "Capture date (oldest)": a much longer one widens the select,
+             pushes the chip row onto its own line, and costs the grid ~32px. -->
         <select id="sortSelect" onchange="onSortChanged()" title="Sort order"
                 data-view-preference="vireo.browse.sort">
           <option value="date">Capture date (oldest)</option>
@@ -2012,9 +2016,9 @@ body.sidebar-resizing {
           <option value="sharpness">Sharpness (sharpest)</option>
           <option value="sharpness_asc">Sharpness (softest)</option>
           <option value="prediction_confidence"
-                  title="Ranks each photo by its strongest current species prediction that you haven't rejected. Photos with no prediction sort last.">Prediction confidence (highest)</option>
+                  title="Ranks each photo by its strongest current species prediction that you haven't rejected. Photos with no prediction sort last.">AI confidence (highest)</option>
           <option value="prediction_confidence_asc"
-                  title="Ranks each photo by its strongest current species prediction that you haven't rejected — weakest first, so the guesses worth checking come up front. Photos with no prediction sort last, because no guess is not a low-confidence guess.">Prediction confidence (lowest)</option>
+                  title="Ranks each photo by its strongest current species prediction that you haven't rejected — weakest first, so the guesses worth checking come up front. Photos with no prediction sort last, because no guess is not a low-confidence guess.">AI confidence (lowest)</option>
         </select>
         <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
           <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
@@ -3361,7 +3365,7 @@ function renderCardField(field, p) {
     case 'quality_score':
       if (p.quality_score != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Quality score">' + p.quality_score.toFixed(2) + '</span>';
       return '';
-    // The value the "Prediction confidence" sorts rank on, so a card can
+    // The value the "AI confidence" sorts rank on, so a card can
     // explain its own position in the grid. Absent (rather than 0) when the
     // photo has no current, unrejected species prediction — the badge stays
     // off instead of claiming a confidence of zero.
@@ -3375,7 +3379,7 @@ function renderCardField(field, p) {
         //
         // The server flags this per card; do NOT re-derive it from the sort
         // dropdown. A healthy visual clause keeps the grid similarity-ranked
-        // while the dropdown still reads "Prediction confidence", and that
+        // while the dropdown still reads "AI confidence", and that
         // path sends the cover's own score — so a select-derived label would
         // claim the relevance order came from a number that did not produce
         // it (Codex P2 on PR #1670).
