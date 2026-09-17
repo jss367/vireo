@@ -8020,9 +8020,14 @@ var browseLightboxStackGesture = null;
 // never claims it). See the ``lightbox:photodeleted`` listener.
 var browseLightboxStackGestureSpent = null;
 
-// The stack the photo in that same close stood for, if it was a cover. Read
-// by the ``lightbox:photodeleted`` listener and dropped on a cancel.
-var browseLightboxDeleteRepresented = null;
+// What each photo viewed in this lightbox session stands for, for the covers
+// among them: {photoId: memberIds}. Recorded while the photo is on screen,
+// because once it is deleted its stack is gone from ``photos`` and nothing
+// can say what it stood for. Keyed by photo rather than held in a single
+// slot so the reopen that follows a delete cannot overwrite the entry the
+// delete still needs. Read by the ``lightbox:photodeleted`` listener, and
+// dropped when the lightbox is really closed. Codex P2 on PR #1672.
+var browseLightboxRepresentedByPhoto = {};
 
 // The selection as it stood before the first click of the most recent click
 // sequence. Captured in ``selectPhoto`` and consulted by the grid double-click
@@ -8100,6 +8105,13 @@ function continueBrowseLightboxAcrossBoundary(delta, currentId, session) {
 }
 
 document.addEventListener('lightbox:photochanged', function(event) {
+  // Before the window check below: this has to happen for every photo the
+  // user actually sees, whoever owns the loaded window.
+  var shownId = event && event.detail && event.detail.photoId;
+  if (shownId != null) {
+    var shownStack = browseStackMemberIds(shownId);
+    if (shownStack) browseLightboxRepresentedByPhoto[String(shownId)] = shownStack;
+  }
   if (!browseLightboxOwnsLoadedWindow() || loading) return;
   var photoId = event && event.detail && event.detail.photoId;
   var lightboxPhotos = window._lightboxPhotoList;
@@ -13354,16 +13366,16 @@ function scrollToCard(idx) {
 document.addEventListener('lightbox:photodeleted', function(event) {
   var deletedId = event && event.detail ? event.detail.photoId : null;
   var spent = browseLightboxStackGestureSpent;
-  var represented = browseLightboxDeleteRepresented;
   browseLightboxStackGestureSpent = null;
-  browseLightboxDeleteRepresented = null;
   if (deletedId == null) return;
+  var represented = browseLightboxRepresentedByPhoto[String(deletedId)];
+  delete browseLightboxRepresentedByPhoto[String(deletedId)];
   // The deleted photo was a stack cover, so the frames behind it just lost
   // the only card standing for them — lightboxDelete splices the cover out of
   // `photos` and nothing reprojects the stack. Selected frames have to go
   // with it, or the batch bar keeps counting photos no shortcut can show and
   // the next rating lands on them unseen. Codex P2 on PR #1672.
-  if (represented && represented.indexOf(deletedId) !== -1) {
+  if (represented) {
     var dropped = false;
     represented.forEach(function(id) {
       if (selectedPhotos.delete(id)) dropped = true;
@@ -13476,16 +13488,10 @@ document.addEventListener('lightbox:closed', function(event) {
   var deleteDialogOpen = !!document.querySelector('#deleteModal.open');
   browseLightboxStackGestureSpent = deleteDialogOpen ? stackGesture : null;
   browseLightboxStackGesture = null;
-  // A cover is the only card its hidden frames have, and this close is the
-  // one the Delete button caused — so record what this photo stands for
-  // while `photos` still holds it. If the delete goes through, those frames
-  // lose their card and have to leave the selection with it; nothing else
-  // reprojects the stack, and a selection may not name photos with no card.
-  // Bounded to this one stack on purpose: a general "drop everything
-  // unreachable" sweep would empty a Select all that reaches past the loaded
-  // page. Codex P2 on PR #1672.
-  browseLightboxDeleteRepresented = deleteDialogOpen
-    ? browseStackMemberIds(photoId) : null;
+  // The delete dialog is open over this close and the lightbox will reopen on
+  // the next photo, so what the viewed photos stood for is still needed. Any
+  // other close is the end of the session. Codex P2 on PR #1672.
+  if (!deleteDialogOpen) browseLightboxRepresentedByPhoto = {};
   if (selectedPhotos.size > 0) {
     // Viewing shortcuts can open the lightbox without collapsing an existing
     // batch. Preserve that batch instead of replacing it with the viewed

@@ -738,6 +738,50 @@ def test_deleting_a_selected_stacks_cover_drops_its_orphaned_frames(
     assert page.evaluate(f"() => photos.some(p => p.id === {other_id})") is True
 
 
+def test_native_menu_delete_of_a_cover_drops_its_orphaned_frames(
+    live_server, page,
+):
+    """The desktop menu's Delete calls lightboxDelete() directly.
+
+    No click bubbles through the overlay, so no ``lightbox:closed`` runs
+    before the delete — anything captured on that close is not there. What
+    a photo stands for is recorded while it is on screen instead, which
+    every delete path passes through. Codex P2 on PR #1672.
+    """
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.click()
+    expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
+
+    page.keyboard.press("e")
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    # Straight to the function, the way the native menu command does it.
+    page.evaluate("() => lightboxDelete()")
+    expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
+    # Confirmed through the handler rather than the button: the delete modal
+    # renders under the still-open lightbox overlay, so on this path the
+    # button cannot be clicked at all. That is a separate, pre-existing
+    # desktop problem — the Delete *button* only works because its click
+    # bubbles to the overlay and closes the lightbox on the way.
+    page.evaluate("() => confirmDelete()")
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+
+    active = page.evaluate("() => getActiveSelection()")
+    assert all(pid not in active for pid in burst_ids), active
+
+
 def test_cancelled_delete_does_not_leave_a_stack_gesture_armed(
     live_server, page,
 ):
