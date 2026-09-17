@@ -2536,6 +2536,16 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
         if stored_mtime is None or stored_size is None:
             continue
         src_file = os.path.join(folder_path, row["filename"])
+        if os.path.islink(src_file):
+            # Scanner discovery admits file symlinks, and ``os.stat`` below
+            # follows them -- but a relative target resolves against the
+            # directory holding the link, so the same target string can point
+            # at a different file once the link has moved. Re-stamping from
+            # whatever the destination-side link resolves to would tell the
+            # incremental scanner that bytes it has never seen are unchanged,
+            # leaving this row's hash and metadata describing the wrong file.
+            # Leave it stale; a rescan resolves the link itself.
+            continue
         # Prefix-strip rather than ``os.path.relpath``: relpath is happy to
         # walk out of the subtree with ``..`` if a row ever slipped past the
         # predicate above, which would point this at a file the move never

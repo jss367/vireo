@@ -6358,3 +6358,49 @@ def test_restamping_carries_the_offline_cache_row(tmp_path, monkeypatch):
                             (kept,)).fetchone()["file_mtime"]
     assert rows[kept] == fresh != 1577880000
     assert rows[unrelated] == 999.0
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Relative file symlinks in a catalog are a POSIX concern here; "
+    "Windows needs privileges to create them and the scanner path differs.",
+)
+def test_a_symlinked_photo_row_is_never_restamped(tmp_path, monkeypatch):
+    """A relative symlink resolves differently once it has moved.
+
+    ``os.stat`` follows the link, so the planner would read whatever the
+    destination-side target happens to be. If that is a same-sized file the
+    re-stamp would tell the incremental scanner that bytes it has never seen
+    are unchanged, leaving the row's hash and metadata on the wrong file.
+    """
+    import move as move_mod
+
+    db, src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+
+    # 'link.jpg' points at 'target.jpg' *relatively*, so it resolves to a
+    # different file at the source than at the destination.
+    (src / "target.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 64)
+    os.utime(src / "target.jpg", (1577880000, 1577880000))
+    os.symlink("target.jpg", src / "link.jpg")
+    st = os.stat(src / "link.jpg")
+    link_id = db.add_photo(folder_id=fid, filename="link.jpg",
+                           extension=".jpg", file_size=st.st_size,
+                           file_mtime=st.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash = 'hash-' || id,"
+                    " exif_data = '{}' WHERE id = ?", (link_id,))
+    db.conn.commit()
+
+    landing = dst / "shoot"
+    landing.mkdir()
+    for name in ("a.jpg", "b.jpg", "target.jpg"):
+        (landing / name).write_bytes((src / name).read_bytes())
+    # The destination-side target: same size, different bytes and timestamp.
+    os.utime(landing / "target.jpg", (1600000000, 1600000000))
+    os.symlink("target.jpg", landing / "link.jpg")
+
+    updates, problem = move_mod._plan_moved_file_mtimes(
+        db, str(src), str(landing))
+
+    assert problem is None
+    assert link_id not in [u[1] for u in updates]
+    assert sorted(u[1] for u in updates) == sorted(ids.values())
