@@ -445,14 +445,34 @@
   // the two the path above it is, and name the folders photos actually
   // land in. Jobs enqueued before the plan snapshot existed carry no
   // counts; they fall back to the template-only sentence.
-  function moveDateNote(cfg) {
+  //
+  // While the job is live the counts are the pre-move plan, so the note
+  // says "planned". Once it finishes ``move_folder_by_date`` returns
+  // per-folder ``planned``/``moved`` counts (missing sources and
+  // destination collisions are skipped, not failures), so the note switches
+  // to actual counts — a completed row must not claim every planned photo
+  // landed when only some did.
+  function moveDateNote(cfg, job) {
     var template = '<code>' + esc(cfg.folder_template) + '</code>';
     var folders = Array.isArray(cfg.date_destinations) ? cfg.date_destinations : [];
     var folderCount = cfg.date_destination_count || 0;
-    var photoCount = cfg.date_photo_count || 0;
+    var plannedTotal = cfg.date_photo_count || 0;
     if (!folderCount) {
       return '<span class="job-move-route-note">Organizing photos into ' +
         'capture-date folders using ' + template + '</span>';
+    }
+    var result = job && job.result;
+    var resultDests = result && Array.isArray(result.destinations)
+      ? result.destinations : null;
+    var movedTotal = result && typeof result.moved === 'number'
+      ? result.moved : null;
+    var reportActual = !isLiveStatus(job && job.status) &&
+      movedTotal !== null && resultDests !== null;
+    var movedByPath = {};
+    if (resultDests) {
+      resultDests.forEach(function(item) {
+        movedByPath[item.path] = item.moved || 0;
+      });
     }
     if (folderCount === 1) {
       // ``folderCount === 1`` only proves the plan resolves to a single
@@ -460,22 +480,54 @@
       // collapse many distinct capture dates into that one folder. So the
       // note names the landing folder without asserting anything about
       // whether the photos share a capture date.
-      return '<span class="job-move-route-note">' +
-        'All ' + photoCount.toLocaleString() + ' ' + plural(photoCount, 'photo') +
-        ' land in this single folder — ' + template +
-        ' resolves to one path for this set</span>';
+      var singleNote;
+      if (reportActual) {
+        singleNote = (movedTotal === plannedTotal
+          ? 'All ' + movedTotal.toLocaleString() + ' ' + plural(movedTotal, 'photo')
+          : movedTotal.toLocaleString() + ' of ' + plannedTotal.toLocaleString() +
+            ' ' + plural(plannedTotal, 'photo')) +
+          ' landed in this single folder — ' + template +
+          ' resolves to one path for this set';
+      } else {
+        singleNote = 'All ' + plannedTotal.toLocaleString() + ' ' +
+          plural(plannedTotal, 'photo') +
+          ' planned to land in this single folder — ' + template +
+          ' resolves to one path for this set';
+      }
+      return '<span class="job-move-route-note">' + singleNote + '</span>';
     }
-    var html = '<span class="job-move-route-note">' +
-      photoCount.toLocaleString() + ' ' + plural(photoCount, 'photo') +
-      ' split across ' + folderCount.toLocaleString() + ' capture-date ' +
-      plural(folderCount, 'folder') + ' under this path, named by ' +
-      template + ':</span>';
+    var header;
+    if (reportActual) {
+      header = (movedTotal === plannedTotal
+        ? 'All ' + movedTotal.toLocaleString() + ' ' + plural(movedTotal, 'photo')
+        : movedTotal.toLocaleString() + ' of ' + plannedTotal.toLocaleString() +
+          ' ' + plural(plannedTotal, 'photo')) +
+        ' landed in ' + folderCount.toLocaleString() + ' capture-date ' +
+        plural(folderCount, 'folder') + ' under this path, named by ' +
+        template + ':';
+    } else {
+      header = plannedTotal.toLocaleString() + ' ' + plural(plannedTotal, 'photo') +
+        ' planned across ' + folderCount.toLocaleString() + ' capture-date ' +
+        plural(folderCount, 'folder') + ' under this path, named by ' +
+        template + ':';
+    }
+    var html = '<span class="job-move-route-note">' + header + '</span>';
     html += '<ul class="job-move-route-dates">';
     folders.forEach(function(item) {
-      var count = item.photo_count || 0;
+      var plannedCount = item.photo_count || 0;
+      var counts;
+      if (reportActual && Object.prototype.hasOwnProperty.call(
+            movedByPath, item.path)) {
+        var moved = movedByPath[item.path];
+        counts = (moved === plannedCount
+          ? moved.toLocaleString() + ' ' + plural(moved, 'photo')
+          : moved.toLocaleString() + ' of ' + plannedCount.toLocaleString() +
+            ' ' + plural(plannedCount, 'photo') + ' moved');
+      } else {
+        counts = plannedCount.toLocaleString() + ' ' + plural(plannedCount, 'photo');
+      }
       html += '<li title="' + escapeAttr(item.path || '') + '">' +
-        esc(item.relative_path || '') + ' · ' + count.toLocaleString() +
-        ' ' + plural(count, 'photo') + '</li>';
+        esc(item.relative_path || '') + ' · ' + counts + '</li>';
     });
     if (folderCount > folders.length) {
       var rest = folderCount - folders.length;
@@ -503,7 +555,7 @@
     html += '<span class="job-move-route-path" title="' +
       escapeAttr(destination) + '">' + esc(destination) + '</span>';
     if (cfg.folder_template) {
-      html += moveDateNote(cfg);
+      html += moveDateNote(cfg, job);
     } else if (cfg.merge) {
       html += '<span class="job-move-route-note">Merging with the existing destination folder</span>';
     }
