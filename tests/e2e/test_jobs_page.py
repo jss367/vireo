@@ -125,7 +125,7 @@ def test_move_folder_job_shows_the_single_capture_date_folder(
         ["/Volumes/Camera/Paris", "/Volumes/Photos/Archive/2026-09-12"]
     )
     expect(move_route.locator(".job-move-route-note")).to_contain_text(
-        "All 499 photos share one capture date"
+        "All 499 photos land in this single folder"
     )
     expect(move_route.locator(".job-move-route-dates")).to_have_count(0)
 

@@ -438,11 +438,13 @@
   }
 
   // The note under a date-organized move's To row. ``resolved_destination``
-  // is the exact landing folder when the plan resolved to a single capture
-  // date, and the selected root when it fanned out — so this has to say
-  // which of the two the path above it is, and name the folders photos
-  // actually land in. Jobs enqueued before the plan snapshot existed carry
-  // no counts; they fall back to the template-only sentence.
+  // is the exact landing folder when the plan resolved to a single output
+  // path (all photos map to one rendered folder — not necessarily one
+  // capture date; ``%Y`` or ``%Y/%m`` collapse many dates), and the
+  // selected root when the plan fanned out — so this has to say which of
+  // the two the path above it is, and name the folders photos actually
+  // land in. Jobs enqueued before the plan snapshot existed carry no
+  // counts; they fall back to the template-only sentence.
   function moveDateNote(cfg) {
     var template = '<code>' + esc(cfg.folder_template) + '</code>';
     var folders = Array.isArray(cfg.date_destinations) ? cfg.date_destinations : [];
@@ -453,10 +455,15 @@
         'capture-date folders using ' + template + '</span>';
     }
     if (folderCount === 1) {
+      // ``folderCount === 1`` only proves the plan resolves to a single
+      // rendered folder; a coarser template like ``%Y`` or ``%Y/%m`` can
+      // collapse many distinct capture dates into that one folder. So the
+      // note names the landing folder without asserting anything about
+      // whether the photos share a capture date.
       return '<span class="job-move-route-note">' +
         'All ' + photoCount.toLocaleString() + ' ' + plural(photoCount, 'photo') +
-        ' share one capture date, so ' + template +
-        ' puts them in this single folder</span>';
+        ' land in this single folder — ' + template +
+        ' resolves to one path for this set</span>';
     }
     var html = '<span class="job-move-route-note">' +
       photoCount.toLocaleString() + ' ' + plural(photoCount, 'photo') +
