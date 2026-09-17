@@ -198,14 +198,18 @@ def disambiguate_labels(records):
     # prompts that differ only in case are one keyword downstream, so a
     # shared binomial under two taxon IDs collides even when the strings
     # are not byte-identical.
-    claims = {}
-    for record in emitted:
-        claims.setdefault(keyword_match_key(record[0]), set()).add(
-            _taxon_key(record[1])
-        )
-    names, identities, disambiguated = [], {}, []
+    def contested_names(records):
+        claims = {}
+        for record in records:
+            claims.setdefault(keyword_match_key(record[0]), set()).add(
+                _taxon_key(record[1])
+            )
+        return {key for key, taxa in claims.items() if len(taxa) > 1}
+
+    settled = []
+    disputed = contested_names(emitted)
     for name, entry, spelling, was_split in emitted:
-        if len(claims[keyword_match_key(name)]) > 1:
+        if keyword_match_key(name) in disputed:
             taxon_id = (entry or {}).get("taxon_id")
             if not taxon_id:
                 # Nothing left to tell it apart by; it would answer for a
@@ -214,6 +218,33 @@ def disambiguate_labels(records):
                 continue
             name = f"{spelling} (taxon {taxon_id})"
             was_split = True
+        settled.append([name, entry, spelling, was_split])
+
+    # A generated fallback can land on a name a third source already uses
+    # verbatim. Nothing is left to qualify by at that point, so keep the
+    # claimant the prompt actually names — ``explicit_source`` reads the
+    # taxon out of the string, and attributing it to anyone else would be
+    # wrong — and report the rest rather than overwriting an identity.
+    still_disputed = contested_names(settled)
+    winner = {}
+    for index in sorted(
+        (i for i, r in enumerate(settled)
+         if keyword_match_key(r[0]) in still_disputed),
+        key=lambda i: (
+            # The prompt names a taxon: that claimant, not another, is who
+            # ``explicit_source`` would read out of it.
+            f" (taxon {(settled[i][1] or {}).get('taxon_id')})" not in settled[i][0],
+            json.dumps(settled[i][1], sort_keys=True),
+        ),
+    ):
+        winner.setdefault(keyword_match_key(settled[index][0]), index)
+
+    names, identities, disambiguated = [], {}, []
+    for index, (name, entry, _spelling, was_split) in enumerate(settled):
+        key = keyword_match_key(name)
+        if key in still_disputed and winner[key] != index:
+            dropped.append(name)
+            continue
         names.append(name)
         if entry:
             identities[name] = entry

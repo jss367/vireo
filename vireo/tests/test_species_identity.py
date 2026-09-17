@@ -11,6 +11,7 @@ from classifier_cache import _ordered_labels_identity
 from computation_cache import CacheFormatError, _validate_candidate_taxonomy, classifier_runtime_fingerprint
 from db import Database
 from embedding_cache import canonicalize_labels
+from keyword_normalization import keyword_match_key
 from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_label_file, save_labels
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
@@ -240,6 +241,26 @@ def test_generated_prompt_cannot_take_a_name_another_taxon_already_uses(
     ]
     taxa = {e["taxon_id"] for e in labels.identities.values()}
     assert taxa == {18976, 18993, 18997}, "no class may be lost to a name clash"
+
+
+def test_a_generated_fallback_never_overwrites_another_taxon(tmp_path, monkeypatch):
+    """Second-order clash: the taxon-qualified fallback for one species is
+    already some third species' literal prompt."""
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    twin = {**RED, "taxon_id": 99999}
+    path = save_labels("A", 14, "CA", ["birds"], SpeciesLabels(
+        ["Parrot", "parrot", "Parrot (taxon 18976)"],
+        {"Parrot": RED, "parrot": twin, "Parrot (taxon 18976)": LILAC},
+    ))
+    labels = load_merged_labels([{"labels_file": path}])
+    # The prompt names 18976, so 18976 keeps it; the third species cannot
+    # answer to a string that reads as someone else and is reported dropped.
+    assert labels.identities["Parrot (taxon 18976)"]["taxon_id"] == 18976
+    assert labels.dropped_ambiguous == ["Parrot (taxon 18976)"]
+    assert len({keyword_match_key(n) for n in labels}) == len(labels)
+    assert LILAC["taxon_id"] not in {
+        e.get("taxon_id") for e in labels.identities.values()
+    }
 
 
 def test_irrecoverably_ambiguous_label_is_dropped_and_named(tmp_path, monkeypatch):

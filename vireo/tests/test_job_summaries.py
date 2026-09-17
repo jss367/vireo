@@ -106,8 +106,8 @@ def test_regroup_and_fetch_labels_details():
     out = describe_result("fetch-labels", {"species_count": 3, "labels_file": "/x/y.txt",
                                            "disambiguated": 2})
     assert out["details"][0] == (
-        "2 common names used by more than one species — saved as "
-        "“Common Name (Scientific name)”"
+        "2 labels whose common name is used by more than one species — "
+        "saved as “Common Name (Scientific name)”"
     )
 
 
