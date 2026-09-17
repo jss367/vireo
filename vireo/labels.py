@@ -70,7 +70,7 @@ def _representative_entry(members):
     metadata selection deterministic across label-set order.
     """
     return min(
-        (entry for _name, entry in members),
+        (member[-1] for member in members),
         key=lambda value: json.dumps(value, sort_keys=True),
     )
 
@@ -148,12 +148,16 @@ def disambiguate_labels(records):
     Name (Scientific name)`` per taxon, which ``SpeciesResolver`` already
     reads back as explicit taxon evidence.
 
-    Returns ``(names, identities, disambiguated, dropped)``. ``dropped``
-    holds prompts no source can pin to one taxon — a label file written
-    before this rewrite existed stores only ``{"ambiguous": True}`` for
-    those, discarding the scientific names needed to split them, so they
-    are left out rather than poisoning the run. Re-downloading the list
-    recovers them.
+    Returns ``(names, identities, disambiguated, dropped, sources)``.
+    ``dropped`` holds prompts no source can pin to one taxon — a label
+    file written before this rewrite existed stores only
+    ``{"ambiguous": True}`` for those, discarding the scientific names
+    needed to split them, so they are left out rather than poisoning the
+    run. Re-downloading the list recovers them. ``sources`` maps each
+    surviving prompt to the indices of the records that produced it,
+    which is the only exact answer to "did this file back a class" —
+    every proxy for it (the name, the taxon, the collision group) is
+    shared with records that did not.
     """
     # Import here rather than at module load: ``labels.py`` is imported
     # from environments (packaging, first-run bootstrap) that don't yet
@@ -163,41 +167,47 @@ def disambiguate_labels(records):
     from keyword_normalization import keyword_match_key
 
     groups = {}
-    for name, entry in records:
+    for index, (name, entry) in enumerate(records):
         # Key on the unqualified name so an already-split prompt and a
         # bare one for a sibling taxon meet in the same group.
         key = keyword_match_key(_base_name(name, entry)) or name
-        groups.setdefault(key, []).append((name, entry or {}))
+        groups.setdefault(key, []).append((index, name, entry or {}))
 
     emitted, dropped = [], []
     for group in groups.values():
         by_taxon = {}
         unattributed = []
-        for name, entry in group:
+        for index, name, entry in group:
             scientific_name = entry.get("scientific_name")
             if entry.get("ambiguous") or not scientific_name:
-                unattributed.append((name, entry))
+                unattributed.append((index, name, entry))
             else:
-                by_taxon.setdefault(_taxon_key(entry), []).append((name, entry))
+                by_taxon.setdefault(_taxon_key(entry), []).append(
+                    (index, name, entry)
+                )
         contested = len(by_taxon) > 1 or any(
-            entry.get("ambiguous") for _name, entry in unattributed
+            entry.get("ambiguous") for _i, _name, entry in unattributed
         )
         if not contested:
             # One taxon, or none at all: keep the historical spelling fold.
-            spelling = _preferred_spelling([name for name, _entry in group])
+            # Every record in the group backs the surviving prompt, including
+            # a spelling that lost the fold — it named the same species.
+            spelling = _preferred_spelling([name for _i, name, _e in group])
             members = next(iter(by_taxon.values()), [])
             entry = _representative_entry(members) if members else None
-            emitted.append([spelling, entry, spelling, False])
+            emitted.append([spelling, entry, spelling, False,
+                            {index for index, _n, _e in group}])
             continue
         for members in by_taxon.values():
-            spelling = _preferred_spelling([name for name, _entry in members])
+            spelling = _preferred_spelling([name for _i, name, _e in members])
             entry = _representative_entry(members)
             qualified = _qualified_name(spelling, entry)
-            emitted.append([qualified, entry, spelling, True])
+            emitted.append([qualified, entry, spelling, True,
+                            {index for index, _n, _e in members}])
         # A prompt with no scientific name in a contested group cannot be
         # qualified — and must not stand, because it would answer for
         # whichever taxon the model happened to mean.
-        dropped.extend(name for name, _entry in unattributed)
+        dropped.extend(name for _i, name, _e in unattributed)
 
     # Two groups can still land on one string: a source whose common name
     # literally reads "Foo (Alpha beta)" for another taxon, or two taxon
@@ -218,7 +228,7 @@ def disambiguate_labels(records):
 
     settled = []
     disputed = contested_names(emitted)
-    for name, entry, spelling, was_split in emitted:
+    for name, entry, spelling, was_split, sources in emitted:
         if keyword_match_key(name) in disputed:
             taxon_id = (entry or {}).get("taxon_id")
             if not taxon_id:
@@ -230,7 +240,7 @@ def disambiguate_labels(records):
             # reloaded fallback is re-qualified rather than stacked.
             name = f"{_base_name(spelling, entry)} (taxon {taxon_id})"
             was_split = True
-        settled.append([name, entry, spelling, was_split])
+        settled.append([name, entry, spelling, was_split, sources])
 
     # A generated fallback can land on a name a third source already uses
     # verbatim. Nothing is left to qualify by at that point, so keep the
@@ -251,18 +261,19 @@ def disambiguate_labels(records):
     ):
         winner.setdefault(keyword_match_key(settled[index][0]), index)
 
-    names, identities, disambiguated = [], {}, []
-    for index, (name, entry, _spelling, was_split) in enumerate(settled):
+    names, identities, disambiguated, sources = [], {}, [], {}
+    for index, (name, entry, _spelling, was_split, record_ids) in enumerate(settled):
         key = keyword_match_key(name)
         if key in still_disputed and winner[key] != index:
             dropped.append(name)
             continue
         names.append(name)
+        sources[name] = record_ids
         if entry:
             identities[name] = entry
         if was_split:
             disambiguated.append(name)
-    return names, identities, disambiguated, dropped
+    return names, identities, disambiguated, dropped, sources
 
 
 # Major taxonomic groups with their iNaturalist taxon IDs
@@ -460,7 +471,9 @@ def fetch_species_list(
             place_id,
         )
 
-    names, identities, disambiguated, dropped = disambiguate_labels(records)
+    names, identities, disambiguated, dropped, _sources = disambiguate_labels(
+        records
+    )
     if disambiguated:
         log.info(
             "%d fetched prompts shared a common name with another taxon and "
@@ -743,38 +756,6 @@ def load_merged_labels(label_sets):
     return labels
 
 
-def _contributed(records, kept_names, kept_taxa, kept_keys, dropped_keys):
-    """Did this file back any class in the merged list?
-
-    A record with a source identity backs a class only if *its own taxon*
-    survived: a kept prompt says nothing, because a collision loser and
-    the winner that took its spelling carry the same string under
-    different taxa.
-
-    A record without one backs a class if it was not dropped — dropped
-    covers both an ``{"ambiguous": True}`` entry and a bare hand-authored
-    name in a group two source-backed files contested. A spelling that
-    merely lost a collision to another file's still counts: the species is
-    in the list either way, and the historical source list says so.
-    """
-    from keyword_normalization import keyword_match_key
-
-    for name, entry in records:
-        entry = entry or {}
-        taxon = _taxon_key(entry) if not entry.get("ambiguous") else None
-        if entry.get("scientific_name") and taxon:
-            if taxon in kept_taxa:
-                return True
-            continue
-        if keyword_match_key(name) in dropped_keys:
-            continue  # this prompt was dropped; it produced no class
-        if name in kept_names:
-            return True
-        if keyword_match_key(_base_name(name, entry)) in kept_keys:
-            return True
-    return False
-
-
 def load_label_set(path, meta=None):
     """One file's labels exactly as the classify job will see them.
 
@@ -806,7 +787,7 @@ def load_merged_labels_with_metas(label_sets):
     DELETE endpoint can retire a label file while the classify job is
     loading, so any two-pass check disagrees with reality.
     """
-    seen = set()
+    index_of = {}
     records = []
     read_sets = []
     for ls in label_sets:
@@ -822,23 +803,24 @@ def load_merged_labels_with_metas(label_sets):
             # consumed_metas reflects only files we actually read.
             log.warning("Label file vanished during read, skipping: %s", path)
             continue
-        own = []
+        own = set()
         for name in labels:
             entry = labels.identities.get(name)
-            own.append((name, entry))
             key = (name, json.dumps(entry, sort_keys=True))
-            if key in seen:
-                continue  # the same set listed twice contributes once
-            seen.add(key)
-            records.append((name, entry))
+            if key not in index_of:
+                # The same prompt in two sets is one record, referenced by
+                # both — so a duplicate still credits the file that holds it.
+                index_of[key] = len(records)
+                records.append((name, entry))
+            own.add(index_of[key])
         read_sets.append((ls, own))
     # ``disambiguate_labels`` groups by the ASCII-NOCASE key so case-only
     # variants collapse the same way SQLite's ``COLLATE NOCASE`` does,
     # keeps the source spelling of every group that names one taxon, and
     # splits the groups where two sources — or two entries of one source —
     # mean different species by the same name.
-    merged, merged_identities, disambiguated, dropped = disambiguate_labels(
-        records
+    merged, merged_identities, disambiguated, dropped, record_sources = (
+        disambiguate_labels(records)
     )
     if dropped:
         log.warning(
@@ -864,27 +846,20 @@ def load_merged_labels_with_metas(label_sets):
         seen_names.add(name)
         unique.append(name)
     kept = set(unique)
-    # A file every one of whose prompts was dropped backs no class, so it
-    # must not be named as a source: ``describe_label_source`` would credit
-    # it, ``labels_fingerprints`` would record it, and later deleting that
-    # useless file would make an otherwise unchanged merged run look stale.
-    from keyword_normalization import keyword_match_key
-
     kept_identities = {
         name: merged_identities[name] for name in kept if name in merged_identities
     }
-    kept_taxa = {_taxon_key(entry) for entry in kept_identities.values()}
-    kept_keys = {
-        keyword_match_key(_base_name(name, kept_identities.get(name)))
-        for name in kept
-    }
-    # Dropped prompts are always unattributed, so their group key is just
-    # the folded name — enough to tell a dropped record from an attributed
-    # one that happens to share the spelling.
-    dropped_keys = {keyword_match_key(name) for name in dropped}
+    # A file backs a class only if one of ITS records produced a prompt
+    # that survived. Anything less exact credits a file whose prompts were
+    # all dropped — and then ``describe_label_source`` names it,
+    # ``labels_fingerprints`` records it, and deleting that useless file
+    # later makes an otherwise unchanged merged run look stale.
+    backing = set()
+    for name in unique:
+        backing |= record_sources.get(name, set())
     consumed_metas = []
     for ls, own in read_sets:
-        if _contributed(own, kept, kept_taxa, kept_keys, dropped_keys):
+        if own & backing:
             consumed_metas.append(ls)
         else:
             log.warning(
