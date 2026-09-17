@@ -6748,7 +6748,8 @@ def stub_move(monkeypatch):
 
     def fake_move_folder(db, folder_id, destination, progress_cb=None,
                          developed_dir="", merge=False, remote=None,
-                         destination_name="", allow_tracked_merge=False):
+                         destination_name="", allow_tracked_merge=False,
+                         **_kwargs):
         calls.append({"folder_id": folder_id, "destination": destination,
                       "merge": merge, "remote": remote,
                       "allow_tracked_merge": allow_tracked_merge})
@@ -7086,7 +7087,8 @@ def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, mon
 
     def fake_move_folder(db, folder_id, destination, progress_cb=None,
                          developed_dir="", merge=False, remote=None,
-                         destination_name="", allow_tracked_merge=False):
+                         destination_name="", allow_tracked_merge=False,
+                         **_kwargs):
         first = not calls
         calls.append(folder_id)
         if first:
@@ -7168,7 +7170,8 @@ def test_chain_cancel_landing_between_lock_release_and_post_check(
 
     def fake_move_folder(db, folder_id, destination, progress_cb=None,
                          developed_dir="", merge=False, remote=None,
-                         destination_name="", allow_tracked_merge=False):
+                         destination_name="", allow_tracked_merge=False,
+                         **_kwargs):
         calls.append(folder_id)
         if len(calls) == 1:
             holder_running.set()
@@ -7253,7 +7256,8 @@ def test_chain_cancel_late_thread_skips_wait_loop_entirely(
 
     def fake_move_folder(db, folder_id, destination, progress_cb=None,
                          developed_dir="", merge=False, remote=None,
-                         destination_name="", allow_tracked_merge=False):
+                         destination_name="", allow_tracked_merge=False,
+                         **_kwargs):
         calls.append(folder_id)
         return {"moved": 1, "errors": []}
 

@@ -24638,6 +24638,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         remote=remote,
                         destination_name=destination_name,
                         allow_tracked_merge=allow_tracked_merge,
+                        thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
                         **({"verify_contents": True} if managed_staging_root and not remote else {}),
                         **({"pre_commit_check": check_mount} if check_mount else {}),
                     )

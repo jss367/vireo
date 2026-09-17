@@ -6410,3 +6410,71 @@ def test_a_symlinked_photo_row_is_never_restamped(tmp_path, monkeypatch):
     assert problem is None
     assert link_id not in [u[1] for u in updates]
     assert sorted(u[1] for u in updates) == sorted(ids.values())
+
+
+def test_restamped_photo_thumbnails_stay_fresh(tmp_path, monkeypatch):
+    """A cached thumbnail is touched to the corrected mtime.
+
+    ``generate_thumbnail`` pegs its output's file mtime to the source's
+    ``file_mtime`` so the endpoint's ``cached_mtime >= file_mtime`` check
+    treats it as fresh on the next request. Advancing ``file_mtime`` here
+    without touching the thumbnail would mark every cached thumbnail in the
+    moved folder stale, and the first fetch of each would regenerate it --
+    for pixels that describe the same unchanged bytes.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    thumb_files = {}
+    for name, pid in ids.items():
+        thumb_name = f"{pid}.jpg"
+        thumb = thumb_dir / thumb_name
+        thumb.write_bytes(b"\xff\xd8thumb")
+        os.utime(thumb, (1577880000, 1577880000))
+        db.conn.execute("UPDATE photos SET thumb_path = ? WHERE id = ?",
+                        (thumb_name, pid))
+        thumb_files[pid] = thumb
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst),
+                         thumb_cache_dir=str(thumb_dir))
+    assert result["errors"] == []
+
+    for pid, thumb in thumb_files.items():
+        fresh = db.conn.execute(
+            "SELECT file_mtime FROM photos WHERE id = ?",
+            (pid,)).fetchone()["file_mtime"]
+        assert fresh != 1577880000
+        # Freshness invariant: cached mtime >= source file_mtime.
+        assert os.path.getmtime(str(thumb)) >= fresh
+
+
+def test_thumbnail_touch_without_thumb_cache_dir_is_a_no_op(tmp_path, monkeypatch):
+    """Callers that don't pass ``thumb_cache_dir`` see the pre-fix behavior.
+
+    Not every caller has the thumbnail cache directory to hand, and a
+    missing one is not a reason to fail the move. The touch pass is
+    strictly opt-in, so leaving the argument off keeps the on-disk
+    thumbnails untouched -- the worst case is a one-shot regeneration on
+    next access, exactly what happens on ``main`` today.
+    """
+    from move import move_folder
+
+    db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    thumb = thumb_dir / f"{ids['a.jpg']}.jpg"
+    thumb.write_bytes(b"\xff\xd8thumb")
+    os.utime(thumb, (1577880000, 1577880000))
+    db.conn.execute("UPDATE photos SET thumb_path = ? WHERE id = ?",
+                    (thumb.name, ids["a.jpg"]))
+    db.conn.commit()
+
+    _lose_timestamps_in_transfer(monkeypatch)
+    result = move_folder(db=db, folder_id=fid, destination=str(dst))
+    assert result["errors"] == []
+    # No touch requested, so the thumbnail keeps its original mtime.
+    assert os.path.getmtime(str(thumb)) == 1577880000

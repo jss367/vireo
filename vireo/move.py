@@ -2591,7 +2591,7 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 merge=False, remote=None, reject_tracked_ancestor=False,
                 allow_tracked_merge=False, destination_name="", verify_contents=False,
-                pre_commit_check=None):
+                pre_commit_check=None, thumb_cache_dir=None):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name unless
@@ -2653,6 +2653,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             moves keep the default refusal. The result then carries ``merge``
             (the reconciliation counts) and ``merged_into_existing`` (the
             tracked archive path).
+        thumb_cache_dir: optional path to the thumbnail cache directory. When
+            a timestamp-losing transfer advances a row's ``file_mtime``, the
+            thumbnail endpoint's freshness invariant (``cached_mtime >=
+            file_mtime``) treats the existing cached thumbnail as stale and
+            regenerates on first access. If this is set, the corresponding
+            thumbnail files are ``os.utime``d alongside the DB update so the
+            already-correct pixels stay served without a regeneration.
 
     Returns dict with keys: moved (int), errors (list of str). When the
     catalog has already been repointed at the new destination but deleting
@@ -3312,6 +3319,39 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             "at %s -- the transfer did not carry their timestamps across",
             mtimes_refreshed, src_path, catalog_path,
         )
+        # The thumbnail endpoint gates cache freshness on ``cached_mtime >=
+        # photos.file_mtime``, and ``generate_thumbnail`` pegs a rendered
+        # thumbnail's file mtime to the source ``file_mtime`` it was made
+        # from. Advancing ``file_mtime`` alone would leave every cached
+        # thumbnail in the moved folder pinned below the new value: the next
+        # fetch would treat it as stale and regenerate, even though the
+        # pixels still describe the same unchanged bytes. Touch each
+        # thumbnail file to the corrected timestamp so the invariant
+        # continues to hold. Best-effort: a failure to touch is non-fatal --
+        # the worst case is a one-shot regeneration on next access, exactly
+        # the pre-fix behavior.
+        if thumb_cache_dir and mtime_updates:
+            photo_ids = [photo_id for _, photo_id, _, _ in mtime_updates]
+            fresh_by_id = {photo_id: fresh
+                           for fresh, photo_id, _, _ in mtime_updates}
+            placeholders = ",".join(["?"] * len(photo_ids))
+            thumb_rows = db.conn.execute(
+                f"SELECT id, thumb_path FROM photos"
+                f" WHERE id IN ({placeholders}) AND thumb_path IS NOT NULL",
+                photo_ids,
+            ).fetchall()
+            for row in thumb_rows:
+                fresh = fresh_by_id.get(row["id"])
+                if fresh is None:
+                    continue
+                thumb_file = os.path.join(thumb_cache_dir, row["thumb_path"])
+                try:
+                    os.utime(thumb_file, (fresh, fresh))
+                except OSError:
+                    log.debug(
+                        "Could not align thumbnail mtime for photo %s at %s",
+                        row["id"], thumb_file, exc_info=True,
+                    )
 
     # Rebase any developed-output subdirs nested under the configured
     # darktable_output_dir. `developed_folder_key` hashes the folder's
