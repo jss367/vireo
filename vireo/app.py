@@ -12109,6 +12109,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Available label sets: read each saved .txt and recompute fingerprint
         # so the inventory's identity matches what the classify job would use.
         label_sets = []
+        unusable_label_sets = []
         seen_paths = set()
         for ls in get_saved_labels():
             path = ls.get("labels_file", "")
@@ -12119,8 +12120,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 species = load_label_set(path, ls)
             except OSError:
                 continue
+            name = ls.get("name") or os.path.splitext(os.path.basename(path))[0]
+            if not species:
+                # ``compute_fingerprint([])`` is the ToL sentinel, so an
+                # empty set would claim Tree of Life's row: its counts
+                # would be double-billed under the set's own name, and a
+                # non-ToL model would show an impossible regional pair.
+                # It classifies nothing — name it as unusable instead.
+                unusable_label_sets.append({
+                    "name": name,
+                    "filename": os.path.basename(path),
+                    "skipped": len(getattr(species, "dropped_ambiguous", ())),
+                })
+                continue
             label_sets.append({
-                "name": ls.get("name") or os.path.splitext(os.path.basename(path))[0],
+                "name": name,
                 "path": path,
                 "filename": os.path.basename(path),
                 "fingerprint": compute_fingerprint(species),
@@ -12292,6 +12306,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "total_photos": db.count_photos(),
             "models": models_out,
             "stale": stale,
+            # Saved sets that produce no usable prompt at all, so they have
+            # no inventory row of their own. Named rather than dropped in
+            # silence (CORE_PHILOSOPHY: no black boxes).
+            "unusable_label_sets": unusable_label_sets,
             "grand_total": {
                 "classified_dets": grand_classified_all,
                 "pending_dets": grand_pending,

@@ -860,6 +860,17 @@ function renderClassificationInventory(data) {
     '</tr>';
   html += '</tbody></table>';
 
+  // Label sets that classify nothing at all: no row of their own above,
+  // so say why rather than leaving the user to notice one is missing.
+  if (data.unusable_label_sets && data.unusable_label_sets.length > 0) {
+    data.unusable_label_sets.forEach(function(u) {
+      html += '<div style="margin-top:10px;font-size:12px;color:var(--warning,#d08700);">' +
+        escapeHtml(u.name) + ': no usable species' +
+        (u.skipped ? ' — all ' + u.skipped + ' names are shared by several species' : '') +
+        '. Download the list again in Settings → Labels to split them by scientific name.</div>';
+    });
+  }
+
   // Stale section
   if (data.stale && data.stale.length > 0) {
     html += '<details class="stale-section"><summary>' +
