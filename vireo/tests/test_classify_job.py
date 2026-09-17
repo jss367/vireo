@@ -168,6 +168,40 @@ def test_load_labels_raises_when_tol_artifacts_missing(tmp_path):
             )
 
 
+def test_load_labels_refuses_a_set_whose_every_name_is_ambiguous(tmp_path):
+    """Regression: an all-dropped list must not read as "no labels".
+
+    Falling through would silently classify against Tree of Life (all
+    species) for a user who selected one region."""
+    import json as _json
+    from unittest.mock import patch
+
+    import labels as labels_mod
+    from classify_job import _load_labels
+
+    names = ["Honey Mushroom", "Shaggy Parasol"]
+    labels_file = tmp_path / "all-ambiguous.txt"
+    labels_file.write_text("".join(name + "\n" for name in names))
+    (tmp_path / "all-ambiguous.json").write_text(_json.dumps({
+        "name": "All ambiguous",
+        "labels_file": str(labels_file),
+        "label_identities": {name: {"ambiguous": True} for name in names},
+        "labels_text_sha256": labels_mod._text_identity(names),
+    }))
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
+
+    with patch("classify_job.get_saved_labels", return_value=[]):
+        with pytest.raises(RuntimeError, match="shared by more than one"):
+            _load_labels(
+                model_type="bioclip",
+                model_str="hf-hub:imageomics/bioclip",
+                labels_file=str(labels_file),
+                labels_files=None,
+                model_dir=str(tmp_path),
+            )
+
+
 def test_load_labels_timm_skips():
     """Phase 2: timm models skip label loading entirely."""
     from classify_job import _load_labels

@@ -211,6 +211,19 @@ def _load_labels(
     else:
         log.info("Classification config: model=%s, no labels selected", model_str)
 
+    # A selected list whose every prompt was dropped as ambiguous is not
+    # "no labels selected": falling through would silently classify the
+    # whole catalog against Tree of Life (all species) when the user asked
+    # for one region. Say what happened and how to fix it instead.
+    if labels is not None and not labels and getattr(labels, "dropped_ambiguous", ()):
+        raise RuntimeError(
+            f"Every name in the selected species list "
+            f"({len(labels.dropped_ambiguous):,}) is shared by more than one "
+            f"species, so none of them can identify a taxon. Go to Settings → "
+            f"Labels and download the list again to split them by scientific "
+            f"name."
+        )
+
     from models import supports_tree_of_life, tree_of_life_ready
 
     use_tol = False
