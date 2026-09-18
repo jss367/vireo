@@ -565,12 +565,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .lb-zoom-stop-fit { left: 0; }
 .lb-zoom-stop-native { display: none; transform: translateX(-50%); }
 .lb-zoom-max-label {
-  position: absolute;
   right: 0;
-  bottom: 0;
-  color: rgba(244,247,248,0.52);
-  font-size: 10px;
-  line-height: 1;
 }
 .lightbox-flag-status {
   position: absolute;
@@ -3971,7 +3966,8 @@ async function createWorkspace() {
                   onclick="setLightboxZoomToFit();">Fit</button>
           <button type="button" class="lb-zoom-stop lb-zoom-stop-native" id="lightboxZoomNativeStop"
                   onclick="setLightboxZoomToOneToOne();">1:1</button>
-          <span class="lb-zoom-max-label" id="lightboxZoomMaxLabel">400%</span>
+          <button type="button" class="lb-zoom-stop lb-zoom-max-label" id="lightboxZoomMaxLabel"
+                  onclick="setLightboxZoomFromSlider(1000);">400%</button>
         </div>
         <button type="button" class="lb-zoom-step" id="lightboxZoomIn"
                 onclick="stepLightboxZoom(1);" aria-label="Zoom in" title="Zoom in (+)">+</button>
@@ -8489,7 +8485,10 @@ function _lbUpdateZoomControl() {
     nativeStop.style.display = (_lbNativeZoom && !combinedFitNative) ? 'inline-block' : 'none';
     nativeStop.style.left = Math.max(8, nativePosition) + '%';
   }
-  if (maxLabel) maxLabel.textContent = _lbNativeZoom ? '400%' : '4\u00d7 Fit';
+  if (maxLabel) {
+    maxLabel.textContent = _lbNativeZoom ? '400%' : '4\u00d7 Fit';
+    maxLabel.disabled = !!_lbVisualTransitionPending;
+  }
 }
 
 function _lbSetZoomPopoverOpen(open) {
