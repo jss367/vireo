@@ -25,12 +25,15 @@ def distance_meters(first, second):
     return 6371000 * 2 * math.asin(math.sqrt(min(1, max(0, haversine))))
 
 
-def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=False):
+def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=False, *, sidecar_reader=None):
     """Compare original photo GPS with the same assigned place used by sync.
 
     Callers authorize the entire selection first. Only discrepant photos need
     a sidecar read. An existing correction is resolved only when it actually
     exists on disk, never merely because a sync was queued or attempted.
+    A cached ``sidecar_reader`` lets callers revalidate database evidence
+    under a writer lock without filesystem I/O; None means the path was
+    not in that snapshot and must be reviewed again.
     """
     result = []
     for offset in range(0, len(photo_ids), 400):
@@ -67,7 +70,9 @@ def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=Fa
             if distance <= minimum_distance_m:
                 continue
             sidecar_path = os.path.join(row["folder_path"], os.path.splitext(row["filename"])[0] + '.xmp')
-            metadata = read_sync_preview_metadata(sidecar_path)
+            metadata = (sidecar_reader or read_sync_preview_metadata)(sidecar_path)
+            if metadata is None:
+                continue
             override = metadata.get("location")
             if override and has_usable_coordinates(override) and distance_meters(override, assigned) < 1:
                 continue

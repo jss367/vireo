@@ -363,3 +363,39 @@ def test_sidecar_change_invalidates_preview(discrepancy_catalog):
     write_gps_location(sidecar, 33, -117)
     assert resolve(client, photos, 'assigned').status_code == 409
     assert db.get_pending_changes() == []
+
+
+@pytest.mark.parametrize('change', ['unrelated', 'coordinates', 'assignment', 'path'])
+def test_sidecar_reads_allow_writers_and_revalidate_database(discrepancy_catalog, monkeypatch, change):
+    import app as app_module
+    import location_review
+    from xmp import read_sync_preview_metadata
+
+    client, db, _, keyword, _ = discrepancy_catalog
+    photos = discrepancy_preview(client)[:1]
+    photo_id = photos[0]['id']
+    db.conn.execute('PRAGMA busy_timeout=20')
+    calls = []
+
+    def concurrent_edit(path):
+        calls.append(path)
+        metadata = read_sync_preview_metadata(path)
+        # This is a separate connection from the request's Database. It
+        # would time out if sidecar I/O still held the request's writer lock.
+        if change == 'unrelated':
+            db.conn.execute('UPDATE photos SET rating=4 WHERE id=?', (photo_id,))
+        elif change == 'coordinates':
+            db.conn.execute('UPDATE photos SET latitude=33 WHERE id=?', (photo_id,))
+        elif change == 'assignment':
+            db.conn.execute('UPDATE keywords SET latitude=33 WHERE id=?', (keyword,))
+        else:
+            db.conn.execute("UPDATE photos SET filename='moved.jpg' WHERE id=?", (photo_id,))
+        db.conn.commit()
+        return metadata
+
+    monkeypatch.setattr(app_module, 'read_sync_preview_metadata', concurrent_edit)
+    monkeypatch.setattr(location_review, 'read_sync_preview_metadata', concurrent_edit)
+    response = resolve(client, photos, 'assigned')
+    assert response.status_code == (200 if change == 'unrelated' else 409)
+    assert len(calls) == 1  # The locked revalidation must use cached sidecar evidence.
+    assert len(db.get_pending_changes()) == (1 if change == 'unrelated' else 0)

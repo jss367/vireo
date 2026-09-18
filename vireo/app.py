@@ -8552,6 +8552,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(fingerprints, dict):
             return json_error("Preview fingerprints are required", 400)
         db = _get_db()
+        # Network sidecars can take longer than SQLite's busy timeout. Read
+        # them before taking the writer lock, after authorizing the selection.
+        for photo_id in photo_ids:
+            error = _photo_location_edit_error(db, photo_id)
+            if error is not None:
+                return error
+        sidecars = {}
+
+        def capture_sidecar(path):
+            if path not in sidecars:
+                sidecars[path] = read_sync_preview_metadata(path)
+            return sidecars[path]
+
+        location_review.gps_discrepancies(
+            db, photo_ids, 0, include_reviewed=True, sidecar_reader=capture_sidecar,
+        )
         # Serialize validation and queueing with concurrent assignment edits.
         db.conn.execute("BEGIN IMMEDIATE")
         try:
@@ -8560,7 +8576,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if error is not None:
                     db.conn.rollback()
                     return error
-            photos = location_review.gps_discrepancies(db, photo_ids, 0, include_reviewed=True)
+            photos = location_review.gps_discrepancies(
+                db, photo_ids, 0, include_reviewed=True, sidecar_reader=sidecars.get,
+            )
             current = {photo["id"]: photo for photo in photos}
             if any(pid not in current or fingerprints.get(str(pid)) != current[pid]["fingerprint"] for pid in photo_ids):
                 db.conn.rollback()
