@@ -112,27 +112,45 @@ def _turn_off(page, action):
         page.click('.vf-done')
 
 
-def _expect_reset_query(page):
-    """Wait for the next grid *reset* query, ignoring lazy pagination.
+def _is_reset_query(request):
+    """Is this a grid reload that starts a fresh window, not a lazy page?
 
     Scrolling or clicking a card can bring the infinite-scroll sentinel inside
     its 3200px root margin, so the next lazy page can start between the action
     under test and the reload it triggers. That request carries neither the new
-    scope nor an anchor, so a plain ``expect_request('**/api/photos/query')``
-    asserts against whichever of the two the browser happened to send first —
-    a race the release gate lost, failing v0.56.0 with ``KeyError: 'folder_id'``
-    while every local run passed.
+    scope nor an anchor, so a test that reads whichever ``/api/photos/query``
+    arrived first is asserting against a coin flip — a race the release gate
+    lost, failing v0.56.0 with ``KeyError: 'folder_id'`` while every local run
+    passed.
 
     ``resetAndLoad`` rewinds ``currentPage`` to 1 and ``loadPhotos`` derives the
     requested page from it, so ``page == 1`` is exactly "a reload that starts a
-    fresh window" and never a lazy continuation. (``_check_turning_off`` needs
-    no such guard: it finishes the lazy loading before acting, so nothing can
-    page in behind it.)
+    fresh window" and can never be a lazy continuation. Popover counters
+    (``per_page: 1``, no ``page``) drop out for the same reason.
     """
-    return page.expect_request(
-        lambda request: request.url.endswith('/api/photos/query')
-        and (request.post_data_json or {}).get('page') == 1
-    )
+    return (request.url.endswith('/api/photos/query')
+            and (request.post_data_json or {}).get('page') == 1)
+
+
+def _expect_reset_query(page):
+    """Wait for the next reset query, ignoring lazy pagination."""
+    return page.expect_request(_is_reset_query)
+
+
+def _collect_reset_queries(page):
+    """Record every reset query's body, ignoring lazy pagination.
+
+    The listener form of :func:`_expect_reset_query`, for tests that assert on
+    the first reload *after* waiting for the grid to settle.
+    """
+    bodies = []
+
+    def record(request):
+        if _is_reset_query(request):
+            bodies.append(request.post_data_json)
+
+    page.on("request", record)
+    return bodies
 
 
 @pytest.mark.parametrize("action", ACTIONS)
@@ -152,9 +170,7 @@ def _check_turning_off(page, live_server, action, selected, photo_link=False):
         "captureSelectedPhotoAnchor()" if selected else "captureBrowseViewportAnchor()"
     )
     assert page.evaluate("gridContainer.scrollTop") > 500
-    queries = []
-    page.on("request", lambda request: queries.append(request.post_data_json)
-            if request.url.endswith('/api/photos/query') else None)
+    queries = _collect_reset_queries(page)
     _turn_off(page, action)
     # Photo links scope Browse to the target's folder (the other two seed
     # photos live elsewhere); removing a filter must preserve that scope.
@@ -258,7 +274,7 @@ def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, 
         "captureSelectedPhotoAnchor()" if selected else "captureBrowseViewportAnchor()"
     )
     page.click('.vf-filters-btn')
-    with page.expect_request('**/api/photos/query') as query:
+    with _expect_reset_query(page) as query:
         if control == "text":
             page.fill('.vf-rule-tree [data-action="multi-text"]', remaining)
         else:
