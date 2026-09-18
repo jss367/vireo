@@ -8066,7 +8066,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
     def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None, _commit=True):
-        """Queue a keyword removal unless it cancels a pending add."""
+        """Cancel a pending add, retaining removal work for merged import paths."""
         # See _queue_keyword_add: keep the cancellation lookup in the same
         # normalized form queue_change stores.
         keyword_name = normalize_keyword_display(keyword_name)
@@ -8077,7 +8077,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo_id, "keyword_add", keyword_name,
             workspace_id=workspace_id, _commit=_commit,
         )
-        if removed == 0:
+        # An add queued by a merge can represent a tag already present under
+        # an imported path. Canceling that add alone cannot remove the old
+        # hierarchy, including a same-name leaf under a different parent.
+        has_import_paths = removed and db.conn.execute(
+            'SELECT 1 FROM keyword_import_aliases a JOIN keywords k ON k.id = a.keyword_id '
+            'WHERE k.name = ? LIMIT 1', (keyword_name,),
+        ).fetchone()
+        if removed == 0 or has_import_paths:
             db.queue_change(
                 photo_id, "keyword_remove", keyword_name,
                 workspace_id=workspace_id, _commit=_commit,

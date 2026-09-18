@@ -71,6 +71,25 @@ def resolve_import_path(db, parts, *, kw_type=None, linked_locations_only=False)
     return row['keyword_id'] if row else None
 
 
+def filter_removed_import_aliases(db, flat_keywords, hierarchical_keywords,
+                                 flat_removals, hierarchical_removals):
+    """Do not restore a removed tag through an old, still-unsynced alias."""
+    if not flat_removals and not hierarchical_removals:
+        return flat_keywords, hierarchical_keywords
+    aliases = {
+        row['path_key']: keyword_match_key(row['name'])
+        for row in db.conn.execute(
+            'SELECT a.path_key, k.name FROM keyword_import_aliases a '
+            'JOIN keywords k ON k.id = a.keyword_id'
+        )
+    }
+    return (
+        [name for name in flat_keywords if aliases.get(path_key([name])) not in flat_removals],
+        [path for path in hierarchical_keywords
+         if aliases.get(path_key(path.split('|'))) not in hierarchical_removals],
+    )
+
+
 def validate_import_locations(db, photo_id, flat_keywords, hierarchical_keywords, *, additive=True):
     """Reject conflicting confirmed locations before an import changes tags.
 

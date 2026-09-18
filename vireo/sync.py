@@ -9,7 +9,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from db import KEYWORD_SOURCE_UNKNOWN
-from keyword_identity import keyword_paths, resolve_import_path, validate_import_locations
+from keyword_identity import (
+    filter_removed_import_aliases,
+    keyword_paths,
+    resolve_import_path,
+    validate_import_locations,
+)
 from keyword_normalization import keyword_match_key
 from xmp import SidecarEditor, read_hierarchical_keywords, read_keywords
 
@@ -361,7 +366,8 @@ def _sync_result(synced, failures):
 
 def _plan_merged_keyword_hierarchies(db, plans):
     """Canonicalize reviewed paths when their retained keyword is added/removed."""
-    if not any(plan.keywords_to_add or plan.keywords_to_remove for plan in plans.values()):
+    if not any(plan.keywords_to_add or plan.keywords_to_remove or plan.keywords_to_remove_flat
+               for plan in plans.values()):
         return
     aliases = db.conn.execute(
         'SELECT a.path_json, k.id, k.name FROM keyword_import_aliases a '
@@ -371,12 +377,20 @@ def _plan_merged_keyword_hierarchies(db, plans):
         return
     paths = keyword_paths(db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall())
     aliases_by_key = defaultdict(list)
+    targets_by_source_key = defaultdict(set)
     for alias in aliases:
-        aliases_by_key[keyword_match_key(alias['name'])].append(alias)
+        name = keyword_match_key(alias['name'])
+        aliases_by_key[name].append(alias)
+        source_name = keyword_match_key(json.loads(alias['path_json'])[-1])
+        if source_name != name:
+            targets_by_source_key[source_name].add(name)
     for photo_id, plan in plans.items():
         adds = {keyword_match_key(name) for name in plan.keywords_to_add}
         removes = {keyword_match_key(name) for name in plan.keywords_to_remove}
+        flat_removes = {keyword_match_key(name) for name in plan.keywords_to_remove_flat}
         relevant = (adds | removes) & aliases_by_key.keys()
+        for source_name in flat_removes:
+            relevant.update(targets_by_source_key[source_name])
         if not relevant:
             continue
         tagged = db.get_photo_keywords(photo_id)
@@ -386,12 +400,19 @@ def _plan_merged_keyword_hierarchies(db, plans):
             for alias in aliases_by_key[name]:
                 old_path = json.loads(alias['path_json'])
                 old_hierarchy = '|'.join(old_path)
-                if name in adds and alias['id'] in tagged_ids:
+                source_name = keyword_match_key(old_path[-1])
+                source_cleanup = source_name != name and source_name in flat_removes
+                if (name in adds or source_cleanup) and alias['id'] in tagged_ids:
                     new_path = paths[alias['id']]
                     plan.hierarchy_replacements[old_hierarchy] = '|'.join(new_path)
+                    # A source cleanup can be synced on its own, or remain
+                    # after the remove route cancels the retained add. Use
+                    # the current association to distinguish those cases.
+                    if name not in flat_removes:
+                        plan.keywords_to_add.add(alias['name'])
                     if len(new_path) > 1:
                         plan.hierarchies_to_add.add('|'.join(new_path))
-                elif name in removes and alias['id'] not in tagged_ids:
+                elif (name in removes or source_cleanup) and alias['id'] not in tagged_ids:
                     # A removal may be synchronized before the earlier merge
                     # addition, so the sidecar can still contain an old alias.
                     plan.hierarchy_replacements[old_hierarchy] = None
@@ -728,6 +749,10 @@ def sync_from_xmp(db, photo_ids):
             pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
                 photo_id, hierarchical=True,
             )
+            xmp_keywords, imported_hierarchies = filter_removed_import_aliases(
+                db, xmp_keywords, read_hierarchical_keywords(xmp_path),
+                pending_removals, pending_hierarchical_removals,
+            )
             pending_flat_only_removals = (
                 pending_removals - pending_hierarchical_removals
             )
@@ -748,7 +773,7 @@ def sync_from_xmp(db, photo_ids):
             # during the removal pass as well as the add pass.
             aliases_by_key = defaultdict(set)
             hierarchical_keywords = [
-                hierarchy for hierarchy in read_hierarchical_keywords(xmp_path)
+                hierarchy for hierarchy in imported_hierarchies
                 if not any(keyword_match_key(part) in pending_hierarchical_removals
                            for part in hierarchy.split('|'))
             ]

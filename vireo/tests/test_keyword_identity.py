@@ -740,3 +740,53 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
     _import_keywords_for_photo(db, photos[0], sidecar)
     sync_from_xmp(db, [photos[0]])
     assert {k['id'] for k in db.get_photo_keywords(photos[0])} == {unrelated}
+
+
+@pytest.mark.parametrize('cancel_add', [False, True])
+@pytest.mark.parametrize('same_name', [False, True])
+def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_db, tmp_path, cancel_add, same_name):
+    from PIL import Image
+    from scanner import _import_keywords_for_photo
+    from sync import sync_from_xmp, sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    app, db = app_and_db
+    client = app.test_client()
+    directory = tmp_path / 'merge-photo'
+    directory.mkdir()
+    Image.new('RGB', (2, 2)).save(directory / 'photo.jpg')
+    folder = db.add_folder(str(directory), name='Merge photo')
+    db.add_workspace_folder(db._ws_id(), folder)
+    photo = db.add_photo(folder_id=folder, filename='photo.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    old_parent = db.add_keyword('Old parent')
+    new_parent = db.add_keyword('New parent')
+    source = db.add_keyword('Old leaf', parent_id=old_parent)
+    target_name = 'Old leaf' if same_name else 'New leaf'
+    target = db.add_keyword(target_name, parent_id=new_parent)
+    db.tag_photo(photo, source)
+    db.tag_photo(1, target)
+    sidecar = str(directory / 'photo.xmp')
+    write_sidecar(sidecar, {'Old leaf'}, {'Old parent|Old leaf'})
+    body = {'keyword_ids': [source, target], 'target_id': target}
+    response = client.post('/api/keywords/merge-preview', json=body)
+    assert response.status_code == 200
+    body['preview_token'] = response.get_json()['preview_token']
+    assert client.post('/api/keywords/merge', json=body).status_code == 200
+    if cancel_add:
+        assert client.delete(f'/api/photos/{photo}/keywords/{target}').status_code == 200
+        # A background scan or an explicit sidecar read can happen before
+        # pending edits are written; aliases must respect that removal too.
+        _import_keywords_for_photo(db, photo, sidecar)
+        sync_from_xmp(db, [photo])
+        assert not db.get_photo_keywords(photo)
+    pending = [dict(r) for r in db.get_pending_changes() if r['photo_id'] == photo]
+    if cancel_add:
+        assert not any(r['change_type'] == 'keyword_add' for r in pending)
+        assert any(r['change_type'] == 'keyword_remove' and r['value'] == target_name for r in pending)
+    cleanup = [r['id'] for r in pending if r['change_type'] == 'keyword_remove_flat'] or [r['id'] for r in pending]
+    assert sync_to_xmp(db, change_ids=cleanup)['failed'] == 0
+    assert read_keywords(sidecar) == (set() if cancel_add else {target_name})
+    assert set(read_hierarchical_keywords(sidecar)) == (set() if cancel_add else {'New parent|' + target_name})
+    _import_keywords_for_photo(db, photo, sidecar)
+    sync_from_xmp(db, [photo])
+    assert {k['id'] for k in db.get_photo_keywords(photo)} == (set() if cancel_add else {target})

@@ -32,7 +32,7 @@ from image_loader import (
     safe_iter_dir,
     safe_scan_walk,
 )
-from keyword_identity import validate_import_locations
+from keyword_identity import filter_removed_import_aliases, validate_import_locations
 from keyword_normalization import keyword_match_key
 from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns, extract_metadata
 from PIL import Image
@@ -287,6 +287,9 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     pending_flat_removals = db.get_pending_keyword_removal_keys(photo_id)
     pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
         photo_id, hierarchical=True,
+    )
+    flat_keywords, hier_keywords = filter_removed_import_aliases(
+        db, flat_keywords, hier_keywords, pending_flat_removals, pending_hierarchical_removals,
     )
     validate_import_locations(
         db, photo_id,
