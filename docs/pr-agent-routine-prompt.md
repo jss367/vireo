@@ -218,7 +218,11 @@ signal; do not limit the work to the triggering payload.
    round's new baseline anchor, apply only what they authorized, and do not
    re-fire the checkpoint against the pre-authorization staged diff. A reply
    that only says "carry on" without naming a scope is not authorization;
-   ask what scope to apply.
+   ask what scope to apply. Repeat the live state/head check from Common
+   Setup immediately before posting the drift comment: edits and validation
+   can span long enough for the PR to close or its head to advance, and a
+   drift alert on a stale or closed PR is a user-visible untruth. Skip the
+   comment silently if either check fails.
 10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
     the push. Commit once with a descriptive subject and include
     `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
@@ -246,12 +250,19 @@ signal; do not limit the work to the triggering payload.
    - `pytest` failures — fix the code or the test
    - `ruff` lint errors — fix style/imports
    - Missing test coverage below threshold — add targeted tests
-4. Rerun validation as described above.
-5. Commit with subject `fix: resolve CI failures on PR #$PR` and include the
+4. Rerun validation as described above. Stage the fix but do not commit yet.
+5. Apply the size-drift checkpoint from step 9 of the reconciliation flow
+   against the cumulative PR diff this fix would produce. A CI-repair round
+   is another automated round on the same PR — a workaround for a failing
+   test can push the total past the threshold in one step, and a later
+   reconciliation noticing the growth after the push has already spent it.
+   If the checkpoint fires here, reset, post the drift comment (after
+   rechecking live state), and stop instead of committing.
+6. Commit with subject `fix: resolve CI failures on PR #$PR` and include the
    marker `[pr-agent-fix-ci:$PR]` in the commit body, then push. The GitHub
    workflow uses that marker to avoid repeated automated retries if the fix
    still fails CI.
-6. If you cannot resolve everything, post a PR comment explaining what is
+7. If you cannot resolve everything, post a PR comment explaining what is
    left instead of pushing a half-fix:
    ```bash
    gh pr comment "$PR" --body "CI fix attempted but could not resolve all failures. Manual intervention needed. <!-- pr-agent-generated -->"
