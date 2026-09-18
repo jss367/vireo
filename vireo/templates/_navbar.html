@@ -3980,6 +3980,7 @@ async function createWorkspace() {
     <div class="lightbox-transform" id="lightboxTransform">
       <img id="lightboxImg" src="" alt="">
       <canvas id="lightboxToneCanvas" class="lb-tone-canvas" aria-hidden="true"></canvas>
+      <img id="lightboxAdjustmentImage" class="lb-tone-canvas" alt="" aria-hidden="true">
       <img id="lightboxMaskOverlay" class="lb-mask-overlay" src="" alt="">
       <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
       <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
@@ -4288,8 +4289,17 @@ function _lbApplyReadOnlyState() {
     button.disabled = _lbReadOnly;
     button.title = _lbReadOnly ? _lbReadOnlyMessage : entry[1];
   });
+  var adjustmentHint = _lbAdjustmentSourceHint();
+  var adjustmentButton = document.getElementById('lightboxAdjustBtn');
+  if (adjustmentButton && adjustmentHint && !_lbReadOnly) {
+    adjustmentButton.disabled = true;
+    adjustmentButton.title = adjustmentHint;
+  }
   var panel = document.getElementById('lightboxAdjustPanel');
-  if (_lbReadOnly && panel) panel.classList.remove('open');
+  if ((_lbReadOnly || adjustmentHint) && panel) {
+    panel.classList.remove('open');
+    if (adjustmentButton) adjustmentButton.setAttribute('aria-expanded', 'false');
+  }
   var editButton = document.getElementById('lightboxEditPhoto');
   if (editButton) {
     var editHint = _lbReadOnly
@@ -4634,7 +4644,9 @@ document.addEventListener('lightbox:flagchanged', async function(event) {
 
 var _lbEditRecipe = null;
 var _lbEditRecipeLoaded = false;
-var _lbRenderedAdjustmentValues = null;
+var _lbAdjustmentSource = null;
+var _lbAdjustmentPreviewSeq = 0;
+var _lbAdjustmentPreviewTimer = null;
 var _lbAdjustSaveTimer = null;
 var _lbAdjustSeq = 0;
 var _lbAdjustmentInputSeq = 0;
@@ -4785,6 +4797,9 @@ window.vireoUpdatePairSourceControls = function(photoId) {
     lightboxControl.style.display = paired ? '' : 'none';
     lightboxControl.textContent = text;
     lightboxControl.disabled = !!pending;
+    _lbApplyReadOnlyState();
+    _lbSetAdjustmentControlsDisabled(!_lbEditRecipeLoaded);
+    if (_lbAdjustmentSourceHint()) _lbClearAdjustmentPreview();
   }
   var detailControl = document.getElementById('detailSourceControl');
   if (detailControl && String(window._detailPhotoId) === key) {
@@ -4858,7 +4873,14 @@ function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
   );
   delete _vireoPairPendingSourceByPhoto[key];
   window.vireoUpdatePairSourceControls(photoId);
-  if (anchorStillCurrent && oldSrc) _vireoSetRenderedImageSource(anchor, oldSrc);
+  if (anchorStillCurrent && oldSrc) {
+    // A RAW edit may have finished saving while the target was loading.
+    // Restore the selected source with its current recipe/render version,
+    // rather than the stale URL captured before that save.
+    _vireoSetRenderedImageSource(anchor, window.vireoRenderedUrl(
+      _vireoBaseRenderedUrl(oldSrc), photoId
+    ));
+  }
   if (anchorStillCurrent && typeof showToast === 'function') {
     showToast('Could not load the ' + requested.toUpperCase() + ' source', 'error');
   }
@@ -4905,6 +4927,8 @@ window.vireoTogglePairSource = function(photoId) {
   var requested = _vireoPairSourceByPhoto[key] === 'raw'
     ? 'jpeg'
     : 'raw';
+  // Commit input made on the RAW before source switching disables controls.
+  if (String(_lightboxCurrentId) === key) _lbFlushPendingAdjustmentSave();
   var anchor = _vireoPairAnchorImage(photoId);
   var oldSrc = anchor ? _vireoRenderedImageSource(anchor) : '';
   var base = oldSrc ? _vireoBaseRenderedUrl(oldSrc) : '/thumbnails/' + key + '.jpg';
@@ -5144,7 +5168,7 @@ window.vireoPhotoEditRecipe = function(photoId) {
   return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(photoId)]);
 };
 
-function _lbRememberEditRecipe(photoId, recipe) {
+function _lbRememberEditRecipe(photoId, recipe, preserveAdjustmentInput) {
   if (photoId == null) return;
   var numericId = Number(photoId);
   var storedRecipe = _lbCloneEditRecipe(recipe);
@@ -5155,11 +5179,12 @@ function _lbRememberEditRecipe(photoId, recipe) {
   if (p) p.edit_recipe = currentRecipe;
   if (_lightboxCurrentId === numericId) {
     _lbCurrentEditRecipe = currentRecipe;
-    _lbEditRecipe = _lbCloneRecipe(storedRecipe);
-    _lbEditRecipeLoaded = true;
-    _lbRenderedAdjustmentValues = _lbAdjustmentValues(_lbEditRecipe);
-    _lbRenderAdjustmentControls();
-    _lbSetAdjustmentControlsDisabled(false);
+    if (!preserveAdjustmentInput) {
+      _lbEditRecipe = _lbCloneRecipe(storedRecipe);
+      _lbEditRecipeLoaded = true;
+      _lbRenderAdjustmentControls();
+      _lbSetAdjustmentControlsDisabled(false);
+    }
   }
   _lbApplyEditButtonState();
 }
@@ -5356,6 +5381,7 @@ function _lbSetEditBusy(busy) {
 
 function _lbReloadCurrentRenderAfterEdit(photoId) {
   if (_lightboxCurrentId !== photoId) return;
+  _lbClearAdjustmentPreview();
   _lbCancelOriginalPreload();
   var img = document.getElementById('lightboxImg');
   var wrap = document.getElementById('lightboxWrap');
@@ -5560,7 +5586,7 @@ function _lbSetAdjustmentControl(id, value) {
 }
 
 function _lbSetAdjustmentControlsDisabled(disabled) {
-  disabled = !!disabled || _lbReadOnly;
+  disabled = !!disabled || _lbReadOnly || !!_lbAdjustmentSourceHint();
   [
     'lbAdjExposure',
     'lbAdjHighlights',
@@ -5576,6 +5602,28 @@ function _lbSetAdjustmentControlsDisabled(disabled) {
     var input = document.getElementById(id);
     if (input) input.disabled = !!disabled;
   });
+  var reset = document.querySelector('#lightboxAdjustPanel .lb-adjust-reset');
+  if (reset) reset.disabled = !!disabled;
+}
+
+function _lbAdjustmentSourceHint() {
+  if (_lightboxCurrentId == null) return '';
+  if (_vireoPairPendingSourceByPhoto[String(_lightboxCurrentId)]) {
+    return 'Wait for the photo source to finish loading';
+  }
+  // A developed companion JPEG is displayed as-authored; recipes belong to
+  // the primary RAW and may use entirely different image coordinates.
+  return _vireoPairSource(_lightboxCurrentId) === 'jpeg'
+    ? 'Switch to RAW to use quick adjustments'
+    : '';
+}
+
+function _lbGuardAdjustmentSource() {
+  if (_lbGuardReadOnly()) return true;
+  var hint = _lbAdjustmentSourceHint();
+  if (!hint) return false;
+  if (typeof showToast === 'function') showToast(hint, 'warning');
+  return true;
 }
 
 function _lbRenderAdjustmentControls() {
@@ -5649,104 +5697,8 @@ function _lbWhiteBalanceGains(temperature, tint) {
   };
 }
 
-// Lazily build the SVG filter used to apply white-balance gains in the preview.
-// color-interpolation-filters="sRGB" matches PIL, which scales raw sRGB bytes
-// rather than linear-light values.
-function _lbEnsureWbFilter() {
-  if (document.getElementById('lbWbFilterFuncR')) return;
-  var ns = 'http://www.w3.org/2000/svg';
-  var svg = document.createElementNS(ns, 'svg');
-  svg.setAttribute('width', '0');
-  svg.setAttribute('height', '0');
-  svg.setAttribute('aria-hidden', 'true');
-  svg.style.position = 'absolute';
-  svg.style.pointerEvents = 'none';
-  var filter = document.createElementNS(ns, 'filter');
-  filter.setAttribute('id', 'lbWbFilter');
-  filter.setAttribute('color-interpolation-filters', 'sRGB');
-  var fct = document.createElementNS(ns, 'feComponentTransfer');
-  ['R', 'G', 'B'].forEach(function(ch) {
-    var f = document.createElementNS(ns, 'feFunc' + ch);
-    f.setAttribute('id', 'lbWbFilterFunc' + ch);
-    f.setAttribute('type', 'linear');
-    f.setAttribute('slope', '1');
-    f.setAttribute('intercept', '0');
-    fct.appendChild(f);
-  });
-  filter.appendChild(fct);
-  svg.appendChild(filter);
-  document.body.appendChild(svg);
-}
-
-function _lbSetWbSlope(channel, slope) {
-  var f = document.getElementById('lbWbFilterFunc' + channel);
-  if (f) f.setAttribute('slope', slope.toFixed(4));
-}
-
-function _lbApplyAdjustmentPreviewCss(values) {
-  var img = document.getElementById('lightboxImg');
-  if (!img) return;
-  var base = _lbRenderedAdjustmentValues || _lbAdjustmentValues(null);
-  var exposure = Math.pow(2, Number(values.exposure || 0) - Number(base.exposure || 0));
-  var baseContrast = Math.max(0.001, 1 + Number(base.contrast || 0) / 100);
-  var contrast = Math.max(0, 1 + Number(values.contrast || 0) / 100) / baseContrast;
-  var baseSaturation = Math.max(0.001, 1 + Number(base.saturation || 0) / 100);
-  var saturation = Math.max(0, 1 + Number(values.saturation || 0) / 100) / baseSaturation;
-  // CSS filters can't target tonal ranges, so the highlights/shadows/whites/
-  // blacks/vibrance sliders are folded into brightness/contrast/saturate as a
-  // directional cue. The GPU path is canonical when available; this only runs
-  // when WebGL is unavailable or uploadSource rejected the image.
-  var dHighlights = Number(values.highlights || 0) - Number(base.highlights || 0);
-  var dShadows = Number(values.shadows || 0) - Number(base.shadows || 0);
-  var dWhites = Number(values.whites || 0) - Number(base.whites || 0);
-  var dBlacks = Number(values.blacks || 0) - Number(base.blacks || 0);
-  var dVibrance = Number(values.vibrance || 0) - Number(base.vibrance || 0);
-  // Positive on any of the four lifts pixels toward white in its mask, so the
-  // net effect on average luma is a brightness shift; the denominator damps it
-  // because each slider only touches part of the tone range.
-  exposure *= Math.max(0, 1 + (dHighlights + dShadows + dWhites + dBlacks) / 400);
-  // Highlights/whites push the upper end up while shadows/blacks pull the
-  // lower end up, so their signed sum tracks apparent contrast.
-  contrast *= Math.max(0, 1 + (dHighlights + dWhites - dShadows - dBlacks) / 400);
-  // Vibrance is a gentler saturate(); weight smaller than saturation itself.
-  saturation *= Math.max(0, 1 + dVibrance / 200);
-  // White balance: the displayed source already has the saved WB baked in, so
-  // preview the delta as new-gain / rendered-gain per channel.
-  var valGains = _lbWhiteBalanceGains(values.temperature, values.tint);
-  var baseGains = _lbWhiteBalanceGains(base.temperature, base.tint);
-  var rSlope = valGains.r / baseGains.r;
-  var gSlope = valGains.g / baseGains.g;
-  var bSlope = valGains.b / baseGains.b;
-  var wbActive = Math.abs(rSlope - 1) > 1e-4
-    || Math.abs(gSlope - 1) > 1e-4
-    || Math.abs(bSlope - 1) > 1e-4;
-  var filters = [];
-  // Match the server order: white balance, then exposure, contrast, saturation.
-  if (wbActive) {
-    _lbEnsureWbFilter();
-    _lbSetWbSlope('R', rSlope);
-    _lbSetWbSlope('G', gSlope);
-    _lbSetWbSlope('B', bSlope);
-    filters.push('url(#lbWbFilter)');
-  }
-  filters.push('brightness(' + exposure.toFixed(3) + ')');
-  filters.push('contrast(' + contrast.toFixed(3) + ')');
-  filters.push('saturate(' + saturation.toFixed(3) + ')');
-  img.style.filter = filters.join(' ');
-}
-
-function _lbClearAdjustmentPreviewCss() {
-  var img = document.getElementById('lightboxImg');
-  if (img) img.style.filter = '';
-}
-
-// --- Tier 3: GPU live preview -------------------------------------------------
-// WebGL transcription of vireo/tone.py. The CSS-filter preview above operates
-// in gamma-encoded sRGB and cannot express linear-light exposure or the
-// highlight rolloff, so when WebGL is available we render the adjustment
-// preview through this shader instead and it matches the server's tone.py
-// render. The shader math below MUST stay in sync with vireo/tone.py
-// (sRGB<->linear transfer, HIGHLIGHT_KNEE, white-balance gains, op order).
+// GPU transcription of vireo/tone.py, applied to a neutral source with the
+// complete adjustment values. Keep shader math in sync with the server.
 var VireoToneGL = (function() {
   var KNEE = 0.85; // == tone.HIGHLIGHT_KNEE
   var canvas = null, gl = null, prog = null, tex = null, locs = null;
@@ -5940,7 +5892,7 @@ var VireoToneGL = (function() {
     if (!w || !h) return false;
     // GPU limit: oversized images make texImage2D emit a GL error (e.g.
     // INVALID_VALUE) rather than throw, so the upload would otherwise look
-    // successful and the canvas would render black. Bail to the CSS fallback.
+    // successful and the canvas would render black. Bail to the server preview.
     if (maxTextureSize && (w > maxTextureSize || h > maxTextureSize)) return false;
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
     var key = img.currentSrc || img.src;
@@ -5960,7 +5912,7 @@ var VireoToneGL = (function() {
       // forces a retry on the next frame.
       if (gl.getError() !== gl.NO_ERROR) {
         console.warn('VireoToneGL texture upload reported a GL error; '
-          + 'falling back to CSS preview');
+          + 'falling back to server preview');
         return false;
       }
       texKey = key;
@@ -5991,70 +5943,103 @@ var VireoToneGL = (function() {
   };
 })();
 
-// Dispatcher: prefer the GPU (linear-light, same formula as tone.py); fall back
-// to the cruder CSS-filter preview when WebGL is unavailable or upload fails.
-// Both work on the *displayed* image, which already has the saved recipe baked
-// in, so adjustments are previewed as a delta applied on top of the rendered
-// values.
-//
-// Parity caveat: the GPU preview reproduces tone.py exactly only for a first
-// edit (no baked adjustments, base == zeros) — then the delta equals the full
-// recipe. For a re-edit the delta is applied to already tone-mapped pixels, and
-// highlight rolloff / clamping are neither reversible nor associative, so the
-// preview is an approximation that snaps to the exact server render once the
-// recipe is saved and the image is re-fetched. test_tone_shader_parity asserts
-// only the first-edit (exact) case for that reason.
-function _lbApplyAdjustmentPreview(values) {
+// Always preview from a neutral, geometry-matched source. Applying deltas to
+// the last saved render is history-dependent: rolloff and clipping cannot be
+// undone, and contrast/saturation do not commute with the other tone controls.
+function _lbAdjustmentPreviewUrl(recipe, neutral) {
   var img = document.getElementById('lightboxImg');
-  var canvas = document.getElementById('lightboxToneCanvas');
-  if (img && canvas && img.naturalWidth && VireoToneGL.supported()) {
-    var base = _lbRenderedAdjustmentValues || _lbAdjustmentValues(null);
-    var dExposure = Number(values.exposure || 0) - Number(base.exposure || 0);
-    var dHighlights = Number(values.highlights || 0) - Number(base.highlights || 0);
-    var dShadows = Number(values.shadows || 0) - Number(base.shadows || 0);
-    var dWhites = Number(values.whites || 0) - Number(base.whites || 0);
-    var dBlacks = Number(values.blacks || 0) - Number(base.blacks || 0);
-    var valGains = _lbWhiteBalanceGains(values.temperature, values.tint);
-    var baseGains = _lbWhiteBalanceGains(base.temperature, base.tint);
-    var wbGain = [
-      valGains.r / baseGains.r,
-      valGains.g / baseGains.g,
-      valGains.b / baseGains.b
-    ];
-    var dContrast = Math.max(0, 1 + Number(values.contrast || 0) / 100)
-      / Math.max(0.001, 1 + Number(base.contrast || 0) / 100);
-    var dVibrance = Number(values.vibrance || 0) - Number(base.vibrance || 0);
-    var dSaturation = Math.max(0, 1 + Number(values.saturation || 0) / 100)
-      / Math.max(0.001, 1 + Number(base.saturation || 0) / 100);
-    // Roll highlights off only when the net change actually pushes values up,
-    // matching tone.apply_adjustments' gate so an un-pushed preview is a no-op.
-    var pushed = Math.pow(2, dExposure) * Math.max(wbGain[0], wbGain[1], wbGain[2]) > 1.000001;
-    var ok = VireoToneGL.render(img, {
-      exposure: dExposure,
-      wbGain: wbGain,
-      highlights: dHighlights,
-      shadows: dShadows,
-      whites: dWhites,
-      blacks: dBlacks,
-      contrast: dContrast,
-      vibrance: dVibrance,
-      saturation: dSaturation,
+  var size = Math.max(img.naturalWidth, img.naturalHeight) || 1920;
+  return '/photos/' + _lightboxCurrentId + '/edit-preview?size=' + size +
+    '&apply_crop=1' + (neutral ? '&analysis=1' : '') +
+    '&recipe=' + encodeURIComponent(JSON.stringify(recipe));
+}
+
+function _lbLoadAdjustmentSource() {
+  var recipe = _lbCloneRecipe(_lbEditRecipe);
+  delete recipe.version;
+  delete recipe.adjustments;
+  delete recipe.local;
+  var url = _lbAdjustmentPreviewUrl(recipe, true);
+  if (_lbAdjustmentSource && _lbAdjustmentSource.url === url) return _lbAdjustmentSource;
+  var source = {url: url, image: new Image()};
+  source.ready = new Promise(function(resolve) {
+    source.image.onload = function() { resolve(true); };
+    source.image.onerror = function() { resolve(false); };
+  });
+  source.image.src = url;
+  _lbAdjustmentSource = source;
+  return source;
+}
+
+// Advanced color, detail, and local edits must run in their canonical order
+// with the global adjustments. Use the full server recipe for those, and for
+// devices where WebGL cannot render the source, instead of stacking filters.
+function _lbPreviewNeedsServer(recipe) {
+  var supported = ['exposure', 'highlights', 'shadows', 'whites', 'blacks',
+    'contrast', 'vibrance', 'saturation', 'white_balance', 'temperature', 'tint'];
+  return !!recipe.local || Object.keys(recipe.adjustments || {}).some(function(key) {
+    return supported.indexOf(key) === -1;
+  });
+}
+
+function _lbApplyServerAdjustmentPreview(recipe, seq) {
+  var url = _lbAdjustmentPreviewUrl(recipe, false);
+  // Coalesce slider events before starting an expensive server render.
+  _lbAdjustmentPreviewTimer = setTimeout(function() {
+    _lbAdjustmentPreviewTimer = null;
+    var preview = new Image();
+    preview.onload = function() {
+      if (seq !== _lbAdjustmentPreviewSeq) return;
+      var overlay = document.getElementById('lightboxAdjustmentImage');
+      overlay.src = url;
+      overlay.classList.add('show');
+      document.getElementById('lightboxToneCanvas').classList.remove('show');
+    };
+    preview.src = url;
+  }, 80);
+}
+
+function _lbApplyAdjustmentPreview(values) {
+  var seq = ++_lbAdjustmentPreviewSeq;
+  clearTimeout(_lbAdjustmentPreviewTimer);
+  var recipe = _lbCloneRecipe(_lbEditRecipe);
+  if (_lbPreviewNeedsServer(recipe) || !VireoToneGL.supported()) {
+    _lbApplyServerAdjustmentPreview(recipe, seq);
+    return;
+  }
+  var source = _lbLoadAdjustmentSource();
+  source.ready.then(function(loaded) {
+    if (seq !== _lbAdjustmentPreviewSeq) return;
+    var gains = _lbWhiteBalanceGains(values.temperature, values.tint);
+    var exposure = Number(values.exposure || 0);
+    var pushed = Math.pow(2, exposure) * Math.max(gains.r, gains.g, gains.b) > 1.000001;
+    var ok = loaded && VireoToneGL.render(source.image, {
+      exposure: exposure,
+      wbGain: [gains.r, gains.g, gains.b],
+      highlights: Number(values.highlights || 0),
+      shadows: Number(values.shadows || 0),
+      whites: Number(values.whites || 0),
+      blacks: Number(values.blacks || 0),
+      contrast: Math.max(0, 1 + Number(values.contrast || 0) / 100),
+      vibrance: Number(values.vibrance || 0),
+      saturation: Math.max(0, 1 + Number(values.saturation || 0) / 100),
       rolloff: pushed
     });
     if (ok) {
-      img.style.filter = '';
-      canvas.classList.add('show');
-      return;
+      document.getElementById('lightboxAdjustmentImage').classList.remove('show');
+      document.getElementById('lightboxToneCanvas').classList.add('show');
+    } else {
+      _lbApplyServerAdjustmentPreview(recipe, seq);
     }
-  }
-  if (canvas) canvas.classList.remove('show');
-  _lbApplyAdjustmentPreviewCss(values);
+  });
 }
 
 function _lbClearAdjustmentPreview() {
-  var canvas = document.getElementById('lightboxToneCanvas');
-  if (canvas) canvas.classList.remove('show');
-  _lbClearAdjustmentPreviewCss();
+  ++_lbAdjustmentPreviewSeq;
+  clearTimeout(_lbAdjustmentPreviewTimer);
+  _lbAdjustmentPreviewTimer = null;
+  document.getElementById('lightboxToneCanvas').classList.remove('show');
+  document.getElementById('lightboxAdjustmentImage').classList.remove('show');
 }
 
 function _lbBumpRecipeBust(photoId) {
@@ -6102,6 +6087,8 @@ function _lbRefreshVisiblePhotoImages(photoId) {
 
 function _lbReloadEditedSource(photoId, seq) {
   if (_lightboxCurrentId !== photoId) return;
+  // The source switch owns the visible image until its target has decoded.
+  if (_vireoPairPendingSourceByPhoto[String(photoId)]) return;
   _lbCancelOriginalPreload();
   var img = document.getElementById('lightboxImg');
   if (!img) return;
@@ -6109,10 +6096,6 @@ function _lbReloadEditedSource(photoId, seq) {
   img.addEventListener('load', function onEditedReload() {
     img.removeEventListener('load', onEditedReload);
     if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
-    _lbRenderedAdjustmentValues = _lbAdjustmentValues(_lbEditRecipe);
-    // The image just reloaded with the new render baked in; drop the cached
-    // GPU texture so the next preview re-uploads the fresh pixels.
-    VireoToneGL.invalidate();
     _lbClearAdjustmentPreview();
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
@@ -6139,7 +6122,8 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
     })
     .then(function(data) {
       _lbMarkEditRecipeWrite(photoId);
-      _lbRememberEditRecipe(photoId, data.recipe || null);
+      // Record the saved recipe without overwriting input made during the request.
+      _lbRememberEditRecipe(photoId, data.recipe || null, true);
       _vireoBumpRenderVersion(photoId);
       _lbBumpRecipeBust(photoId);
       _lbRefreshVisiblePhotoImages(photoId);
@@ -6171,7 +6155,7 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
 }
 
 function _lbSaveAdjustmentRecipe(values) {
-  if (_lbGuardReadOnly()) return false;
+  if (_lbGuardAdjustmentSource()) return false;
   if (!_lightboxCurrentId || !_lbEditRecipeLoaded) return;
   var photoId = _lightboxCurrentId;
   var key = String(photoId);
@@ -6220,7 +6204,7 @@ function _lbWaitForAdjustmentSaveIdle(photoId) {
 }
 
 function onLightboxAdjustmentInput(input) {
-  if (_lbGuardReadOnly()) return false;
+  if (_lbGuardAdjustmentSource()) return false;
   if (!_lbEditRecipeLoaded) {
     _lbSetAdjustmentStatus('Loading recipe...');
     _lbRenderAdjustmentControls();
@@ -6242,7 +6226,7 @@ function onLightboxAdjustmentInput(input) {
 }
 
 function resetLightboxAdjustments() {
-  if (_lbGuardReadOnly()) return false;
+  if (_lbGuardAdjustmentSource()) return false;
   if (!_lbEditRecipeLoaded) {
     _lbSetAdjustmentStatus('Loading recipe...');
     return;
@@ -6269,7 +6253,7 @@ function resetLightboxAdjustments() {
 }
 
 function toggleLightboxAdjustPanel() {
-  if (_lbGuardReadOnly()) return false;
+  if (_lbGuardAdjustmentSource()) return false;
   var panel = document.getElementById('lightboxAdjustPanel');
   var btn = document.getElementById('lightboxAdjustBtn');
   if (!panel) return;
@@ -6280,6 +6264,9 @@ function toggleLightboxAdjustPanel() {
     _lbRenderAdjustmentControls();
     _lbSetAdjustmentControlsDisabled(!_lbEditRecipeLoaded);
     _lbSetAdjustmentStatus(_lbEditRecipeLoaded ? '' : 'Loading recipe...');
+    if (_lbEditRecipeLoaded && !_lbPreviewNeedsServer(_lbEditRecipe) && VireoToneGL.supported()) {
+      _lbLoadAdjustmentSource();
+    }
   }
 }
 
@@ -8076,7 +8063,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbFullUsesOriginal = null;
   _lbEditRecipe = null;
   _lbEditRecipeLoaded = false;
-  _lbRenderedAdjustmentValues = _lbAdjustmentValues(null);
+  _lbAdjustmentSource = null;
   if (_lbAdjustSaveTimer) {
     clearTimeout(_lbAdjustSaveTimer);
     _lbAdjustSaveTimer = null;
@@ -8168,7 +8155,6 @@ function openLightbox(photoId, filename, photoList, options) {
       if (editFetchSeq === _lbAdjustSeq) {
         _lbEditRecipe = _lbCloneRecipe(data.edit_recipe || {});
         _lbEditRecipeLoaded = true;
-        _lbRenderedAdjustmentValues = _lbAdjustmentValues(_lbEditRecipe);
         _lbRenderAdjustmentControls();
         _lbSetAdjustmentControlsDisabled(false);
         _lbSetAdjustmentStatus('');
