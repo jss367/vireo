@@ -248,7 +248,12 @@ signal; do not limit the work to the triggering payload.
    same growth.
 10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
     the push. Commit once with a descriptive subject and include
-    `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
+    `[pr-agent-review-fix:$PR]` in the body, then push to the same branch. If
+    this round resumes a CI repair that the drift checkpoint stopped, include
+    `[pr-agent-fix-ci:$PR]` as well: the workflow's one-retry guard greps the
+    head commit for that marker, so a resumed repair carrying only the
+    review-fix marker would let a still-failing fix trigger another automated
+    attempt.
 11. Reply to every inline thread actually addressed or rejected with evidence,
     ending each reply with `<!-- pr-agent-generated -->`, then resolve that
     exact thread using GraphQL `resolveReviewThread`. Do not
