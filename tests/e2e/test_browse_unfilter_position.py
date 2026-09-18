@@ -112,6 +112,19 @@ def _turn_off(page, action):
         page.click('.vf-done')
 
 
+def _is_reset_query(request):
+    """A grid *reset* query, distinguishable from a lazy continuation.
+
+    ``resetAndLoad`` rewinds ``currentPage`` to 1 and ``loadPhotos`` derives the
+    requested page from it, so ``page == 1`` is exactly "a reload that starts a
+    fresh window" and never a lazy continuation.
+    """
+    return (
+        request.url.endswith('/api/photos/query')
+        and (request.post_data_json or {}).get('page') == 1
+    )
+
+
 def _expect_reset_query(page):
     """Wait for the next grid *reset* query, ignoring lazy pagination.
 
@@ -121,18 +134,13 @@ def _expect_reset_query(page):
     scope nor an anchor, so a plain ``expect_request('**/api/photos/query')``
     asserts against whichever of the two the browser happened to send first —
     a race the release gate lost, failing v0.56.0 with ``KeyError: 'folder_id'``
-    while every local run passed.
-
-    ``resetAndLoad`` rewinds ``currentPage`` to 1 and ``loadPhotos`` derives the
-    requested page from it, so ``page == 1`` is exactly "a reload that starts a
-    fresh window" and never a lazy continuation. (``_check_turning_off`` needs
-    no such guard: it finishes the lazy loading before acting, so nothing can
-    page in behind it.)
+    while every local run passed. ``_check_turning_off`` uses the same
+    ``_is_reset_query`` filter on its persistent listener for the same reason:
+    the 150ms wait before it registers is not a guarantee that the intersection
+    observer has fired, so the page-2 lazy request could otherwise land as
+    ``queries[0]`` ahead of the reset.
     """
-    return page.expect_request(
-        lambda request: request.url.endswith('/api/photos/query')
-        and (request.post_data_json or {}).get('page') == 1
-    )
+    return page.expect_request(_is_reset_query)
 
 
 @pytest.mark.parametrize("action", ACTIONS)
@@ -154,7 +162,7 @@ def _check_turning_off(page, live_server, action, selected, photo_link=False):
     assert page.evaluate("gridContainer.scrollTop") > 500
     queries = []
     page.on("request", lambda request: queries.append(request.post_data_json)
-            if request.url.endswith('/api/photos/query') else None)
+            if _is_reset_query(request) else None)
     _turn_off(page, action)
     # Photo links scope Browse to the target's folder (the other two seed
     # photos live elsewhere); removing a filter must preserve that scope.
