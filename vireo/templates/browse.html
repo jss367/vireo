@@ -7396,6 +7396,17 @@ async function resetAndLoad(options) {
       return true;
     }
 
+    // Offline placeholders can hold the viewport without becoming a
+    // selection or enabling any photo actions.
+    if (anchor.viewportOnly) {
+      requestAnimationFrame(function() {
+        if (!resetRequestIsCurrent() || !anchorRestoreIsPending(anchor, restoreEpoch)) return;
+        restorePhotoAnchor(anchor);
+        updateScrollPosition();
+      });
+      return true;
+    }
+
     // The anchor may have been rendered as an offline placeholder — e.g. a
     // folder-health refresh with ``showOfflineCollectionPhotos`` on keeps the
     // just-went-missing photo in the reloaded dataset with ``folder_status``
@@ -7411,15 +7422,6 @@ async function resetAndLoad(options) {
       if (scrollAnchor) {
         await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
       }
-      return true;
-    }
-
-    if (anchor.viewportOnly) {
-      requestAnimationFrame(function() {
-        if (!resetRequestIsCurrent() || !anchorRestoreIsPending(anchor, restoreEpoch)) return;
-        restorePhotoAnchor(anchor);
-        updateScrollPosition();
-      });
       return true;
     }
 

@@ -258,3 +258,35 @@ def test_folder_handoff_does_not_inherit_keyword_selection(live_server, page):
     assert page.evaluate("selectedPhotoId") is None
     assert page.evaluate("gridContainer.scrollTop") == 0
     assert page.evaluate("VireoFilter.hasFilters()") is False
+
+
+def test_clearing_filters_keeps_offline_placeholder_in_view(live_server, page):
+    ids = _prepare(page, live_server, "clear")
+    db = live_server["db"]
+    with db.conn:
+        db.conn.execute("UPDATE folders SET status='missing' WHERE id=?",
+                        (live_server["data"]["folders"][0],))
+    collection_id = next(c['id'] for c in db.get_collections() if c['name'] == 'All Photos')
+    page.goto(f"{live_server['url']}/browse?collection_id={collection_id}&dashboard_scope=1&rating_min=5")
+    page.wait_for_function("VireoFilter.isReady() && !loading && browseDatasetReady")
+    page.click('#offlineCollectionToggle')
+    page.wait_for_function("!loading && browseDatasetReady && totalPhotos === 60")
+    page.evaluate("updateThumbSize(300)")
+    page.locator(f'#grid .grid-card.offline[data-id="{ids[145]}"]').scroll_into_view_if_needed()
+    anchor = page.evaluate("captureBrowseViewportAnchor()")
+    assert page.evaluate("gridContainer.scrollTop") > 500
+    with page.expect_request('**/api/photos/query') as query:
+        page.click('.vf-clear')
+    assert query.value.post_data_json['include_offline'] is True
+    assert query.value.post_data_json['collection_id'] == collection_id
+    assert query.value.post_data_json['focus_photo_id'] == anchor['photoId']
+    page.wait_for_function("!loading && browseDatasetReady && anchorScanDepth === 0 && totalPhotos === 185")
+    page.wait_for_function("""anchor => {
+      const card = getGridCard(anchor.photoId);
+      if (!card || !card.classList.contains('offline')) return false;
+      const rect = card.getBoundingClientRect(), box = gridContainer.getBoundingClientRect();
+      return rect.bottom > box.top && rect.top < box.bottom &&
+        Math.abs(rect.top - box.top - anchor.topOffset) < 4;
+    }""", arg=anchor, timeout=3000)
+    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("getActiveSelection()") == []
