@@ -10128,23 +10128,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     pairs,
                 )
             # A pure location-to-location rename is handled entirely by the
-            # ``location`` change queued below: set_location_keywords() writes
-            # both flat and hierarchical entries under the new leaf and claims
-            # full marker ownership because the sidecar is stripped of the
-            # old marker's entries first. Queueing a keyword_add for the new
-            # leaf here would land it in ``dc:subject`` BEFORE
+            # ``location`` change queued below WHEN
+            # ``write_location_keywords_to_xmp`` is on for the affected
+            # workspace: set_location_keywords() writes both flat and
+            # hierarchical entries under the new leaf and claims full
+            # marker ownership because the sidecar is stripped of the old
+            # marker's entries first. Queueing a keyword_add for the new
+            # leaf in that case would land it in ``dc:subject`` BEFORE
             # set_location_keywords() runs, at which point it looks
             # pre-existing (existed_flat=True) and gets only hierarchical
             # ownership; a later clear would then leave the renamed flat
             # leaf in XMP indefinitely.
+            #
+            # When the setting is OFF for a workspace, however, the queued
+            # ``location`` change only runs marker cleanup at sync time;
+            # set_location_keywords() never writes the new flat leaf, so
+            # a pre-existing flat XMP keyword under the OLD name (from a
+            # manual entry or an earlier period when the setting was on)
+            # would stay behind indefinitely. Fall back to the ordinary
+            # keyword_remove + keyword_add for those workspaces so the
+            # flat leaf still gets renamed in XMP.
             location_to_location_rename = (
                 old_row["type"] == "location"
                 and new_row["type"] == "location"
             )
-            if not location_to_location_rename:
+            skip_keyword_requeue_by_ws = {}
+            if location_to_location_rename:
+                import config as cfg
+
+                try:
+                    global_cfg = cfg.load()
+                except Exception:
+                    global_cfg = {}
                 for row in affected:
-                    _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
-                    _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
+                    ws_id = row["workspace_id"]
+                    if ws_id in skip_keyword_requeue_by_ws:
+                        continue
+                    ws = db.get_workspace(ws_id)
+                    raw = ws["config_overrides"] if ws else None
+                    skip_keyword_requeue_by_ws[ws_id] = (
+                        _workspace_effective_setting(
+                            raw, global_cfg, _LOCATION_KEYWORDS_SETTING,
+                        )
+                    )
+            for row in affected:
+                if skip_keyword_requeue_by_ws.get(row["workspace_id"], False):
+                    continue
+                _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
+                _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
         # A location→non-location retype with no name change queues a
         # ``location`` change below but no keyword_add — the name-change
         # block above didn't run. sync_to_xmp() therefore resolves no

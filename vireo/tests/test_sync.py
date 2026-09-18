@@ -2160,6 +2160,54 @@ def test_sync_to_xmp_leaves_lightroom_location_keywords_alone(tmp_path, monkeypa
     db.close()
 
 
+def test_sync_to_xmp_defers_location_when_config_read_fails(
+    tmp_path, monkeypatch,
+):
+    """A transient config read failure must not silently cleanup Vireo keywords.
+
+    Regression: ``_write_location_keywords_to_xmp_enabled`` used to return
+    ``False`` both for an explicit off and for a raised ``config.load()``.
+    A queued ``location`` change on a transient malformed config would
+    therefore strip the marker and every keyword Vireo wrote, then clear
+    the pending row -- restoring the config would not requeue anything, and
+    the keywords would stay gone until a manual backfill. The tri-state
+    now returns ``"unknown"`` on read failure, and the change stays queued.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+
+    # Simulate a malformed config that raises during load. The queued
+    # location change must stay in the queue and the sidecar must retain
+    # Vireo's previously-written keyword.
+    import config as cfg
+
+    def _raise(*_args, **_kwargs):
+        raise ValueError("config unreadable")
+
+    monkeypatch.setattr(cfg, "load", _raise)
+
+    db.queue_change(pid, "location", "effective")
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 0
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+    pending_kinds = [c["change_type"] for c in db.get_pending_changes()]
+    assert "location" in pending_kinds
+    db.close()
+
+
 def test_sync_to_xmp_preserves_ordinary_keyword_matching_cleared_location_leaf(
     tmp_path, monkeypatch,
 ):

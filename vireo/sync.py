@@ -89,6 +89,28 @@ def _xmp_sync_setting_enabled(db, key):
         return False
 
 
+def _xmp_sync_setting_state(db, key):
+    """Return ``"on"``/``"off"``/``"unknown"`` for one XMP-write setting.
+
+    ``"unknown"`` means ``config.load()`` raised or the effective read
+    failed. Callers that gate destructive cleanup on the setting must not
+    treat ``"unknown"`` as an explicit off: a location-keywords cleanup, for
+    instance, would strip the previously-written marker and keywords and
+    clear the pending row, so a later config fix would not requeue anything.
+    Callers only gating writes can keep treating ``"unknown"`` as "don't
+    write" (per ``_xmp_sync_setting_enabled`` above) -- that path leaves
+    the queue alone.
+    """
+    try:
+        import config as cfg
+
+        val = bool(db.get_effective_config(cfg.load()).get(key, False))
+        return "on" if val else "off"
+    except Exception:
+        log.warning("Failed to read %s config", key, exc_info=True)
+        return "unknown"
+
+
 def _sync_flags_to_xmp_enabled(db):
     """Return whether the active workspace should write flags to XMP."""
     return _xmp_sync_setting_enabled(db, "sync_flags_to_xmp")
@@ -102,6 +124,15 @@ def _write_assigned_location_to_xmp_enabled(db):
 def _write_location_keywords_to_xmp_enabled(db):
     """Return whether the active workspace should write location keywords."""
     return _xmp_sync_setting_enabled(db, "write_location_keywords_to_xmp")
+
+
+def _write_location_keywords_to_xmp_state(db):
+    """Return ``"on"``/``"off"``/``"unknown"`` for the location-keywords setting.
+
+    Cleanup is destructive (drops the marker and every entry it names), so
+    we need to tell an explicit False from a transient config read failure.
+    """
+    return _xmp_sync_setting_state(db, "write_location_keywords_to_xmp")
 
 
 _KEYWORD_CHANGE_TYPES = ("keyword_add", "keyword_remove", "keyword_remove_flat")
@@ -167,8 +198,19 @@ class _PhotoSyncPlan:
 
 
 def _plan_photo_sync(photo_changes, sync_flags, sync_locations,
-                     sync_location_keywords=False):
-    """Fold one photo's pending changes into a ``_PhotoSyncPlan``."""
+                     sync_location_keywords_state="off"):
+    """Fold one photo's pending changes into a ``_PhotoSyncPlan``.
+
+    ``sync_location_keywords_state`` is a tri-state:
+
+    - ``"on"``      -- the queued ``location`` change writes keywords.
+    - ``"off"``     -- the queued ``location`` change runs cleanup.
+    - ``"unknown"`` -- config read failed; leave the ``location`` change
+      unsupported so a future sync with a readable config can decide.
+      Silently running cleanup here would strip the previously-written
+      marker and keywords and clear the pending row, so a later config
+      fix would not requeue anything.
+    """
     plan = _PhotoSyncPlan()
     for c in photo_changes:
         kind = c["change_type"]
@@ -186,11 +228,18 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations,
                 continue
             plan.flag = c["value"] or "none"
         elif kind == "location":
+            if sync_location_keywords_state == "unknown":
+                # A transient malformed config must not be interpreted as
+                # an explicit off: cleanup would strip the previously-
+                # written marker and keywords and clear the pending row,
+                # stranding the sidecars until a manual backfill.
+                plan.unsupported_changes.append(c)
+                continue
             if sync_locations:
                 plan.sync_location = True
             else:
                 plan.cleanup_location = True
-            if sync_location_keywords:
+            if sync_location_keywords_state == "on":
                 plan.sync_location_keywords = True
             else:
                 plan.cleanup_location_keywords = True
@@ -447,7 +496,12 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
 
     sync_flags = _sync_flags_to_xmp_enabled(db)
     sync_locations = _write_assigned_location_to_xmp_enabled(db)
-    sync_location_keywords = _write_location_keywords_to_xmp_enabled(db)
+    # Tri-state so a config read failure ("unknown") is not treated as an
+    # explicit off -- cleanup would otherwise strip the marker on every
+    # queued location change and clear the pending row, stranding the
+    # sidecars until manual backfill. See _plan_photo_sync.
+    sync_location_keywords_state = _write_location_keywords_to_xmp_state(db)
+    sync_location_keywords = sync_location_keywords_state == "on"
 
     # Everything that needs the database happens here, on the caller's
     # thread: the sidecar writers below run on a pool and must not touch the
@@ -491,7 +545,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         try:
             plans[photo_id] = _plan_photo_sync(
                 photo_changes, sync_flags, sync_locations,
-                sync_location_keywords,
+                sync_location_keywords_state,
             )
         except Exception as e:
             # A malformed queue row -- a rating whose value is NULL or not an

@@ -2429,6 +2429,40 @@ def test_renaming_a_location_leaf_skips_keyword_remove_and_keyword_add(
     assert change_types == ["location"]
 
 
+def test_renaming_a_location_leaf_queues_keyword_requeue_when_setting_off(
+    client_with_photo,
+):
+    """With location keyword writes off, a rename still needs keyword_remove/add.
+
+    Regression: the location-to-location rename branch unconditionally
+    skipped ``keyword_remove`` + ``keyword_add``, relying on
+    ``set_location_keywords()`` at sync time to rewrite the flat leaf.
+    When ``write_location_keywords_to_xmp`` is off, that writer never
+    runs -- a pre-existing flat XMP keyword under the OLD name (from a
+    manual entry or an earlier period when the setting was on) would
+    stay behind forever. The fallback queues the ordinary keyword
+    changes so XMP still gets the rename.
+    """
+    app, db, photo_id = client_with_photo
+    # Setting stays at its default (off).
+    leaf_id = _assign_location(db, photo_id, ["France", "OldParis"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.put(
+        f"/api/keywords/{leaf_id}", json={"name": "NewParis"},
+    )
+    assert resp.status_code == 200
+
+    queued = [
+        (c["change_type"], c["value"])
+        for c in db.get_pending_changes()
+    ]
+    assert ("keyword_remove", "OldParis") in queued
+    assert ("keyword_add", "NewParis") in queued
+    assert ("location", "effective") in queued
+
+
 def test_retyping_a_location_to_general_queues_keyword_add(client_with_photo):
     """A same-name location→general retype must queue keyword_add.
 
