@@ -8597,6 +8597,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except BaseException:
             db.conn.rollback()
             raise
+        db._prune_edit_history()
         return jsonify({"reviewed": len(photo_ids), "queued": len(photo_ids) if body["action"] == "assigned" else 0})
 
     @app.route("/api/location-review/saved-suggestions")

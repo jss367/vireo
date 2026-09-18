@@ -195,6 +195,29 @@ def test_keep_is_remembered_but_coordinate_changes_require_review(discrepancy_ca
     assert len(discrepancy_preview(client)) == len(photo_ids)
 
 
+@pytest.mark.parametrize('action', ['keep', 'assigned'])
+def test_discrepancy_reviews_respect_history_limit(discrepancy_catalog, action):
+    import config as cfg
+
+    client, db, _, _, _ = discrepancy_catalog
+    cfg.set('max_edit_history', 2)
+    photos = discrepancy_preview(client)
+    for photo in photos:
+        assert resolve(client, [photo], action).status_code == 200
+
+    history = db.get_edit_history()
+    assert len(history) == 2
+    assert {row['photo_id'] for row in db.conn.execute('SELECT photo_id FROM edit_history_items')} == {
+        photo['id'] for photo in photos[-2:]
+    }
+    # Pruning the audit trail must not discard the user's decisions or work.
+    if action == 'keep':
+        assert discrepancy_preview(client) == []
+        assert db.conn.execute('SELECT COUNT(*) FROM location_gps_reviews').fetchone()[0] == 3
+    else:
+        assert {row['photo_id'] for row in db.get_pending_changes()} == {photo['id'] for photo in photos}
+
+
 def test_explicit_reapply_reaches_sidecar_and_preserves_original(discrepancy_catalog):
     from sync import sync_to_xmp
     from xmp import read_sync_preview_metadata
