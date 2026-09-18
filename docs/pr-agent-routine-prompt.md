@@ -31,7 +31,12 @@ reviewer stamped on it:
   that need an interleaving the app does not sanction — a job type
   coordinated to run alone (its handler takes an exclusive workspace slot
   or asserts no peer is running), a scenario that assumes a second
-  operator, or a hand-crafted request the UI would never issue — cap at P3.
+  operator, or a request no supported client makes — cap at P3. "Supported
+  client" is the browser UI *and* the documented headless API
+  (`docs/headless-api.md`): `/api/v1` is a semver-contracted surface for
+  scripts and agents that talks to the same running instance, so a race
+  between an API caller and the UI is a supported deployment, not a
+  hand-crafted request.
 - A finding that needs the filesystem changed adversarially mid-job — an
   ancestor swapped for a symlink, a path replaced between validation and use —
   is not a threat model for this app. Handle the case where the user moved
@@ -215,11 +220,15 @@ signal; do not limit the work to the triggering payload.
    When it fires, do not commit or push. Repeat the live state/head check from
    Common Setup first — edits and validation can run long enough for the PR to
    close or its head to move, and a drift alert on a stale PR is itself a
-   user-visible untruth, so skip silently on either mismatch. Otherwise post
-   one deduplicated comment naming what the PR set out to do, what it now
-   contains, and which finding pushed it past the line, then wait. Any
-   maintainer reply telling you to proceed clears the checkpoint for this PR:
-   apply what they authorized and do not fire again on the same growth.
+   user-visible untruth, so skip silently on either mismatch. Add the
+   `claude-agent` label if the PR does not already carry it — the comment
+   forwarder only routes replies on labeled PRs, while `fix-ci` runs without
+   the label, so an unlabeled PR would leave the maintainer's answer with
+   nowhere to wake you from. Then post one deduplicated comment naming what
+   the PR set out to do, what it now contains, and which finding pushed it
+   past the line, and wait. Any maintainer reply telling you to proceed
+   clears the checkpoint for this PR: apply what they authorized and do not
+   fire again on the same growth.
 10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
     the push. Commit once with a descriptive subject and include
     `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
