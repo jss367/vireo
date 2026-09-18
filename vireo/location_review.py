@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from xmp import read_sync_preview_metadata
@@ -23,6 +24,17 @@ def distance_meters(first, second):
     ))
     haversine = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
     return 6371000 * 2 * math.asin(math.sqrt(min(1, max(0, haversine))))
+
+
+def _read_discrepancy_sidecars(paths, sidecar_reader=None):
+    # Deduplicate RAW/JPEG companions. The caller supplies at most one database
+    # batch (400 photos), so both worker count and queued work stay bounded.
+    paths = list(dict.fromkeys(paths))
+    if sidecar_reader is not None or len(paths) < 2:
+        reader = sidecar_reader or read_sync_preview_metadata
+        return {path: reader(path) for path in paths}
+    with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+        return dict(zip(paths, pool.map(read_sync_preview_metadata, paths), strict=True))
 
 
 def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=False, *, sidecar_reader=None):
@@ -58,6 +70,7 @@ def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=Fa
             WHERE k.rn = 1
             ORDER BY p.timestamp, p.id
         """, chunk).fetchall()
+        candidates = []
         for row in rows:
             photo = dict(row)
             assigned = {
@@ -70,7 +83,10 @@ def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=Fa
             if distance <= minimum_distance_m:
                 continue
             sidecar_path = os.path.join(row["folder_path"], os.path.splitext(row["filename"])[0] + '.xmp')
-            metadata = (sidecar_reader or read_sync_preview_metadata)(sidecar_path)
+            candidates.append((photo, assigned, distance, sidecar_path))
+        sidecars = _read_discrepancy_sidecars((item[3] for item in candidates), sidecar_reader)
+        for photo, assigned, distance, sidecar_path in candidates:
+            metadata = sidecars[sidecar_path]
             if metadata is None:
                 continue
             override = metadata.get("location")
@@ -79,7 +95,7 @@ def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=Fa
             # Re-review when either coordinate source or the on-disk override changes.
             evidence = [photo["latitude"], photo["longitude"], assigned, override, metadata["status"]]
             fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
-            if not include_reviewed and row["reviewed_fingerprint"] == fingerprint:
+            if not include_reviewed and photo["reviewed_fingerprint"] == fingerprint:
                 continue
             result.append({
                 key: photo[key] for key in (

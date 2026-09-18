@@ -465,3 +465,53 @@ def test_gps_review_merge_prefers_newest_decision(discrepancy_catalog, loser_dat
     )
     db._transfer_gps_review_for_merge(losing, survivor)
     assert db.conn.execute('SELECT fingerprint FROM location_gps_reviews WHERE photo_id=?', (survivor,)).fetchone()[0] == expected
+
+
+def test_discrepancy_sidecar_reads_are_parallel_bounded_and_deduplicated(monkeypatch):
+    import threading
+
+    import location_review
+
+    barrier = threading.Barrier(8, timeout=5)
+    lock = threading.Lock()
+    active = peak = 0
+    calls = []
+
+    def read(path):
+        nonlocal active, peak
+        with lock:
+            calls.append(path)
+            active += 1
+            peak = max(peak, active)
+        # Sixteen unique paths form two full waves of eight workers. A serial
+        # implementation times out; unbounded workers exceed the peak limit.
+        barrier.wait()
+        with lock:
+            active -= 1
+        return {'status': 'missing', 'location': None}
+
+    monkeypatch.setattr(location_review, 'read_sync_preview_metadata', read)
+    paths = [f'{i}.xmp' for i in range(16)]
+    result = location_review._read_discrepancy_sidecars(paths + paths)
+    assert list(result) == paths
+    assert sorted(calls) == sorted(paths)
+    assert peak == 8
+
+
+def test_discrepancy_preview_reads_sidecars_off_request_thread(discrepancy_catalog, monkeypatch):
+    import threading
+
+    import location_review
+    from xmp import read_sync_preview_metadata
+
+    client, _, photo_ids, _, _ = discrepancy_catalog
+    request_thread = threading.get_ident()
+    threads = []
+
+    def read(path):
+        threads.append(threading.get_ident())
+        return read_sync_preview_metadata(path)
+
+    monkeypatch.setattr(location_review, 'read_sync_preview_metadata', read)
+    assert len(discrepancy_preview(client)) == len(photo_ids)
+    assert threads and request_thread not in threads
