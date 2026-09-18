@@ -509,6 +509,15 @@
     // ``moved: 0``; counting it would claim more landing folders than the
     // move produced. It still gets a row in the list, reporting 0 of N.
     var landed = dests.filter(function(item) { return (item.moved || 0) > 0; });
+    // The denominator has to come from the same plan that produced
+    // ``moved``. A photo scanned into the source subtree between enqueue and
+    // the worker's re-plan is in the worker's plan but not in the config
+    // snapshot, so pairing an actual ``moved`` with the enqueue-time total
+    // can render "500 of 499 photos landed". Fall back to the snapshot only
+    // when a result predates the per-folder ``planned`` counts.
+    var plannedInResult = dests.reduce(function(sum, item) {
+      return sum + (item.planned || 0);
+    }, 0);
     return {
       actual: true,
       // One folder in the result means every moved photo landed there, so
@@ -520,7 +529,7 @@
       listTotal: dests.length,
       photoCount: result.moved,
       plannedFolderCount: plannedFolderCount,
-      plannedPhotoCount: plannedPhotos,
+      plannedPhotoCount: plannedInResult > 0 ? plannedInResult : plannedPhotos,
       folders: shown.map(function(item) {
         var moved = item.moved || 0;
         var planned = item.planned || 0;

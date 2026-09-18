@@ -443,6 +443,45 @@ def test_move_folder_job_does_not_count_a_folder_that_got_nothing(
     ])
 
 
+def test_move_folder_job_counts_against_the_plan_the_worker_used(
+    live_server, page,
+):
+    """A photo scanned in after enqueue must not produce "500 of 499".
+
+    The worker re-plans, so its plan can contain photos the enqueue-time
+    snapshot never saw. ``moved`` is counted against that plan, so the
+    denominator has to come from the result's ``planned`` counts too.
+    """
+    job = _move_folder_job(live_server, {
+        "folder_template": "%Y-%m-%d",
+        "resolved_destination": "/Volumes/Photos/Archive/2026-09-12",
+        "date_destinations": [{
+            "path": "/Volumes/Photos/Archive/2026-09-12",
+            "relative_path": "2026-09-12",
+            "photo_count": 499,
+        }],
+        "date_destination_count": 1,
+        "date_photo_count": 499,
+    })
+    job["status"] = "completed"
+    job["finished_at"] = "2026-08-16T21:39:12"
+    job["result"] = {
+        "moved": 500,
+        "errors": [],
+        "destinations": [{
+            "path": "/Volumes/Photos/Archive/2026-09-12",
+            "planned": 500,
+            "moved": 500,
+        }],
+        "destination_count": 1,
+    }
+    _serve_jobs_page(live_server, page, job, history=True)
+
+    note = page.locator(".job-move-route .job-move-route-note")
+    expect(note).to_contain_text("All 500 photos landed in this single folder")
+    expect(note).not_to_contain_text("of 499")
+
+
 def test_label_preparation_shows_progress_and_one_estimate(live_server, page):
     from datetime import datetime, timedelta
 
