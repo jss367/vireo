@@ -1,5 +1,6 @@
 """Sync engine: reconcile database and XMP sidecars."""
 
+import json
 import logging
 import os
 import threading
@@ -8,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from db import KEYWORD_SOURCE_UNKNOWN
-from keyword_identity import resolve_import_path, validate_import_locations
+from keyword_identity import keyword_paths, resolve_import_path, validate_import_locations
 from keyword_normalization import keyword_match_key
 from xmp import SidecarEditor, read_hierarchical_keywords, read_keywords
 
@@ -139,6 +140,8 @@ class _PhotoSyncPlan:
     # would strip that preserved ``lr:hierarchicalSubject`` entry; flat-only
     # removal touches only the stale ``dc:subject`` line.
     keywords_to_remove_flat: set = field(default_factory=set)
+    hierarchy_replacements: dict = field(default_factory=dict)
+    hierarchies_to_add: set = field(default_factory=set)
     rating: int | None = None
     flag: str | None = None
     edit_recipe_json: str | None = None
@@ -254,13 +257,15 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sid
     ``SidecarEditor.set_rating``.
     """
     editor = SidecarEditor(xmp_path)
+    if plan.hierarchy_replacements:
+        editor.replace_keyword_hierarchies(plan.hierarchy_replacements)
     _remove_planned_keywords(editor, plan)
 
     # Apply keyword additions after removals so a same-photo remove+add
     # pair does not cancel out (see _remove_planned_keywords).
     if plan.keywords_to_add:
         editor.add_keywords(
-            flat_keywords=plan.keywords_to_add, hierarchical_keywords=set()
+            flat_keywords=plan.keywords_to_add, hierarchical_keywords=plan.hierarchies_to_add
         )
 
     # Apply the flag before the rating: a flag creates a sidecar if needed,
@@ -352,6 +357,46 @@ def _sync_result(synced, failures):
         "ok": not failures,
         "errors": reasons,
     }
+
+
+def _plan_merged_keyword_hierarchies(db, plans):
+    """Canonicalize reviewed paths when their retained keyword is added/removed."""
+    if not any(plan.keywords_to_add or plan.keywords_to_remove for plan in plans.values()):
+        return
+    aliases = db.conn.execute(
+        'SELECT a.path_json, k.id, k.name FROM keyword_import_aliases a '
+        'JOIN keywords k ON k.id = a.keyword_id',
+    ).fetchall()
+    if not aliases:
+        return
+    paths = keyword_paths(db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall())
+    aliases_by_key = defaultdict(list)
+    for alias in aliases:
+        aliases_by_key[keyword_match_key(alias['name'])].append(alias)
+    for photo_id, plan in plans.items():
+        adds = {keyword_match_key(name) for name in plan.keywords_to_add}
+        removes = {keyword_match_key(name) for name in plan.keywords_to_remove}
+        relevant = (adds | removes) & aliases_by_key.keys()
+        if not relevant:
+            continue
+        tagged = db.get_photo_keywords(photo_id)
+        tagged_ids = {k['id'] for k in tagged}
+        tagged_names = {keyword_match_key(k['name']) for k in tagged}
+        for name in relevant:
+            for alias in aliases_by_key[name]:
+                old_path = json.loads(alias['path_json'])
+                old_hierarchy = '|'.join(old_path)
+                if name in adds and alias['id'] in tagged_ids:
+                    new_path = paths[alias['id']]
+                    plan.hierarchy_replacements[old_hierarchy] = '|'.join(new_path)
+                    if len(new_path) > 1:
+                        plan.hierarchies_to_add.add('|'.join(new_path))
+                elif name in removes and alias['id'] not in tagged_ids:
+                    # A removal may be synchronized before the earlier merge
+                    # addition, so the sidecar can still contain an old alias.
+                    plan.hierarchy_replacements[old_hierarchy] = None
+                    if keyword_match_key(old_path[-1]) not in tagged_names:
+                        plan.keywords_to_remove_flat.add(old_path[-1])
 
 
 def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
@@ -456,6 +501,8 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 "error": str(e),
                 "reason": _failure_reason(e),
             }
+
+    _plan_merged_keyword_hierarchies(db, plans)
 
     locations = {}
     if sync_locations:

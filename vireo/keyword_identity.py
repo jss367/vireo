@@ -385,7 +385,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token):
                     'WHERE pk.photo_id = ?', (pid,),
                 )
                 if not any(keyword_match_key(r['name']) == keyword_match_key(old_name) for r in still_used):
-                    db.queue_change(pid, 'keyword_remove', old_name, workspace_id=ws, _commit=False)
+                    db.queue_change(pid, 'keyword_remove_flat', old_name, workspace_id=ws, _commit=False)
             db.remove_pending_changes(pid, 'keyword_remove', target['name'], workspace_id=ws, _commit=False)
             db.clear_equivalent_flat_removals(
                 [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': target['name']}], _commit=False,

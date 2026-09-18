@@ -619,6 +619,27 @@ class SidecarEditor:
             ET.SubElement(lr_bag, f"{{{NS_RDF}}}li").text = kw
             self._dirty = True
 
+    def replace_keyword_hierarchies(self, replacements):
+        """Replace exact reviewed paths; a None replacement removes that path."""
+        if not self._readable():
+            return
+        def key(path):
+            return tuple(keyword_match_key(part) for part in path.split('|'))
+        by_key = {key(source): target for source, target in replacements.items()}
+        for bag in self._root.findall(f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"):
+            seen = set()
+            for li in list(bag.findall(f"{{{NS_RDF}}}li")):
+                old = li.text or ''
+                value = by_key.get(key(old), old)
+                if value is None or value in seen:
+                    bag.remove(li)
+                    self._dirty = True
+                    continue
+                seen.add(value)
+                if value != old:
+                    li.text = value
+                    self._dirty = True
+
     def remove_keywords(self, keywords_to_remove, *, hierarchical=True,
                         keep_exact=False):
         """Remove keywords from dc:subject and lr:hierarchicalSubject.

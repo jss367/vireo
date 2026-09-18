@@ -420,7 +420,7 @@ def test_manual_merge_preview_and_cross_workspace_sidecar_updates(catalog):
         pending = {(r['photo_id'], r['change_type'], r['value']) for r in db.conn.execute(
             'SELECT * FROM pending_changes WHERE workspace_id = ?', (workspace,))}
         for photo in photos[:2]:
-            assert (photo, 'keyword_remove', 'Wing St. Canyon') in pending
+            assert (photo, 'keyword_remove_flat', 'Wing St. Canyon') in pending
             assert (photo, 'keyword_add', 'Wing Street Canyon') in pending
         for photo in photos:
             assert (photo, 'location', 'effective') in pending
@@ -694,3 +694,49 @@ def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp
     assert read_keywords(sidecar) == {'Retained spelling'}
     sync_from_xmp(db, [photos[1]])
     assert {k['id'] for k in db.get_photo_keywords(photos[1])} == {target}
+
+
+@pytest.mark.parametrize('remove_before_sync', [False, True])
+def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog, tmp_path, remove_before_sync):
+    from PIL import Image
+    from scanner import _import_keywords_for_photo
+    from sync import sync_from_xmp, sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db, photos = catalog
+    old_parent = db.add_keyword('Old parent')
+    new_parent = db.add_keyword('New parent')
+    source = db.add_keyword('Old leaf', parent_id=old_parent)
+    target = db.add_keyword('New leaf', parent_id=new_parent)
+    other_parent = db.add_keyword('Things')
+    homonym_parent = db.add_keyword('Old leaf', parent_id=other_parent)
+    unrelated = db.add_keyword('Detail', parent_id=homonym_parent)
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[0], unrelated)
+    db.tag_photo(photos[1], target)
+    directory = tmp_path / 'photos'
+    directory.mkdir()
+    Image.new('RGB', (2, 2)).save(directory / '0.jpg')
+    sidecar = str(directory / '0.xmp')
+    write_sidecar(sidecar, {'Old leaf', 'Detail'}, {'Old parent|Old leaf', 'Things|Old leaf|Detail'})
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    def sync_photo():
+        changes = [r['id'] for r in db.get_pending_changes() if r['photo_id'] == photos[0]]
+        assert sync_to_xmp(db, change_ids=changes)['failed'] == 0
+    if not remove_before_sync:
+        sync_photo()
+        assert read_keywords(sidecar) == {'New leaf', 'Detail'}
+        assert set(read_hierarchical_keywords(sidecar)) == {'New parent|New leaf', 'Things|Old leaf|Detail'}
+        _import_keywords_for_photo(db, photos[0], sidecar)
+        sync_from_xmp(db, [photos[0]])
+        assert {k['id'] for k in db.get_photo_keywords(photos[0])} == {target, unrelated}
+    db.untag_photo(photos[0], target)
+    db.remove_pending_changes(photos[0], 'keyword_add', 'New leaf')
+    db.queue_change(photos[0], 'keyword_remove', 'New leaf')
+    sync_photo()
+    assert read_keywords(sidecar) == {'Detail'}
+    assert set(read_hierarchical_keywords(sidecar)) == {'Things|Old leaf|Detail'}
+    _import_keywords_for_photo(db, photos[0], sidecar)
+    sync_from_xmp(db, [photos[0]])
+    assert {k['id'] for k in db.get_photo_keywords(photos[0])} == {unrelated}
