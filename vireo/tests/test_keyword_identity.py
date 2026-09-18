@@ -1,6 +1,12 @@
 import pytest
 from db import Database
-from keyword_identity import grouped_keywords, location_candidates, reconcile_location
+from keyword_identity import (
+    grouped_keywords,
+    location_candidates,
+    merge_keywords,
+    preview_keyword_merge,
+    reconcile_location,
+)
 
 
 @pytest.fixture
@@ -385,3 +391,187 @@ def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(cat
             else:
                 sync_from_xmp(db, [photos[2]])
     assert {k['id'] for k in db.get_photo_keywords(photos[2])} == before
+
+
+def test_manual_merge_preview_and_cross_workspace_sidecar_updates(catalog):
+    db, photos = catalog
+    source = db.add_keyword('Wing St. Canyon', kw_type='location')
+    target = db.add_keyword('Wing Street Canyon', kw_type='location')
+    db.update_keyword(target, latitude=32.7447, longitude=-117.2186)
+    db.tag_photo(photos[0], source, source='manual')
+    db.tag_photo(photos[0], target, source='accept')
+    db.tag_photo(photos[1], source)
+    db.tag_photo(photos[2], target)
+    ws = db._ws_id()
+    other = db.create_workspace('Shared photos')
+    folder = db.conn.execute('SELECT folder_id FROM photos WHERE id = ?', (photos[0],)).fetchone()[0]
+    db.add_workspace_folder(other, folder)
+    selection = [source, target]
+    preview = preview_keyword_merge(db, selection, target)
+    assert preview['combined_count'] == 3
+    assert (preview['latitude'], preview['longitude']) == (32.7447, -117.2186)
+    assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (source,)).fetchone()
+    assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
+    merge_keywords(db, selection, target, preview['preview_token'])
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (source,)).fetchone()
+    assert {r['photo_id'] for r in db.conn.execute('SELECT photo_id FROM photo_keywords WHERE keyword_id = ?', (target,))} == set(photos)
+    assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?', (photos[0], target)).fetchone()[0] == 'manual'
+    for workspace in (ws, other):
+        pending = {(r['photo_id'], r['change_type'], r['value']) for r in db.conn.execute(
+            'SELECT * FROM pending_changes WHERE workspace_id = ?', (workspace,))}
+        for photo in photos[:2]:
+            assert (photo, 'keyword_remove', 'Wing St. Canyon') in pending
+            assert (photo, 'keyword_add', 'Wing Street Canyon') in pending
+        for photo in photos:
+            assert (photo, 'location', 'effective') in pending
+
+
+def test_manual_merge_general_into_linked_place_remembers_import(catalog):
+    db, photos = catalog
+    source, target, parent = place_pair(db, name='Whatcom Falls Park', nested=True)
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    assert db.add_keyword('Whatcom Falls Park', parent_id=parent, _resolve_alias=True) == target
+    assert db.get_assigned_photo_location(photos[0])['place_id'] == 'test-place'
+
+
+def test_manual_merge_multiple_keywords_and_coordinate_pair(catalog):
+    db, photos = catalog
+    ids = [db.add_keyword(name, kw_type='location') for name in ('Short', 'Long', 'Alternative')]
+    for photo, kid in zip(photos, ids, strict=True):
+        db.tag_photo(photo, kid)
+    db.update_keyword(ids[0], latitude=99)
+    db.update_keyword(ids[1], latitude=32, longitude=-117)
+    preview = preview_keyword_merge(db, ids, ids[0])
+    assert (preview['latitude'], preview['longitude']) == (32, -117)
+    merge_keywords(db, ids, ids[0], preview['preview_token'])
+    row = db.conn.execute('SELECT * FROM keywords WHERE id = ?', (ids[0],)).fetchone()
+    assert (row['latitude'], row['longitude']) == (32, -117)
+    assert all(db.get_photo_keywords(p)[0]['id'] == ids[0] for p in photos)
+
+
+def test_manual_merge_stale_preview_and_rollback(catalog, monkeypatch):
+    db, photos = catalog
+    source, target, _ = place_pair(db)
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    ids = [source, target]
+    preview = preview_keyword_merge(db, ids, target)
+    db.tag_photo(photos[2], source)
+    with pytest.raises(ValueError, match='changed'):
+        merge_keywords(db, ids, target, preview['preview_token'])
+    preview = preview_keyword_merge(db, ids, target)
+    def fail(*args, **kwargs):
+        raise RuntimeError('queue failed')
+    monkeypatch.setattr(db, 'queue_change', fail)
+    with pytest.raises(RuntimeError, match='queue failed'):
+        merge_keywords(db, ids, target, preview['preview_token'])
+    assert db.get_photo_keywords(photos[0])[0]['id'] == source
+    assert not db.conn.execute('SELECT 1 FROM keyword_import_aliases').fetchone()
+    assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
+
+
+@pytest.mark.parametrize('case', ['type', 'species', 'children', 'different_place', 'photo_conflict', 'alias', 'workspace', 'different_taxon'])
+def test_manual_merge_rejects_unsafe_selection(catalog, case):
+    db, photos = catalog
+    source, target, _ = place_pair(db)
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    if case == 'type':
+        db.update_keyword(source, type='individual')
+    elif case == 'species':
+        db.conn.execute('UPDATE keywords SET is_species = 1 WHERE id = ?', (source,))
+    elif case == 'children':
+        db.add_keyword('Child', parent_id=source)
+    elif case in ('different_place', 'photo_conflict', 'alias'):
+        other = db.upsert_place_chain({'place_id': 'other-place', 'name': 'Other lake', 'lat': 34, 'lng': -116, 'address_components': []})
+        if case == 'different_place':
+            source = other
+            db.tag_photo(photos[0], source)
+        elif case == 'photo_conflict':
+            db.tag_photo(photos[0], other)
+        else:
+            from keyword_identity import path_key
+            db.conn.execute('INSERT INTO keyword_import_aliases VALUES (?, ?, ?)', (path_key(['Lake Hodges']), '["Lake Hodges"]', other))
+    elif case == 'workspace':
+        db.set_active_workspace(db.create_workspace('Empty'))
+    elif case == 'different_taxon':
+        source, target = species_pair(db)[:2]
+        db.tag_photo(photos[0], source)
+        db.tag_photo(photos[1], target)
+        db.conn.execute('UPDATE keywords SET source_taxon_id = 999 WHERE id = ?', (source,))
+    db.conn.commit()
+    with pytest.raises(ValueError):
+        preview_keyword_merge(db, [source, target], target)
+    assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (source,)).fetchone()
+
+
+def test_manual_merge_api_validation_and_revalidation(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    photos = [r['id'] for r in db.conn.execute('SELECT id FROM photos ORDER BY id LIMIT 2')]
+    ids = [db.add_keyword(name, kw_type='general') for name in ('Merge first', 'Merge second')]
+    for photo, kid in zip(photos, ids, strict=True):
+        db.tag_photo(photo, kid)
+    for invalid in (None, [], {}, {'keyword_ids': [True, ids[1]], 'target_id': ids[1]},
+                    {'keyword_ids': ids, 'target_id': True},
+                    {'keyword_ids': [ids[0], ids[0]], 'target_id': ids[0]},
+                    {'keyword_ids': ids, 'target_id': 999999},
+                    {'keyword_ids': [ids[0], 999999], 'target_id': ids[0]}):
+        assert client.post('/api/keywords/merge-preview', json=invalid).status_code == 400
+    body = {'keyword_ids': ids, 'target_id': ids[1]}
+    assert client.post('/api/keywords/merge', json=body).status_code == 400
+    preview = client.post('/api/keywords/merge-preview', json=body)
+    assert preview.status_code == 200
+    body['preview_token'] = preview.get_json()['preview_token']
+    assert client.post('/api/keywords/merge', json=body).status_code == 200
+    assert client.post('/api/keywords/merge', json=body).status_code == 400
+
+
+def test_manual_merge_count_includes_retained_children_and_other_workspaces(catalog):
+    db, photos = catalog
+    source = db.add_keyword('Alias', kw_type='general')
+    target = db.add_keyword('Keep', kw_type='general')
+    child = db.add_keyword('Child', parent_id=target)
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], child)
+    ws = db._ws_id()
+    other = db.create_workspace('Other workspace')
+    db.set_active_workspace(other)
+    folder = db.add_folder('/other-merge-photos', name='Other photos')
+    db.add_workspace_folder(other, folder)
+    photo = db.add_photo(folder_id=folder, filename='elsewhere.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    db.tag_photo(photo, source)
+    db.set_active_workspace(ws)
+    preview = preview_keyword_merge(db, [source, target], target)
+    assert preview['combined_count'] == 3
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    assert db.conn.execute('SELECT parent_id FROM keywords WHERE id = ?', (child,)).fetchone()[0] == target
+    assert db.conn.execute('SELECT keyword_id FROM photo_keywords WHERE photo_id = ?', (photo,)).fetchone()[0] == target
+    assert db.conn.execute("SELECT 1 FROM pending_changes WHERE photo_id = ? AND workspace_id = ? AND change_type = 'keyword_add'", (photo, other)).fetchone()
+
+
+def test_manual_merge_sidecar_sync_keeps_unrelated_tags(catalog, tmp_path):
+    from PIL import Image
+    from sync import sync_to_xmp
+    from xmp import read_keywords, write_sidecar
+
+    db, photos = catalog
+    directory = tmp_path / 'photos'
+    directory.mkdir()
+    Image.new('RGB', (2, 2)).save(directory / '0.jpg')
+    sidecar = directory / '0.xmp'
+    write_sidecar(str(sidecar), {'Wing St. Canyon', 'Unrelated'}, set())
+    source = db.add_keyword('Wing St. Canyon', kw_type='location')
+    target = db.add_keyword('Wing Street Canyon', kw_type='location')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    changes = [r['id'] for r in db.get_pending_changes() if r['photo_id'] == photos[0]]
+    result = sync_to_xmp(db, change_ids=changes)
+    assert result['failed'] == 0
+    assert result['synced'] == 1
+    assert read_keywords(str(sidecar)) == {'Wing Street Canyon', 'Unrelated'}

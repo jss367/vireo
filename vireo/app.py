@@ -7955,6 +7955,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(error), 400)
         return jsonify(result)
 
+    @app.route('/api/keywords/merge-preview', methods=['POST'])
+    @app.route('/api/keywords/merge', methods=['POST'])
+    def api_merge_keywords():
+        from keyword_identity import merge_keywords, preview_keyword_merge
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error('Expected a keyword selection and a keyword to keep.', 400)
+        try:
+            args = (_get_db(), body.get('keyword_ids'), body.get('target_id'))
+            if request.path.endswith('/merge-preview'):
+                result = preview_keyword_merge(*args)
+            else:
+                result = merge_keywords(*args, body.get('preview_token'))
+        except ValueError as error:
+            return json_error(str(error), 400)
+        return jsonify(result)
+
     @app.route("/api/keywords")
     def api_keywords():
         db = _get_db()
