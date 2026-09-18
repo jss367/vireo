@@ -278,6 +278,171 @@ def test_move_folder_job_reports_partial_fanout_after_completion(
     ])
 
 
+def test_move_folder_job_prefers_the_result_over_the_stale_plan(
+    live_server, page,
+):
+    """A re-plan between enqueue and run must not leave history lying.
+
+    The worker re-plans when it starts, so a capture-time edit landing in
+    between can send every photo somewhere the enqueue-time snapshot never
+    named. The finished route is drawn from ``result.destinations``, so "To"
+    names the folder that actually received the photos — and the plan's own
+    folder count is stated as a plain fact rather than dropped.
+    """
+    job = _move_folder_job(live_server, {
+        "folder_template": "%Y-%m-%d",
+        "date_destinations": [
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-12",
+                "relative_path": "2026-09-12",
+                "photo_count": 300,
+            },
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-13",
+                "relative_path": "2026-09-13",
+                "photo_count": 199,
+            },
+        ],
+        "date_destination_count": 2,
+        "date_photo_count": 499,
+    })
+    job["status"] = "completed"
+    job["finished_at"] = "2026-08-16T21:39:12"
+    job["result"] = {
+        "moved": 499,
+        "errors": [],
+        # The worker put everything in one corrected date folder.
+        "destinations": [{
+            "path": "/Volumes/Photos/Archive/2026-09-11",
+            "planned": 499,
+            "moved": 499,
+        }],
+        "destination_count": 1,
+    }
+    _serve_jobs_page(live_server, page, job, history=True)
+
+    move_route = page.locator(".job-move-route")
+    expect(move_route.locator(".job-move-route-path")).to_have_text(
+        ["/Volumes/Camera/Paris", "/Volumes/Photos/Archive/2026-09-11"]
+    )
+    note = move_route.locator(".job-move-route-note")
+    expect(note).to_contain_text("All 499 photos landed in this single folder")
+    # One folder here is the run's outcome, not proof the template collapses
+    # to one path, so the note must not explain it that way.
+    expect(note).to_contain_text("the plan at start had 2 folders")
+    expect(note).not_to_contain_text("resolves to one path")
+
+
+def test_move_folder_job_names_every_folder_the_move_actually_used(
+    live_server, page,
+):
+    """A finished fan-out lists the result's folders, not the plan's."""
+    job = _move_folder_job(live_server, {
+        "folder_template": "%Y-%m-%d",
+        "resolved_destination": "/Volumes/Photos/Archive/2026-09-12",
+        "date_destinations": [{
+            "path": "/Volumes/Photos/Archive/2026-09-12",
+            "relative_path": "2026-09-12",
+            "photo_count": 499,
+        }],
+        "date_destination_count": 1,
+        "date_photo_count": 499,
+    })
+    job["status"] = "completed"
+    job["finished_at"] = "2026-08-16T21:39:12"
+    job["result"] = {
+        "moved": 499,
+        "errors": [],
+        "destinations": [
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-12",
+                "planned": 300,
+                "moved": 300,
+            },
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-13",
+                "planned": 199,
+                "moved": 199,
+            },
+        ],
+        "destination_count": 2,
+    }
+    _serve_jobs_page(live_server, page, job, history=True)
+
+    move_route = page.locator(".job-move-route")
+    # Two landing folders means there is no single "To" path; the selected
+    # root is the honest answer even though the plan named one folder.
+    expect(move_route.locator(".job-move-route-path")).to_have_text(
+        ["/Volumes/Camera/Paris", "/Volumes/Photos/Archive"]
+    )
+    expect(move_route.locator(".job-move-route-note")).to_contain_text(
+        "All 499 photos landed in 2 capture-date folders"
+    )
+    expect(move_route.locator(".job-move-route-dates li")).to_have_text([
+        "2026-09-12 · 300 photos",
+        "2026-09-13 · 199 photos",
+        "Planned at start: 1 folder",
+    ])
+
+
+def test_move_folder_job_does_not_count_a_folder_that_got_nothing(
+    live_server, page,
+):
+    """A group whose photos were all skipped is not a landing folder.
+
+    ``move_folder_by_date`` still reports that destination with ``moved: 0``
+    (a missing source or a same-name file at the destination skips the photo
+    rather than failing the job), so the header counts only the folders that
+    received photos while the list still shows the empty one for what it is.
+    """
+    job = _move_folder_job(live_server, {
+        "folder_template": "%Y-%m-%d",
+        "date_destinations": [
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-12",
+                "relative_path": "2026-09-12",
+                "photo_count": 300,
+            },
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-13",
+                "relative_path": "2026-09-13",
+                "photo_count": 199,
+            },
+        ],
+        "date_destination_count": 2,
+        "date_photo_count": 499,
+    })
+    job["status"] = "completed"
+    job["finished_at"] = "2026-08-16T21:39:12"
+    job["result"] = {
+        "moved": 300,
+        "errors": ["199 photos already exist at the destination"],
+        "destinations": [
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-12",
+                "planned": 300,
+                "moved": 300,
+            },
+            {
+                "path": "/Volumes/Photos/Archive/2026-09-13",
+                "planned": 199,
+                "moved": 0,
+            },
+        ],
+        "destination_count": 2,
+    }
+    _serve_jobs_page(live_server, page, job, history=True)
+
+    move_route = page.locator(".job-move-route")
+    expect(move_route.locator(".job-move-route-note")).to_contain_text(
+        "300 of 499 photos landed in 1 capture-date folder"
+    )
+    expect(move_route.locator(".job-move-route-dates li")).to_have_text([
+        "2026-09-12 · 300 photos",
+        "2026-09-13 · 0 of 199 photos moved",
+    ])
+
+
 def test_label_preparation_shows_progress_and_one_estimate(live_server, page):
     from datetime import datetime, timedelta
 
