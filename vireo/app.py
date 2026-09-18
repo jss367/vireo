@@ -10056,6 +10056,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                    WHERE pk.keyword_id = ?""",
                 (keyword_id,),
             ).fetchall()
+        # Additionally snapshot photos whose SIDECAR LOCATION path would go
+        # stale from this update. A location-keyword rename does not just
+        # change ``dc:subject`` (the flat leaf, which the ``affected`` set
+        # above covers): it also invalidates the sidecar's
+        # ``vireo:locationKeywords`` marker and ``lr:hierarchicalSubject``
+        # entry. Renaming an ANCESTOR is worse still -- no photo is tagged
+        # with the ancestor directly, so ``affected`` is empty and the
+        # sidecar's hierarchy keeps the old ancestor name forever. Recurse
+        # down from ``keyword_id`` to catch every descendant-leaf-tagged
+        # photo. The gate on ``old_row["type"] == "location"`` covers a
+        # rename or a retype away from location; a retype INTO location is
+        # rare but also queued so a sidecar written under a former
+        # non-location role gets its marker cleaned up on the next sync.
+        location_affected = []
+        if old_row is not None and (
+            old_row["type"] == "location"
+            or (isinstance(body.get("type"), str) and body["type"] == "location")
+        ):
+            location_affected = db.conn.execute(
+                """WITH RECURSIVE tree(id) AS (
+                       SELECT ?
+                       UNION ALL
+                       SELECT k.id FROM keywords k
+                       JOIN tree t ON k.parent_id = t.id
+                   )
+                   SELECT DISTINCT p.id AS photo_id, wf.workspace_id
+                   FROM photos p
+                   JOIN photo_keywords pk ON pk.photo_id = p.id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN tree t ON t.id = pk.keyword_id""",
+                (keyword_id,),
+            ).fetchall()
         # Apply the update first — if it raises, no sidecar changes are queued
         try:
             effective_id = db.update_keyword(keyword_id, **body)
@@ -10098,6 +10130,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
+        # If a location keyword's name or type changed, requeue a
+        # ``location`` change for every descendant-tagged photo so
+        # ``sync_to_xmp`` rewrites the sidecar's hierarchy path and
+        # ``vireo:locationKeywords`` marker under the new spelling.
+        # ``keyword_remove``/``keyword_add`` above only rewrites the flat
+        # ``dc:subject`` entry (and only for a leaf rename); the hierarchy
+        # and marker require the ``location`` change type. ``queue_change``
+        # dedupes silently, so re-running an already-queued photo is
+        # harmless.
+        if location_affected and old_row is not None and new_row is not None:
+            old_was_location = old_row["type"] == "location"
+            new_is_location = new_row["type"] == "location"
+            name_changed = old_row["name"] != new_row["name"]
+            type_changed = old_row["type"] != new_row["type"]
+            if (old_was_location or new_is_location) and (
+                name_changed or type_changed
+            ):
+                for row in location_affected:
+                    db.queue_change(
+                        row["photo_id"],
+                        "location",
+                        "effective",
+                        workspace_id=row["workspace_id"],
+                        _commit=False,
+                    )
+                db.conn.commit()
         # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
         # only when `merged` is truthy; without it the UI keeps the deleted
         # source id and its next edit/delete would 404 or hit the wrong row.

@@ -2280,6 +2280,95 @@ def _drop_all_pending(db):
     db.conn.commit()
 
 
+def test_renaming_a_location_leaf_queues_a_location_change(client_with_photo):
+    """Renaming a leaf location keyword requeues its tagged photos.
+
+    Regression: ``api_update_keyword`` used to queue only ``keyword_remove``
+    and ``keyword_add`` on a rename, so the sidecar's flat ``dc:subject``
+    was rewritten but its ``lr:hierarchicalSubject`` and
+    ``vireo:locationKeywords`` marker kept pointing at the old leaf. The
+    hierarchy in Lightroom stayed stale until another edit re-queued the
+    location.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    leaf_id = _assign_location(db, photo_id, ["France", "OldParis"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.put(
+        f"/api/keywords/{leaf_id}", json={"name": "NewParis"},
+    )
+    assert resp.status_code == 200
+
+    queued = [
+        (c["photo_id"], c["change_type"]) for c in db.get_pending_changes()
+    ]
+    assert (photo_id, "location") in queued
+
+
+def test_renaming_a_location_ancestor_queues_descendant_photos(
+    client_with_photo,
+):
+    """A rename of an ancestor requeues photos tagged with descendant leaves.
+
+    No photo is tagged with the ancestor directly, so the existing
+    ``keyword_remove``/``keyword_add`` snapshot iterates an empty list --
+    the hierarchy in the sidecar keeps the old ancestor name forever
+    without an explicit ``location`` change queued for the descendant leaf.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    # Build France|Paris and remember France's id for the rename.
+    france_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('France', NULL, 'location')"
+    ).lastrowid
+    paris_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Paris', ?, 'location')",
+        (france_id,),
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, paris_id)
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.put(
+        f"/api/keywords/{france_id}",
+        json={"name": "République Française"},
+    )
+    assert resp.status_code == 200
+
+    queued = [
+        (c["photo_id"], c["change_type"]) for c in db.get_pending_changes()
+    ]
+    assert (photo_id, "location") in queued
+
+
+def test_renaming_a_non_location_keyword_does_not_queue_location(
+    client_with_photo,
+):
+    """A rename of an ordinary keyword must not touch the location queue.
+
+    Guards against a helper that would queue on any keyword rename -- the
+    sidecar location marker and hierarchy are unaffected when the renamed
+    keyword is not a ``type='location'`` row (or an ancestor of one).
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    kw_id = db.add_keyword("SomeSpecies", is_species=True)
+    db.tag_photo(photo_id, kw_id)
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.put(
+        f"/api/keywords/{kw_id}", json={"name": "OtherSpecies"},
+    )
+    assert resp.status_code == 200
+
+    change_types = {c["change_type"] for c in db.get_pending_changes()}
+    assert "location" not in change_types
+
+
 def test_sync_preview_says_marker_only_when_the_keyword_is_already_gone(
     client_with_photo,
 ):

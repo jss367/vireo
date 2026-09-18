@@ -1281,6 +1281,150 @@ def test_set_location_keywords_does_not_claim_a_users_hier_case_variant(tmp_path
     ]
 
 
+def test_remove_vireo_location_keywords_leaves_user_normalized_flat_variant(tmp_path):
+    """A user's normalized flat variant added after our write is not ours to remove.
+
+    Vireo writes canonical ``Paris``. Later, a user (or another metadata
+    tool) adds the normalized variant ``paris`` as a separate ``rdf:li``.
+    A blind normalized-key match would remove both entries on cleanup; the
+    fix restricts removal to the exact spelling recorded in the marker
+    when it is still present in the sidecar.
+    """
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Paris"])
+    editor.commit()
+
+    # User adds a normalized variant of the flat leaf beside our canonical entry.
+    tampered = SidecarEditor(path)
+    tampered.add_keywords(flat_keywords={"paris"}, hierarchical_keywords=set())
+    tampered.commit()
+    assert read_keywords(path) == {"Paris", "paris"}
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # Only our exact entry is gone; the user's variant survives.
+    assert read_keywords(path) == {"paris"}
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_remove_vireo_location_keywords_leaves_user_normalized_hier_variant(tmp_path):
+    """A user's normalized hierarchy variant added after our write is not ours."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Paris"])
+    editor.commit()
+
+    tampered = SidecarEditor(path)
+    tampered.add_keywords(
+        flat_keywords=set(), hierarchical_keywords={"france|paris"},
+    )
+    tampered.commit()
+    assert set(read_hierarchical_keywords(path)) == {"France|Paris", "france|paris"}
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # Only our exact hierarchy entry is gone; the user's variant survives.
+    assert read_hierarchical_keywords(path) == ["france|paris"]
+    assert read_keywords(path) == set()
+
+
+def test_remove_vireo_location_keywords_falls_back_to_normalized_when_lightroom_rewrote(
+    tmp_path,
+):
+    """When Lightroom rewrites our exact entry, the normalized fallback still cleans it up.
+
+    Vireo writes ``Paris`` and Lightroom later normalizes it to ``paris``
+    in place, so the exact spelling recorded in the marker is no longer
+    present. The removal path falls back to a single normalized match so
+    the entry Vireo wrote still gets cleaned up. Only one entry is
+    removed even if multiple normalized variants are present, so a user
+    variant added independently is not swept up with it.
+    """
+    from xmp import LOCATION_KEYWORDS_MARKER, NS_LR, NS_RDF, SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Paris"])
+    editor.commit()
+
+    # Simulate Lightroom rewriting the exact entry in place.
+    rewritten = SidecarEditor(path)
+    desc = rewritten._description()
+    dc_bag = rewritten._bag(desc, "http://purl.org/dc/elements/1.1/", "subject")
+    for li in dc_bag.findall(f"{{{NS_RDF}}}li"):
+        if li.text == "Paris":
+            li.text = "PARIS"
+    lr_bag = rewritten._bag(desc, NS_LR, "hierarchicalSubject")
+    for li in lr_bag.findall(f"{{{NS_RDF}}}li"):
+        if li.text == "France|Paris":
+            li.text = "france|paris"
+    rewritten._dirty = True
+    rewritten.commit()
+    assert desc.get(LOCATION_KEYWORDS_MARKER) == "France|Paris"
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # The rewritten entries -- our write in Lightroom's spelling -- are gone.
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_remove_vireo_location_keywords_normalized_fallback_removes_only_one_variant(
+    tmp_path,
+):
+    """When no exact match survives, cleanup removes at most one normalized entry.
+
+    If Lightroom rewrote our entry and a user independently added another
+    normalized variant, the marker records what we wrote but the sidecar
+    holds two candidates. Removing every normalized match would delete
+    user data; the fallback drops one entry only so at most one variant
+    is lost.
+    """
+    from xmp import LOCATION_KEYWORDS_MARKER, NS_RDF, SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Paris"])
+    editor.commit()
+
+    # Rewrite our exact entry to "PARIS" and have the user add "paris" too.
+    tampered = SidecarEditor(path)
+    desc = tampered._description()
+    dc_bag = tampered._bag(desc, "http://purl.org/dc/elements/1.1/", "subject")
+    for li in dc_bag.findall(f"{{{NS_RDF}}}li"):
+        if li.text == "Paris":
+            li.text = "PARIS"
+    tampered._dirty = True
+    tampered.commit()
+
+    tampered = SidecarEditor(path)
+    tampered.add_keywords(flat_keywords={"paris"}, hierarchical_keywords=set())
+    tampered.commit()
+    assert read_keywords(path) == {"PARIS", "paris"}
+    assert (
+        tampered._description().get(LOCATION_KEYWORDS_MARKER) == "France|Paris"
+    )
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # Exactly one normalized variant survives -- we removed one, not both.
+    assert len(read_keywords(path)) == 1
+    assert read_keywords(path).issubset({"PARIS", "paris"})
+
+
 def test_set_location_keywords_refuses_a_name_with_a_pipe(tmp_path, caplog):
     """A location whose name contains ``|`` cannot round-trip through
     Lightroom's hierarchy delimiter, so the write raises rather than

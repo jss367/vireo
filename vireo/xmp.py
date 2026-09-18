@@ -1094,12 +1094,16 @@ class SidecarEditor:
         ``owned_value`` says which of the flat leaf and hierarchical path
         the earlier write actually authored (a missing companion attribute
         is treated as both, to keep removal working on legacy sidecars).
-        Matching is by normalized key rather than exact text so a sidecar
-        Lightroom rewrote with different casing or spacing still resolves
-        to the entry Vireo wrote; the flat match is restricted to the leaf
-        name and the hierarchical match requires the whole recorded path.
-        Anything else in the sidecar -- including a matching entry the user
-        typed themselves in Lightroom -- is left alone.
+        The recorded marker holds the exact text Vireo wrote, so prefer
+        entries whose text is that exact spelling: a user or metadata tool
+        that later adds a normalized variant (``paris`` beside our
+        canonical ``Paris``) must not lose their entry when Vireo cleans
+        up. Only when no exact match survives -- e.g. Lightroom rewrote
+        our entry with different casing or spacing -- do we fall back to
+        a single normalized match, which still catches the rewritten
+        entry without deleting every normalized variant a user may have
+        added since. The flat match is restricted to the leaf name and
+        the hierarchical match requires the whole recorded path.
         """
         leaf, path = location_keyword_entries(marker_value)
         if not path:
@@ -1111,21 +1115,49 @@ class SidecarEditor:
 
         if owns_flat and leaf_key:
             for bag in self._root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag"):
-                for li in bag.findall(f"{{{NS_RDF}}}li"):
-                    if li.text and keyword_match_key(li.text) == leaf_key:
-                        removed.append(li.text)
-                        bag.remove(li)
+                exact = [
+                    li for li in bag.findall(f"{{{NS_RDF}}}li")
+                    if li.text == leaf
+                ]
+                if exact:
+                    targets = exact
+                else:
+                    fallback = next(
+                        (
+                            li for li in bag.findall(f"{{{NS_RDF}}}li")
+                            if li.text and keyword_match_key(li.text) == leaf_key
+                        ),
+                        None,
+                    )
+                    targets = [fallback] if fallback is not None else []
+                for li in targets:
+                    removed.append(li.text)
+                    bag.remove(li)
 
         if owns_hier:
             for bag in self._root.findall(
                 f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"
             ):
-                for li in bag.findall(f"{{{NS_RDF}}}li"):
-                    if not li.text:
-                        continue
-                    if [keyword_match_key(s) for s in li.text.split("|")] == path_keys:
-                        removed.append(li.text)
-                        bag.remove(li)
+                exact = [
+                    li for li in bag.findall(f"{{{NS_RDF}}}li")
+                    if li.text == path
+                ]
+                if exact:
+                    targets = exact
+                else:
+                    fallback = next(
+                        (
+                            li for li in bag.findall(f"{{{NS_RDF}}}li")
+                            if li.text
+                            and [keyword_match_key(s) for s in li.text.split("|")]
+                            == path_keys
+                        ),
+                        None,
+                    )
+                    targets = [fallback] if fallback is not None else []
+                for li in targets:
+                    removed.append(li.text)
+                    bag.remove(li)
 
         if removed:
             self._dirty = True
