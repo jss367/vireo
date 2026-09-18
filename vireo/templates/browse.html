@@ -2550,6 +2550,7 @@ window.GOOGLE_MAPS_PREFER_ENGLISH = true;
 var photos = [];
 var totalPhotos = 0;
 var totalUnderlyingPhotos = 0;
+var totalBrowseStacks = 0;
 var currentPage = 1;
 var perPage = 50;
 var loading = false;
@@ -2634,6 +2635,7 @@ function _removeBrowseStackExpansionRequest(cacheKey, request) {
 
 function setBrowseTotals(data) {
   totalPhotos = Number(data && data.total) || 0;
+  totalBrowseStacks = Number(data && data.stack_count) || 0;
   totalUnderlyingPhotos = data && data.underlying_total != null
     ? Number(data.underlying_total) || 0
     : totalPhotos;
@@ -8121,16 +8123,18 @@ function reloadBrowseResults(options) {
 function updateScrollPosition() {
   var el = document.getElementById('filterSummary');
   var positionOffset = loadedWindowOffset();
+  var stackedTotals = totalPhotos.toLocaleString() + ' items · '
+    + totalBrowseStacks.toLocaleString() + (totalBrowseStacks === 1 ? ' stack · ' : ' stacks · ')
+    + totalUnderlyingPhotos.toLocaleString() + ' photos';
   var resultLabel = function(position) {
     if (browseStacksEnabled()) {
-      return position + ' of ' + totalPhotos.toLocaleString() + ' items · '
-        + totalUnderlyingPhotos.toLocaleString() + ' photos';
+      return position + ' of ' + stackedTotals;
     }
     return position + ' of ' + totalPhotos.toLocaleString();
   };
   if (photos.length === 0) {
     el.textContent = browseStacksEnabled()
-      ? totalPhotos.toLocaleString() + ' items · ' + totalUnderlyingPhotos.toLocaleString() + ' photos'
+      ? stackedTotals
       : totalPhotos.toLocaleString() + ' photos';
     return;
   }
@@ -8138,7 +8142,7 @@ function updateScrollPosition() {
   var cards = document.querySelectorAll('.grid-card');
   if (cards.length === 0) {
     el.textContent = browseStacksEnabled()
-      ? totalPhotos.toLocaleString() + ' items · ' + totalUnderlyingPhotos.toLocaleString() + ' photos'
+      ? stackedTotals
       : totalPhotos.toLocaleString() + ' photos';
     return;
   }

@@ -28608,6 +28608,7 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
 
     rows = [dict(row) for row in db.query_browse_stacks([], sort="name")]
     assert db.count_browse_stacks([]) == 4
+    assert db.browse_stack_totals([]) == {"total": 4, "stack_count": 2}
     grouped = {
         row["_browse_stack_kind"]: row
         for row in rows if row["_browse_stack_kind"]
@@ -28635,6 +28636,12 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
     assert len(filtered) == 1
     assert filtered[0]["id"] == ids["burst-best.jpg"]
     assert filtered[0]["_browse_stack_kind"] is None
+    assert db.browse_stack_totals([
+        {"field": "rating", "op": ">=", "value": 5},
+    ]) == {"total": 1, "stack_count": 0}
+    assert db.browse_stack_totals([
+        {"field": "photo_ids", "value": []},
+    ]) == {"total": 0, "stack_count": 0}
 
 
 def _timed_photo(db, folder_id, filename, timestamp, *keyword_ids):

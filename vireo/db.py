@@ -26058,16 +26058,30 @@ class Database:
     def count_browse_stacks(self, rules, collection_id=None, folder_id=None,
                             include_offline_folders=False, stack_config=None):
         """Count logical Browse items after stack projection."""
+        return self.browse_stack_totals(
+            rules, collection_id=collection_id, folder_id=folder_id,
+            include_offline_folders=include_offline_folders,
+            stack_config=stack_config,
+        )["total"]
+
+    def browse_stack_totals(self, rules, collection_id=None, folder_id=None,
+                           include_offline_folders=False, stack_config=None):
+        """Count all items and multi-photo stacks in one scoped projection."""
         ctes, params = self._browse_stack_query_parts(
             rules, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
             stack_config=stack_config,
         )
         row = self.conn.execute(
-            ctes + " SELECT COUNT(DISTINCT _stack_key) AS n FROM keyed",
+            ctes + """
+                SELECT COUNT(DISTINCT _stack_key) AS total,
+                       COUNT(DISTINCT CASE WHEN _stack_kind IS NOT NULL
+                             THEN _stack_key END) AS stack_count
+                FROM keyed
+            """,
             params,
         ).fetchone()
-        return int(row["n"] or 0)
+        return {"total": int(row["total"]), "stack_count": int(row["stack_count"])}
 
     def query_browse_stack_position(self, rules, photo_id, sort="date",
                                     collection_id=None, folder_id=None,
