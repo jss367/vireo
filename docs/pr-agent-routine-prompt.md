@@ -196,11 +196,15 @@ signal; do not limit the work to the triggering payload.
    empty commit or a top-level success comment.
 9. Size-drift checkpoint. Look at the whole branch above the base, staged fix
    included, and ask whether the PR still looks like the change it set out to
-   be. Two rough conditions, both required: it is more than about three times
-   the size it was when a human last committed to the branch (for a PR opened
-   by another agent, where no human commit exists, use the PR as it stood when
-   it was opened), and it is large in absolute terms — several hundred changed
-   lines at least. A 60-line PR that needs a 40-line fix has not drifted; a
+   be. Two rough conditions, both required. First, the branch is more than
+   about three times the size it was at its baseline — the newest commit on it
+   carrying no routine marker (`[pr-agent-review-fix:$PR]`,
+   `[pr-agent-fix-ci:$PR]`), or the PR as opened if every commit carries one.
+   Your commits are authored under the maintainer's GitHub identity, so the
+   marker is what identifies them, not the author; keying the baseline to
+   authorship would let it creep forward one round at a time and hide exactly
+   the cumulative growth this checkpoint is for. Second, the branch is large in
+   absolute terms — several hundred changed lines at least. A 60-line PR that needs a 40-line fix has not drifted; a
    130-line display fix now carrying 1,800 lines of concurrency hardening has.
    This is a judgment call by design, not an accounting rule: it exists to hand
    a drifting PR back to the maintainer. Err toward continuing when the growth
