@@ -748,6 +748,38 @@ def test_catalog_import_resolves_multiple_non_location_merge_aliases(catalog, mo
     assert {k['id'] for k in db.get_photo_keywords(photos[0])} == expected
 
 
+def test_catalog_import_matches_windows_paths_across_separator_and_case(catalog, monkeypatch):
+    """A Windows catalog path must find the photo the scanner stored.
+
+    `read_catalog` returns Lightroom's own spelling — forward slashes, and
+    whatever case the catalog recorded — while the scanner stores what
+    `os.walk` produced. When those disagree the import silently skips the
+    photo. Both normalizers are identities on POSIX, so `ntpath`'s are patched
+    in to make the mismatch reachable from this runner at all.
+    """
+    import ntpath
+
+    import importer
+    from importer import execute_import
+
+    db, _ = catalog
+    monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
+    monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
+    folder = db.add_folder('D:\\Pictures\\Trip', name='Trip')
+    db.add_workspace_folder(db._ws_id(), folder)
+    photo = db.add_photo(folder_id=folder, filename='DSC_1.jpg', extension='.jpg',
+                         file_size=10, file_mtime=1, timestamp='2024-06-15T10:00:00')
+    monkeypatch.setattr('importer.read_catalog', lambda *args, **kwargs: {
+        'd:/Pictures/Trip/DSC_1.jpg': {
+            'flat_keywords': {'Osprey'},
+            'hierarchical_keywords': set(),
+        },
+    })
+    result = execute_import(['dummy.lrcat'], db, write_xmp=False)
+    assert result['skipped'] == 0
+    assert [k['name'] for k in db.get_photo_keywords(photo)] == ['Osprey']
+
+
 def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp_path):
     from PIL import Image
     from sync import sync_from_xmp, sync_to_xmp

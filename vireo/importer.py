@@ -13,6 +13,19 @@ from xmp import write_sidecar
 log = logging.getLogger(__name__)
 
 
+def _path_lookup_key(path):
+    """Key a file path so the catalog and scanned spellings of it collide.
+
+    ``os.path.normpath`` already reconciles the separator difference between
+    Lightroom's forward-slashed paths and the backslashed ones ``os.walk``
+    produces. Case is the other half of that on Windows: a catalog holding
+    ``D:/Pictures`` and a scan rooted at ``d:\\Pictures`` name the same file.
+    ``os.path.normcase`` folds both, and is the identity on POSIX, where case
+    is significant and a backslash is a legal filename character.
+    """
+    return os.path.normcase(os.path.normpath(path))
+
+
 def preview_catalog(catalog_path, db):
     """Preview what a single catalog contains and how it maps to files on disk.
 
@@ -113,10 +126,8 @@ def execute_import(
     Returns:
         dict with imported, skipped, failed counts
     """
-    # Build path -> DB photo lookup. read_catalog concatenates Lightroom's
-    # stored absolutePath and pathFromRoot (both forward-slash) while
-    # os.path.join on Windows produces backslashes, so both sides go through
-    # os.path.normpath to compare equally on every platform.
+    # Build path -> DB photo lookup. Both sides go through _path_lookup_key
+    # so a catalog path and a scanned path that name the same file agree.
     photos_by_path = {}
     all_photos = db.get_photos(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
@@ -124,8 +135,8 @@ def execute_import(
         if pause_callback:
             pause_callback()
         folder_path = folders.get(p["folder_id"], "")
-        full_path = os.path.normpath(os.path.join(folder_path, p["filename"]))
-        photos_by_path[full_path] = p
+        full_path = os.path.join(folder_path, p["filename"])
+        photos_by_path[_path_lookup_key(full_path)] = p
 
     # Merge catalog data
     merged = {}  # file_path -> {flat_keywords, hierarchical_keywords}
@@ -169,7 +180,7 @@ def execute_import(
             db.conn.commit()
             pause_callback()
         # Find matching photo in DB
-        photo = photos_by_path.get(file_path)
+        photo = photos_by_path.get(_path_lookup_key(file_path))
         if not photo:
             skipped += 1
             if progress_callback:
