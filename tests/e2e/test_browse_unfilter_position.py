@@ -8,20 +8,25 @@ from e2e.test_browse_sort_keeps_selection import _stall_first_focused_query
 ACTIONS = [
     "quick_missing", "quick_flag", "quick_rules", "rating", "color",
     "chip", "rule", "clear", "clear_popover", "clear_api", "pause",
+    "api_toggle", "api_remove", "sidebar_keyword", "calendar_clear",
 ]
 
 
 def _prepare(page, live_server, action, photo_link=False):
     db = live_server["db"]
     place = db.add_keyword("Park", kw_type="location")
+    keyword = db.add_keyword("Portfolio") if action == "sidebar_keyword" else None
     ids = []
     for i in range(180):
         photo_id = db.add_photo(
             folder_id=live_server["data"]["folders"][0],
             filename=f"bird{i:03d}.jpg", extension=".jpg", file_size=1000 + i,
-            file_mtime=1.0, timestamp="2024-05-01T08:00:00",
+            file_mtime=1.0, timestamp=("2024-05-02T08:00:00"
+                if action == "calendar_clear" and i >= 120 else "2024-05-01T08:00:00"),
         )
         ids.append(photo_id)
+        if keyword and i >= 120:
+            db.tag_photo(photo_id, keyword)
         if i < 120:
             db.tag_photo(photo_id, place)
         elif action == "color":
@@ -57,6 +62,10 @@ def _prepare(page, live_server, action, photo_link=False):
         page.click('.vf-star[data-rating="5"]' if action == "rating"
                    else '.vf-quick-colors [data-color="red"]')
         page.click('.vf-done')
+    elif action == "sidebar_keyword":
+        page.locator('#keywordTree .tree-item[data-keyword="Portfolio"]').click()
+    elif action == "calendar_clear":
+        page.evaluate("selectCalendarDay('2024-05-02', 60)")
     else:
         page.evaluate("VireoFilter.addRule('rating', '>=', 5)")
     page.wait_for_function("!loading && browseDatasetReady && totalPhotos >= 60 && totalPhotos < 70")
@@ -78,6 +87,19 @@ def _turn_off(page, action):
         page.evaluate("VireoFilter.clearAll()")
     elif action == "pause":
         page.click('.vf-mute')
+    elif action == "api_toggle":
+        page.evaluate("VireoFilter.addRule('rating', '>=', 5)")
+    elif action == "api_remove":
+        page.evaluate("VireoFilter.removeField('rating')")
+    elif action == "sidebar_keyword":
+        # The keyword list lives in the summary panel, which a selection's
+        # detail panel hides. Exercise its handler directly in that case.
+        if page.evaluate("selectedPhotoId != null"):
+            page.evaluate("filterByKeyword('Portfolio')")
+        else:
+            page.locator('#keywordTree .tree-item[data-keyword="Portfolio"]').click()
+    elif action == "calendar_clear":
+        page.evaluate("clearCalendarSelection()")
     else:
         page.click('.vf-filters-btn')
         selector = {
@@ -219,3 +241,20 @@ def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, 
       return rect.bottom > box.top && rect.top < box.bottom &&
         Math.abs(rect.top - box.top - anchor.topOffset) < 4;
     }""", arg=anchor)
+
+
+
+def test_folder_handoff_does_not_inherit_keyword_selection(live_server, page):
+    ids = _prepare(page, live_server, "sidebar_keyword")
+    page.locator(f'#grid .grid-card[data-id="{ids[145]}"]').click()
+    folder_id = live_server["data"]["folders"][0]
+    # The chosen folder still contains the selected photo, but this action
+    # opens a new scope and intentionally starts at the beginning.
+    with page.expect_request('**/api/photos/query') as query:
+        page.locator(f'#folderTree .tree-item[data-folder-id="{folder_id}"]').click()
+    assert 'focus_photo_id' not in query.value.post_data_json
+    assert query.value.post_data_json['folder_id'] == folder_id
+    page.wait_for_function("!loading && browseDatasetReady")
+    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("gridContainer.scrollTop") == 0
+    assert page.evaluate("VireoFilter.hasFilters()") is False

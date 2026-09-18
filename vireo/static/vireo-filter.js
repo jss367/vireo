@@ -2020,12 +2020,13 @@
     },
     getUserRules() { return userRules(); },
     addRule(field, op, value) {
+      const rule = makeRule(field, op, value);
+      const existing = state.root.rules.filter((n) => !isGroup(n) && n.field === field);
+      const removing = existing.length === 1 && JSON.stringify(existing[0]) === JSON.stringify(rule);
       mutate(() => {
-        const rule = makeRule(field, op, value);
-        const existing = state.root.rules.filter((n) => !isGroup(n) && n.field === field);
         // Toggle off when the sole existing rule of this field is
         // identical (sidebar keyword clicks re-toggle to clear).
-        if (existing.length === 1 && JSON.stringify(existing[0]) === JSON.stringify(rule)) {
+        if (removing) {
           state.root.rules = state.root.rules.filter((n) => n !== existing[0]);
           return;
         }
@@ -2037,10 +2038,10 @@
         // leftover ">= date_from" and silently show wrong results.
         state.root.rules = state.root.rules.filter((n) => isGroup(n) || n.field !== field);
         state.root.rules.unshift(rule);
-      });
+      }, { reason: removing ? 'filterRemoved' : undefined });
     },
     quickSearch(text) { applyQuickSearch(text); },
-    removeField(field) {
+    removeField(field, opts) {
       // Remove ALL matching root leaves — legacy `?date_from=…&date_to=…`
       // and other multi-rule param combinations can install more than
       // one leaf per field. Returns true when a rule was actually
@@ -2050,9 +2051,11 @@
       // reload when this is a no-op.
       const hasMatch = state.root.rules.some((n) => !isGroup(n) && n.field === field);
       if (!hasMatch) return false;
+      // A caller changing page scope can override the removal reason so
+      // its new view does not inherit the old view's selected photo.
       mutate(() => {
         state.root.rules = state.root.rules.filter((n) => isGroup(n) || n.field !== field);
-      });
+      }, { reason: (opts && opts.reason) || 'filterRemoved' });
       return true;
     },
     hasFilters() { return hasUserFilters(); },

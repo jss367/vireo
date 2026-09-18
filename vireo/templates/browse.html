@@ -5669,7 +5669,7 @@ function filterByFolder(folderId) {
     el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
   });
   if (hadSidebarKeyword && window.VireoFilter && VireoFilter.isReady()) {
-    if (VireoFilter.removeField('keyword')) return;
+    if (VireoFilter.removeField('keyword', { reason: 'scopeChanged' })) return;
   }
   if (timelineMode) loadCalendarData();
   reloadBrowseResults();
