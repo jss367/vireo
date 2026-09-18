@@ -780,9 +780,15 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
         sync_from_xmp(db, [photo])
         assert not db.get_photo_keywords(photo)
     pending = [dict(r) for r in db.get_pending_changes() if r['photo_id'] == photo]
+    preview = client.get('/api/sync/preview').get_json()
+    preview_photo = next(p for p in preview['photos'] if p['photo_id'] == photo)
+    merge_change = next(c for c in preview_photo['changes'] if c['type'] == 'keyword_merge')
+    assert merge_change['presentation']['before'] == 'Old parent → Old leaf'
+    assert merge_change['presentation']['after'] == ('Removed' if cancel_add else 'New parent → ' + target_name)
     if cancel_add:
         assert not any(r['change_type'] == 'keyword_add' for r in pending)
-        assert any(r['change_type'] == 'keyword_remove' and r['value'] == target_name for r in pending)
+        assert not any(r['change_type'] == 'keyword_remove' for r in pending)
+        assert any(r['change_type'] == 'keyword_merge' for r in pending)
     cleanup = [r['id'] for r in pending if r['change_type'] == 'keyword_remove_flat'] or [r['id'] for r in pending]
     assert sync_to_xmp(db, change_ids=cleanup)['failed'] == 0
     assert read_keywords(sidecar) == (set() if cancel_add else {target_name})
@@ -790,3 +796,60 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
     _import_keywords_for_photo(db, photo, sidecar)
     sync_from_xmp(db, [photo])
     assert {k['id'] for k in db.get_photo_keywords(photo)} == (set() if cancel_add else {target})
+
+
+def test_cancel_unrelated_homonym_add_preserves_existing_hierarchy(app_and_db, tmp_path):
+    from sync import sync_from_xmp, sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    app, db = app_and_db
+    client = app.test_client()
+    directory = tmp_path / 'homonym-photo'
+    directory.mkdir()
+    folder = db.add_folder(str(directory), name='Homonym photo')
+    db.add_workspace_folder(db._ws_id(), folder)
+    photo = db.add_photo(folder_id=folder, filename='photo.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    people = db.add_keyword('People', kw_type='individual')
+    individual = db.add_keyword('Robin', parent_id=people, kw_type='individual')
+    source = db.add_keyword('Old Robin', kw_type='taxonomy')
+    target = db.add_keyword('Robin', kw_type='taxonomy')
+    db.tag_photo(1, source)
+    db.tag_photo(1, target)
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    db.tag_photo(photo, individual)
+    sidecar = str(directory / 'photo.xmp')
+    write_sidecar(sidecar, {'Robin'}, {'People|Robin'})
+    assert client.post(f'/api/photos/{photo}/keywords', json={'keyword_id': target}).status_code == 200
+    assert client.delete(f'/api/photos/{photo}/keywords/{target}').status_code == 200
+    assert not [r for r in db.get_pending_changes() if r['photo_id'] == photo]
+    sync_to_xmp(db)
+    assert read_keywords(sidecar) == {'Robin'}
+    assert set(read_hierarchical_keywords(sidecar)) == {'People|Robin'}
+    sync_from_xmp(db, [photo])
+    assert {k['id'] for k in db.get_photo_keywords(photo)} == {individual}
+
+
+def test_chained_merges_sync_together_when_only_latest_add_is_selected(catalog, tmp_path):
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db, photos = catalog
+    directory = tmp_path / 'photos'
+    directory.mkdir()
+    ids = []
+    for name in ('First', 'Second', 'Third'):
+        parent = db.add_keyword(name + ' parent')
+        keyword = db.add_keyword(name, parent_id=parent)
+        db.tag_photo(photos[0], keyword)
+        ids.append(keyword)
+    sidecar = str(directory / '0.xmp')
+    write_sidecar(sidecar, {'First'}, {'First parent|First'})
+    for source, target in zip(ids, ids[1:], strict=False):
+        preview = preview_keyword_merge(db, [source, target], target)
+        merge_keywords(db, [source, target], target, preview['preview_token'])
+    additions = [r['id'] for r in db.get_pending_changes() if r['change_type'] == 'keyword_add']
+    assert sync_to_xmp(db, change_ids=additions)['failed'] == 0
+    assert read_keywords(sidecar) == {'Third'}
+    assert set(read_hierarchical_keywords(sidecar)) == {'Third parent|Third'}
+    assert not db.get_pending_changes()

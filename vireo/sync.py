@@ -12,7 +12,9 @@ from db import KEYWORD_SOURCE_UNKNOWN
 from keyword_identity import (
     filter_removed_import_aliases,
     keyword_paths,
+    path_key,
     resolve_import_path,
+    resolve_merge_target,
     validate_import_locations,
 )
 from keyword_normalization import keyword_match_key
@@ -123,13 +125,21 @@ def _select_changes(changes, change_ids):
         if c["change_type"] in _KEYWORD_CHANGE_TYPES and c["value"]:
             key = (c["photo_id"], keyword_match_key(c["value"]))
             kw_index[key].append(c["id"])
+    groups = [set(ids) for ids in kw_index.values()]
     for c in changes:
-        if c["id"] not in selected_ids:
-            continue
-        if c["change_type"] not in _KEYWORD_CHANGE_TYPES or not c["value"]:
-            continue
-        key = (c["photo_id"], keyword_match_key(c["value"]))
-        selected_ids.update(kw_index[key])
+        if c['change_type'] == 'keyword_merge':
+            merge = json.loads(c['value'])
+            group = {c['id']}
+            for path in (merge['source_path'], merge['target_path']):
+                group.update(kw_index.get((c['photo_id'], keyword_match_key(path[-1])), []))
+            groups.append(group)
+    # Include transitive pairs when several merges are still waiting to sync.
+    previous_count = -1
+    while previous_count != len(selected_ids):
+        previous_count = len(selected_ids)
+        for group in groups:
+            if group & selected_ids:
+                selected_ids.update(group)
     return [c for c in changes if c["id"] in selected_ids]
 
 
@@ -147,6 +157,7 @@ class _PhotoSyncPlan:
     keywords_to_remove_flat: set = field(default_factory=set)
     hierarchy_replacements: dict = field(default_factory=dict)
     hierarchies_to_add: set = field(default_factory=set)
+    keyword_merges: list = field(default_factory=list)
     rating: int | None = None
     flag: str | None = None
     edit_recipe_json: str | None = None
@@ -170,6 +181,8 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
             plan.keywords_to_remove.add(c["value"])
         elif kind == "keyword_remove_flat":
             plan.keywords_to_remove_flat.add(c["value"])
+        elif kind == "keyword_merge":
+            plan.keyword_merges.append(json.loads(c['value']))
         elif kind == "rating":
             plan.rating = int(c["value"])
         elif kind == "flag":
@@ -365,59 +378,41 @@ def _sync_result(synced, failures):
 
 
 def _plan_merged_keyword_hierarchies(db, plans):
-    """Canonicalize reviewed paths when their retained keyword is added/removed."""
-    if not any(plan.keywords_to_add or plan.keywords_to_remove or plan.keywords_to_remove_flat
-               for plan in plans.values()):
+    """Apply durable merge work only to its recorded photo and keyword identity."""
+    if not any(plan.keyword_merges for plan in plans.values()):
         return
-    aliases = db.conn.execute(
-        'SELECT a.path_json, k.id, k.name FROM keyword_import_aliases a '
-        'JOIN keywords k ON k.id = a.keyword_id',
-    ).fetchall()
-    if not aliases:
-        return
-    paths = keyword_paths(db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall())
-    aliases_by_key = defaultdict(list)
-    targets_by_source_key = defaultdict(set)
-    for alias in aliases:
-        name = keyword_match_key(alias['name'])
-        aliases_by_key[name].append(alias)
-        source_name = keyword_match_key(json.loads(alias['path_json'])[-1])
-        if source_name != name:
-            targets_by_source_key[source_name].add(name)
+    rows = db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall()
+    paths = keyword_paths(rows)
     for photo_id, plan in plans.items():
-        adds = {keyword_match_key(name) for name in plan.keywords_to_add}
-        removes = {keyword_match_key(name) for name in plan.keywords_to_remove}
-        flat_removes = {keyword_match_key(name) for name in plan.keywords_to_remove_flat}
-        relevant = (adds | removes) & aliases_by_key.keys()
-        for source_name in flat_removes:
-            relevant.update(targets_by_source_key[source_name])
-        if not relevant:
+        if not plan.keyword_merges:
             continue
         tagged = db.get_photo_keywords(photo_id)
         tagged_ids = {k['id'] for k in tagged}
         tagged_names = {keyword_match_key(k['name']) for k in tagged}
-        for name in relevant:
-            for alias in aliases_by_key[name]:
-                old_path = json.loads(alias['path_json'])
-                old_hierarchy = '|'.join(old_path)
-                source_name = keyword_match_key(old_path[-1])
-                source_cleanup = source_name != name and source_name in flat_removes
-                if (name in adds or source_cleanup) and alias['id'] in tagged_ids:
-                    new_path = paths[alias['id']]
-                    plan.hierarchy_replacements[old_hierarchy] = '|'.join(new_path)
-                    # A source cleanup can be synced on its own, or remain
-                    # after the remove route cancels the retained add. Use
-                    # the current association to distinguish those cases.
-                    if name not in flat_removes:
-                        plan.keywords_to_add.add(alias['name'])
-                    if len(new_path) > 1:
-                        plan.hierarchies_to_add.add('|'.join(new_path))
-                elif (name in removes or source_cleanup) and alias['id'] not in tagged_ids:
-                    # A removal may be synchronized before the earlier merge
-                    # addition, so the sidecar can still contain an old alias.
+        tagged_paths = {path_key(paths[k['id']]) for k in tagged}
+        for merge in plan.keyword_merges:
+            source_path = merge['source_path']
+            target_id = resolve_merge_target(db, merge)
+            target_path = paths.get(target_id)
+            old_hierarchy = '|'.join(source_path)
+            if target_id in tagged_ids:
+                plan.hierarchy_replacements[old_hierarchy] = '|'.join(target_path)
+                plan.keywords_to_add.add(target_path[-1])
+                if len(target_path) > 1:
+                    plan.hierarchies_to_add.add('|'.join(target_path))
+            else:
+                if path_key(source_path) not in tagged_paths:
                     plan.hierarchy_replacements[old_hierarchy] = None
-                    if keyword_match_key(old_path[-1]) not in tagged_names:
-                        plan.keywords_to_remove_flat.add(old_path[-1])
+                if target_path and keyword_match_key(target_path[-1]) not in tagged_names:
+                    plan.keywords_to_add.discard(target_path[-1])
+                # Keep an unrelated same-named tag when its own hierarchy is
+                # still assigned to this photo.
+                if target_path and keyword_match_key(target_path[-1]) in tagged_names:
+                    plan.keywords_to_remove.discard(target_path[-1])
+                    if path_key(target_path) not in tagged_paths:
+                        plan.hierarchy_replacements['|'.join(target_path)] = None
+            if keyword_match_key(source_path[-1]) not in tagged_names:
+                plan.keywords_to_remove_flat.add(source_path[-1])
 
 
 def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
@@ -750,7 +745,7 @@ def sync_from_xmp(db, photo_ids):
                 photo_id, hierarchical=True,
             )
             xmp_keywords, imported_hierarchies = filter_removed_import_aliases(
-                db, xmp_keywords, read_hierarchical_keywords(xmp_path),
+                db, photo_id, xmp_keywords, read_hierarchical_keywords(xmp_path),
                 pending_removals, pending_hierarchical_removals,
             )
             pending_flat_only_removals = (

@@ -289,7 +289,7 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
         photo_id, hierarchical=True,
     )
     flat_keywords, hier_keywords = filter_removed_import_aliases(
-        db, flat_keywords, hier_keywords, pending_flat_removals, pending_hierarchical_removals,
+        db, photo_id, flat_keywords, hier_keywords, pending_flat_removals, pending_hierarchical_removals,
     )
     validate_import_locations(
         db, photo_id,

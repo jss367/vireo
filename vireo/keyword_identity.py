@@ -71,10 +71,18 @@ def resolve_import_path(db, parts, *, kw_type=None, linked_locations_only=False)
     return row['keyword_id'] if row else None
 
 
-def filter_removed_import_aliases(db, flat_keywords, hierarchical_keywords,
+def resolve_merge_target(db, merge):
+    """Follow subsequent merges through the durable source-path alias."""
+    return resolve_import_path(db, merge['source_path']) or merge['target_id']
+
+
+def filter_removed_import_aliases(db, photo_id, flat_keywords, hierarchical_keywords,
                                  flat_removals, hierarchical_removals):
     """Do not restore a removed tag through an old, still-unsynced alias."""
-    if not flat_removals and not hierarchical_removals:
+    merges = [json.loads(row['value']) for row in db.conn.execute(
+        "SELECT value FROM pending_changes WHERE photo_id = ? AND change_type = 'keyword_merge'", (photo_id,),
+    )]
+    if not flat_removals and not hierarchical_removals and not merges:
         return flat_keywords, hierarchical_keywords
     aliases = {
         row['path_key']: keyword_match_key(row['name'])
@@ -83,10 +91,28 @@ def filter_removed_import_aliases(db, flat_keywords, hierarchical_keywords,
             'JOIN keywords k ON k.id = a.keyword_id'
         )
     }
+    blocked_paths, blocked_names = set(), set()
+    if merges:
+        tagged = db.get_photo_keywords(photo_id)
+        tagged_ids = {k['id'] for k in tagged}
+        tagged_names = {keyword_match_key(k['name']) for k in tagged}
+        paths = keyword_paths(db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall())
+        tagged_paths = {path_key(paths[k['id']]) for k in tagged}
+        for merge in merges:
+            if resolve_merge_target(db, merge) in tagged_ids:
+                continue
+            source_path = merge['source_path']
+            key = path_key(source_path)
+            if key not in tagged_paths:
+                blocked_paths.add(key)
+            if keyword_match_key(source_path[-1]) not in tagged_names:
+                blocked_names.add(keyword_match_key(source_path[-1]))
     return (
-        [name for name in flat_keywords if aliases.get(path_key([name])) not in flat_removals],
+        [name for name in flat_keywords if aliases.get(path_key([name])) not in flat_removals
+         and keyword_match_key(name) not in blocked_names],
         [path for path in hierarchical_keywords
-         if aliases.get(path_key(path.split('|'))) not in hierarchical_removals],
+         if aliases.get(path_key(path.split('|'))) not in hierarchical_removals
+         and path_key(path.split('|')) not in blocked_paths],
     )
 
 
@@ -378,7 +404,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token):
         target = preview['target']
         affected = []
         for source in preview['sources']:
-            affected.extend((dict(r), source['name']) for r in db.conn.execute(
+            affected.extend((dict(r), source) for r in db.conn.execute(
                 'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
                 'JOIN photos p ON p.id = pk.photo_id '
                 'JOIN workspace_folders wf ON wf.folder_id = p.folder_id WHERE pk.keyword_id = ?',
@@ -394,8 +420,12 @@ def merge_keywords(db, keyword_ids, target_id, preview_token):
             db._merge_keyword_into(source['id'], target_id, pending_source_only=True)
         db.conn.execute('UPDATE keywords SET latitude = ?, longitude = ? WHERE id = ?',
                         (preview['latitude'], preview['longitude'], target_id))
-        for row, old_name in affected:
+        for row, source in affected:
             pid, ws = row['photo_id'], row['workspace_id']
+            old_name = source['name']
+            db.queue_change(pid, 'keyword_merge', json.dumps({
+                'source_path': source['path'], 'target_id': target_id, 'target_path': target['path'],
+            }, sort_keys=True), workspace_id=ws, _commit=False)
             if old_name != target['name']:
                 # Only remove the old flat name if another surviving keyword
                 # on this photo does not still need it.

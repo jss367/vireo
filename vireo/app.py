@@ -456,6 +456,7 @@ _SYNC_PREVIEW_FIELD_LABELS = {
     "keyword_add": "Keyword",
     "keyword_remove": "Keyword",
     "keyword_remove_flat": "Keyword",
+    "keyword_merge": "Keyword hierarchy",
     "rating": "Rating",
     "flag": "Flag",
     "location": "Location",
@@ -559,6 +560,17 @@ def _sync_preview_presentation(
 
     if folder_offline:
         return _sync_preview_folder_offline_presentation(change_type)
+
+    if change_type == 'keyword_merge':
+        merge = json.loads(value)
+        target_path = change.get('merge_target_path')
+        return {
+            'field': 'Keyword hierarchy',
+            'action': 'updated' if target_path else 'removed',
+            'before': ' → '.join(merge['source_path']),
+            'after': ' → '.join(target_path) if target_path else 'Removed',
+            'after_detail': 'The merged keyword and its hierarchy sync together',
+        }
 
     if change_type in {"keyword_add", "keyword_remove", "keyword_remove_flat"}:
         existing = next(
@@ -994,6 +1006,8 @@ def _sync_preview_change_creates_sidecar(
     and the ``remove_*`` paths do not, so they are excluded.
     """
     change_type = change["change_type"]
+    if change_type == 'keyword_merge':
+        return bool(change.get('merge_target_path'))
     if change_type == "keyword_add":
         return True
     if change_type == "flag":
@@ -8066,7 +8080,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
     def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None, _commit=True):
-        """Cancel a pending add, retaining removal work for merged import paths."""
+        """Queue a keyword removal unless it cancels a pending add."""
         # See _queue_keyword_add: keep the cancellation lookup in the same
         # normalized form queue_change stores.
         keyword_name = normalize_keyword_display(keyword_name)
@@ -8077,14 +8091,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo_id, "keyword_add", keyword_name,
             workspace_id=workspace_id, _commit=_commit,
         )
-        # An add queued by a merge can represent a tag already present under
-        # an imported path. Canceling that add alone cannot remove the old
-        # hierarchy, including a same-name leaf under a different parent.
-        has_import_paths = removed and db.conn.execute(
-            'SELECT 1 FROM keyword_import_aliases a JOIN keywords k ON k.id = a.keyword_id '
-            'WHERE k.name = ? LIMIT 1', (keyword_name,),
-        ).fetchone()
-        if removed == 0 or has_import_paths:
+        if removed == 0:
             db.queue_change(
                 photo_id, "keyword_remove", keyword_name,
                 workspace_id=workspace_id, _commit=_commit,
@@ -12474,8 +12481,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if any(change["type"] == "location" for change in photo["changes"])
         ]
         assigned_locations = _serialize_photo_locations(db, location_photo_ids)
+        from keyword_identity import keyword_paths, resolve_merge_target
+        merge_paths = keyword_paths(db.conn.execute(
+            'SELECT id, name, parent_id FROM keywords'
+        ).fetchall()) if any(
+            change['type'] == 'keyword_merge'
+            for photo in page_photos for change in photo['changes']
+        ) else {}
         folder_accessibility = {}
         for photo in page_photos:
+            merges = [c for c in photo['changes'] if c['type'] == 'keyword_merge']
+            if merges:
+                tagged_ids = {k['id'] for k in db.get_photo_keywords(photo['photo_id'])}
+                for change in merges:
+                    target_id = resolve_merge_target(db, json.loads(change['value']))
+                    change['merge_target_path'] = merge_paths.get(target_id) if target_id in tagged_ids else None
             xmp_path = os.path.join(
                 photo["folder"],
                 os.path.splitext(photo["filename"])[0] + ".xmp",
