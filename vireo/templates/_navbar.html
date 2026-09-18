@@ -4873,7 +4873,14 @@ function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
   );
   delete _vireoPairPendingSourceByPhoto[key];
   window.vireoUpdatePairSourceControls(photoId);
-  if (anchorStillCurrent && oldSrc) _vireoSetRenderedImageSource(anchor, oldSrc);
+  if (anchorStillCurrent && oldSrc) {
+    // A RAW edit may have finished saving while the target was loading.
+    // Restore the selected source with its current recipe/render version,
+    // rather than the stale URL captured before that save.
+    _vireoSetRenderedImageSource(anchor, window.vireoRenderedUrl(
+      _vireoBaseRenderedUrl(oldSrc), photoId
+    ));
+  }
   if (anchorStillCurrent && typeof showToast === 'function') {
     showToast('Could not load the ' + requested.toUpperCase() + ' source', 'error');
   }

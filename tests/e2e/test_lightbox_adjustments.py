@@ -1,6 +1,8 @@
 """Quick adjustments are independent of slider and save history."""
 
+import io
 import json
+import re
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -177,13 +179,8 @@ def test_late_preview_cannot_reappear_after_closing_lightbox(
     expect(page.locator('#lightboxAdjustmentImage')).not_to_have_class('lb-tone-canvas show')
 
 
-@pytest.mark.parametrize('server_preview', [False, True])
-def test_paired_jpeg_disables_adjustments_and_discards_pending_raw_preview(
-    live_server, page, adjustment_photo, server_preview,
-):
-    import io
-    import re
-
+@pytest.fixture
+def paired_adjustment_photo(live_server, page, adjustment_photo):
     db = live_server['db']
     db.conn.execute(
         "UPDATE photos SET filename='gradient.nef', extension='.nef', companion_path='gradient.jpg' WHERE id=?",
@@ -201,6 +198,15 @@ def test_paired_jpeg_disables_adjustments_and_discards_pending_raw_preview(
             content_type='image/png',
         ),
     )
+    return adjustment_photo, raw.getvalue(), jpeg.getvalue()
+
+
+@pytest.mark.parametrize('server_preview', [False, True])
+def test_paired_jpeg_disables_adjustments_and_discards_pending_raw_preview(
+    live_server, page, paired_adjustment_photo, server_preview,
+):
+    adjustment_photo, raw, _jpeg = paired_adjustment_photo
+    db = live_server['db']
     held_previews = []
     page.route('**/edit-preview?*', lambda route: held_previews.append(route))
     page.goto(live_server['url'] + '/browse')
@@ -241,10 +247,53 @@ def test_paired_jpeg_disables_adjustments_and_discards_pending_raw_preview(
     expect(adjust).to_be_disabled()
     expect(page.locator('#lightboxAdjustPanel')).not_to_have_class('lightbox-adjust-panel open')
     with page.expect_response('**/edit-preview?*'):
-        held_previews[0].fulfill(body=raw.getvalue(), content_type='image/png')
+        held_previews[0].fulfill(body=raw, content_type='image/png')
     page.wait_for_timeout(100)
     expect(page.locator('#lightboxToneCanvas')).not_to_have_class('lb-tone-canvas show')
     expect(page.locator('#lightboxAdjustmentImage')).not_to_have_class('lb-tone-canvas show')
     _wait_saved(page)
     assert page.locator('#lightboxImg').evaluate('img => [img.naturalWidth, img.naturalHeight]') == [64, 256]
     assert db.get_photo_edit_recipe(adjustment_photo)['adjustments']['exposure'] == 2
+
+
+def test_failed_jpeg_switch_reloads_raw_edit_saved_during_switch(
+    live_server, page, paired_adjustment_photo,
+):
+    photo_id, raw, _jpeg = paired_adjustment_photo
+    page.route('**/edit-preview?*', lambda route: route.fulfill(body=raw, content_type='image/png'))
+    page.goto(live_server['url'] + '/browse')
+    page.evaluate("id => openLightbox(id, 'gradient.nef')", photo_id)
+    page.wait_for_function('_lbEditRecipeLoaded')
+    source = page.locator('#lightboxSourceControl')
+    expect(source).to_have_text('Viewing JPEG · Show RAW')
+    source.click()
+    expect(source).to_have_text('Viewing RAW · Show JPEG')
+    old_url = page.locator('#lightboxImg').get_attribute('src')
+
+    held_jpeg = []
+    page.route('**/photos/*/full?*source=jpeg*', lambda route: held_jpeg.append(route))
+    page.locator('#lightboxAdjustBtn').click()
+    # Start the source switch in the same turn as input, before its debounced
+    # save starts, and hold JPEG until that save has finished.
+    page.evaluate("""() => {
+      const input = document.getElementById('lbAdjExposure');
+      input.value = '2';
+      onLightboxAdjustmentInput(input);
+      vireoTogglePairSource(_lightboxCurrentId);
+    }""")
+    expect(source).to_contain_text('Loading JPEG')
+    _wait_saved(page)
+    deadline = time.monotonic() + 5
+    while not held_jpeg and time.monotonic() < deadline:
+        page.wait_for_timeout(25)
+    assert held_jpeg
+    assert live_server['db'].get_photo_edit_recipe(photo_id)['adjustments']['exposure'] == 2
+    expected_url = page.evaluate("""oldUrl => vireoRenderedUrl(
+      _vireoBaseRenderedUrl(oldUrl), _lightboxCurrentId
+    )""", old_url)
+    assert expected_url != old_url
+    with page.expect_request(lambda request: request.url.endswith(expected_url)):
+        held_jpeg[0].abort()
+    expect(source).to_have_text('Viewing RAW · Show JPEG')
+    expect(page.locator('#lightboxImg')).to_have_attribute('src', expected_url)
+    expect(page.locator('#lightboxAdjustBtn')).to_be_enabled()
