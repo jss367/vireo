@@ -1406,6 +1406,21 @@
     const action = target.dataset.action;
     const path = target.dataset.path;
     if (!action || path == null) return;
+    // Editing a free-entry in/not_in list (File extension, etc.) can drop
+    // values — deleting an entry through the same input the user types
+    // additions into. Emit filterRemoved when the parsed list loses any
+    // previously-present value so the focused-anchor reload runs, matching
+    // what the enum-pill handler already does for click-driven removals.
+    let reason;
+    if (action === 'multi-text') {
+      const node = getNodeAtPath(path);
+      if (node && !isGroup(node)) {
+        const prev = Array.isArray(node.value) ? node.value : (node.value == null || node.value === '' ? [] : [node.value]);
+        const nextVals = String(target.value).split(',').map((s) => s.trim()).filter(Boolean);
+        const nextSet = new Set(nextVals);
+        if (prev.some((v) => !nextSet.has(v))) reason = 'filterRemoved';
+      }
+    }
     mutate(() => {
       const node = getNodeAtPath(path);
       if (!node) return;
@@ -1449,6 +1464,7 @@
       // change-event edits (selects, checkboxes) re-render the row; live
       // typing must not destroy the input under the caret.
       lightRender: ['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action) && fromTyping,
+      reason,
     });
   }
 

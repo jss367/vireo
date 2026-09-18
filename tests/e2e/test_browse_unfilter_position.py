@@ -285,6 +285,75 @@ def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, 
 
 
 
+@pytest.mark.parametrize("selected", [True, False])
+def test_deleting_free_entry_enum_value_keeps_photo_in_view(live_server, page, selected):
+    """Deleting a value from a suggest-backed in/not_in list (File extension)
+    goes through handleRuleEdit's multi-text branch. That path must emit
+    filterRemoved when the parsed list drops a previously-present value so
+    the focused-anchor reload keeps the current photo in view, just like the
+    enum-pill removal does for value-backed enums."""
+    db = live_server["db"]
+    ids = []
+    for i in range(180):
+        ext = ".jpg" if i < 120 else ".png"
+        photo_id = db.add_photo(
+            folder_id=live_server["data"]["folders"][0],
+            filename=f"bird{i:03d}{ext}", extension=ext, file_size=1000 + i,
+            file_mtime=1.0, timestamp="2024-05-01T08:00:00",
+        )
+        ids.append(photo_id)
+    page.add_init_script("localStorage.clear()")
+    _open_browse(page, live_server)
+    page.wait_for_function("VireoFilter.isReady() && !loading && browseDatasetReady")
+    page.select_option("#sortSelect", "name")
+    page.wait_for_function("!loading && browseDatasetReady")
+    page.evaluate("updateThumbSize(300)")
+    page.evaluate("rule => VireoFilter.loadExpression([rule])", {
+        "field": "extension", "op": "in", "value": [".jpg", ".png"],
+    })
+    page.wait_for_function("!loading && browseDatasetReady && totalPhotos === 180")
+    page.evaluate("async () => { while (!allLoaded) await loadPhotos(); }")
+    # Anchor a .jpg card; dropping .png from the list narrows the results
+    # but the anchor stays eligible.
+    card = page.locator(f'#grid .grid-card[data-id="{ids[100]}"]')
+    card.scroll_into_view_if_needed()
+    if selected:
+        card.click()
+    page.wait_for_timeout(150)
+    anchor = page.evaluate(
+        "captureSelectedPhotoAnchor()" if selected else "captureBrowseViewportAnchor()"
+    )
+    page.click('.vf-filters-btn')
+    input_selector = '.vf-rule-tree input[data-action="multi-text"]'
+    page.locator(input_selector).first.wait_for()
+    with page.expect_request('**/api/photos/query') as query:
+        # Simulate a delete-through-typing edit: the user removes ".png"
+        # from the comma-separated list, then the debounced input handler
+        # commits the shrunk list.
+        page.evaluate(
+            """selector => {
+              const input = document.querySelector(selector);
+              input.value = '.jpg';
+              input.dispatchEvent(new Event('input', {bubbles: true}));
+            }""",
+            input_selector,
+        )
+        page.wait_for_timeout(320)
+    assert query.value.post_data_json.get('focus_photo_id') == anchor['photoId']
+    page.click('.vf-done')
+    page.wait_for_function(
+        "!loading && browseDatasetReady && totalPhotos === 120 && anchorScanDepth === 0",
+    )
+    assert page.evaluate("selectedPhotoId") == (anchor["photoId"] if selected else None)
+    page.wait_for_function("""anchor => {
+      const card = getGridCard(anchor.photoId);
+      if (!card) return false;
+      const rect = card.getBoundingClientRect(), box = gridContainer.getBoundingClientRect();
+      return rect.bottom > box.top && rect.top < box.bottom &&
+        Math.abs(rect.top - box.top - anchor.topOffset) < 4;
+    }""", arg=anchor)
+
+
 def test_folder_handoff_does_not_inherit_keyword_selection(live_server, page):
     ids = _prepare(page, live_server, "sidebar_keyword")
     page.locator(f'#grid .grid-card[data-id="{ids[145]}"]').click()
