@@ -609,8 +609,9 @@
         details += '<p>Coordinates: ' + data.latitude.toFixed(4) + ', ' + data.longitude.toFixed(4) + '</p>';
       }
       if (data.target.place_id) {
-        details += '<p>Google place link retained. Imported names and paths will resolve to this place on future imports.</p>';
+        details += '<p>Google place link retained.</p>';
       }
+      details += '<p>Imported names and paths will resolve to the retained keyword on future imports.</p>';
       mergePreview.innerHTML = details;
       mergeToken = data.preview_token;
       mergeConfirm.disabled = false;

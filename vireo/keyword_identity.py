@@ -44,7 +44,7 @@ def path_key(parts):
     return json.dumps([keyword_match_key(p) for p in parts], ensure_ascii=False)
 
 
-def resolve_import_alias(db, name, parent_id):
+def resolve_import_alias(db, name, parent_id, *, kw_type=None):
     parts = [name]
     seen = set()
     while parent_id is not None and parent_id not in seen:
@@ -56,15 +56,17 @@ def resolve_import_alias(db, name, parent_id):
             return None
         parts.append(row['name'])
         parent_id = row['parent_id']
-    return resolve_import_path(db, list(reversed(parts)))
+    return resolve_import_path(db, list(reversed(parts)), kw_type=kw_type)
 
 
-def resolve_import_path(db, parts):
+def resolve_import_path(db, parts, *, kw_type=None, linked_locations_only=False):
+    """Resolve reviewed import paths without overriding an explicit type."""
     row = db.conn.execute(
         "SELECT a.keyword_id FROM keyword_import_aliases a "
         "JOIN keywords k ON k.id = a.keyword_id "
-        "WHERE a.path_key = ? AND k.type = 'location' AND k.place_id IS NOT NULL",
-        (path_key(parts),),
+        "WHERE a.path_key = ? AND (? IS NULL OR k.type = ?) "
+        "AND (? = 0 OR (k.type = 'location' AND k.place_id IS NOT NULL))",
+        (path_key(parts), kw_type, kw_type, linked_locations_only),
     ).fetchone()
     return row['keyword_id'] if row else None
 
@@ -82,13 +84,13 @@ def validate_import_locations(db, photo_id, flat_keywords, hierarchical_keywords
         if any(not keyword_match_key(part) for part in parts):
             continue
         hierarchy_leaves.add(keyword_match_key(parts[-1]))
-        target = resolve_import_path(db, parts)
+        target = resolve_import_path(db, parts, linked_locations_only=True)
         if target is not None:
             targets.add(target)
     flat_keys = {keyword_match_key(name) for name in flat_keywords}
     for name in flat_keywords:
         if keyword_match_key(name) not in hierarchy_leaves:
-            target = resolve_import_path(db, [name])
+            target = resolve_import_path(db, [name], linked_locations_only=True)
             if target is not None:
                 targets.add(target)
     if not targets:
@@ -325,11 +327,11 @@ def preview_keyword_merge(db, keyword_ids, target_id):
         )
         if any(r['id'] not in compatible for r in others):
             raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
-        for source in sources:
-            alias = db.conn.execute('SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
-                                    (path_key(paths[source['id']]),)).fetchone()
-            if alias and alias['keyword_id'] not in selected:
-                raise ValueError('An imported path is already linked to a different place.')
+    for source in sources:
+        alias = db.conn.execute('SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
+                                (path_key(paths[source['id']]),)).fetchone()
+        if alias and alias['keyword_id'] not in selected:
+            raise ValueError('An imported path already resolves to a different keyword.')
 
     # Keep coordinate pairs together; never synthesize a point from two rows.
     coordinate_record = next((r for r in [target, *sources]
@@ -363,11 +365,13 @@ def merge_keywords(db, keyword_ids, target_id, preview_token):
                 'JOIN workspace_folders wf ON wf.folder_id = p.folder_id WHERE pk.keyword_id = ?',
                 (source['id'],),
             ))
-            if target['type'] == 'location' and target['place_id']:
-                db.conn.execute(
-                    'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
-                    (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
-                )
+            # Remember every merged path, including same-name leaves under
+            # different parents. Existing sidecars/catalogs can retain that
+            # hierarchy even after a flat keyword_add has been synchronized.
+            db.conn.execute(
+                'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
+                (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
+            )
             db._merge_keyword_into(source['id'], target_id)
         db.conn.execute('UPDATE keywords SET latitude = ?, longitude = ? WHERE id = ?',
                         (preview['latitude'], preview['longitude'], target_id))

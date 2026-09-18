@@ -12641,7 +12641,7 @@ class Database:
             source_taxon_id: Explicit iNaturalist ID for a species keyword;
                      bypass common-name inference and reuse only that identity.
             _resolve_alias: Import callers opt in for leaf keywords only.
-                     Manual additions must not inherit imported place aliases,
+                     Manual additions must not inherit imported keyword aliases,
                      and a leaf alias must not relocate a new parent chain.
         """
         if kw_type is not None and kw_type not in KEYWORD_TYPES:
@@ -12660,7 +12660,7 @@ class Database:
         if not name:
             raise ValueError("keyword name is empty after normalization")
         if _resolve_alias and not is_species and source_taxon_id is None and kw_type in (None, 'location'):
-            resolved = resolve_import_alias(self, name, parent_id)
+            resolved = resolve_import_alias(self, name, parent_id, kw_type=kw_type)
             if resolved is not None:
                 return resolved
         # Reconcile is_species and kw_type to keep the legacy column coherent

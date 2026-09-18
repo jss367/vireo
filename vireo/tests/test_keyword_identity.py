@@ -575,3 +575,87 @@ def test_manual_merge_sidecar_sync_keeps_unrelated_tags(catalog, tmp_path):
     assert result['failed'] == 0
     assert result['synced'] == 1
     assert read_keywords(str(sidecar)) == {'Wing Street Canyon', 'Unrelated'}
+
+
+@pytest.mark.parametrize('keyword_type', ['general', 'taxonomy', 'location', 'individual', 'genre'])
+def test_manual_merge_same_name_hierarchy_survives_sync_and_rescan(catalog, tmp_path, keyword_type):
+    from PIL import Image
+    from scanner import _import_keywords_for_photo
+    from sync import sync_from_xmp, sync_to_xmp
+    from xmp import write_sidecar
+
+    db, photos = catalog
+    old_parent = db.add_keyword('Wrong parent')
+    new_parent = db.add_keyword('Retained parent')
+    source = db.add_keyword('Shared leaf', parent_id=old_parent, kw_type=keyword_type)
+    target = db.add_keyword('Shared leaf', parent_id=new_parent, kw_type=keyword_type)
+    unrelated = db.add_keyword('Unrelated')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[0], unrelated)
+    db.tag_photo(photos[1], target)
+    directory = tmp_path / 'photos'
+    directory.mkdir()
+    Image.new('RGB', (2, 2)).save(directory / '0.jpg')
+    sidecar = str(directory / '0.xmp')
+    write_sidecar(sidecar, {'Shared leaf', 'Unrelated'}, {'Wrong parent|Shared leaf'})
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    for after_sync in (False, True):
+        if after_sync:
+            changes = [r['id'] for r in db.get_pending_changes() if r['photo_id'] == photos[0]]
+            assert sync_to_xmp(db, change_ids=changes)['failed'] == 0
+        _import_keywords_for_photo(db, photos[0], sidecar)
+        sync_from_xmp(db, [photos[0]])
+        assert {k['id'] for k in db.get_photo_keywords(photos[0])} == {target, unrelated}
+        assert not db.conn.execute('SELECT 1 FROM keywords WHERE name = ? AND parent_id = ?',
+                                   ('Shared leaf', old_parent)).fetchone()
+
+
+def test_manual_merge_import_aliases_keep_types_and_manual_additions_distinct(catalog):
+    db, photos = catalog
+    source = db.add_keyword('Imported label')
+    target = db.add_keyword('Retained label')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    assert db.add_keyword('Imported label', _resolve_alias=True) == target
+    assert db.add_keyword('Imported label') != target
+    typed = db.add_keyword('Imported label', kw_type='location', _resolve_alias=True)
+    assert typed != target
+    assert db.conn.execute('SELECT type FROM keywords WHERE id = ?', (typed,)).fetchone()[0] == 'location'
+    path = db.conn.execute('PRAGMA database_list').fetchone()['file']
+    with Database(path) as reopened:
+        assert reopened.add_keyword('Imported label', _resolve_alias=True) == target
+
+
+def test_catalog_import_resolves_multiple_non_location_merge_aliases(catalog, monkeypatch):
+    from importer import execute_import
+
+    db, photos = catalog
+    expected = set()
+    for name in ('First label', 'Second label'):
+        old_parent = db.add_keyword('Old ' + name)
+        new_parent = db.add_keyword('New ' + name)
+        source = db.add_keyword(name, parent_id=old_parent)
+        target = db.add_keyword(name, parent_id=new_parent)
+        db.tag_photo(photos[0], source)
+        db.tag_photo(photos[1], target)
+        preview = preview_keyword_merge(db, [source, target], target)
+        merge_keywords(db, [source, target], target, preview['preview_token'])
+        expected.add(target)
+    # Non-location aliases must not participate in the one-linked-place rule.
+    place = db.upsert_place_chain({'place_id': 'real-place', 'name': 'A place', 'lat': 33, 'lng': -117,
+                                   'address_components': []})
+    db.tag_photo(photos[0], place)
+    expected.add(place)
+    row = db.conn.execute('SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?',
+                          (photos[0],)).fetchone()
+    monkeypatch.setattr('importer.read_catalog', lambda *args, **kwargs: {
+        row['path'] + '/' + row['filename']: {
+            'flat_keywords': {'First label', 'Second label'},
+            'hierarchical_keywords': {'Old First label|First label', 'Old Second label|Second label'},
+        },
+    })
+    execute_import(['dummy.lrcat'], db, write_xmp=False)
+    assert {k['id'] for k in db.get_photo_keywords(photos[0])} == expected
