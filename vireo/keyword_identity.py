@@ -68,7 +68,35 @@ def resolve_import_path(db, parts, *, kw_type=None, linked_locations_only=False)
         "AND (? = 0 OR (k.type = 'location' AND k.place_id IS NOT NULL))",
         (path_key(parts), kw_type, kw_type, linked_locations_only),
     ).fetchone()
-    return row['keyword_id'] if row else None
+    if row:
+        return row['keyword_id']
+    if len(parts) != 1:
+        return None
+    # Flat-only metadata cannot distinguish parent paths. Resolve a merged
+    # leaf only when every matching alias/live identity agrees on its target.
+    name = keyword_match_key(parts[0])
+    candidates = {
+        row['keyword_id'] for row in db.conn.execute(
+            'SELECT a.keyword_id, a.path_json FROM keyword_import_aliases a '
+            'JOIN keywords k ON k.id = a.keyword_id WHERE (? IS NULL OR k.type = ?)',
+            (kw_type, kw_type),
+        ) if keyword_match_key(json.loads(row['path_json'])[-1]) == name
+    }
+    if not candidates:
+        return None
+    candidates.update(
+        row['id'] for row in db.conn.execute(
+            'SELECT id, name FROM keywords WHERE (? IS NULL OR type = ?)', (kw_type, kw_type),
+        ) if keyword_match_key(row['name']) == name
+    )
+    if len(candidates) != 1:
+        return None
+    target_id = candidates.pop()
+    if linked_locations_only:
+        target = db.conn.execute('SELECT type, place_id FROM keywords WHERE id = ?', (target_id,)).fetchone()
+        if target['type'] != 'location' or target['place_id'] is None:
+            return None
+    return target_id
 
 
 def resolve_merge_target(db, merge):
@@ -101,12 +129,13 @@ def filter_removed_import_aliases(db, photo_id, flat_keywords, hierarchical_keyw
         for merge in merges:
             if resolve_merge_target(db, merge) in tagged_ids:
                 continue
-            source_path = merge['source_path']
-            key = path_key(source_path)
-            if key not in tagged_paths:
-                blocked_paths.add(key)
-            if keyword_match_key(source_path[-1]) not in tagged_names:
-                blocked_names.add(keyword_match_key(source_path[-1]))
+            target_path = paths.get(resolve_merge_target(db, merge), merge['target_path'])
+            for removed_path in (merge['source_path'], target_path):
+                key = path_key(removed_path)
+                if key not in tagged_paths:
+                    blocked_paths.add(key)
+                if keyword_match_key(removed_path[-1]) not in tagged_names:
+                    blocked_names.add(keyword_match_key(removed_path[-1]))
     return (
         [name for name in flat_keywords if aliases.get(path_key([name])) not in flat_removals
          and keyword_match_key(name) not in blocked_names],

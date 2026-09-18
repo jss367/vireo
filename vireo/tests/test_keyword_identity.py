@@ -744,7 +744,8 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
 
 @pytest.mark.parametrize('cancel_add', [False, True])
 @pytest.mark.parametrize('same_name', [False, True])
-def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_db, tmp_path, cancel_add, same_name):
+@pytest.mark.parametrize('target_present', [False, True])
+def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_db, tmp_path, cancel_add, same_name, target_present):
     from PIL import Image
     from scanner import _import_keywords_for_photo
     from sync import sync_from_xmp, sync_to_xmp
@@ -767,6 +768,9 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
     db.tag_photo(1, target)
     sidecar = str(directory / 'photo.xmp')
     write_sidecar(sidecar, {'Old leaf'}, {'Old parent|Old leaf'})
+    if target_present:
+        db.tag_photo(photo, target)
+        write_sidecar(sidecar, {target_name}, {'New parent|' + target_name})
     body = {'keyword_ids': [source, target], 'target_id': target}
     response = client.post('/api/keywords/merge-preview', json=body)
     assert response.status_code == 200
@@ -853,3 +857,56 @@ def test_chained_merges_sync_together_when_only_latest_add_is_selected(catalog, 
     assert read_keywords(sidecar) == {'Third'}
     assert set(read_hierarchical_keywords(sidecar)) == {'Third parent|Third'}
     assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize('reader', ['scan', 'sync', 'catalog'])
+def test_flat_only_import_resolves_unambiguous_merged_nested_leaf(catalog, tmp_path, monkeypatch, reader):
+    from importer import execute_import
+    from scanner import _import_keywords_for_photo
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db, photos = catalog
+    parent = db.add_keyword('Old parent')
+    source = db.add_keyword('Old leaf', parent_id=parent)
+    target = db.add_keyword('Retained leaf')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    directory = tmp_path / 'photos'
+    directory.mkdir()
+    sidecar = str(directory / '2.xmp')
+    write_sidecar(sidecar, {'Old leaf'}, set())
+    if reader == 'scan':
+        _import_keywords_for_photo(db, photos[2], sidecar)
+    elif reader == 'sync':
+        sync_from_xmp(db, [photos[2]])
+    else:
+        monkeypatch.setattr('importer.read_catalog', lambda *args, **kwargs: {
+            str(directory / '2.jpg'): {
+                'flat_keywords': {'Old leaf'}, 'hierarchical_keywords': set(),
+            },
+        })
+        execute_import(['dummy.lrcat'], db, write_xmp=False)
+    assert {k['id'] for k in db.get_photo_keywords(photos[2])} == {target}
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE name = ?', ('Old leaf',)).fetchone()
+
+
+def test_flat_merge_alias_does_not_override_ambiguous_live_identity(catalog):
+    from keyword_identity import resolve_import_path
+
+    db, photos = catalog
+    parent = db.add_keyword('Old parent')
+    source = db.add_keyword('Robin', parent_id=parent, kw_type='taxonomy')
+    target = db.add_keyword('Bird', kw_type='taxonomy')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    assert resolve_import_path(db, ['Robin']) == target
+    people = db.add_keyword('People', kw_type='individual')
+    db.add_keyword('Robin', parent_id=people, kw_type='individual')
+    assert resolve_import_path(db, ['Robin']) is None
+    assert resolve_import_path(db, ['Robin'], kw_type='taxonomy') == target
+    assert resolve_import_path(db, ['Old parent', 'Robin']) == target

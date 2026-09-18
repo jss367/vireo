@@ -405,12 +405,13 @@ def _plan_merged_keyword_hierarchies(db, plans):
                     plan.hierarchy_replacements[old_hierarchy] = None
                 if target_path and keyword_match_key(target_path[-1]) not in tagged_names:
                     plan.keywords_to_add.discard(target_path[-1])
+                    plan.keywords_to_remove_flat.add(target_path[-1])
+                if target_path and path_key(target_path) not in tagged_paths:
+                    plan.hierarchy_replacements['|'.join(target_path)] = None
                 # Keep an unrelated same-named tag when its own hierarchy is
                 # still assigned to this photo.
                 if target_path and keyword_match_key(target_path[-1]) in tagged_names:
                     plan.keywords_to_remove.discard(target_path[-1])
-                    if path_key(target_path) not in tagged_paths:
-                        plan.hierarchy_replacements['|'.join(target_path)] = None
             if keyword_match_key(source_path[-1]) not in tagged_names:
                 plan.keywords_to_remove_flat.add(source_path[-1])
 
