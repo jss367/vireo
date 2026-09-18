@@ -183,17 +183,26 @@ signal; do not limit the work to the triggering payload.
    expanding the PR.
 8. Apply all selected conflict, review, and CI fixes in one coherent change.
    Run validation and fix failures. Stage the result but do not commit yet:
-   the size-drift checkpoint in step 9 needs to see the actual diff this round
-   would push, including the fix that closed the finding it might trip on. If
-   there is no code or merge change to stage, do not create an empty commit or
-   a top-level success comment.
-9. Size-drift checkpoint. Compare the staged diff against the PR's size at the
-   last human-authored commit. If the staged diff has grown past roughly three
-   times that baseline, do not commit or push: reset the working tree, then
-   post one deduplicated comment naming what the PR set out to do, what it now
-   contains, and which finding pushed it past the threshold. This is a
-   checkpoint, not an escalation of any one finding: it exists so the
-   maintainer can redirect a PR that has drifted. Wait for a response.
+   the size-drift checkpoint in step 9 needs to see the cumulative PR diff
+   this round would produce, including the fix that closed the finding it
+   might trip on. If there is no code or merge change to stage, do not create
+   an empty commit or a top-level success comment.
+9. Size-drift checkpoint. Measure the PR's cumulative diff — everything on the
+   branch above the base branch, including this round's staged fix — and
+   compare it against the PR's size at its baseline. The baseline is the PR
+   state at the parent of the first commit on the branch whose message carries
+   a routine marker (`[pr-agent-review-fix:$PR]` or `[pr-agent-fix-ci:$PR]`);
+   this is mechanically identifiable even for PRs opened by another agent
+   (e.g., Codex), whose commits do not carry those markers even when they
+   author under the maintainer's connected GitHub identity. If no
+   routine-marker commit exists on the branch yet, the baseline is the current
+   PR head and the checkpoint does not fire this round. If the cumulative diff
+   has grown past roughly three times the baseline, do not commit or push:
+   reset the working tree, then post one deduplicated comment naming what the
+   PR set out to do, what it now contains, and which finding pushed it past
+   the threshold. This is a checkpoint, not an escalation of any one finding:
+   it exists so the maintainer can redirect a PR that has drifted. Wait for a
+   response.
 10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
     the push. Commit once with a descriptive subject and include
     `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
