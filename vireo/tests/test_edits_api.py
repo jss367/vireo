@@ -2530,6 +2530,79 @@ def test_deleting_a_location_ancestor_queues_descendant_photos(
     assert (photo_id, "location") in queued
 
 
+def test_removing_a_location_tag_queues_a_location_change(client_with_photo):
+    """DELETE /api/photos/<id>/keywords/<kid> requeues a location cleanup.
+
+    Regression: ``api_remove_keyword`` queued only ``keyword_remove`` for a
+    ``type='location'`` tag, so the generic remover stripped the flat and
+    hierarchical entries but left ``vireo:locationKeywords`` and its
+    ownership claim in the sidecar. If the user later recreated the
+    keyword in Lightroom and assigned another location in Vireo,
+    ``set_location_keywords`` would then delete the user's new entry
+    under the stale marker's ownership.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    leaf_id = _assign_location(db, photo_id, ["France", "Paris"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{leaf_id}")
+    assert resp.status_code == 200
+
+    queued = [
+        (c["photo_id"], c["change_type"]) for c in db.get_pending_changes()
+    ]
+    assert (photo_id, "location") in queued
+
+
+def test_removing_a_non_location_tag_does_not_queue_a_location_change(
+    client_with_photo,
+):
+    """Guards the remove-tag fix from over-queueing.
+
+    Removing an ordinary keyword tag must not touch the location queue --
+    it does not affect ``vireo:locationKeywords`` at all.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    kw_id = db.add_keyword("SomeSpecies", is_species=True)
+    db.tag_photo(photo_id, kw_id)
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kw_id}")
+    assert resp.status_code == 200
+
+    change_types = {c["change_type"] for c in db.get_pending_changes()}
+    assert "location" not in change_types
+
+
+def test_batch_removing_a_location_tag_queues_a_location_change(client_with_photo):
+    """The batch remove endpoint has the same marker-cleanup responsibility.
+
+    ``POST /api/batch/keyword-remove`` also strips a ``type='location'``
+    tag through ``keyword_remove`` and must queue a ``location`` change
+    per affected photo, otherwise the sidecar marker outlives the tag.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    leaf_id = _assign_location(db, photo_id, ["France", "Nice"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": [photo_id], "keyword_id": leaf_id},
+    )
+    assert resp.status_code == 200
+
+    queued = [
+        (c["photo_id"], c["change_type"]) for c in db.get_pending_changes()
+    ]
+    assert (photo_id, "location") in queued
+
+
 def test_disabling_location_keywords_via_full_workspace_put_queues_cleanup(
     client_with_photo,
 ):
