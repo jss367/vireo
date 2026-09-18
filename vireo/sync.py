@@ -1,5 +1,6 @@
 """Sync engine: reconcile database and XMP sidecars."""
 
+import json
 import logging
 import os
 import threading
@@ -8,7 +9,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from db import KEYWORD_SOURCE_UNKNOWN
-from keyword_identity import resolve_import_path, validate_import_locations
+from keyword_identity import (
+    filter_removed_import_aliases,
+    keyword_paths,
+    path_key,
+    resolve_import_path,
+    resolve_merge_target,
+    validate_import_locations,
+)
 from keyword_normalization import keyword_match_key
 from xmp import SidecarEditor, read_hierarchical_keywords, read_keywords
 
@@ -117,13 +125,21 @@ def _select_changes(changes, change_ids):
         if c["change_type"] in _KEYWORD_CHANGE_TYPES and c["value"]:
             key = (c["photo_id"], keyword_match_key(c["value"]))
             kw_index[key].append(c["id"])
+    groups = [set(ids) for ids in kw_index.values()]
     for c in changes:
-        if c["id"] not in selected_ids:
-            continue
-        if c["change_type"] not in _KEYWORD_CHANGE_TYPES or not c["value"]:
-            continue
-        key = (c["photo_id"], keyword_match_key(c["value"]))
-        selected_ids.update(kw_index[key])
+        if c['change_type'] == 'keyword_merge':
+            merge = json.loads(c['value'])
+            group = {c['id']}
+            for path in (merge['source_path'], merge['target_path']):
+                group.update(kw_index.get((c['photo_id'], keyword_match_key(path[-1])), []))
+            groups.append(group)
+    # Include transitive pairs when several merges are still waiting to sync.
+    previous_count = -1
+    while previous_count != len(selected_ids):
+        previous_count = len(selected_ids)
+        for group in groups:
+            if group & selected_ids:
+                selected_ids.update(group)
     return [c for c in changes if c["id"] in selected_ids]
 
 
@@ -139,6 +155,9 @@ class _PhotoSyncPlan:
     # would strip that preserved ``lr:hierarchicalSubject`` entry; flat-only
     # removal touches only the stale ``dc:subject`` line.
     keywords_to_remove_flat: set = field(default_factory=set)
+    hierarchy_replacements: dict = field(default_factory=dict)
+    hierarchies_to_add: set = field(default_factory=set)
+    keyword_merges: list = field(default_factory=list)
     rating: int | None = None
     flag: str | None = None
     edit_recipe_json: str | None = None
@@ -162,6 +181,8 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
             plan.keywords_to_remove.add(c["value"])
         elif kind == "keyword_remove_flat":
             plan.keywords_to_remove_flat.add(c["value"])
+        elif kind == "keyword_merge":
+            plan.keyword_merges.append(json.loads(c['value']))
         elif kind == "rating":
             plan.rating = int(c["value"])
         elif kind == "flag":
@@ -254,13 +275,15 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sid
     ``SidecarEditor.set_rating``.
     """
     editor = SidecarEditor(xmp_path)
+    if plan.hierarchy_replacements:
+        editor.replace_keyword_hierarchies(plan.hierarchy_replacements)
     _remove_planned_keywords(editor, plan)
 
     # Apply keyword additions after removals so a same-photo remove+add
     # pair does not cancel out (see _remove_planned_keywords).
     if plan.keywords_to_add:
         editor.add_keywords(
-            flat_keywords=plan.keywords_to_add, hierarchical_keywords=set()
+            flat_keywords=plan.keywords_to_add, hierarchical_keywords=plan.hierarchies_to_add
         )
 
     # Apply the flag before the rating: a flag creates a sidecar if needed,
@@ -352,6 +375,45 @@ def _sync_result(synced, failures):
         "ok": not failures,
         "errors": reasons,
     }
+
+
+def _plan_merged_keyword_hierarchies(db, plans):
+    """Apply durable merge work only to its recorded photo and keyword identity."""
+    if not any(plan.keyword_merges for plan in plans.values()):
+        return
+    rows = db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall()
+    paths = keyword_paths(rows)
+    for photo_id, plan in plans.items():
+        if not plan.keyword_merges:
+            continue
+        tagged = db.get_photo_keywords(photo_id)
+        tagged_ids = {k['id'] for k in tagged}
+        tagged_names = {keyword_match_key(k['name']) for k in tagged}
+        tagged_paths = {path_key(paths[k['id']]) for k in tagged}
+        for merge in plan.keyword_merges:
+            source_path = merge['source_path']
+            target_id = resolve_merge_target(db, merge)
+            target_path = paths.get(target_id)
+            old_hierarchy = '|'.join(source_path)
+            if target_id in tagged_ids:
+                plan.hierarchy_replacements[old_hierarchy] = '|'.join(target_path)
+                plan.keywords_to_add.add(target_path[-1])
+                if len(target_path) > 1:
+                    plan.hierarchies_to_add.add('|'.join(target_path))
+            else:
+                if path_key(source_path) not in tagged_paths:
+                    plan.hierarchy_replacements[old_hierarchy] = None
+                if target_path and keyword_match_key(target_path[-1]) not in tagged_names:
+                    plan.keywords_to_add.discard(target_path[-1])
+                    plan.keywords_to_remove_flat.add(target_path[-1])
+                if target_path and path_key(target_path) not in tagged_paths:
+                    plan.hierarchy_replacements['|'.join(target_path)] = None
+                # Keep an unrelated same-named tag when its own hierarchy is
+                # still assigned to this photo.
+                if target_path and keyword_match_key(target_path[-1]) in tagged_names:
+                    plan.keywords_to_remove.discard(target_path[-1])
+            if keyword_match_key(source_path[-1]) not in tagged_names:
+                plan.keywords_to_remove_flat.add(source_path[-1])
 
 
 def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
@@ -456,6 +518,8 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 "error": str(e),
                 "reason": _failure_reason(e),
             }
+
+    _plan_merged_keyword_hierarchies(db, plans)
 
     locations = {}
     if sync_locations:
@@ -681,6 +745,10 @@ def sync_from_xmp(db, photo_ids):
             pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
                 photo_id, hierarchical=True,
             )
+            xmp_keywords, imported_hierarchies = filter_removed_import_aliases(
+                db, photo_id, xmp_keywords, read_hierarchical_keywords(xmp_path),
+                pending_removals, pending_hierarchical_removals,
+            )
             pending_flat_only_removals = (
                 pending_removals - pending_hierarchical_removals
             )
@@ -701,7 +769,7 @@ def sync_from_xmp(db, photo_ids):
             # during the removal pass as well as the add pass.
             aliases_by_key = defaultdict(set)
             hierarchical_keywords = [
-                hierarchy for hierarchy in read_hierarchical_keywords(xmp_path)
+                hierarchy for hierarchy in imported_hierarchies
                 if not any(keyword_match_key(part) in pending_hierarchical_removals
                            for part in hierarchy.split('|'))
             ]

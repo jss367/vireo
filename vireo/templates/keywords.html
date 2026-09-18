@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="/static/vireo-base.css">
 <title>Vireo - Keywords</title>
 <style>
-  body { padding-bottom: 36px; }
+  body { padding-bottom: 110px; }
   .content { max-width: 1200px; }
 
   /* Toolbar */
@@ -48,8 +48,11 @@
   /* Bulk action bar */
   .kw-bulk-bar {
     display: none; align-items: center; gap: 10px;
-    margin-bottom: 10px; padding: 8px 12px;
-    background: var(--accent-dim); border-radius: 6px;
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    width: max-content; max-width: calc(100vw - 32px); box-sizing: border-box;
+    flex-wrap: wrap; z-index: 100; padding: 10px 14px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    background: var(--bg-secondary); border-radius: 6px;
     border: 1px solid var(--accent);
     font-size: 13px; color: var(--accent);
   }
@@ -70,6 +73,16 @@
     color: var(--danger); font-weight: normal;
   }
   .kw-bulk-btn.danger:hover { background: rgba(231,76,60,0.15); }
+  .kw-merge-dialog {
+    width: 520px; max-width: calc(100vw - 48px); max-height: 80vh;
+    padding: 24px; border: 1px solid var(--border-primary); border-radius: 8px;
+    background: var(--bg-secondary); color: var(--text-primary);
+  }
+  .kw-merge-dialog::backdrop { background: rgba(0,0,0,0.6); }
+  .kw-merge-dialog p { font-size: 13px; line-height: 1.5; margin: 12px 0; }
+  #kwMergePreview { overflow-wrap: anywhere; }
+  #kwMergeError { color: var(--danger); }
+  .kw-merge-dialog button:disabled { opacity: 0.5; cursor: default; }
 
   /* Table */
   .kw-table-wrap {
@@ -220,6 +233,7 @@
         <option value="genre">Genre</option>
       </select>
       <button class="kw-bulk-btn" id="kwBulkApply">Apply</button>
+      <button class="kw-bulk-btn" id="kwBulkMerge" type="button" hidden>Merge selected…</button>
       <span style="flex:1"></span>
       <button class="kw-bulk-btn danger" id="kwBulkDelete">Delete Selected</button>
     </div>
@@ -246,6 +260,22 @@
   </div>
 
 </div>
+
+<dialog id="kwMergeDialog" class="kw-merge-dialog" aria-labelledby="kwMergeTitle">
+  <h3 id="kwMergeTitle">Merge selected keywords</h3>
+  <p>Choose the keyword to keep. Its name, type, and parent path will remain.
+    Missing coordinates will be filled from another selected keyword when available.</p>
+  <label class="modal-label" for="kwMergeTarget">Keyword to keep</label>
+  <select id="kwMergeTarget" class="modal-input"></select>
+  <div id="kwMergePreview" role="status" aria-live="polite"></div>
+  <p id="kwMergeError" role="alert" hidden></p>
+  <p>This combines photo tags across the entire catalog, including other workspaces.
+    The other selected keyword records will be removed. This merge cannot be undone.</p>
+  <div class="modal-actions">
+    <button class="modal-btn modal-btn-cancel" id="kwMergeCancel" type="button">Cancel</button>
+    <button class="modal-btn modal-btn-primary" id="kwMergeConfirm" type="button" disabled>Merge keywords</button>
+  </div>
+</dialog>
 
 <!-- Link-to-Google-place modal -->
 <div class="modal-overlay" id="linkPlaceModal">
@@ -542,8 +572,109 @@
     const bar = document.getElementById('kwBulkBar');
     const count = selectedIds.size;
     document.getElementById('kwBulkCount').textContent = count + ' selected';
+    document.getElementById('kwBulkMerge').hidden = count < 2;
     if (count > 0) { bar.classList.add('visible'); } else { bar.classList.remove('visible'); }
   }
+
+  // -- Explicit merge with a catalog-wide preview --
+  const mergeDialog = document.getElementById('kwMergeDialog');
+  const mergeTarget = document.getElementById('kwMergeTarget');
+  const mergeConfirm = document.getElementById('kwMergeConfirm');
+  const mergeCancel = document.getElementById('kwMergeCancel');
+  const mergeError = document.getElementById('kwMergeError');
+  const mergePreview = document.getElementById('kwMergePreview');
+  let mergeIds = [];
+  let mergeToken = null;
+  let mergeRequest = 0;
+  let mergeSaving = false;
+
+  async function refreshMergePreview() {
+    const requestId = ++mergeRequest;
+    mergeToken = null;
+    mergeConfirm.disabled = true;
+    mergeError.hidden = true;
+    mergePreview.textContent = 'Loading preview…';
+    try {
+      const response = await fetch('/api/keywords/merge-preview', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({keyword_ids: mergeIds, target_id: Number(mergeTarget.value)})
+      });
+      const data = await response.json();
+      if (requestId !== mergeRequest || !mergeDialog.open) return;
+      if (!response.ok) throw new Error(data.error || 'Could not preview merge.');
+      let details = '<p><strong>' + data.combined_count + ' distinct photos after merging</strong></p>' +
+        '<p>Keep: ' + escapeHtml(data.target.path.join(' → ')) + ' (' + escapeHtml(data.target.type) + ')</p>' +
+        '<p>Merge into it: ' + data.sources.map(k => escapeHtml(k.path.join(' → '))).join('; ') + '</p>';
+      if (data.latitude != null && data.longitude != null) {
+        details += '<p>Coordinates: ' + data.latitude.toFixed(4) + ', ' + data.longitude.toFixed(4) + '</p>';
+      }
+      if (data.target.place_id) {
+        details += '<p>Google place link retained.</p>';
+      }
+      details += '<p>Imported names and paths will resolve to the retained keyword on future imports.</p>';
+      mergePreview.innerHTML = details;
+      mergeToken = data.preview_token;
+      mergeConfirm.disabled = false;
+    } catch (error) {
+      if (requestId !== mergeRequest || !mergeDialog.open) return;
+      mergePreview.textContent = '';
+      mergeError.textContent = error.message;
+      mergeError.hidden = false;
+    }
+  }
+
+  function openMergeDialog(ids) {
+    if (ids.length < 2) return;
+    mergeIds = [...ids];
+    const records = mergeIds.map(id => allKeywords.find(k => k.id === id)).filter(Boolean);
+    // Prefer the record carrying a place/taxon link, then coordinates.
+    const score = k => (k.place_id ? 8 : 0) + (k.taxon_id ? 4 : 0) +
+      (k.type === 'location' ? 2 : 0) + (k.latitude != null && k.longitude != null ? 1 : 0);
+    records.sort((a, b) => score(b) - score(a));
+    mergeTarget.replaceChildren(...records.map(k => {
+      const option = document.createElement('option');
+      option.value = k.id;
+      option.textContent = (k.path || [k.name]).join(' → ') + ' · ' + k.type + (k.place_id ? ' · linked place' : '');
+      return option;
+    }));
+    mergeDialog.showModal();
+    refreshMergePreview();
+  }
+
+  document.getElementById('kwBulkMerge').addEventListener('click', () => openMergeDialog([...selectedIds]));
+  mergeTarget.addEventListener('change', refreshMergePreview);
+  mergeCancel.addEventListener('click', () => mergeDialog.close());
+  mergeDialog.addEventListener('cancel', event => { if (mergeSaving) event.preventDefault(); });
+  mergeDialog.addEventListener('close', () => { ++mergeRequest; mergeToken = null; });
+  mergeConfirm.addEventListener('click', async function() {
+    if (!mergeToken || mergeSaving) return;
+    mergeSaving = true;
+    mergeConfirm.disabled = true;
+    mergeCancel.disabled = true;
+    mergeTarget.disabled = true;
+    mergeError.hidden = true;
+    try {
+      const response = await fetch('/api/keywords/merge', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({keyword_ids: mergeIds, target_id: Number(mergeTarget.value), preview_token: mergeToken})
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not merge keywords.');
+      mergeDialog.close();
+      selectedIds.clear();
+      await loadKeywords();
+      if (!document.getElementById('kwLocationReview').hidden) await loadLocationMatches();
+      showToast('Keywords merged into “' + data.target.name + '”.', 'success');
+    } catch (error) {
+      await refreshMergePreview();
+      mergeError.textContent = error.message;
+      mergeError.hidden = false;
+    } finally {
+      mergeSaving = false;
+      mergeCancel.disabled = false;
+      mergeTarget.disabled = false;
+    }
+  });
 
   // -- Inline type change via badge click --
   document.getElementById('kwBody').addEventListener('click', function(e) {
@@ -744,6 +875,7 @@
             renameKeyword(singleKw.id, newName.trim());
           }
         } },
+      ...(kwIds.length > 1 ? [{label: 'Merge selected…', onClick: () => openMergeDialog(kwIds)}] : []),
       { chips: TYPES.map(typeChip) },
       { separator: true },
       { label: 'Show Photos with this Keyword',
