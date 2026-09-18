@@ -5264,6 +5264,7 @@ class Database:
                 (target_folder_id, photo["filename"]),
             ).fetchone()
             if existing:
+                self._transfer_gps_review_for_merge(photo["id"], existing["id"])
                 drop_ids.append(photo["id"])
             elif os.path.exists(os.path.join(new_path, photo["filename"])):
                 self.conn.execute(
@@ -5901,6 +5902,22 @@ class Database:
             if keyword_match_key(r["name"]) == match_key
         ]
 
+    def _transfer_gps_review_for_merge(self, losing_id, surviving_id):
+        """Carry the newest GPS keep decision across an identity merge.
+
+        Prefer the survivor on timestamp ties. The fingerprint still has to
+        match its coordinates, assigned place and sidecar before review will
+        suppress a discrepancy; moving the decision cannot bless new data.
+        The caller owns the transaction and deletion of the losing row.
+        """
+        self.conn.execute("""
+            INSERT INTO location_gps_reviews(photo_id, fingerprint, reviewed_at)
+            SELECT ?, fingerprint, reviewed_at FROM location_gps_reviews WHERE photo_id = ?
+            ON CONFLICT(photo_id) DO UPDATE SET
+                fingerprint = excluded.fingerprint, reviewed_at = excluded.reviewed_at
+            WHERE excluded.reviewed_at > location_gps_reviews.reviewed_at
+        """, (surviving_id, losing_id))
+
     def _transfer_review_state_for_merge(self, losing_id, surviving_id):
         """Carry queued rating / flag state onto the survivor by chronology.
 
@@ -5924,6 +5941,7 @@ class Database:
 
         Returns the number of queue rows dropped.
         """
+        self._transfer_gps_review_for_merge(losing_id, surviving_id)
         dropped = 0
         for change_type, column in (("rating", "rating"), ("flag", "flag")):
             rows = self.conn.execute(

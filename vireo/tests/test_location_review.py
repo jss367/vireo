@@ -399,3 +399,69 @@ def test_sidecar_reads_allow_writers_and_revalidate_database(discrepancy_catalog
     assert response.status_code == (200 if change == 'unrelated' else 409)
     assert len(calls) == 1  # The locked revalidation must use cached sidecar evidence.
     assert len(db.get_pending_changes()) == (1 if change == 'unrelated' else 0)
+
+
+@pytest.mark.parametrize('merge_kind', ['archive_collision', 'archive_phantom', 'relocate', 'raw_jpeg'])
+def test_identity_merges_preserve_gps_review(db, tmp_path, merge_kind):
+    from location_review import gps_discrepancies
+    from scanner import _pair_raw_jpeg_companions
+
+    archive = tmp_path / 'archive'
+    archive.mkdir()
+    (archive / 'photo.NEF').write_bytes(b'archived')
+    target_folder = db.add_folder(str(archive), name='archive')
+    source_folder = db.add_folder(str(tmp_path / 'stage'), name='stage')
+    target = db.add_photo(
+        folder_id=target_folder, filename='photo.NEF', extension='.nef',
+        file_size=8, file_mtime=1, file_hash='same',
+    )
+    source = db.add_photo(
+        folder_id=target_folder if merge_kind == 'raw_jpeg' else source_folder,
+        filename='photo.jpg' if merge_kind == 'raw_jpeg' else 'photo.NEF',
+        extension='.jpg' if merge_kind == 'raw_jpeg' else '.nef',
+        file_size=8, file_mtime=1, file_hash='same',
+    )
+    keyword = db.get_or_create_text_location('Kumeyaay Lake')
+    db.conn.execute('UPDATE keywords SET latitude=32.841515, longitude=-117.032998 WHERE id=?', (keyword,))
+    for pid in [target, source]:
+        db.set_photo_location(pid, keyword)
+        db.conn.execute('UPDATE photos SET latitude=32.8360733333333, longitude=-117.029203333333 WHERE id=?', (pid,))
+    losing, survivor = source, target
+    if merge_kind == 'archive_phantom':
+        db.conn.execute("UPDATE photos SET file_hash='stale' WHERE id=?", (target,))
+        losing, survivor = target, source
+    fingerprint = gps_discrepancies(db, [losing])[0]['fingerprint']
+    db.conn.execute('INSERT INTO location_gps_reviews(photo_id, fingerprint) VALUES (?, ?)', (losing, fingerprint))
+    db.conn.commit()
+
+    if merge_kind.startswith('archive_'):
+        db.merge_staged_tree_into_archive(source_folder, str(archive))
+    elif merge_kind == 'relocate':
+        db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (source_folder,))
+        db.conn.commit()
+        db.relocate_folder(source_folder, str(archive))
+    else:
+        _pair_raw_jpeg_companions(db)
+
+    assert db.conn.execute('SELECT 1 FROM photos WHERE id=?', (losing,)).fetchone() is None
+    row = db.conn.execute('SELECT fingerprint FROM location_gps_reviews WHERE photo_id=?', (survivor,)).fetchone()
+    assert row is not None and row['fingerprint'] == fingerprint
+    assert gps_discrepancies(db, [survivor]) == []
+    db.conn.execute('UPDATE photos SET latitude=33 WHERE id=?', (survivor,))
+    assert len(gps_discrepancies(db, [survivor])) == 1
+
+
+@pytest.mark.parametrize('loser_date,expected', [
+    ('2026-09-11 12:00:00', 'survivor'),
+    ('2026-09-12 12:00:00', 'survivor'),
+    ('2026-09-13 12:00:00', 'loser'),
+])
+def test_gps_review_merge_prefers_newest_decision(discrepancy_catalog, loser_date, expected):
+    _, db, photo_ids, _, _ = discrepancy_catalog
+    losing, survivor = photo_ids[:2]
+    db.conn.executemany(
+        'INSERT INTO location_gps_reviews(photo_id, fingerprint, reviewed_at) VALUES (?, ?, ?)',
+        [(losing, 'loser', loser_date), (survivor, 'survivor', '2026-09-12 12:00:00')],
+    )
+    db._transfer_gps_review_for_merge(losing, survivor)
+    assert db.conn.execute('SELECT fingerprint FROM location_gps_reviews WHERE photo_id=?', (survivor,)).fetchone()[0] == expected
