@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -38,6 +39,31 @@ def app_and_db(tmp_path, monkeypatch):
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
     return app, db, ws_id, tmp_path
+
+
+def _post_snapshot_until_ready(client, timeout=5.0):
+    """POST the snapshot endpoint until the background walk has landed.
+
+    A cold-cache POST kicks off the walk and answers 200 only when it finishes
+    inside the endpoint's short fast-path wait. A loaded CI runner misses that
+    budget and gets the 202 the real client re-polls through, so a test that
+    demands 200 from a single POST is really asserting the runner is fast.
+    Repeat POSTs coalesce onto the in-flight walk, so polling never spawns a
+    second compute, and the 202 path has tests of its own.
+    """
+    deadline = time.monotonic() + timeout
+    resp = None
+    while time.monotonic() < deadline:
+        resp = client.post("/api/workspaces/active/new-images/snapshot")
+        if resp.status_code == 200:
+            return resp
+        assert resp.status_code == 202, (
+            f"unexpected status {resp.status_code}: {resp.get_data(as_text=True)}"
+        )
+        time.sleep(0.05)
+    raise AssertionError(
+        f"snapshot never converged; last status {resp and resp.status_code}"
+    )
 
 
 def test_api_new_images_reports_unscanned_files(app_and_db):
@@ -578,23 +604,7 @@ def test_post_snapshot_creates_row_with_current_new_images(app_and_db):
     _touch_image(str(folder / "IMG_002.JPG"))
 
     with app.test_client() as client:
-        # The endpoint returns 202 while the background walk is in flight;
-        # under CI load the fast-path 500ms wait can be exceeded. Poll like a
-        # real client would — this matches test_post_snapshot_reuses_walk_across_polls.
-        import time as _time
-        deadline = _time.monotonic() + 5.0
-        resp = None
-        while _time.monotonic() < deadline:
-            resp = client.post("/api/workspaces/active/new-images/snapshot")
-            if resp.status_code == 200:
-                break
-            assert resp.status_code == 202, (
-                f"unexpected status {resp.status_code}: {resp.get_data(as_text=True)}"
-            )
-            _time.sleep(0.05)
-        assert resp is not None and resp.status_code == 200, (
-            f"snapshot never converged; last status {resp and resp.status_code}"
-        )
+        resp = _post_snapshot_until_ready(client)
         data = resp.get_json()
         assert data["file_count"] == 2
         assert isinstance(data["snapshot_id"], int)
@@ -709,17 +719,7 @@ def test_post_snapshot_reuses_walk_across_polls(app_and_db, monkeypatch):
             # walking a third time.
             release.set()
 
-            import time as _time
-            deadline = _time.monotonic() + 2.0
-            resp = None
-            while _time.monotonic() < deadline:
-                resp = client.post("/api/workspaces/active/new-images/snapshot")
-                if resp.status_code == 200:
-                    break
-                _time.sleep(0.05)
-            assert resp is not None and resp.status_code == 200, (
-                f"snapshot never converged after walk; last status {resp and resp.status_code}"
-            )
+            resp = _post_snapshot_until_ready(client, timeout=2.0)
             assert resp.get_json()["file_count"] == 1
             assert call_count["n"] == calls_after_first, (
                 f"post-walk poll must not spawn another compute; "
@@ -736,7 +736,6 @@ def test_post_snapshot_coalesces_onto_inflight_navbar_walk(
     then snapshot the walk's result once it lands. Restarting the walk on
     every click is what made large-library clicks never converge."""
     import threading
-    import time
 
     import new_images as new_images_module
     from new_images import get_shared_cache
@@ -783,18 +782,7 @@ def test_post_snapshot_coalesces_onto_inflight_navbar_walk(
             assert extra_calls["n"] == 0
 
             walk_release.set()
-            deadline = time.monotonic() + 2.0
-            resp = None
-            while time.monotonic() < deadline:
-                resp = client.post("/api/workspaces/active/new-images/snapshot")
-                if resp.status_code == 200:
-                    break
-                time.sleep(0.05)
-
-            assert resp is not None and resp.status_code == 200, (
-                f"snapshot never converged after walk finished; "
-                f"last={resp and resp.status_code}"
-            )
+            resp = _post_snapshot_until_ready(client, timeout=2.0)
             data = resp.get_json()
             assert data["file_count"] == 1
             assert extra_calls["n"] == 0
@@ -893,33 +881,8 @@ def test_post_snapshot_second_click_reuses_cache_until_invalidated(app_and_db, m
         new_images_module, "count_new_images_for_workspace", counting,
     )
 
-    import time
-
-    def _post_until_ready(client):
-        # Cold-cache POSTs trigger an async walk; under CI load a single
-        # POST can exceed the endpoint's ~500ms fast-path wait and return
-        # 202. Poll like a real client would — this matches
-        # test_post_snapshot_creates_row_with_current_new_images. Repeat
-        # POSTs coalesce onto the in-flight walk, so polling never inflates
-        # call_count.
-        deadline = time.monotonic() + 5.0
-        resp = None
-        while time.monotonic() < deadline:
-            resp = client.post("/api/workspaces/active/new-images/snapshot")
-            if resp.status_code == 200:
-                return resp
-            assert resp.status_code == 202, (
-                f"unexpected status {resp.status_code}: "
-                f"{resp.get_data(as_text=True)}"
-            )
-            time.sleep(0.05)
-        raise AssertionError(
-            f"snapshot never converged; last status "
-            f"{resp and resp.status_code}"
-        )
-
     with app.test_client() as client:
-        first = _post_until_ready(client)
+        first = _post_snapshot_until_ready(client)
         assert first.get_json()["file_count"] == 1
         calls_after_first = call_count["n"]
         assert calls_after_first >= 1
@@ -939,7 +902,7 @@ def test_post_snapshot_second_click_reuses_cache_until_invalidated(app_and_db, m
         # A scan/import invalidates the cache; the next click re-walks and
         # sees the new arrival.
         get_shared_cache().invalidate_workspaces(db._db_path, [ws_id])
-        third = _post_until_ready(client)
+        third = _post_snapshot_until_ready(client)
         assert third.get_json()["file_count"] == 2, (
             "post-invalidation click must recompute and pick up the new file"
         )
@@ -1091,8 +1054,7 @@ def test_post_snapshot_registers_job_when_walk_needed(
 def test_post_snapshot_zero_new_images_returns_200(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     with app.test_client() as client:
-        resp = client.post("/api/workspaces/active/new-images/snapshot")
-        assert resp.status_code == 200
+        resp = _post_snapshot_until_ready(client)
         assert resp.get_json()["file_count"] == 0
 
 
