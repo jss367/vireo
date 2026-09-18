@@ -950,6 +950,26 @@
     </div>
   </div>
 
+  <!-- Location metadata -->
+  <div class="section" id="location-metadata">
+    <div class="section-title">Location metadata in XMP</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      Assigning a place in Vireo queues a sidecar write for that photo. What the write does is decided by two settings in
+      the Metadata category below &mdash; <code>write_assigned_location_to_xmp</code> writes GPS coordinates,
+      <code>write_location_keywords_to_xmp</code> writes the place and its parents as Lightroom keywords. Photos you located
+      before turning a setting on have nothing queued, so they need a one-off backfill.
+    </p>
+    <div id="locationWriteStatus" style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Loading location counts...</div>
+    <button type="button" id="locationWriteQueueBtn" onclick="queueLocationWrites()"
+            style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">
+      Queue location writes
+    </button>
+    <div style="font-size:11px;color:var(--text-ghost);margin-top:8px;">
+      Queueing writes nothing on its own: the changes land in the sync queue, and the review shows what each photo's sidecar
+      will gain or lose before you run Sync to XMP.
+    </div>
+  </div>
+
   <!-- External Editors -->
   <div class="section">
     <div class="section-title">External Editors</div>
@@ -1238,6 +1258,7 @@ loadVersion();
 loadThemePicker();
 loadAllSettings();
 loadComputationCacheStatus();
+loadLocationWriteStatus();
 
 var SETTINGS_FIND_STATE = {
   marks: [],
@@ -3614,6 +3635,53 @@ function darktableIsLinux() {
 
 function darktableIsWindows() {
   return darktableInstallPlatform() === 'win32';
+}
+
+async function loadLocationWriteStatus() {
+  var el = document.getElementById('locationWriteStatus');
+  if (!el) return;
+  try {
+    var data = await safeFetch('/api/sync/location-writes', {}, { toast: false });
+    var photos = data.photos_with_location || 0;
+    var queued = data.already_queued || 0;
+    var writes = [];
+    if (data.location_sync_enabled) writes.push('GPS coordinates');
+    if (data.location_keyword_sync_enabled) writes.push('location keywords');
+    var parts = [];
+    parts.push(photos.toLocaleString() + (photos === 1 ? ' photo in this workspace has' : ' photos in this workspace have') + ' an assigned place.');
+    if (queued) {
+      parts.push(queued.toLocaleString() + ' of them ' + (queued === 1 ? 'is' : 'are') + ' already waiting in the sync queue.');
+    }
+    if (writes.length) {
+      parts.push('A sync now writes ' + writes.join(' and ') + ' into their sidecars.');
+    } else {
+      parts.push('Both location writes are turned off, so a sync would only remove location GPS and keywords Vireo wrote earlier.');
+    }
+    el.textContent = parts.join(' ');
+  } catch (err) {
+    el.textContent = 'Could not read location counts: ' + (err && err.message || String(err));
+  }
+}
+
+async function queueLocationWrites() {
+  var btn = document.getElementById('locationWriteQueueBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Queueing...'; }
+  try {
+    var data = await safeFetch('/api/sync/location-writes', { method: 'POST' });
+    if (typeof showToast === 'function') {
+      showToast(
+        data.queued
+          ? 'Queued ' + data.queued.toLocaleString() + ' location change' + (data.queued === 1 ? '' : 's') +
+            '. Open the sync panel to review them.'
+          : 'Nothing new to queue \u2014 every located photo already has a location change waiting.',
+        data.queued ? 'success' : 'info',
+      );
+    }
+    await loadLocationWriteStatus();
+    if (typeof checkPendingSync === 'function') checkPendingSync();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Queue location writes'; }
+  }
 }
 
 async function loadDarktableStatus() {

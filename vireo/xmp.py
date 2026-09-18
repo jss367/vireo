@@ -295,6 +295,24 @@ def _read_bag_values(bag):
     return values
 
 
+# Attribute recording the location keyword path Vireo last wrote into this
+# sidecar, e.g. ``United States|California|Kumeyaay Lake``. Location keywords
+# are the one keyword kind Vireo owns end to end -- the user assigns a place
+# in Vireo, never in the sidecar -- so a later change or an unset location has
+# to remove them again. Without a record of what was written, "remove the old
+# place" would have to guess, and any guess wide enough to catch a renamed
+# place is also wide enough to delete a location keyword the user typed in
+# Lightroom.
+LOCATION_KEYWORDS_MARKER = f"{{{NS_VIREO}}}locationKeywords"
+
+
+def _location_marker_parts(marker_value):
+    """Split a stored location-keyword marker into its path segments."""
+    if not marker_value:
+        return []
+    return [part for part in str(marker_value).split("|") if part.strip()]
+
+
 def _parse_xmp(xmp_path):
     """Parse an XMP file, returning (root, tree) or None if missing/corrupt."""
     path = Path(xmp_path)
@@ -359,6 +377,36 @@ def read_hierarchical_keywords(xmp_path):
         if li.text:
             results.append(li.text)
     return results
+
+
+def read_vireo_location_keywords(xmp_path):
+    """Return the location keyword path Vireo wrote into this sidecar.
+
+    ``None`` when the sidecar is missing, unreadable, or was never written by
+    Vireo's location-keyword sync. Import callers use it to tell the entries
+    Vireo authored from the ones the user typed in Lightroom.
+    """
+    result = _parse_xmp(xmp_path)
+    if result is None:
+        return None
+    root, _tree = result
+    desc = root.find(f".//{{{NS_RDF}}}Description")
+    if desc is None:
+        return None
+    return desc.get(LOCATION_KEYWORDS_MARKER)
+
+
+def location_keyword_entries(marker_value):
+    """Return ``(flat_leaf, hierarchical_path)`` for a location marker value.
+
+    Both are ``(None, None)`` for an empty marker. These are exactly the two
+    sidecar entries :meth:`SidecarEditor.set_location_keywords` writes, so an
+    importer can skip them without re-deriving the convention.
+    """
+    parts = _location_marker_parts(marker_value)
+    if not parts:
+        return None, None
+    return parts[-1], "|".join(parts)
 
 
 def _parse_gps_coordinate(value):
@@ -440,6 +488,7 @@ def read_sync_preview_metadata(xmp_path):
         "location": None,
         "previous_location": None,
         "location_source": None,
+        "location_keywords": None,
         "edit_recipe": None,
     }
     try:
@@ -489,6 +538,7 @@ def read_sync_preview_metadata(xmp_path):
             desc, namespace=NS_VIREO, prefix="previous",
         ),
         "location_source": desc.get(f"{{{NS_VIREO}}}gpsSource"),
+        "location_keywords": desc.get(LOCATION_KEYWORDS_MARKER),
         "edit_recipe": desc.get(f"{{{NS_VIREO}}}editRecipe"),
     }
 
@@ -788,6 +838,102 @@ class SidecarEditor:
         if removed:
             self._dirty = True
         return removed
+
+    def set_location_keywords(self, path_parts):
+        """Write the assigned place as Lightroom keywords, creating a sidecar.
+
+        ``path_parts`` is the location keyword chain from broadest to leaf,
+        e.g. ``["United States", "California", "Kumeyaay Lake"]``. The leaf
+        goes into ``dc:subject`` and the whole chain into
+        ``lr:hierarchicalSubject`` as one pipe-delimited entry -- the shape
+        Lightroom reads back as a nested keyword. Ancestors are deliberately
+        not written as separate flat entries: Lightroom derives them from the
+        hierarchy, and writing them would put "United States" in the user's
+        flat keyword list for every photo.
+
+        An empty chain means the photo no longer has a location, which is the
+        removal case. Rewriting a photo whose place changed strips the entries
+        recorded by the previous write before adding the new ones, so the
+        sidecar never accumulates every place a photo has ever been assigned.
+        """
+        parts = [part for part in (path_parts or []) if part and part.strip()]
+        if not parts:
+            return self.remove_vireo_location_keywords()
+
+        path = "|".join(parts)
+        was_dirty = self._dirty
+        desc = self._description()
+        previous = desc.get(LOCATION_KEYWORDS_MARKER)
+        if previous and previous != path:
+            self._remove_location_keyword_entries(previous)
+
+        # Canonicalize a flat variant of the leaf the way the species-keyword
+        # path does: add_keywords() dedupes on exact text, so a sidecar
+        # spelling like `kumeyaay lake` would otherwise sit beside the clean
+        # one as a second <rdf:li>. ``keep_exact`` keeps a re-sync of an
+        # already-correct sidecar a no-op.
+        self.remove_keywords({parts[-1]}, hierarchical=False, keep_exact=True)
+        self.add_keywords(flat_keywords={parts[-1]}, hierarchical_keywords={path})
+        self._set_attributes(desc, {LOCATION_KEYWORDS_MARKER: path})
+        return self._dirty != was_dirty
+
+    def remove_vireo_location_keywords(self):
+        """Remove location keywords only when Vireo previously wrote them."""
+        if not self._readable():
+            return False
+        desc = self._find_description()
+        if desc is None:
+            return False
+        previous = desc.get(LOCATION_KEYWORDS_MARKER)
+        if not previous:
+            return False
+        self._remove_location_keyword_entries(previous)
+        # Clearing the marker is itself a change worth publishing: it is what
+        # keeps a later re-enable from treating stale entries as ours.
+        del desc.attrib[LOCATION_KEYWORDS_MARKER]
+        self._dirty = True
+        return True
+
+    def _remove_location_keyword_entries(self, marker_value):
+        """Strip the two entries a previous location-keyword write added.
+
+        Matching is by normalized key rather than exact text so a sidecar
+        Lightroom rewrote with different casing or spacing still resolves to
+        the entry Vireo wrote, and the flat match is restricted to the leaf
+        name while the hierarchical match requires the whole recorded path.
+        Anything else in the sidecar -- including a location keyword the user
+        typed in Lightroom -- is left alone.
+        """
+        leaf, path = location_keyword_entries(marker_value)
+        if not path:
+            return False
+        leaf_key = keyword_match_key(leaf)
+        path_keys = [keyword_match_key(part) for part in path.split("|")]
+        removed = []
+
+        if leaf_key:
+            for bag in self._root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag"):
+                for li in bag.findall(f"{{{NS_RDF}}}li"):
+                    if li.text and keyword_match_key(li.text) == leaf_key:
+                        removed.append(li.text)
+                        bag.remove(li)
+
+        for bag in self._root.findall(
+            f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"
+        ):
+            for li in bag.findall(f"{{{NS_RDF}}}li"):
+                if not li.text:
+                    continue
+                if [keyword_match_key(s) for s in li.text.split("|")] == path_keys:
+                    removed.append(li.text)
+                    bag.remove(li)
+
+        if removed:
+            self._dirty = True
+            log.info(
+                "Removed Vireo location keywords from %s: %s", self.path, removed,
+            )
+        return bool(removed)
 
     def set_edit_recipe(self, recipe_json):
         """Write or clear Vireo's non-destructive edit recipe marker."""

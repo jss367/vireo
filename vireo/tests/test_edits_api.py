@@ -2026,3 +2026,154 @@ def test_set_edit_recipe_removes_regeneration_sidecar(app_and_db, tmp_path):
         f"{pid}_raw_regen.jpg survived the recipe-edit invalidation; "
         "paired-source sidecars need the same sweep as the default"
     )
+
+
+def _enable_location_keyword_writes(db):
+    """Turn on location keyword writes for the active workspace."""
+    import config as cfg
+
+    config = cfg.load()
+    config["write_location_keywords_to_xmp"] = True
+    cfg.save(config)
+
+
+def _assign_location(db, photo_id, chain):
+    """Link ``photo_id`` to a fresh location keyword chain; returns the leaf id."""
+    parent_id = None
+    for name in chain:
+        parent_id = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, type) VALUES (?, ?, 'location')",
+            (name, parent_id),
+        ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, parent_id)
+    return parent_id
+
+
+def test_sync_preview_names_the_location_keyword_it_will_write(client_with_photo):
+    """The review says which keyword the sidecar is about to gain."""
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["United States", "California", "Kumeyaay Lake"])
+    db.queue_change(photo_id, "location", "effective")
+
+    payload = app.test_client().get("/api/sync/preview").get_json()
+
+    assert payload["location_keyword_sync_enabled"] is True
+    change = payload["photos"][0]["changes"][0]
+    assert change["creates_xmp_sidecar"] is True
+    assert change["presentation"]["field"] == "Location"
+    assert change["presentation"]["after_detail"].endswith(
+        "writes the keyword United States|California|Kumeyaay Lake"
+    )
+
+
+def test_sync_preview_reports_a_location_keyword_already_in_xmp(client_with_photo):
+    """A sidecar that already carries the place is not promised a rewrite."""
+    import os
+
+    from xmp import SidecarEditor
+
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["France", "Pont de Gau"])
+    db.queue_change(photo_id, "location", "effective")
+
+    photo = db.get_photo(photo_id)
+    folder = db.get_folder(photo["folder_id"])["path"]
+    editor = SidecarEditor(os.path.join(folder, "test.xmp"))
+    editor.set_location_keywords(["France", "Pont de Gau"])
+    editor.commit()
+
+    payload = app.test_client().get("/api/sync/preview").get_json()
+
+    change = payload["photos"][0]["changes"][0]
+    assert change["presentation"]["after_detail"].endswith(
+        "XMP already lists the keyword France|Pont de Gau"
+    )
+    assert change["creates_xmp_sidecar"] is True
+
+
+def test_sync_preview_reports_removing_location_keywords_when_disabled(
+    client_with_photo,
+):
+    """With the setting off, the review says the written keywords come out."""
+    import os
+
+    from xmp import SidecarEditor
+
+    app, db, photo_id = client_with_photo
+    _assign_location(db, photo_id, ["France", "Pont de Gau"])
+    db.queue_change(photo_id, "location", "effective")
+
+    photo = db.get_photo(photo_id)
+    folder = db.get_folder(photo["folder_id"])["path"]
+    editor = SidecarEditor(os.path.join(folder, "test.xmp"))
+    editor.set_location_keywords(["France", "Pont de Gau"])
+    editor.commit()
+
+    payload = app.test_client().get("/api/sync/preview").get_json()
+
+    assert payload["location_keyword_sync_enabled"] is False
+    change = payload["photos"][0]["changes"][0]
+    assert change["presentation"]["after_detail"].endswith(
+        "removes the keyword France|Pont de Gau Vireo wrote; "
+        "writing location keywords to XMP is turned off"
+    )
+
+
+def test_queue_location_writes_route(client_with_photo):
+    """The backfill queues one location change per located photo."""
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    client = app.test_client()
+
+    status = client.get("/api/sync/location-writes").get_json()
+    assert status == {
+        "photos_with_location": 1,
+        "already_queued": 0,
+        "location_sync_enabled": False,
+        "location_keyword_sync_enabled": True,
+    }
+
+    result = client.post("/api/sync/location-writes").get_json()
+    assert result == {
+        "ok": True, "photos": 1, "queued": 1, "already_queued": 0,
+    }
+    assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
+
+    assert client.get("/api/sync/location-writes").get_json()[
+        "already_queued"
+    ] == 1
+    assert client.post("/api/sync/location-writes").get_json()["queued"] == 0
+
+
+def test_sync_preview_says_marker_only_when_the_keyword_is_already_gone(
+    client_with_photo,
+):
+    """A keyword deleted in Lightroom is not promised a second removal."""
+    import os
+
+    from xmp import SidecarEditor, remove_keywords
+
+    app, db, photo_id = client_with_photo
+    _assign_location(db, photo_id, ["France", "Pont de Gau"])
+    db.queue_change(photo_id, "location", "effective")
+
+    photo = db.get_photo(photo_id)
+    folder = db.get_folder(photo["folder_id"])["path"]
+    xmp_path = os.path.join(folder, "test.xmp")
+    editor = SidecarEditor(xmp_path)
+    editor.set_location_keywords(["France", "Pont de Gau"])
+    editor.commit()
+    # Someone removed the keyword in Lightroom; Vireo's marker survives.
+    remove_keywords(xmp_path, {"Pont de Gau"})
+
+    payload = app.test_client().get("/api/sync/preview").get_json()
+
+    change = payload["photos"][0]["changes"][0]
+    assert change["presentation"]["after_detail"].endswith(
+        "clears the location-keyword marker Vireo left in XMP; "
+        "writing location keywords to XMP is turned off"
+    )

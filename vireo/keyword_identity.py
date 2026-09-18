@@ -8,6 +8,7 @@ import json
 from collections import defaultdict
 
 from keyword_normalization import keyword_match_key
+from xmp import location_keyword_entries, read_vireo_location_keywords
 
 
 def identity_sql(alias="k"):
@@ -66,6 +67,38 @@ def resolve_import_path(db, parts):
         (path_key(parts),),
     ).fetchone()
     return row['keyword_id'] if row else None
+
+
+def drop_stale_vireo_location_keywords(db, photo_id, xmp_path,
+                                       flat_keywords, hierarchical_keywords):
+    """Filter out location keywords Vireo wrote that the DB has since changed.
+
+    Location keywords are the one kind Vireo owns end to end: the user assigns
+    a place in Vireo and the sidecar receives a copy. While a ``location``
+    change is queued the sidecar's copy is by definition out of date -- the
+    user has already picked a different place, or none -- so importing it
+    would re-attach the place they just moved away from and leave the photo
+    carrying two locations until someone noticed.
+
+    Only the two entries the last write recorded in its sidecar marker are
+    dropped, so a location keyword the user typed in Lightroom is imported
+    exactly as before. Returns ``(flat_set, hierarchical_list)``.
+    """
+    flat, hierarchical = set(flat_keywords), list(hierarchical_keywords)
+    if not db.has_pending_location_change(photo_id):
+        return flat, hierarchical
+    leaf, path = location_keyword_entries(read_vireo_location_keywords(xmp_path))
+    if not path:
+        return flat, hierarchical
+
+    leaf_key = keyword_match_key(leaf)
+    path_keys = [keyword_match_key(part) for part in path.split('|')]
+    return (
+        {name for name in flat
+         if not leaf_key or keyword_match_key(name) != leaf_key},
+        [entry for entry in hierarchical
+         if [keyword_match_key(part) for part in entry.split('|')] != path_keys],
+    )
 
 
 def validate_import_locations(db, photo_id, flat_keywords, hierarchical_keywords, *, additive=True):

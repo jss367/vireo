@@ -10563,6 +10563,149 @@ class Database:
             "place_id": row["place_id"],
         }
 
+    def get_photo_location_paths(self, photo_ids):
+        """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
+
+        The leaf is chosen exactly as :meth:`get_assigned_photo_location`
+        chooses it -- deepest in the chain, most recent id as the tie-break --
+        so the keywords written to a sidecar always describe the same place as
+        the GPS written beside them. Unlike that method this one does not
+        require coordinates: a free-text location the user typed has a name
+        worth writing even though it has nothing to put on a map.
+
+        Photos with no linked location are absent from the result, which is
+        how the sync engine tells "write these keywords" from "remove the ones
+        we wrote".
+        """
+        if not photo_ids:
+            return {}
+
+        leaves = {}
+        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT photo_id, id, name, parent_id FROM (
+                        SELECT pk.photo_id, k.id, k.name, k.parent_id,
+                               ROW_NUMBER() OVER (
+                                 PARTITION BY pk.photo_id
+                                 ORDER BY (k.parent_id IS NULL) ASC, k.id DESC
+                               ) AS rn
+                        FROM photo_keywords pk
+                        JOIN keywords k ON k.id = pk.keyword_id
+                        WHERE pk.photo_id IN ({placeholders})
+                          AND k.type = 'location'
+                    ) WHERE rn = 1""",
+                list(chunk),
+            ).fetchall()
+            for row in rows:
+                leaves[row["photo_id"]] = row
+
+        # One cache for the whole batch: a shoot shares a place, so thousands
+        # of photos resolve the same handful of chains.
+        chains = {}
+
+        def chain_for(keyword_id, name, parent_id):
+            if keyword_id in chains:
+                return chains[keyword_id]
+            parts = [name]
+            seen = {keyword_id}
+            current = parent_id
+            while current is not None and current not in seen:
+                seen.add(current)
+                parent = self.conn.execute(
+                    "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+                    (current,),
+                ).fetchone()
+                # Stop at the first non-location ancestor rather than walking
+                # into an unrelated tree: a location chain re-parented under a
+                # general keyword would otherwise write that keyword into
+                # every sidecar as the root of the place hierarchy.
+                if parent is None or parent["type"] != "location":
+                    break
+                parts.append(parent["name"])
+                current = parent["parent_id"]
+            chains[keyword_id] = list(reversed(parts))
+            return chains[keyword_id]
+
+        return {
+            photo_id: chain_for(row["id"], row["name"], row["parent_id"])
+            for photo_id, row in leaves.items()
+        }
+
+    def has_pending_location_change(self, photo_id):
+        """Return whether a ``location`` change is queued for ``photo_id``.
+
+        Reads across workspaces for the same reason
+        :meth:`get_pending_keyword_removal_keys` does: photo metadata is
+        global even though the sync queue is presented per workspace. Import
+        callers use it to decide whether a sidecar's Vireo-written location
+        keywords are still current or describe a place the user has already
+        changed in Vireo.
+        """
+        return self.conn.execute(
+            "SELECT 1 FROM pending_changes WHERE photo_id = ? "
+            "AND change_type = 'location' LIMIT 1",
+            (photo_id,),
+        ).fetchone() is not None
+
+    def count_photos_with_location(self):
+        """Count photos in the active workspace carrying a location keyword."""
+        return self.conn.execute(
+            """SELECT COUNT(DISTINCT p.id)
+               FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_keywords pk ON pk.photo_id = p.id
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE wf.workspace_id = ? AND k.type = 'location'""",
+            (self._ws_id(),),
+        ).fetchone()[0]
+
+    def queue_location_changes_for_tagged_photos(self):
+        """Queue a ``location`` change for every located photo in the workspace.
+
+        This is the backfill behind "write my existing locations to XMP":
+        assigning a place queues the change at the time of assignment, so
+        photos located before location writes were switched on have nothing
+        queued and would never be written. What the queued change actually
+        does to a sidecar still depends on the two location settings at sync
+        time -- it writes coordinates, keywords, both, or removes what Vireo
+        previously wrote -- and the sync review shows that per photo before
+        anything is written.
+
+        Returns ``{"photos": n, "queued": k, "already_queued": n - k}``.
+        ``queue_change`` skips a duplicate, so re-running this is idempotent.
+        """
+        ws_id = self._ws_id()
+        photo_ids = [
+            row[0] for row in self.conn.execute(
+                """SELECT DISTINCT p.id
+                   FROM photos p
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_keywords pk ON pk.photo_id = p.id
+                   JOIN keywords k ON k.id = pk.keyword_id
+                   WHERE wf.workspace_id = ? AND k.type = 'location'
+                   ORDER BY p.id""",
+                (ws_id,),
+            ).fetchall()
+        ]
+        queued = 0
+        for photo_id in photo_ids:
+            if self.queue_change(
+                photo_id, "location", "effective",
+                workspace_id=ws_id, _commit=False,
+            ):
+                queued += 1
+        self.conn.commit()
+        log.info(
+            "Queued %d location change(s) for %d located photo(s)",
+            queued, len(photo_ids),
+        )
+        return {
+            "photos": len(photo_ids),
+            "queued": queued,
+            "already_queued": len(photo_ids) - queued,
+        }
+
     def get_effective_photo_location(self, photo_id, verify_workspace=True):
         """Return the coordinates Vireo should use for a single photo.
 

@@ -30528,3 +30528,101 @@ def test_get_workspace_root_folder_ids_matches_roots_without_counting_photos(tmp
     import pytest
     with pytest.raises(RuntimeError):
         db.get_workspace_root_folder_ids()
+
+
+def _located_photo(db, tmp_path, filename, chain, *, folder_id=None):
+    """Add a photo plus a location keyword chain; returns (photo_id, leaf_id)."""
+    if folder_id is None:
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename=filename, extension=".jpg",
+                       file_size=1, file_mtime=0)
+    parent_id = None
+    for name in chain:
+        parent_id = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, type) VALUES (?, ?, 'location')",
+            (name, parent_id),
+        ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(pid, parent_id)
+    return pid, parent_id, folder_id
+
+
+def test_get_photo_location_paths_returns_the_whole_chain(tmp_path):
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, _leaf, folder_id = _located_photo(
+        db, tmp_path, "a.jpg", ["United States", "California", "Kumeyaay Lake"],
+    )
+    untagged = db.add_photo(folder_id=folder_id, filename="b.jpg", extension=".jpg",
+                            file_size=1, file_mtime=0)
+
+    paths = db.get_photo_location_paths([pid, untagged])
+
+    assert paths == {pid: ["United States", "California", "Kumeyaay Lake"]}
+    assert db.get_photo_location_paths([]) == {}
+    db.close()
+
+
+def test_get_photo_location_paths_stops_at_a_non_location_parent(tmp_path):
+    """A place re-parented under an ordinary keyword must not drag it along."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, leaf, _folder = _located_photo(db, tmp_path, "a.jpg", ["Kumeyaay Lake"])
+    general = db.add_keyword("Trips")
+    db.conn.execute(
+        "UPDATE keywords SET parent_id = ? WHERE id = ?", (general, leaf),
+    )
+    db.conn.commit()
+
+    assert db.get_photo_location_paths([pid]) == {pid: ["Kumeyaay Lake"]}
+    db.close()
+
+
+def test_queue_location_changes_for_tagged_photos_is_idempotent(tmp_path):
+    """The backfill queues each located photo once and reports what it did."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, _leaf, folder_id = _located_photo(
+        db, tmp_path, "a.jpg", ["United States", "Kumeyaay Lake"],
+    )
+    second, _leaf2, _folder = _located_photo(
+        db, tmp_path, "b.jpg", ["France", "Pont de Gau"], folder_id=folder_id,
+    )
+    db.add_photo(folder_id=folder_id, filename="c.jpg", extension=".jpg",
+                 file_size=1, file_mtime=0)
+
+    assert db.count_photos_with_location() == 2
+    assert db.queue_location_changes_for_tagged_photos() == {
+        "photos": 2, "queued": 2, "already_queued": 0,
+    }
+    queued = {
+        change["photo_id"] for change in db.get_pending_changes()
+        if change["change_type"] == "location"
+    }
+    assert queued == {first, second}
+
+    # Re-running adds nothing: queue_change skips a duplicate.
+    assert db.queue_location_changes_for_tagged_photos() == {
+        "photos": 2, "queued": 0, "already_queued": 2,
+    }
+    assert len(db.get_pending_changes()) == 2
+    db.close()
+
+
+def test_has_pending_location_change(tmp_path):
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, _leaf, _folder = _located_photo(db, tmp_path, "a.jpg", ["Kumeyaay Lake"])
+
+    assert db.has_pending_location_change(pid) is False
+    db.queue_change(pid, "location", "effective")
+    assert db.has_pending_location_change(pid) is True
+    db.close()

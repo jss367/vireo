@@ -940,3 +940,134 @@ def test_repeated_writer_calls_do_not_republish_unchanged_metadata(
     # A real change still publishes.
     write_rating(sample_xmp, 3)
     assert len(published) == 1
+
+
+# ── Location keywords ───────────────────────────────────────────────────
+
+def test_set_location_keywords_writes_leaf_and_hierarchy(tmp_path):
+    """The place goes into dc:subject, the whole chain into lr:hierarchicalSubject."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(
+        ["United States", "California", "San Carlos", "Kumeyaay Lake"]
+    )
+    assert editor.commit() is True
+
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+    assert read_hierarchical_keywords(path) == [
+        "United States|California|San Carlos|Kumeyaay Lake"
+    ]
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["location_keywords"] == (
+        "United States|California|San Carlos|Kumeyaay Lake"
+    )
+
+
+def test_set_location_keywords_is_a_no_op_when_already_written(tmp_path):
+    """Re-syncing an unchanged place costs a read, not a publish."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Camargue"])
+    editor.commit()
+
+    again = SidecarEditor(path)
+    again.set_location_keywords(["France", "Camargue"])
+    assert again.commit() is False
+
+
+def test_set_location_keywords_replaces_the_previous_place(tmp_path):
+    """A photo moved to another place keeps only its current location keywords."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.add_keywords(flat_keywords={"House finch"})
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    moved = SidecarEditor(path)
+    moved.set_location_keywords(["France", "Camargue", "Pont de Gau"])
+    assert moved.commit() is True
+
+    assert read_keywords(path) == {"House finch", "Pont de Gau"}
+    assert read_hierarchical_keywords(path) == ["France|Camargue|Pont de Gau"]
+
+
+def test_set_location_keywords_canonicalizes_a_case_variant(tmp_path):
+    """A sidecar spelling of the place is rewritten, not duplicated."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(path, flat_keywords={"kumeyaay lake"}, hierarchical_keywords=set())
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "Kumeyaay Lake"])
+    editor.commit()
+
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+
+
+def test_remove_vireo_location_keywords_leaves_user_keywords_alone(tmp_path):
+    """Only the entries recorded by Vireo's own write are removed."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.add_keywords(
+        flat_keywords={"House finch", "Backyard"},
+        hierarchical_keywords={"Places|Backyard"},
+    )
+    editor.set_location_keywords(["United States", "Kumeyaay Lake"])
+    editor.commit()
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    assert read_keywords(path) == {"House finch", "Backyard"}
+    assert read_hierarchical_keywords(path) == ["Places|Backyard"]
+    assert read_sync_preview_metadata(path)["location_keywords"] is None
+
+
+def test_remove_vireo_location_keywords_without_a_marker_is_a_no_op(tmp_path):
+    """A place the user typed in Lightroom is not Vireo's to remove."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(
+        path,
+        flat_keywords={"Kumeyaay Lake"},
+        hierarchical_keywords={"United States|Kumeyaay Lake"},
+    )
+
+    editor = SidecarEditor(path)
+    assert editor.remove_vireo_location_keywords() is False
+    assert editor.commit() is False
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+
+
+def test_set_location_keywords_with_an_empty_chain_removes_them(tmp_path):
+    """An unset location takes the same removal path as the disabled setting."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "Kumeyaay Lake"])
+    editor.commit()
+
+    cleared = SidecarEditor(path)
+    cleared.set_location_keywords([])
+    cleared.commit()
+
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_read_vireo_location_keywords_on_a_missing_sidecar(tmp_path):
+    from xmp import read_vireo_location_keywords
+
+    assert read_vireo_location_keywords(str(tmp_path / "nope.xmp")) is None
