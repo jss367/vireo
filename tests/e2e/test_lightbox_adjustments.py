@@ -1,0 +1,177 @@
+"""Quick adjustments are independent of slider and save history."""
+
+import json
+import time
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from PIL import Image
+from playwright.sync_api import expect
+
+
+@pytest.fixture
+def adjustment_photo(live_server, tmp_path):
+    folder = tmp_path / 'adjustment-photos'
+    folder.mkdir()
+    image = Image.new('RGB', (256, 64))
+    image.putdata([(x, x // 2, 255 - x) for _y in range(64) for x in range(256)])
+    path = folder / 'gradient.png'
+    image.save(path)
+    db = live_server['db']
+    folder_id = db.add_folder(str(folder))
+    return db.add_photo(
+        folder_id=folder_id, filename=path.name, extension='.png',
+        file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
+        width=256, height=64,
+    )
+
+
+def _open(page, live_server, photo_id):
+    page.goto(live_server['url'] + '/browse')
+    page.evaluate("id => openLightbox(id, 'gradient.png')", photo_id)
+    page.wait_for_function("""() => {
+      const img = document.getElementById('lightboxImg');
+      return img.complete && img.naturalWidth === 256 && _lbEditRecipeLoaded;
+    }""")
+    page.locator('#lightboxAdjustBtn').click()
+    expect(page.locator('#lbAdjExposure')).to_be_enabled()
+
+
+def _set_exposure(page, value):
+    page.locator('#lbAdjExposure').evaluate("""(el, value) => {
+      el.value = String(value);
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+    }""", value)
+
+
+def _wait_saved(page):
+    expect(page.locator('#lightboxAdjustStatus')).to_have_text('Saved')
+    page.wait_for_function("""() => {
+      const img = document.getElementById('lightboxImg');
+      return img.complete && !document.getElementById('lightboxToneCanvas').classList.contains('show')
+        && !document.getElementById('lightboxAdjustmentImage')?.classList.contains('show');
+    }""")
+
+
+@pytest.mark.parametrize('saved_exposure', [0, -1])
+def test_exposure_preview_is_identical_after_saved_round_trip(
+    live_server, page, adjustment_photo, saved_exposure,
+):
+    if saved_exposure:
+        live_server['db'].set_photo_edit_recipe(
+            adjustment_photo, {'adjustments': {'exposure': saved_exposure}},
+        )
+    _open(page, live_server, adjustment_photo)
+    page.evaluate("""() => {
+      window.previewFrames = [];
+      const render = VireoToneGL.render;
+      VireoToneGL.render = function(img, uniforms) {
+        const ok = render(img, uniforms);
+        if (ok) {
+          const canvas = document.getElementById('lightboxToneCanvas');
+          const gl = canvas.getContext('webgl');
+          const pixels = new Uint8Array(canvas.width * 4);
+          gl.readPixels(0, 0, canvas.width, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          previewFrames.push({pixels: Array.from(pixels), exposure: uniforms.exposure});
+        }
+        return ok;
+      };
+    }""")
+    _set_exposure(page, 5)
+    page.wait_for_function('previewFrames.length === 1')
+    first = page.evaluate('previewFrames[0]')
+    _wait_saved(page)
+    _set_exposure(page, -2)
+    page.wait_for_function('previewFrames.length === 2')
+    _wait_saved(page)
+    _set_exposure(page, 5)
+    page.wait_for_function('previewFrames.length === 3')
+    last = page.evaluate('previewFrames[2]')
+    assert last['pixels'] == first['pixels']
+    assert first['exposure'] == last['exposure'] == 5
+    assert len(set(first['pixels'])) > 10, 'must render the gradient, not a blank canvas'
+    _wait_saved(page)
+    assert live_server['db'].get_photo_edit_recipe(adjustment_photo)['adjustments']['exposure'] == 5
+
+
+def test_save_response_does_not_replace_newer_slider_input(live_server, page, adjustment_photo):
+    _open(page, live_server, adjustment_photo)
+    held = []
+
+    def hold_first_save(route):
+        if route.request.method == 'PUT' and not held:
+            held.append((route, route.fetch()))
+        else:
+            route.continue_()
+
+    page.route(f'**/api/photos/{adjustment_photo}/edit-recipe', hold_first_save)
+    _set_exposure(page, 1)
+    expect(page.locator('#lightboxAdjustStatus')).to_have_text('Saving...')
+    # Pump browser events until the committed response is held in transit.
+    deadline = time.monotonic() + 5
+    while not held and time.monotonic() < deadline:
+        page.wait_for_timeout(25)
+    assert held
+    _set_exposure(page, 5)
+    route, response = held[0]
+    route.fulfill(response=response)
+    _wait_saved(page)
+    expect(page.locator('#lbAdjExposure')).to_have_value('5')
+    assert live_server['db'].get_photo_edit_recipe(adjustment_photo)['adjustments']['exposure'] == 5
+
+
+@pytest.mark.parametrize('advanced', [False, True])
+def test_server_preview_uses_complete_recipe_and_preserves_geometry(
+    live_server, page, adjustment_photo, advanced,
+):
+    recipe = {'rotation': 90, 'crop': {'x': 0.1, 'y': 0.1, 'w': 0.8, 'h': 0.8}}
+    if advanced:
+        recipe['adjustments'] = {'tone_curve': {'midtones': 60}}
+    live_server['db'].set_photo_edit_recipe(adjustment_photo, recipe)
+    page.goto(live_server['url'] + '/browse')
+    page.evaluate("id => openLightbox(id, 'gradient.png')", adjustment_photo)
+    page.wait_for_function('_lbEditRecipeLoaded')
+    if not advanced:
+        page.evaluate('VireoToneGL.supported = () => false')
+    page.locator('#lightboxAdjustBtn').click()
+    with page.expect_response('**/edit-preview?*') as preview:
+        _set_exposure(page, 2)
+    assert preview.value.ok
+    query = parse_qs(urlparse(preview.value.url).query)
+    rendered = json.loads(query['recipe'][0])
+    assert rendered['rotation'] == 90
+    assert rendered['crop'] == recipe['crop']
+    assert rendered['adjustments']['exposure'] == 2
+    if advanced:
+        assert rendered['adjustments']['tone_curve'] == {'midtones': 60}
+    assert query['apply_crop'] == ['1']
+    _wait_saved(page)
+
+
+@pytest.mark.parametrize('server_preview', [False, True])
+def test_late_preview_cannot_reappear_after_closing_lightbox(
+    live_server, page, adjustment_photo, server_preview,
+):
+    if server_preview:
+        page.add_init_script("""(() => {
+          const getContext = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function(kind, ...args) {
+            if (kind === 'webgl' || kind === 'experimental-webgl') return null;
+            return getContext.call(this, kind, ...args);
+          };
+        })();""")
+    held = []
+    page.route('**/edit-preview?*', lambda route: held.append(route))
+    _open(page, live_server, adjustment_photo)
+    _set_exposure(page, 2)
+    deadline = time.monotonic() + 5
+    while not held and time.monotonic() < deadline:
+        page.wait_for_timeout(25)
+    assert held
+    page.evaluate('closeLightbox()')
+    with page.expect_response('**/edit-preview?*'):
+        held[0].continue_()
+    # Let the decoded image's onload and promise callbacks run.
+    page.wait_for_timeout(100)
+    expect(page.locator('#lightboxToneCanvas')).not_to_have_class('lb-tone-canvas show')
+    expect(page.locator('#lightboxAdjustmentImage')).not_to_have_class('lb-tone-canvas show')
