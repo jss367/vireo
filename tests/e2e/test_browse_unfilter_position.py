@@ -112,6 +112,47 @@ def _turn_off(page, action):
         page.click('.vf-done')
 
 
+def _is_reset_query(request):
+    """Is this a grid reload that starts a fresh window, not a lazy page?
+
+    Scrolling or clicking a card can bring the infinite-scroll sentinel inside
+    its 3200px root margin, so the next lazy page can start between the action
+    under test and the reload it triggers. That request carries neither the new
+    scope nor an anchor, so a test that reads whichever ``/api/photos/query``
+    arrived first is asserting against a coin flip — a race the release gate
+    lost, failing v0.56.0 with ``KeyError: 'folder_id'`` while every local run
+    passed.
+
+    ``resetAndLoad`` rewinds ``currentPage`` to 1 and ``loadPhotos`` derives the
+    requested page from it, so ``page == 1`` is exactly "a reload that starts a
+    fresh window" and can never be a lazy continuation. Popover counters
+    (``per_page: 1``, no ``page``) drop out for the same reason.
+    """
+    return (request.url.endswith('/api/photos/query')
+            and (request.post_data_json or {}).get('page') == 1)
+
+
+def _expect_reset_query(page):
+    """Wait for the next reset query, ignoring lazy pagination."""
+    return page.expect_request(_is_reset_query)
+
+
+def _collect_reset_queries(page):
+    """Record every reset query's body, ignoring lazy pagination.
+
+    The listener form of :func:`_expect_reset_query`, for tests that assert on
+    the first reload *after* waiting for the grid to settle.
+    """
+    bodies = []
+
+    def record(request):
+        if _is_reset_query(request):
+            bodies.append(request.post_data_json)
+
+    page.on("request", record)
+    return bodies
+
+
 @pytest.mark.parametrize("action", ACTIONS)
 @pytest.mark.parametrize("selected", [True, False], ids=["selected", "just_browsing"])
 def test_turning_filter_off_keeps_photo_in_view(live_server, page, action, selected):
@@ -129,9 +170,7 @@ def _check_turning_off(page, live_server, action, selected, photo_link=False):
         "captureSelectedPhotoAnchor()" if selected else "captureBrowseViewportAnchor()"
     )
     assert page.evaluate("gridContainer.scrollTop") > 500
-    queries = []
-    page.on("request", lambda request: queries.append(request.post_data_json)
-            if request.url.endswith('/api/photos/query') else None)
+    queries = _collect_reset_queries(page)
     _turn_off(page, action)
     # Photo links scope Browse to the target's folder (the other two seed
     # photos live elsewhere); removing a filter must preserve that scope.
@@ -235,7 +274,7 @@ def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, 
         "captureSelectedPhotoAnchor()" if selected else "captureBrowseViewportAnchor()"
     )
     page.click('.vf-filters-btn')
-    with page.expect_request('**/api/photos/query') as query:
+    with _expect_reset_query(page) as query:
         if control == "text":
             page.fill('.vf-rule-tree [data-action="multi-text"]', remaining)
         else:
@@ -265,7 +304,7 @@ def test_folder_handoff_does_not_inherit_keyword_selection(live_server, page):
     folder_id = live_server["data"]["folders"][0]
     # The chosen folder still contains the selected photo, but this action
     # opens a new scope and intentionally starts at the beginning.
-    with page.expect_request('**/api/photos/query') as query:
+    with _expect_reset_query(page) as query:
         page.locator(f'#folderTree .tree-item[data-folder-id="{folder_id}"]').click()
     assert 'focus_photo_id' not in query.value.post_data_json
     assert query.value.post_data_json['folder_id'] == folder_id
@@ -290,7 +329,7 @@ def test_clearing_filters_keeps_offline_placeholder_in_view(live_server, page):
     page.locator(f'#grid .grid-card.offline[data-id="{ids[145]}"]').scroll_into_view_if_needed()
     anchor = page.evaluate("captureBrowseViewportAnchor()")
     assert page.evaluate("gridContainer.scrollTop") > 500
-    with page.expect_request('**/api/photos/query') as query:
+    with _expect_reset_query(page) as query:
         page.click('.vf-clear')
     assert query.value.post_data_json['include_offline'] is True
     assert query.value.post_data_json['collection_id'] == collection_id
@@ -314,7 +353,7 @@ def test_replacing_or_adding_free_entry_values_starts_fresh(live_server, page, v
     page.wait_for_function('!loading && browseDatasetReady')
     page.locator(f'#grid .grid-card[data-id="{ids[25]}"]').click()
     page.click('.vf-filters-btn')
-    with page.expect_request('**/api/photos/query') as query:
+    with _expect_reset_query(page) as query:
         page.fill('.vf-rule-tree [data-action="multi-text"]', value)
     assert 'focus_photo_id' not in query.value.post_data_json
     page.wait_for_function('!loading && browseDatasetReady')
