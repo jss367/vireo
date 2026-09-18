@@ -1301,7 +1301,6 @@ def test_set_location_keywords_refuses_a_name_with_a_pipe(tmp_path, caplog):
     import logging
 
     import pytest
-
     from xmp import SidecarEditor, read_vireo_location_keywords
 
     path = str(tmp_path / "photo.xmp")
@@ -1323,7 +1322,6 @@ def test_set_location_keywords_refuses_a_name_with_a_pipe(tmp_path, caplog):
 def test_set_location_keywords_refuses_a_pipe_in_an_ancestor(tmp_path):
     """Any segment containing ``|`` disqualifies the whole chain."""
     import pytest
-
     from xmp import SidecarEditor, read_vireo_location_keywords
 
     path = str(tmp_path / "photo.xmp")
