@@ -8386,6 +8386,34 @@ def test_retype_to_location_with_pipe_in_name_is_rejected(app_and_db):
     assert row["type"] == "general"
 
 
+def test_type_only_retype_of_pipe_named_keyword_to_location_is_rejected(
+    app_and_db,
+):
+    """A type-only PUT that retypes an existing pipe-named general keyword
+    into a location must be rejected too.
+
+    The rename-target-only guard would let ``{"type": "location"}`` slip
+    through when ``body.name`` is absent, and every subsequent sync of a
+    photo tagged with the row would raise in
+    ``SidecarEditor.set_location_keywords`` -- the pipe-named leaf would
+    stay queued forever with no way to succeed, blocking any other edit
+    that shared the sidecar transaction.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("Home|Cabin")
+
+    resp = client.put(f"/api/keywords/{kid}", json={"type": "location"})
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "|" in body.get("error", "")
+    row = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Home|Cabin"
+    assert row["type"] == "general"
+
+
 def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
     """Renaming a top-level keyword to a name that normalizes to an existing
     top-level peer must merge into that peer instead of writing a second row.

@@ -2138,6 +2138,60 @@ def test_sync_preview_reports_a_normalized_hierarchy_variant_as_already_listed(
     )
 
 
+def test_sync_preview_matches_writer_when_photo_has_multiple_locations(
+    client_with_photo,
+):
+    """The preview and the writer must name the same place.
+
+    ``get_photo_location_paths`` (the writer's chain lookup) picks the
+    coord-bearing/deepest/newest location row; a bare ``ORDER BY
+    pk.rowid`` in the preview's leaf lookup would instead pick the
+    first-inserted row, so a photo carrying both a free-text location
+    (tagged first, no coordinates) and a later coord-bearing place
+    would have the review's GPS half name the free-text place ("no
+    GPS coordinates to write") while the keyword half writes GPS and
+    a hierarchy for the coord-bearing one. Derive both from the same
+    selection rule so the review agrees with itself and with sync.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    # First tag: a coord-less free-text place. Under the old rowid-ordered
+    # leaf lookup this is what the preview would announce for the GPS half.
+    free_text_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) "
+        "VALUES ('FreeText', NULL, 'location')"
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photo_id, free_text_id)
+    # Second tag: a coord-bearing place. ``get_photo_location_paths`` and
+    # ``get_assigned_photo_location`` both prefer this one -- the coord
+    # eligibility rule wins over insertion order.
+    coord_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, latitude, longitude) "
+        "VALUES ('CoordPlace', NULL, 'location', 43.5, 4.5)"
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photo_id, coord_id)
+    db.queue_change(photo_id, "location", "effective")
+
+    payload = app.test_client().get("/api/sync/preview").get_json()
+
+    change = payload["photos"][0]["changes"][0]
+    presentation = change["presentation"]
+    # The preview's "after" and the keyword half of "after_detail" must both
+    # name the coord-bearing place -- the same one the sync writer resolves
+    # via ``get_photo_location_paths``.
+    assert presentation["after"] == "CoordPlace"
+    assert "CoordPlace is assigned in Vireo" in presentation["after_detail"]
+    # And the review must not report "no GPS coordinates to write" for a
+    # place that actually has coordinates: that was the bug -- the GPS half
+    # was describing FreeText while the keyword half wrote CoordPlace.
+    assert "no GPS coordinates" not in presentation["after_detail"]
+    assert presentation["after_detail"].endswith(
+        "writes the keyword CoordPlace"
+    )
+
+
 def test_sync_preview_reports_removing_location_keywords_when_disabled(
     client_with_photo,
 ):
@@ -2461,6 +2515,48 @@ def test_renaming_a_location_leaf_queues_keyword_requeue_when_setting_off(
     assert ("keyword_remove", "OldParis") in queued
     assert ("keyword_add", "NewParis") in queued
     assert ("location", "effective") in queued
+
+
+def test_renaming_a_location_leaf_skips_keyword_requeue_when_config_unreadable(
+    client_with_photo,
+):
+    """A malformed global config must not be read as an explicit off.
+
+    Regression: ``config.load()`` catches parse errors and returns
+    ``DEFAULTS`` (which have ``write_location_keywords_to_xmp=False``),
+    so a transiently malformed config would misclassify the setting as
+    off and take the fall-back branch that queues ``keyword_remove`` +
+    ``keyword_add`` for the new leaf. If the setting was actually ON,
+    that ordinary add would land in ``dc:subject`` BEFORE
+    ``set_location_keywords()`` runs during the next sync, which would
+    then see the leaf as pre-existing (``existed_flat=True``) and claim
+    only hierarchical ownership. Later clearing or reassigning the
+    place would leave the renamed flat leaf in XMP forever. The rename
+    must treat an unreadable config as unknown and skip the ordinary
+    requeue -- the queued ``location`` change stays unsupported until
+    the config is readable again.
+    """
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    leaf_id = _assign_location(db, photo_id, ["France", "OldParis"])
+    _drop_all_pending(db)
+
+    # Malformed config: ``cfg.load`` swallows the parse error and returns
+    # DEFAULTS, ``cfg.load_strict`` raises.
+    with open(cfg.CONFIG_PATH, "w") as f:
+        f.write("{this is not valid json")
+
+    client = app.test_client()
+    resp = client.put(
+        f"/api/keywords/{leaf_id}", json={"name": "NewParis"},
+    )
+    assert resp.status_code == 200
+
+    change_types = [c["change_type"] for c in db.get_pending_changes()]
+    assert "keyword_remove" not in change_types
+    assert "keyword_add" not in change_types
+    assert "location" in change_types
 
 
 def test_retyping_a_location_to_general_queues_keyword_add(client_with_photo):

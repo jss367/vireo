@@ -10231,22 +10231,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                    JOIN tree t ON t.id = pk.keyword_id""",
                 (keyword_id,),
             ).fetchall()
-        # Reject '|' in a rename that lands on a location keyword before we
+        # Reject '|' in an update that lands on a location keyword before we
         # ever touch the row. ``get_or_create_text_location`` refuses pipes
         # at creation time because XMP keyword hierarchies reserve it as the
         # delimiter and there is no reversible XMP encoding, but the update
-        # path used to accept them. Once such a rename landed, every sync
-        # of a photo tagged with the row raised in
+        # path used to accept them. Once such a value landed, every sync of a
+        # photo tagged with the row raised in
         # ``SidecarEditor.set_location_keywords``, leaving the ``location``
-        # change queued forever and blocking any other edit that shared
-        # its sidecar transaction. Guard both a name-only rename of an
-        # existing location and a retype-into-location that also renames.
+        # change queued forever and blocking any other edit that shared its
+        # sidecar transaction. Check the EFFECTIVE name (the requested rename
+        # if any, else the current row's name), so a type-only retype of an
+        # existing pipe-named general keyword into a location is caught too --
+        # otherwise a ``PUT`` with only ``type: "location"`` on an existing
+        # ``Home|Cabin`` general keyword would slip through and queue
+        # unsyncable location changes on every tagged photo.
         rename_target = body.get("name")
-        if isinstance(rename_target, str) and "|" in rename_target:
-            effective_type = body.get("type")
-            if not isinstance(effective_type, str):
-                effective_type = old_row["type"] if old_row is not None else None
-            if effective_type == "location":
+        effective_type = body.get("type")
+        if not isinstance(effective_type, str):
+            effective_type = old_row["type"] if old_row is not None else None
+        if effective_type == "location":
+            effective_name = rename_target if isinstance(rename_target, str) else (
+                old_row["name"] if old_row is not None else None
+            )
+            if isinstance(effective_name, str) and "|" in effective_name:
                 return json_error(
                     "location name may not contain '|' -- XMP keyword "
                     "hierarchies reserve it as the level delimiter",
@@ -10320,21 +10327,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if location_to_location_rename:
                 import config as cfg
 
+                # Use load_strict rather than load: the ordinary loader
+                # catches parse/IO errors and returns DEFAULTS (which have
+                # write_location_keywords_to_xmp=False), so a transiently
+                # malformed config would misread the setting as an explicit
+                # off and take the "fall back to keyword_remove + keyword_add"
+                # branch below. Sync would then add the renamed flat leaf
+                # before ``set_location_keywords()`` runs, which would treat
+                # it as pre-existing (``existed_flat=True``) and record only
+                # hierarchical ownership. A later place clear or reassign
+                # would then leave the renamed flat leaf in XMP forever.
+                # Treat a read failure as unknown and SKIP the ordinary
+                # requeue for every workspace: the ``location`` change queued
+                # below stays unsupported until the config is readable, at
+                # which point sync writes the flat leaf under the correct
+                # ownership.
                 try:
-                    global_cfg = cfg.load()
+                    global_cfg = cfg.load_strict()
+                    global_cfg_readable = True
                 except Exception:
                     global_cfg = {}
-                for row in affected:
-                    ws_id = row["workspace_id"]
-                    if ws_id in skip_keyword_requeue_by_ws:
-                        continue
-                    ws = db.get_workspace(ws_id)
-                    raw = ws["config_overrides"] if ws else None
-                    skip_keyword_requeue_by_ws[ws_id] = (
-                        _workspace_effective_setting(
-                            raw, global_cfg, _LOCATION_KEYWORDS_SETTING,
+                    global_cfg_readable = False
+                if global_cfg_readable:
+                    for row in affected:
+                        ws_id = row["workspace_id"]
+                        if ws_id in skip_keyword_requeue_by_ws:
+                            continue
+                        ws = db.get_workspace(ws_id)
+                        raw = ws["config_overrides"] if ws else None
+                        skip_keyword_requeue_by_ws[ws_id] = (
+                            _workspace_effective_setting(
+                                raw, global_cfg, _LOCATION_KEYWORDS_SETTING,
+                            )
                         )
-                    )
+                else:
+                    for row in affected:
+                        skip_keyword_requeue_by_ws[row["workspace_id"]] = True
             for row in affected:
                 if skip_keyword_requeue_by_ws.get(row["workspace_id"], False):
                     continue
@@ -10695,30 +10723,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         each leaf and then walking the same parent chain once per photo turns
         that review into tens of thousands of SQLite queries.  Fetch leaves
         in chunks and reuse each distinct hierarchy instead.
+
+        Selects the same leaf ``get_assigned_photo_location()`` and
+        ``get_photo_location_paths()`` do -- coordinate-bearing first, then
+        deepest in the chain, then most recent id as the tie-break -- so the
+        sync review's preview cannot name one place while the actual sync
+        writes GPS and a hierarchy for another. Photos with several
+        ``type='location'`` tags (permitted by the generic keyword-add
+        endpoint) would otherwise pick the first-inserted row here while the
+        writer picks the coord-bearing/deepest/newest one.
         """
         if not photo_ids:
             return {}
 
         leaves = {}
-        # Keep the first linked location, matching the single-photo helper's
-        # LIMIT 1 behavior without relying on a window-function result shape.
         for start in range(0, len(photo_ids), 400):
             chunk = photo_ids[start:start + 400]
             placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
                 f"""
-                SELECT pk.photo_id, k.id, k.name, k.place_id, k.latitude,
-                       k.longitude, k.parent_id
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                WHERE pk.photo_id IN ({placeholders})
-                  AND k.type = 'location'
-                ORDER BY pk.rowid
+                SELECT photo_id, id, name, place_id, latitude, longitude,
+                       parent_id
+                FROM (
+                    SELECT pk.photo_id, k.id, k.name, k.place_id, k.latitude,
+                           k.longitude, k.parent_id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY pk.photo_id
+                             ORDER BY (k.latitude IS NULL OR k.longitude IS NULL) ASC,
+                                      (k.parent_id IS NULL) ASC,
+                                      k.id DESC
+                           ) AS rn
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND k.type = 'location'
+                ) WHERE rn = 1
                 """,
                 chunk,
             ).fetchall()
             for row in rows:
-                leaves.setdefault(row["photo_id"], row)
+                leaves[row["photo_id"]] = row
 
         chain_cache = {}
         result = {}
