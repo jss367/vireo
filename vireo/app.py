@@ -5733,6 +5733,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photos = []
             total = 0
             underlying_total = 0
+            stack_count = 0
             focus_index = None
             focus_page = page
         else:
@@ -5744,10 +5745,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         page=page, per_page=per_page, sort=sort,
                         stack_config=stack_cfg,
                     )
-                    total = db.count_browse_stacks(
+                    stack_totals = db.browse_stack_totals(
                         [], folder_id=folder_id, collection_id=collection_id,
                         stack_config=stack_cfg,
                     )
+                    total = stack_totals["total"]
+                    stack_count = stack_totals["stack_count"]
                     underlying_total = db.count_photos_for_rules(
                         [], folder_id=folder_id, collection_id=collection_id,
                     )
@@ -5894,6 +5897,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
         if stacks:
             response_payload["underlying_total"] = underlying_total
+            response_payload["stack_count"] = stack_count
         response = jsonify(response_payload)
         # End the read transaction after every value in the response has been
         # materialized. rollback() is intentional: this endpoint is read-only
@@ -7332,6 +7336,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     # underlying (unstacked) total is what they must agree
                     # with — never the stack count.
                     response["underlying_total"] = len(ordered_ids)
+                    response["stack_count"] = sum(
+                        len(item["member_ids"]) > 1 for item in stack_items
+                    )
                 if availability is not None:
                     response.update(availability)
                 return jsonify(response)
@@ -7420,11 +7427,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         include_offline_folders=include_offline,
                         stack_config=stack_cfg,
                     )
-                    total = db.count_browse_stacks(
+                    stack_totals = db.browse_stack_totals(
                         rules, collection_id=collection_id, folder_id=folder_id,
                         include_offline_folders=include_offline,
                         stack_config=stack_cfg,
                     )
+                    total = stack_totals["total"]
+                    stack_count = stack_totals["stack_count"]
                 else:
                     photos = db.query_photos(
                         rules, sort=sort, page=page, per_page=per_page,
@@ -7448,6 +7457,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 response["focus_page"] = page
             if stacks:
                 response["underlying_total"] = underlying_total
+                response["stack_count"] = stack_count
             if include_offline or include_availability:
                 # Availability is always reported in photos, never in stacks:
                 # the notice reads "N of M photos available", so it has to agree
@@ -13663,9 +13673,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     [], collection_id=collection_id, sort=sort,
                     page=page, per_page=per_page, stack_config=stack_cfg,
                 )
-                total = db.count_browse_stacks(
+                stack_totals = db.browse_stack_totals(
                     [], collection_id=collection_id, stack_config=stack_cfg,
                 )
+                total = stack_totals["total"]
+                stack_count = stack_totals["stack_count"]
             else:
                 photos = db.get_collection_photos(
                     collection_id, page=page, per_page=per_page, sort=sort,
@@ -13685,6 +13697,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
         if stacks:
             response["underlying_total"] = underlying_total
+            response["stack_count"] = stack_count
         return jsonify(response)
 
     @app.route("/api/collections/<int:collection_id>/photo-ids")

@@ -12223,6 +12223,7 @@ def test_api_photos_query_browse_stacks(app_and_db):
     data = response.get_json()
     assert data["total"] == 2
     assert data["underlying_total"] == 3
+    assert data["stack_count"] == 1
     stack = next(photo for photo in data["photos"] if photo["browse_stack"])
     single = next(photo for photo in data["photos"] if not photo["browse_stack"])
     assert stack["id"] == second
@@ -12249,6 +12250,41 @@ def test_api_photos_query_browse_stacks(app_and_db):
     assert stack_cover_idx < stack_hidden_idx, (
         "stack cover must precede its hidden members in ids_only order"
     )
+
+
+@pytest.mark.parametrize("endpoint", ["init", "query", "collection"])
+def test_browse_stack_count_covers_all_pages(app_and_db, endpoint):
+    app, db = app_and_db
+    listed = db.get_photos(sort="name")
+    with db.conn:
+        _seed_browse_burst(db, [listed[0]["id"], listed[1]["id"]])
+    collection_id = db.add_collection("All photos", "[]")
+    client = app.test_client()
+
+    def fetch(stacks):
+        if endpoint == "query":
+            return client.post("/api/photos/query", json={
+                "rules": [], "stacks": stacks, "sort": "name",
+                "page": 2, "per_page": 1,
+            })
+        path = ("/api/browse/init" if endpoint == "init"
+                else f"/api/collections/{collection_id}/photos")
+        return client.get(path, query_string={
+            "stacks": str(stacks).lower(), "sort": "name",
+            "page": 2, "per_page": 1,
+        })
+
+    response = fetch(True)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["total"] == 2
+    assert data["underlying_total"] == 3
+    assert data["stack_count"] == 1
+    assert len(data["photos"]) == 1
+    assert data["photos"][0]["browse_stack"] is None
+    unstacked = fetch(False).get_json()
+    assert unstacked["total"] == 3
+    assert "stack_count" not in unstacked
 
 
 def _seed_sortable_photos(db, count=12):
@@ -13292,6 +13328,7 @@ def test_api_photos_query_visual_ranks_by_similarity(app_and_db, monkeypatch):
     }).get_json()
     assert stacked["total"] == 1
     assert stacked["underlying_total"] == 2
+    assert stacked["stack_count"] == 1
     assert stacked["photos"][0]["id"] == photos["bird2.jpg"]
     assert stacked["photos"][0]["similarity"] == 0.95
 

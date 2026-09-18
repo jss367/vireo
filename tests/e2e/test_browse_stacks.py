@@ -5,6 +5,16 @@ from playwright.sync_api import expect
 from e2e.stack_seed import seed_browse_stack
 
 
+def test_browse_stack_count_zero_and_toggle(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    summary = page.locator("#filterSummary")
+    expect(page.locator("#grid > .grid-card")).to_have_count(5)
+    page.locator("#browseStacksToggle").check()
+    expect(summary).to_contain_text("5 items · 0 stacks · 5 photos")
+    page.locator("#browseStacksToggle").uncheck()
+    expect(summary).not_to_contain_text("stacks")
+
+
 def test_browse_stacks_collapse_expand_and_select(live_server, page):
     db = live_server["db"]
     burst_ids = live_server["data"]["photos"][:3]
@@ -26,7 +36,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
 
     page.locator("#browseStacksToggle").check()
     expect(cards).to_have_count(3)
-    expect(page.locator("#filterSummary")).to_contain_text("3 items · 5 photos")
+    expect(page.locator("#filterSummary")).to_contain_text("3 items · 1 stack · 5 photos")
     assert page.evaluate(
         """() => browseStackCoverCompare(
           {id: 1, rating: 0, width: 1, height: 1},
