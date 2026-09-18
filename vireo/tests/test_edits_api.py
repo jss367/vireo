@@ -2397,3 +2397,128 @@ def test_sync_preview_says_marker_only_when_the_keyword_is_already_gone(
         "clears the location-keyword marker Vireo left in XMP; "
         "writing location keywords to XMP is turned off"
     )
+
+
+def test_renaming_a_location_leaf_skips_keyword_remove_and_keyword_add(
+    client_with_photo,
+):
+    """A location-to-location rename must not queue keyword_remove/keyword_add.
+
+    Regression: if the API queues an ordinary ``keyword_add`` for the new
+    leaf, it lands in ``dc:subject`` BEFORE ``set_location_keywords()``
+    runs during the sync. The writer then sees the leaf as pre-existing
+    (``existed_flat=True``) and claims only hierarchical ownership. Later
+    clearing the location strips just the hierarchy, leaving the renamed
+    flat leaf orphaned in XMP indefinitely. The queued ``location``
+    change alone drives both flat and hierarchical writes with full
+    ownership, so keyword_remove/keyword_add on the same photo would
+    only interfere.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    leaf_id = _assign_location(db, photo_id, ["France", "OldParis"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.put(
+        f"/api/keywords/{leaf_id}", json={"name": "NewParis"},
+    )
+    assert resp.status_code == 200
+
+    change_types = [c["change_type"] for c in db.get_pending_changes()]
+    assert change_types == ["location"]
+
+
+def test_retyping_a_location_to_general_queues_keyword_add(client_with_photo):
+    """A same-name location→general retype must queue keyword_add.
+
+    Regression: a location→general retype without a name change queues a
+    ``location`` change but the name-change block queues no
+    ``keyword_add``. sync_to_xmp() resolves no location path (the
+    keyword is no longer typed ``location``) and
+    ``remove_vireo_location_keywords()`` strips the marker-owned flat
+    leaf. The photo remains tagged with the newly ``general`` keyword
+    in the DB, so an ordinary ``keyword_add`` is what keeps the flat
+    leaf in ``dc:subject`` after the marker cleanup.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    leaf_id = _assign_location(db, photo_id, ["France", "Paris"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.put(
+        f"/api/keywords/{leaf_id}", json={"type": "general"},
+    )
+    assert resp.status_code == 200
+
+    queued = [
+        (c["change_type"], c["value"])
+        for c in db.get_pending_changes()
+    ]
+    assert ("keyword_add", "Paris") in queued
+    assert ("location", "effective") in queued
+
+
+def test_deleting_a_location_ancestor_queues_descendant_photos(
+    client_with_photo,
+):
+    """A delete of a location ancestor queues its descendant-tagged photos.
+
+    Regression: no photo is tagged with the ancestor directly, so the
+    existing ``affected`` snapshot iterates an empty list, no
+    ``keyword_remove`` reaches the sidecar, and the descendant leaf's
+    ``lr:hierarchicalSubject`` entry keeps the deleted ancestor name
+    forever. Snapshot the descendant-tagged photos and queue a
+    ``location`` change so the next sync rewrites the hierarchy under
+    the surviving ancestor chain.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    france_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('France', NULL, 'location')"
+    ).lastrowid
+    paris_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Paris', ?, 'location')",
+        (france_id,),
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, paris_id)
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.delete(f"/api/keywords/{france_id}")
+    assert resp.status_code == 200
+
+    queued = [
+        (c["photo_id"], c["change_type"]) for c in db.get_pending_changes()
+    ]
+    assert (photo_id, "location") in queued
+
+
+def test_disabling_location_keywords_via_full_workspace_put_queues_cleanup(
+    client_with_photo,
+):
+    """A full workspace PUT that swaps overrides must run the transition check.
+
+    Regression: ``PUT /api/workspaces/<id>`` accepts an arbitrary
+    ``config_overrides`` object and writes it directly, so a payload that
+    changes an effective ``write_location_keywords_to_xmp`` value from
+    true to false left the already-synced sidecars untouched forever
+    -- the per-key PATCH already queued cleanup, but the bulk PUT did
+    not.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)  # global on
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    _drop_all_pending(db)
+    ws_id = db._active_workspace_id
+
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}",
+        json={"config_overrides": {"write_location_keywords_to_xmp": False}},
+    )
+    assert resp.status_code == 200
+
+    assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
