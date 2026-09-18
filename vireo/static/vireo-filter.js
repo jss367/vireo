@@ -1406,6 +1406,15 @@
     const action = target.dataset.action;
     const path = target.dataset.path;
     if (!action || path == null) return;
+    const nextValues = action === 'multi-text'
+      ? String(target.value).split(',').map((s) => s.trim()).filter(Boolean)
+      : null;
+    const editedNode = getNodeAtPath(path);
+    // A pure deletion from a free-entry list has the same meaning as
+    // deselecting an enum pill. Replacements/additions remain ordinary edits.
+    const removing = nextValues && editedNode && Array.isArray(editedNode.value) &&
+      nextValues.length < editedNode.value.length &&
+      nextValues.every((value) => editedNode.value.includes(value));
     mutate(() => {
       const node = getNodeAtPath(path);
       if (!node) return;
@@ -1439,12 +1448,13 @@
       } else if (action === 'recent-unit') {
         node.value = { ...(node.value || {}), unit: target.value };
       } else if (action === 'multi-text') {
-        node.value = String(target.value).split(',').map((s) => s.trim()).filter(Boolean);
+        node.value = nextValues;
       } else if (action === 'case') {
         if (target.checked) node.case = true;
         else delete node.case;
       }
     }, {
+      reason: removing ? 'filterRemoved' : undefined,
       noSnapshot: ['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action),
       // change-event edits (selects, checkboxes) re-render the row; live
       // typing must not destroy the input under the caret.

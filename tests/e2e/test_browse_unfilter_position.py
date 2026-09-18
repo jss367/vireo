@@ -204,13 +204,25 @@ def test_removing_one_of_two_flags_can_exclude_selected_photo(live_server, page)
     assert page.evaluate("photos.length") < 120, "must not scan all results for an excluded photo"
 
 
+@pytest.mark.parametrize("control", ["pill", "text"])
 @pytest.mark.parametrize("op", ["in", "not_in"])
 @pytest.mark.parametrize("selected", [True, False])
-def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, op, selected):
+def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, control, op, selected):
     ids = _prepare(page, live_server, "quick_flag")
-    values = ["none", "flagged" if op == "in" else "rejected"]
+    if control == "text":
+        with live_server["db"].conn:
+            live_server["db"].conn.executemany(
+                "UPDATE photos SET extension='.png' WHERE id=?",
+                [(photo_id,) for photo_id in ids[:120] + live_server["data"]["photos"]],
+            )
+        field = "extension"
+        remaining = ".jpg" if op == "in" else ".gif"
+        values = [".png", remaining]
+    else:
+        field = "flag"
+        values = ["none", "flagged" if op == "in" else "rejected"]
     page.evaluate("rule => VireoFilter.loadExpression([rule])", {
-        "field": "flag", "op": op, "value": values,
+        "field": field, "op": op, "value": values,
     })
     page.wait_for_function("!loading && browseDatasetReady")
     page.evaluate("async () => { while (!allLoaded) await loadPhotos(); }")
@@ -224,11 +236,14 @@ def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, 
     )
     page.click('.vf-filters-btn')
     with page.expect_request('**/api/photos/query') as query:
-        page.click('.vf-rule-tree [data-action="multi"][data-value="none"]')
+        if control == "text":
+            page.fill('.vf-rule-tree [data-action="multi-text"]', remaining)
+        else:
+            page.click('.vf-rule-tree [data-action="multi"][data-value="none"]')
     assert query.value.post_data_json.get('focus_photo_id') == anchor['photoId']
     page.click('.vf-done')
     # Removing an excluded value widens the view; removing an included
-    # value narrows it. The flagged anchor remains eligible in both cases.
+    # value narrows it. The anchor remains eligible in both cases.
     page.wait_for_function(
         "total => !loading && browseDatasetReady && totalPhotos === total && anchorScanDepth === 0",
         arg=60 if op == "in" else 185,
@@ -290,3 +305,17 @@ def test_clearing_filters_keeps_offline_placeholder_in_view(live_server, page):
     }""", arg=anchor, timeout=3000)
     assert page.evaluate("selectedPhotoId") is None
     assert page.evaluate("getActiveSelection()") == []
+
+
+@pytest.mark.parametrize('value', ['.gif', '.jpg, .png, .gif'])
+def test_replacing_or_adding_free_entry_values_starts_fresh(live_server, page, value):
+    ids = _prepare(page, live_server, 'quick_flag')
+    page.evaluate("VireoFilter.loadExpression([{field: 'extension', op: 'in', value: ['.jpg', '.png']}])")
+    page.wait_for_function('!loading && browseDatasetReady')
+    page.locator(f'#grid .grid-card[data-id="{ids[25]}"]').click()
+    page.click('.vf-filters-btn')
+    with page.expect_request('**/api/photos/query') as query:
+        page.fill('.vf-rule-tree [data-action="multi-text"]', value)
+    assert 'focus_photo_id' not in query.value.post_data_json
+    page.wait_for_function('!loading && browseDatasetReady')
+    assert page.evaluate('selectedPhotoId') is None
