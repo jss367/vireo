@@ -1,6 +1,6 @@
 [package]
 name = "vireo"
-version = "0.55.0"
+version = "0.56.0"
 description = "AI-powered wildlife photo organizer"
 authors = []
 license = "MIT"
