@@ -354,6 +354,58 @@ def test_deleting_free_entry_enum_value_keeps_photo_in_view(live_server, page, s
     }""", arg=anchor)
 
 
+def test_narrowing_or_rule_that_excludes_viewport_anchor_holds_position(live_server, page):
+    """When there is no selection and a removal narrows an OR-style rule so
+    the captured top card is itself filtered out, Browse falls back to a
+    neighbour at the same result index rather than resetting to page 1
+    (Codex review r4043606240)."""
+    db = live_server["db"]
+    ids = []
+    for i in range(180):
+        photo_id = db.add_photo(
+            folder_id=live_server["data"]["folders"][0],
+            filename=f"bird{i:03d}.jpg", extension=".jpg", file_size=1000 + i,
+            file_mtime=1.0, timestamp="2024-05-01T08:00:00",
+        )
+        ids.append(photo_id)
+    # First 90 rejected, last 90 flagged: the anchored rejected card
+    # disappears when only ``flagged`` remains.
+    with db.conn:
+        db.conn.executemany(
+            "UPDATE photos SET flag='rejected' WHERE id=?", [(i,) for i in ids[:90]]
+        )
+        db.conn.executemany(
+            "UPDATE photos SET flag='flagged' WHERE id=?", [(i,) for i in ids[90:]]
+        )
+    page.add_init_script("localStorage.clear()")
+    _open_browse(page, live_server)
+    page.wait_for_function("VireoFilter.isReady() && !loading && browseDatasetReady")
+    page.select_option("#sortSelect", "name")
+    page.wait_for_function("!loading && browseDatasetReady")
+    page.evaluate("updateThumbSize(300)")
+    page.evaluate("rule => VireoFilter.loadExpression([rule])", {
+        "field": "flag", "op": "in", "value": ["flagged", "rejected"],
+    })
+    page.wait_for_function("!loading && browseDatasetReady && totalPhotos === 180")
+    # Anchor on a rejected card WITHOUT selecting it: viewportOnly path.
+    card = page.locator(f'#grid .grid-card[data-id="{ids[45]}"]')
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(150)
+    assert page.evaluate("selectedPhotoId") is None
+    scroll_before = page.evaluate("gridContainer.scrollTop")
+    assert scroll_before > 200
+    page.click('.vf-filters-btn')
+    page.click('.vf-rule-tree [data-action="multi"][data-value="rejected"]')
+    page.click('.vf-done')
+    page.wait_for_function(
+        "!loading && browseDatasetReady && anchorScanDepth === 0 && totalPhotos === 90",
+    )
+    # Anchor card was filtered out — with the fallback fix the grid holds
+    # a nearby result index instead of snapping back to scrollTop 0.
+    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("gridContainer.scrollTop") > 0
+
+
 def test_folder_handoff_does_not_inherit_keyword_selection(live_server, page):
     ids = _prepare(page, live_server, "sidebar_keyword")
     page.locator(f'#grid .grid-card[data-id="{ids[145]}"]').click()

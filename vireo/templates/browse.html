@@ -7304,6 +7304,14 @@ async function resetAndLoad(options) {
   var scrollAnchor = preserveScroll
     ? captureBrowseViewportAnchor()
     : null;
+  // A viewport-only anchor can itself be excluded by a filter-narrowing
+  // reload — e.g. deselecting ``flagged`` from ``flag in [flagged, rejected]``
+  // while the top card only matched the deselected value. The focused query
+  // then omits it and the ``!card`` branch below has no fallback, leaving the
+  // grid at page 1. Reuse the same viewport anchor as the scroll fallback so
+  // ``restoreBrowseViewportAnchor`` can hold position via a neighbour at the
+  // same result index (Codex review r4043606240).
+  if (!scrollAnchor && anchor && anchor.viewportOnly) scrollAnchor = anchor;
   browseDatasetReady = false;
   expandedBrowseStacks.clear();
   browseStackMembers = {};
