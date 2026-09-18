@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from db import Database
 from keyword_identity import (
@@ -179,7 +181,7 @@ def test_catalog_import_does_not_attach_flat_and_hierarchical_leaf(catalog, monk
     row = db.conn.execute('SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?',
                           (photos[0],)).fetchone()
     monkeypatch.setattr('importer.read_catalog', lambda *args, **kwargs: {
-        row['path'] + '/' + row['filename']: {
+        os.path.join(row['path'], row['filename']): {
             'flat_keywords': {'Lake Hodges'},
             'hierarchical_keywords': {'Imported places|Lake Hodges'},
         },
@@ -739,7 +741,7 @@ def test_catalog_import_resolves_multiple_non_location_merge_aliases(catalog, mo
     row = db.conn.execute('SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?',
                           (photos[0],)).fetchone()
     monkeypatch.setattr('importer.read_catalog', lambda *args, **kwargs: {
-        row['path'] + '/' + row['filename']: {
+        os.path.join(row['path'], row['filename']): {
             'flat_keywords': {'First label', 'Second label'},
             'hierarchical_keywords': {'Old First label|First label', 'Old Second label|Second label'},
         },

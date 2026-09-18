@@ -749,7 +749,7 @@ def test_import_result_poll_waits_through_long_pause():
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the polling behavior test")
-    template = (Path(__file__).parents[1] / "templates" / "import.html").read_text()
+    template = (Path(__file__).parents[1] / "templates" / "import.html").read_text(encoding="utf-8")
     start = template.index("async function pollJobResult(jobId)")
     end = template.index("\n}", start) + 2
     script = r'''
