@@ -9560,12 +9560,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         keywords = db.get_photo_keywords(photo_id)
         kw_name = ""
+        kw_type = ""
         for k in keywords:
             if k["id"] == keyword_id:
                 kw_name = k["name"]
+                kw_type = k["type"] or ""
                 break
         db.untag_photo(photo_id, keyword_id)
         _queue_keyword_remove(photo_id, kw_name)
+        # A ``keyword_remove`` on a ``type='location'`` tag strips the flat
+        # and hierarchical entries but leaves ``vireo:locationKeywords`` and
+        # its ownership claim in the sidecar. If the user later recreates
+        # that keyword in Lightroom and assigns another place in Vireo,
+        # ``set_location_keywords`` treats the stale marker as authoritative
+        # and can delete the user's new entry. Queue a ``location`` change so
+        # ``sync_to_xmp`` clears the marker (or rewrites it to a still-
+        # tagged location, if the photo has one) on the next sync.
+        if kw_type == "location":
+            _queue_location_sync_if_enabled(photo_id)
         db.record_edit('keyword_remove', f'Removed keyword "{kw_name}"', str(keyword_id),
                        [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
@@ -11651,7 +11663,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids required")
 
         keyword_row = db.conn.execute(
-            "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+            "SELECT id, name, type FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         if keyword_row is None:
             return json_error("keyword not found", 404)
@@ -11677,9 +11689,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         tagged_set = set(tagged_ids)
         removed_ids = [pid for pid in clean_ids if pid in tagged_set]
         name = keyword_row["name"]
+        is_location = (keyword_row["type"] or "") == "location"
         for pid in removed_ids:
             db.untag_photo(pid, keyword_id)
             _queue_keyword_remove(pid, name)
+            # See ``api_remove_keyword``: a ``keyword_remove`` on a
+            # ``type='location'`` tag leaves the sidecar's
+            # ``vireo:locationKeywords`` marker and ownership claim in
+            # place. Queue a ``location`` change so the next sync clears
+            # the marker (or rewrites it to a still-tagged location).
+            if is_location:
+                _queue_location_sync_if_enabled(pid)
 
         items = [
             {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
