@@ -204,13 +204,21 @@ signal; do not limit the work to the triggering payload.
    (e.g., Codex), whose commits do not carry those markers even when they
    author under the maintainer's connected GitHub identity. If no
    routine-marker commit exists on the branch yet, the baseline is the current
-   PR head and the checkpoint does not fire this round. If the cumulative diff
-   has grown past roughly three times the baseline, do not commit or push:
-   reset the working tree, then post one deduplicated comment naming what the
-   PR set out to do, what it now contains, and which finding pushed it past
-   the threshold. This is a checkpoint, not an escalation of any one finding:
-   it exists so the maintainer can redirect a PR that has drifted. Wait for a
-   response.
+   PR head — the checkpoint still fires this round, so a first-round fix that
+   grows the staged diff past three times that pre-fix head is drift too and
+   trips the same reset. If the cumulative diff has grown past roughly three
+   times the baseline, do not commit or push: reset the working tree, then
+   post one deduplicated comment naming what the PR set out to do, what it
+   now contains, and which finding pushed it past the threshold. This is a
+   checkpoint, not an escalation of any one finding: it exists so the
+   maintainer can redirect a PR that has drifted. Wait for a response. The
+   maintainer clears the checkpoint by replying with the scope they authorize
+   you to proceed with — the full finding, a narrower fix, a different
+   approach, or "leave it, reply and move on": treat that reply as this
+   round's new baseline anchor, apply only what they authorized, and do not
+   re-fire the checkpoint against the pre-authorization staged diff. A reply
+   that only says "carry on" without naming a scope is not authorization;
+   ask what scope to apply.
 10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
     the push. Commit once with a descriptive subject and include
     `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
