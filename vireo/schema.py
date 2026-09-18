@@ -1010,6 +1010,16 @@ def _validate_grouping_history_snapshots_split(conn):
         )
 
 
+def _add_location_gps_reviews(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS location_gps_reviews (
+            photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+            fingerprint TEXT NOT NULL,
+            reviewed_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+
 MIGRATIONS = (
     Migration(
         version=5,
@@ -1045,6 +1055,7 @@ MIGRATIONS = (
         apply=_split_grouping_history_snapshots,
         validate=_validate_grouping_history_snapshots_split,
     ),
+    Migration(version=11, name="remember-gps-discrepancy-reviews", apply=_add_location_gps_reviews),
 )
 
 

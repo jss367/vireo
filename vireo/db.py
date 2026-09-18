@@ -1136,6 +1136,12 @@ class Database:
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS location_gps_reviews (
+                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+                fingerprint TEXT NOT NULL,
+                reviewed_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS detections (
                 id                  INTEGER PRIMARY KEY,
                 photo_id            INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
@@ -22908,7 +22914,7 @@ class Database:
         # in v1 — _apply_undo has no handlers for them, so including them
         # would silently advance the undo cursor without reverting state.
         # Adding undo support is a follow-up if it becomes important.
-        'location_set', 'location_clear', 'location_link',
+        'location_set', 'location_clear', 'location_link', 'location_gps_review',
         # Compare-page review actions are auditable but not undoable in v1
         # for the same reason: _apply_undo/_apply_redo have no handlers, so
         # leaving them undoable would mark the entry undone without
