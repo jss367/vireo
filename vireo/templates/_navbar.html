@@ -4289,8 +4289,17 @@ function _lbApplyReadOnlyState() {
     button.disabled = _lbReadOnly;
     button.title = _lbReadOnly ? _lbReadOnlyMessage : entry[1];
   });
+  var adjustmentHint = _lbAdjustmentSourceHint();
+  var adjustmentButton = document.getElementById('lightboxAdjustBtn');
+  if (adjustmentButton && adjustmentHint && !_lbReadOnly) {
+    adjustmentButton.disabled = true;
+    adjustmentButton.title = adjustmentHint;
+  }
   var panel = document.getElementById('lightboxAdjustPanel');
-  if (_lbReadOnly && panel) panel.classList.remove('open');
+  if ((_lbReadOnly || adjustmentHint) && panel) {
+    panel.classList.remove('open');
+    if (adjustmentButton) adjustmentButton.setAttribute('aria-expanded', 'false');
+  }
   var editButton = document.getElementById('lightboxEditPhoto');
   if (editButton) {
     var editHint = _lbReadOnly
@@ -4788,6 +4797,9 @@ window.vireoUpdatePairSourceControls = function(photoId) {
     lightboxControl.style.display = paired ? '' : 'none';
     lightboxControl.textContent = text;
     lightboxControl.disabled = !!pending;
+    _lbApplyReadOnlyState();
+    _lbSetAdjustmentControlsDisabled(!_lbEditRecipeLoaded);
+    if (_lbAdjustmentSourceHint()) _lbClearAdjustmentPreview();
   }
   var detailControl = document.getElementById('detailSourceControl');
   if (detailControl && String(window._detailPhotoId) === key) {
@@ -4908,6 +4920,8 @@ window.vireoTogglePairSource = function(photoId) {
   var requested = _vireoPairSourceByPhoto[key] === 'raw'
     ? 'jpeg'
     : 'raw';
+  // Commit input made on the RAW before source switching disables controls.
+  if (String(_lightboxCurrentId) === key) _lbFlushPendingAdjustmentSave();
   var anchor = _vireoPairAnchorImage(photoId);
   var oldSrc = anchor ? _vireoRenderedImageSource(anchor) : '';
   var base = oldSrc ? _vireoBaseRenderedUrl(oldSrc) : '/thumbnails/' + key + '.jpg';
@@ -5565,7 +5579,7 @@ function _lbSetAdjustmentControl(id, value) {
 }
 
 function _lbSetAdjustmentControlsDisabled(disabled) {
-  disabled = !!disabled || _lbReadOnly;
+  disabled = !!disabled || _lbReadOnly || !!_lbAdjustmentSourceHint();
   [
     'lbAdjExposure',
     'lbAdjHighlights',
@@ -5581,6 +5595,28 @@ function _lbSetAdjustmentControlsDisabled(disabled) {
     var input = document.getElementById(id);
     if (input) input.disabled = !!disabled;
   });
+  var reset = document.querySelector('#lightboxAdjustPanel .lb-adjust-reset');
+  if (reset) reset.disabled = !!disabled;
+}
+
+function _lbAdjustmentSourceHint() {
+  if (_lightboxCurrentId == null) return '';
+  if (_vireoPairPendingSourceByPhoto[String(_lightboxCurrentId)]) {
+    return 'Wait for the photo source to finish loading';
+  }
+  // A developed companion JPEG is displayed as-authored; recipes belong to
+  // the primary RAW and may use entirely different image coordinates.
+  return _vireoPairSource(_lightboxCurrentId) === 'jpeg'
+    ? 'Switch to RAW to use quick adjustments'
+    : '';
+}
+
+function _lbGuardAdjustmentSource() {
+  if (_lbGuardReadOnly()) return true;
+  var hint = _lbAdjustmentSourceHint();
+  if (!hint) return false;
+  if (typeof showToast === 'function') showToast(hint, 'warning');
+  return true;
 }
 
 function _lbRenderAdjustmentControls() {
@@ -6044,6 +6080,8 @@ function _lbRefreshVisiblePhotoImages(photoId) {
 
 function _lbReloadEditedSource(photoId, seq) {
   if (_lightboxCurrentId !== photoId) return;
+  // The source switch owns the visible image until its target has decoded.
+  if (_vireoPairPendingSourceByPhoto[String(photoId)]) return;
   _lbCancelOriginalPreload();
   var img = document.getElementById('lightboxImg');
   if (!img) return;
@@ -6110,7 +6148,7 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
 }
 
 function _lbSaveAdjustmentRecipe(values) {
-  if (_lbGuardReadOnly()) return false;
+  if (_lbGuardAdjustmentSource()) return false;
   if (!_lightboxCurrentId || !_lbEditRecipeLoaded) return;
   var photoId = _lightboxCurrentId;
   var key = String(photoId);
@@ -6159,7 +6197,7 @@ function _lbWaitForAdjustmentSaveIdle(photoId) {
 }
 
 function onLightboxAdjustmentInput(input) {
-  if (_lbGuardReadOnly()) return false;
+  if (_lbGuardAdjustmentSource()) return false;
   if (!_lbEditRecipeLoaded) {
     _lbSetAdjustmentStatus('Loading recipe...');
     _lbRenderAdjustmentControls();
@@ -6181,7 +6219,7 @@ function onLightboxAdjustmentInput(input) {
 }
 
 function resetLightboxAdjustments() {
-  if (_lbGuardReadOnly()) return false;
+  if (_lbGuardAdjustmentSource()) return false;
   if (!_lbEditRecipeLoaded) {
     _lbSetAdjustmentStatus('Loading recipe...');
     return;
@@ -6208,7 +6246,7 @@ function resetLightboxAdjustments() {
 }
 
 function toggleLightboxAdjustPanel() {
-  if (_lbGuardReadOnly()) return false;
+  if (_lbGuardAdjustmentSource()) return false;
   var panel = document.getElementById('lightboxAdjustPanel');
   var btn = document.getElementById('lightboxAdjustBtn');
   if (!panel) return;

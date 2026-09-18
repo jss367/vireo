@@ -175,3 +175,76 @@ def test_late_preview_cannot_reappear_after_closing_lightbox(
     page.wait_for_timeout(100)
     expect(page.locator('#lightboxToneCanvas')).not_to_have_class('lb-tone-canvas show')
     expect(page.locator('#lightboxAdjustmentImage')).not_to_have_class('lb-tone-canvas show')
+
+
+@pytest.mark.parametrize('server_preview', [False, True])
+def test_paired_jpeg_disables_adjustments_and_discards_pending_raw_preview(
+    live_server, page, adjustment_photo, server_preview,
+):
+    import io
+    import re
+
+    db = live_server['db']
+    db.conn.execute(
+        "UPDATE photos SET filename='gradient.nef', extension='.nef', companion_path='gradient.jpg' WHERE id=?",
+        (adjustment_photo,),
+    )
+    db.conn.commit()
+    raw = io.BytesIO()
+    jpeg = io.BytesIO()
+    Image.new('RGB', (256, 64), 'red').save(raw, 'PNG')
+    Image.new('RGB', (64, 256), 'green').save(jpeg, 'PNG')
+    page.route(
+        re.compile(rf'/(thumbnails/{adjustment_photo}\.jpg|photos/{adjustment_photo}/(full|original|preview))'),
+        lambda route: route.fulfill(
+            body=raw.getvalue() if 'source=raw' in route.request.url else jpeg.getvalue(),
+            content_type='image/png',
+        ),
+    )
+    held_previews = []
+    page.route('**/edit-preview?*', lambda route: held_previews.append(route))
+    page.goto(live_server['url'] + '/browse')
+    if server_preview:
+        page.evaluate('VireoToneGL.supported = () => false')
+    page.evaluate("id => openLightbox(id, 'gradient.nef')", adjustment_photo)
+    page.wait_for_function('_lbEditRecipeLoaded')
+    source = page.locator('#lightboxSourceControl')
+    adjust = page.locator('#lightboxAdjustBtn')
+    exposure = page.locator('#lbAdjExposure')
+    expect(source).to_have_text('Viewing JPEG · Show RAW')
+    expect(adjust).to_be_disabled()
+    expect(adjust).to_have_attribute('title', 'Switch to RAW to use quick adjustments')
+    expect(exposure).to_be_disabled()
+    assert page.evaluate("""() => [
+      toggleLightboxAdjustPanel(),
+      onLightboxAdjustmentInput(document.getElementById('lbAdjExposure')),
+      resetLightboxAdjustments(),
+      _lbSaveAdjustmentRecipe({exposure: 5})
+    ]""") == [False] * 4
+    assert not held_previews
+    assert db.get_photo_edit_recipe(adjustment_photo) is None
+
+    source.click()
+    expect(source).to_have_text('Viewing RAW · Show JPEG')
+    expect(adjust).to_be_enabled()
+    adjust.click()
+    expect(exposure).to_be_enabled()
+    _set_exposure(page, 2)
+    deadline = time.monotonic() + 5
+    while not held_previews and time.monotonic() < deadline:
+        page.wait_for_timeout(25)
+    assert held_previews
+    # Switching must flush the pending RAW edit, close its panel, and cancel
+    # both neutral-source callbacks and complete server preview callbacks.
+    source.click()
+    expect(source).to_have_text('Viewing JPEG · Show RAW')
+    expect(adjust).to_be_disabled()
+    expect(page.locator('#lightboxAdjustPanel')).not_to_have_class('lightbox-adjust-panel open')
+    with page.expect_response('**/edit-preview?*'):
+        held_previews[0].fulfill(body=raw.getvalue(), content_type='image/png')
+    page.wait_for_timeout(100)
+    expect(page.locator('#lightboxToneCanvas')).not_to_have_class('lb-tone-canvas show')
+    expect(page.locator('#lightboxAdjustmentImage')).not_to_have_class('lb-tone-canvas show')
+    _wait_saved(page)
+    assert page.locator('#lightboxImg').evaluate('img => [img.naturalWidth, img.naturalHeight]') == [64, 256]
+    assert db.get_photo_edit_recipe(adjustment_photo)['adjustments']['exposure'] == 2
