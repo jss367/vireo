@@ -70,7 +70,7 @@ def preview_import(catalog_paths, db):
         dict with catalogs (list of previews), conflict_count, conflicts (list)
     """
     catalogs = []
-    merged = {}  # file_path -> {keywords_by_catalog: {cat_name: set}}
+    merged = {}  # lookup key -> {file_path, keywords_by_catalog: {cat_name: set}}
 
     for cat_path in catalog_paths:
         try:
@@ -81,9 +81,10 @@ def preview_import(catalog_paths, db):
             cat_name = Path(cat_path).stem
 
             for file_path, kw_data in data.items():
-                if file_path not in merged:
-                    merged[file_path] = {"keywords_by_catalog": {}}
-                merged[file_path]["keywords_by_catalog"][cat_name] = kw_data[
+                key = _path_lookup_key(file_path)
+                if key not in merged:
+                    merged[key] = {"file_path": file_path, "keywords_by_catalog": {}}
+                merged[key]["keywords_by_catalog"][cat_name] = kw_data[
                     "flat_keywords"
                 ]
         except Exception:
@@ -91,11 +92,11 @@ def preview_import(catalog_paths, db):
 
     # Detect conflicts: files in multiple catalogs with different keywords
     conflicts = []
-    for file_path, info in merged.items():
+    for info in merged.values():
         if len(info["keywords_by_catalog"]) > 1:
             conflicts.append(
                 {
-                    "file_path": file_path,
+                    "file_path": info["file_path"],
                     "keywords_by_catalog": {
                         cat: sorted(kws)
                         for cat, kws in info["keywords_by_catalog"].items()
@@ -139,7 +140,7 @@ def execute_import(
         photos_by_path[_path_lookup_key(full_path)] = p
 
     # Merge catalog data
-    merged = {}  # file_path -> {flat_keywords, hierarchical_keywords}
+    merged = {}  # lookup key -> {path, flat_keywords, hierarchical_keywords}
     for idx, cat_path in enumerate(catalog_paths):
         if pause_callback:
             pause_callback()
@@ -152,21 +153,28 @@ def execute_import(
         for raw_file_path, kw_data in data.items():
             if pause_callback:
                 pause_callback()
-            file_path = os.path.normpath(raw_file_path)
-            if file_path not in merged:
-                merged[file_path] = {
+            # Group on the same key the photo lookup uses. Two catalogs that
+            # spell one photo differently are one entry, so the conflict
+            # strategy decides between them instead of both being imported in
+            # turn onto the photo they both resolve to. The entry keeps an
+            # original spelling for the sidecar path.
+            key = _path_lookup_key(raw_file_path)
+            if key not in merged:
+                merged[key] = {
+                    "path": os.path.normpath(raw_file_path),
                     "flat_keywords": set(),
                     "hierarchical_keywords": set(),
                 }
 
             if strategy == "merge_all":
-                merged[file_path]["flat_keywords"].update(kw_data["flat_keywords"])
-                merged[file_path]["hierarchical_keywords"].update(
+                merged[key]["flat_keywords"].update(kw_data["flat_keywords"])
+                merged[key]["hierarchical_keywords"].update(
                     kw_data["hierarchical_keywords"]
                 )
-            elif strategy == "prefer_first" and not merged[file_path]["flat_keywords"] or strategy == "prefer_last":
-                merged[file_path]["flat_keywords"] = kw_data["flat_keywords"]
-                merged[file_path]["hierarchical_keywords"] = kw_data[
+            elif strategy == "prefer_first" and not merged[key]["flat_keywords"] or strategy == "prefer_last":
+                merged[key]["path"] = os.path.normpath(raw_file_path)
+                merged[key]["flat_keywords"] = kw_data["flat_keywords"]
+                merged[key]["hierarchical_keywords"] = kw_data[
                     "hierarchical_keywords"
                 ]
 
@@ -175,12 +183,13 @@ def execute_import(
     failed = 0
     total = len(merged)
 
-    for i, (file_path, kw_data) in enumerate(merged.items()):
+    for i, (key, kw_data) in enumerate(merged.items()):
         if pause_callback:
             db.conn.commit()
             pause_callback()
+        file_path = kw_data["path"]
         # Find matching photo in DB
-        photo = photos_by_path.get(_path_lookup_key(file_path))
+        photo = photos_by_path.get(key)
         if not photo:
             skipped += 1
             if progress_callback:
