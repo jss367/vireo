@@ -1215,6 +1215,72 @@ def test_set_location_keywords_replaces_previous_only_removes_what_it_owned(tmp_
     assert read_hierarchical_keywords(path) == []
 
 
+def test_set_location_keywords_does_not_claim_a_users_flat_case_variant(tmp_path):
+    """A pre-existing normalized flat variant is the user's, not Vireo's.
+
+    The canonicalization step in ``set_location_keywords`` strips a leaf
+    spelling like ``kumeyaay lake`` before ``add_keywords`` writes the
+    canonical ``Kumeyaay Lake``. A snapshot taken after that removal would
+    misread the canonical entry as a fresh Vireo insert, so a later clear
+    or setting-toggle would delete the user's keyword under a new spelling.
+    """
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(path, flat_keywords={"kumeyaay lake"}, hierarchical_keywords=set())
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    # Vireo added the hierarchy but not the flat leaf (it was the user's).
+    assert read_vireo_location_keywords_owned(path) == "hier"
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # The user's flat leaf (now canonicalized) survives the removal.
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_set_location_keywords_does_not_claim_a_users_hier_case_variant(tmp_path):
+    """A pre-existing normalized hierarchy variant is the user's, not Vireo's.
+
+    ``_remove_location_keyword_entries`` matches hierarchical entries on
+    normalized keys, so if Vireo claimed the canonical hierarchy it added
+    beside a user's ``united states|california|kumeyaay lake`` variant, a
+    later removal would strip the user's entry too.
+    """
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(
+        path,
+        flat_keywords=set(),
+        hierarchical_keywords={"united states|california|kumeyaay lake"},
+    )
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    # Vireo added the flat leaf but not the hierarchy (it was the user's).
+    assert read_vireo_location_keywords_owned(path) == "flat"
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # The user's hierarchy variant survives the removal.
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == [
+        "united states|california|kumeyaay lake"
+    ]
+
+
 def test_remove_vireo_location_keywords_defaults_to_both_on_legacy_marker(tmp_path):
     """A sidecar missing the ownership companion is treated as pre-fix.
 

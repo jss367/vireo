@@ -920,6 +920,32 @@ class SidecarEditor:
         if previous and previous != path:
             self._remove_location_keyword_entries(previous, previous_owned)
 
+        # Look for a pre-existing normalized match of the leaf or hierarchy
+        # BEFORE canonicalizing. add_keywords() dedupes on exact text, so a
+        # sidecar spelling like `kumeyaay lake` (a Lightroom rewrite, or a
+        # keyword the user typed themselves) would otherwise sit beside a
+        # clean `Kumeyaay Lake` as a second <rdf:li>. The flat-leaf removal
+        # below strips those variants, and add_keywords() would then look
+        # like it inserted a fresh entry -- but the entry is really the
+        # user's. Claiming it as Vireo-owned would let a later clear or
+        # setting-toggle delete the user's keyword. The hierarchy is not
+        # canonicalized here, but the same shape of user variant needs the
+        # same ownership treatment: _remove_location_keyword_entries matches
+        # on normalized keys, so a hier variant would be stripped on removal
+        # if we claimed the canonical form we added beside it.
+        dc_bag = self._bag(desc, NS_DC, "subject")
+        lr_bag = self._bag(desc, NS_LR, "hierarchicalSubject")
+        leaf_key = keyword_match_key(parts[-1])
+        path_keys = [keyword_match_key(part) for part in parts]
+        existed_flat = bool(leaf_key) and any(
+            keyword_match_key(v) == leaf_key
+            for v in _read_bag_values(dc_bag)
+        )
+        existed_hier = any(
+            [keyword_match_key(s) for s in v.split("|")] == path_keys
+            for v in _read_bag_values(lr_bag)
+        )
+
         # Canonicalize a flat variant of the leaf the way the species-keyword
         # path does: add_keywords() dedupes on exact text, so a sidecar
         # spelling like `kumeyaay lake` would otherwise sit beside the clean
@@ -927,19 +953,27 @@ class SidecarEditor:
         # already-correct sidecar a no-op.
         self.remove_keywords({parts[-1]}, hierarchical=False, keep_exact=True)
 
-        # Snapshot the bags just before adding so we can tell what
-        # add_keywords() would actually insert. An entry the sidecar already
-        # carries -- because the user typed it in Lightroom, or another
-        # Vireo keyword shares its name -- is not ours to claim and must not
-        # be removed on a later clear. Reading the bag also materializes
-        # it, matching what add_keywords() would do; that keeps the dirty
-        # tracking consistent with the pre-fix path.
-        dc_bag = self._bag(desc, NS_DC, "subject")
-        lr_bag = self._bag(desc, NS_LR, "hierarchicalSubject")
-        added_flat = parts[-1] not in _read_bag_values(dc_bag)
-        added_hier = path not in _read_bag_values(lr_bag)
+        # An entry the sidecar already carries -- because the user typed it
+        # in Lightroom, or another Vireo keyword shares its name -- is not
+        # ours to claim and must not be removed on a later clear. Exact-text
+        # matches survive the canonicalization step above and show up as
+        # "already present"; normalized variants were stripped by that step,
+        # so a straight bag re-read would misread them as fresh inserts.
+        # ``existed_*`` captured that pre-canonicalization truth.
+        added_flat = (
+            parts[-1] not in _read_bag_values(dc_bag) and not existed_flat
+        )
+        added_hier = path not in _read_bag_values(lr_bag) and not existed_hier
 
-        self.add_keywords(flat_keywords={parts[-1]}, hierarchical_keywords={path})
+        # Skip inserting the canonical hierarchy when the user already has a
+        # normalized variant of it: add_keywords() would otherwise leave both
+        # spellings side by side, and the leaked canonical would drift out of
+        # step with the user's spelling forever. The species-keyword sync path
+        # only canonicalizes flat entries for the same reason.
+        hier_to_add = set() if existed_hier else {path}
+        self.add_keywords(
+            flat_keywords={parts[-1]}, hierarchical_keywords=hier_to_add,
+        )
 
         # A no-op rewrite of the same path must not shrink an ownership
         # claim we made on a previous run: if the first write inserted an
