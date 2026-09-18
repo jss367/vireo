@@ -317,6 +317,7 @@ POST         /api/keywords/merge-preview
 POST         /api/keywords/reconcile-location
 POST         /api/labels/active
 POST         /api/location-review/preview
+POST         /api/location-review/resolve-discrepancies
 POST         /api/megadetector/delete
 POST         /api/megadetector/download
 POST         /api/misses/<int:photo_id>/unflag

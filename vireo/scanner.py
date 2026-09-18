@@ -872,6 +872,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                     (primary["id"],),
                 )
         # Remove keyword associations then the duplicate JPEG record
+        db._transfer_gps_review_for_merge(companion["id"], primary["id"])
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
         merged_ids.add(companion["id"])

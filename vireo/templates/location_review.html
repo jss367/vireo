@@ -502,11 +502,23 @@ body {
 .location-review-photo-actions { display: flex; flex-wrap: wrap; gap: 5px; padding-top: 6px; }
 .location-review-photo-actions button { font-size: 11px; padding: 5px 7px; }
 .location-review-button:disabled { opacity: .45; cursor: default; }
+.discrepancy-only[hidden] { display: none !important; }
+.location-review-discrepancies .regular-location-section { display: none; }
+.location-review-discrepancies .location-review-map-column { grid-template-rows: minmax(0, 1fr) 240px; }
+.location-review-discrepancies .location-review-actions { grid-template-columns: 1fr 1fr; }
+.location-review-discrepancies .location-review-assign-column { grid-column: 1 / -1; }
+.location-review-discrepancies .location-review-thumbnails { flex-wrap: wrap; overflow-y: auto; max-height: 260px; }
+.location-review-discrepancy-photo { width: 145px; font-size: 11px; }
+.location-review-discrepancy-photo .location-review-thumb { width: 100%; }
+.location-review-discrepancy-photo label { display: block; padding: 6px 0; }
+#locationReviewDistance { width: 95px; }
+#locationReviewDiscrepancySummary { line-height: 1.6; }
 .location-review-time-tools[hidden], .time-only[hidden], #locationReviewSuggestionMode[hidden] { display: none; }
 </style>
 </head>
 <body>
 {% include '_navbar.html' %}
+{% include '_sync_panel.html' %}
 
 <main class="location-review-page">
   <header class="location-review-header">
@@ -536,7 +548,12 @@ body {
     <select id="locationReviewMode">
       <option value="coordinates">Existing GPS · name locations</option>
       <option value="time">Missing GPS · group by time</option>
+      <option value="discrepancies">GPS differs from assigned place</option>
     </select>
+    <label for="locationReviewDistance" class="discrepancy-only" hidden>More than</label>
+    <input id="locationReviewDistance" class="discrepancy-only" hidden type="number" min="0" max="20015087" step="1" value="500" required aria-label="Minimum GPS distance in meters">
+    <span class="discrepancy-only" hidden>meters</span>
+    <label class="discrepancy-only" hidden><input type="checkbox" id="locationReviewIncludeKept"> Include previously kept GPS</label>
     <label for="locationReviewGap" class="time-only" hidden>Start a new group after</label>
     <select id="locationReviewGap" class="time-only" hidden>
       <option value="15">15 minute gap</option>
@@ -583,7 +600,16 @@ body {
           </div>
         </div>
 
-        <section class="location-review-section">
+        <section class="location-review-section discrepancy-only" id="locationReviewDiscrepancyPanel" hidden>
+          <div id="locationReviewDiscrepancySummary"></div>
+          <p>A saved place may mark the center of a large area. Distance alone does not mean the photo GPS is wrong.</p>
+          <p>Keep photo GPS remembers your review without changing metadata. Use assigned place coordinates queues a correction for metadata sync, preserving the GPS in your original photo.</p>
+          <button class="location-review-button" id="locationReviewSelectAll" type="button">Select all photos</button>
+          <button class="location-review-button" id="locationReviewSelectNone" type="button">Clear selection</button>
+          <p id="locationReviewCorrectionStatus" aria-live="polite"></p>
+          <button class="location-review-button" type="button" onclick="openSyncPreview()">Review queued metadata changes</button>
+        </section>
+        <section class="location-review-section regular-location-section">
           <div class="location-review-section-title">
             <span id="locationReviewLocationsHeading">Suggested locations</span>
             <div class="location-review-section-controls">
@@ -606,7 +632,7 @@ body {
           </div>
         </section>
 
-        <section class="location-review-section">
+        <section class="location-review-section regular-location-section">
           <div class="location-review-section-title"><span>Find another place</span></div>
           <div class="location-review-search-row">
             <input class="location-review-search" id="locationReviewSearch" type="text" placeholder="Search near these photos or enter a friendly name">
@@ -623,6 +649,7 @@ body {
 
       <div class="location-review-actions">
         <button class="location-review-button" id="locationReviewSkip" type="button">Skip for now</button>
+        <button class="location-review-button discrepancy-only" id="locationReviewKeep" type="button" hidden disabled>Keep photo GPS</button>
         <div class="location-review-assign-column">
           <div class="location-review-assignment-progress location-review-hidden" id="locationReviewAssignmentProgress">
             <div class="location-review-assignment-status" id="locationReviewAssignmentStatus" aria-live="polite"></div>
@@ -639,6 +666,7 @@ body {
   <section class="location-review-empty location-review-hidden" id="locationReviewEmpty">
     <h2 id="locationReviewEmptyTitle">All locations reviewed</h2>
     <p id="locationReviewEmptyMessage">There are no remaining groups in this set.</p>
+    <button class="location-review-button discrepancy-only" hidden type="button" onclick="openSyncPreview()">Review queued metadata changes</button>
     <button class="location-review-button" id="locationReviewEmptyBack" type="button">Return to Browse</button>
   </section>
 </main>
@@ -649,7 +677,11 @@ body {
 
   var state = {
     source: null,
-    mode: new URLSearchParams(window.location.search).get('mode') === 'time' ? 'time' : 'coordinates',
+    mode: ['time', 'discrepancies'].includes(new URLSearchParams(window.location.search).get('mode')) ? new URLSearchParams(window.location.search).get('mode') : 'coordinates',
+    minimumDistance: Number(new URLSearchParams(window.location.search).get('minimum_distance_m') || 500),
+    includeKept: new URLSearchParams(window.location.search).get('include_reviewed') === 'true',
+    selectedGpsPhotos: new Set(),
+    queuedCorrections: 0,
     gapMinutes: Number(new URLSearchParams(window.location.search).get('gap_minutes') || 60),
     inspectAll: false,
     photoPage: 0,
@@ -797,6 +829,13 @@ body {
       params.set('mode', 'time');
       params.set('gap_minutes', document.getElementById('locationReviewGap').value);
     }
+    if (document.getElementById('locationReviewMode').value === 'discrepancies') {
+      var distance = document.getElementById('locationReviewDistance');
+      if (!distance.reportValidity()) return;
+      params.set('mode', 'discrepancies');
+      params.set('minimum_distance_m', distance.value);
+      params.set('include_reviewed', document.getElementById('locationReviewIncludeKept').checked);
+    }
     window.location.href = '/locations/review?' + params.toString();
   }
   document.getElementById('locationReviewCollection').addEventListener('change', function(event) {
@@ -805,7 +844,7 @@ body {
     changeReviewSource(value === 'all' ? {scope: 'all'} : value === '__selection__'
       ? state.source : {collection_id: Number(value)});
   });
-  ['locationReviewMode', 'locationReviewGap'].forEach(function(id) {
+  ['locationReviewMode', 'locationReviewGap', 'locationReviewDistance', 'locationReviewIncludeKept'].forEach(function(id) {
     document.getElementById(id).addEventListener('change', function() { changeReviewSource(state.source); });
   });
 
@@ -848,7 +887,7 @@ body {
     var completed = state.assignedGroups;
     var total = state.initialGroupCount;
     var pct = total ? Math.round((completed / total) * 100) : 100;
-    document.getElementById('locationReviewProgressText').textContent = completed + ' of ' + total + ' assigned';
+    document.getElementById('locationReviewProgressText').textContent = completed + ' of ' + total + (state.mode === 'discrepancies' ? ' reviewed' : ' assigned');
     document.getElementById('locationReviewRemaining').textContent = state.groups.length ? state.groups.length + ' in queue' : '';
     document.getElementById('locationReviewProgressFill').style.width = pct + '%';
   }
@@ -883,7 +922,7 @@ body {
   }
 
   function setAssignmentNavigationDisabled(disabled) {
-    ['locationReviewMode', 'locationReviewGap', 'locationReviewCollection',
+    ['locationReviewMode', 'locationReviewGap', 'locationReviewCollection', 'locationReviewDistance', 'locationReviewIncludeKept',
       'locationReviewShowAll', 'locationReviewPagePrevious', 'locationReviewPageNext'].forEach(function(id) {
       document.getElementById(id).disabled = disabled;
     });
@@ -967,7 +1006,7 @@ body {
 
   function refreshGroupMetadata(group) {
     if (!group || !group.photos.length) return;
-    if (state.mode === 'time') {
+    if (state.mode === 'time' || state.mode === 'discrepancies') {
       group.captured_from = group.photos[0].timestamp;
       group.captured_to = group.photos[group.photos.length - 1].timestamp;
       return;
@@ -1081,9 +1120,14 @@ body {
   function renderPhotoMarkers(group) {
     clearMapObjects();
     if (!state.map || !group || !group.center) return;
+    var mapPhotos = group.photos.slice();
+    if (state.mode === 'discrepancies') {
+      mapPhotos.push({latitude: group.assigned_location.latitude, longitude: group.assigned_location.longitude,
+        filename: 'Assigned place: ' + group.assigned_location.name, assigned: true});
+    }
     if (state.mapMode === 'google') {
       var bounds = new google.maps.LatLngBounds();
-      group.photos.forEach(function(photo) {
+      mapPhotos.forEach(function(photo) {
         var position = {lat: photo.latitude, lng: photo.longitude};
         var marker = new google.maps.Marker({
           position: position,
@@ -1091,15 +1135,15 @@ body {
           title: photo.filename,
           icon: {
             path: google.maps.SymbolPath.CIRCLE,
-            scale: 4,
-            fillColor: '#24E5CA',
+            scale: photo.assigned ? 9 : 4,
+            fillColor: photo.assigned ? '#f5b942' : '#24E5CA',
             fillOpacity: .92,
             strokeColor: '#ffffff',
             strokeWeight: 1.5,
           },
           zIndex: 20,
         });
-        marker.addListener('click', function() { openPhotoPreview(photo); });
+        if (!photo.assigned) marker.addListener('click', function() { openPhotoPreview(photo); });
         state.photoMarkers.push(marker);
         bounds.extend(position);
       });
@@ -1109,12 +1153,12 @@ body {
       });
     } else {
       var latLngs = [];
-      group.photos.forEach(function(photo) {
+      mapPhotos.forEach(function(photo) {
         var marker = L.marker([photo.latitude, photo.longitude], {
-          icon: L.divIcon({className: '', html: '<div class="location-review-photo-dot"></div>', iconSize: [15,15], iconAnchor: [7,7]}),
+          icon: L.divIcon({className: '', html: '<div class="location-review-photo-dot"' + (photo.assigned ? ' style="background:#f5b942;width:19px;height:19px"' : '') + '></div>', iconSize: [19,19], iconAnchor: [9,9]}),
           title: photo.filename,
         }).addTo(state.map);
-        marker.on('click', function() { openPhotoPreview(photo); });
+        if (!photo.assigned) marker.on('click', function() { openPhotoPreview(photo); });
         state.photoMarkers.push(marker);
         latLngs.push([photo.latitude, photo.longitude]);
       });
@@ -1552,11 +1596,16 @@ body {
       } else {
         showEmpty('All locations reviewed', 'There are no remaining groups in this set.');
       }
+      if (state.mode === 'discrepancies' && state.queuedCorrections) {
+        document.getElementById('locationReviewEmptyMessage').textContent += ' ' + state.queuedCorrections +
+          ' corrections were queued. Review queued metadata changes and sync to write them to the sidecars.';
+      }
       updateProgress();
       return;
     }
     state.photoPage = 0;
     state.renderToken += 1;
+    if (state.mode === 'discrepancies') { renderDiscrepancyGroup(group); updateProgress(); return; }
     var token = state.renderToken;
     state.selectedChoice = null;
     state.savedCandidates = [];
@@ -1575,6 +1624,113 @@ body {
     updateProgress();
     loadSuggestions(group, token);
   }
+
+  function updateDiscrepancySelection() {
+    var count = state.selectedGpsPhotos.size;
+    document.getElementById('locationReviewAssign').disabled = state.isAssigning || !count;
+    document.getElementById('locationReviewAssign').textContent = 'Use assigned place coordinates' + (count ? ' (' + count + ')' : '');
+    document.getElementById('locationReviewKeep').disabled = state.isAssigning || !count;
+    document.querySelectorAll('[data-gps-select]').forEach(function(input) {
+      input.checked = state.selectedGpsPhotos.has(Number(input.dataset.gpsSelect));
+      input.disabled = state.isAssigning;
+    });
+    ['locationReviewSelectAll', 'locationReviewSelectNone'].forEach(function(id) {
+      document.getElementById(id).disabled = state.isAssigning;
+    });
+  }
+
+  function renderDiscrepancyGroup(group) {
+    state.selectedGpsPhotos = new Set();
+    document.getElementById('locationReviewGroupTitle').textContent = group.assigned_location.name;
+    document.getElementById('locationReviewGroupPosition').textContent = group.count + (group.count === 1 ? ' photo' : ' photos') + ' · Group ' + (state.currentIndex + 1) + ' of ' + state.groups.length;
+    document.getElementById('locationReviewCaptured').textContent = formatCaptureRange(group);
+    document.getElementById('locationReviewBasisLabel').textContent = 'Distance from assigned place';
+    var distances = group.photos.map(function(p) { return p.distance_m; });
+    var nearest = Math.round(Math.min.apply(null, distances));
+    var farthest = Math.round(Math.max.apply(null, distances));
+    document.getElementById('locationReviewSpread').textContent = (nearest === farthest ? formatNumber(nearest) : formatNumber(nearest) + ' – ' + formatNumber(farthest)) + ' m';
+    var assigned = group.assigned_location;
+    document.getElementById('locationReviewDiscrepancySummary').textContent =
+      'Gold marker: ' + assigned.name + ' (' + assigned.latitude.toFixed(6) + ', ' + assigned.longitude.toFixed(6) + '). Teal markers: original photo GPS.';
+    document.getElementById('locationReviewCoordinates').textContent = 'Select photos below the map to review individually or together.';
+    document.getElementById('locationReviewFilenames').textContent = '';
+    var container = document.getElementById('locationReviewThumbnails');
+    container.innerHTML = group.photos.map(function(photo) {
+      var override = photo.sidecar_location;
+      var detail = override && override.latitude != null && override.longitude != null
+        ? '<div>Current sidecar GPS: ' + Number(override.latitude).toFixed(6) + ', ' + Number(override.longitude).toFixed(6) + '</div>' : '';
+      return '<div class="location-review-discrepancy-photo"><button class="location-review-thumb" type="button" data-gps-preview="' + photo.id + '">' +
+        '<img src="/thumbnails/' + photo.id + '.jpg" alt="" loading="lazy"><span>' + escapeHtml(photo.filename) + '</span></button>' +
+        '<label><input type="checkbox" data-gps-select="' + photo.id + '" aria-label="Select ' + escapeAttr(photo.filename) + '"> ' + formatNumber(Math.round(photo.distance_m)) + ' m away</label>' +
+        '<div>' + photo.latitude.toFixed(6) + ', ' + photo.longitude.toFixed(6) + '</div>' + detail + '</div>';
+    }).join('');
+    container.querySelectorAll('[data-gps-preview]').forEach(function(button) {
+      button.addEventListener('click', function() {
+        openPhotoPreview(group.photos.find(function(p) { return p.id === Number(button.dataset.gpsPreview); }));
+      });
+    });
+    container.querySelectorAll('[data-gps-select]').forEach(function(input) {
+      input.addEventListener('change', function() {
+        if (input.checked) state.selectedGpsPhotos.add(Number(input.dataset.gpsSelect));
+        else state.selectedGpsPhotos.delete(Number(input.dataset.gpsSelect));
+        updateDiscrepancySelection();
+      });
+    });
+    renderPhotoMarkers(group);
+    updateDiscrepancySelection();
+  }
+
+  async function resolveDiscrepancies(action) {
+    var group = currentGroup();
+    if (!group || state.isAssigning || !state.selectedGpsPhotos.size) return;
+    var selected = group.photos.filter(function(p) { return state.selectedGpsPhotos.has(p.id); });
+    var fingerprints = {};
+    selected.forEach(function(p) { fingerprints[p.id] = p.fingerprint; });
+    if (lightboxIsOpen() && typeof closeLightbox === 'function') closeLightbox();
+    state.isAssigning = true;
+    setAssignmentNavigationDisabled(true);
+    updateDiscrepancySelection();
+    try {
+      var result = await safeFetch('/api/location-review/resolve-discrepancies', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: action, photo_ids: selected.map(function(p) { return p.id; }), fingerprints: fingerprints})
+      });
+      state.queuedCorrections += result.queued;
+      var message = result.queued ? result.queued + (result.queued === 1 ? ' correction queued.' : ' corrections queued.') + ' Review metadata changes and sync to write the sidecars.'
+        : selected.length + (selected.length === 1 ? ' photo kept unchanged.' : ' photos kept unchanged.') + ' This decision is remembered until their location data changes.';
+      document.getElementById('locationReviewCorrectionStatus').textContent = message;
+      showToast(message);
+      group.photos = group.photos.filter(function(p) { return !state.selectedGpsPhotos.has(p.id); });
+      group.photo_ids = group.photos.map(function(p) { return p.id; });
+      group.count = group.photos.length;
+      if (group.count) refreshGroupMetadata(group);
+      if (!group.count) {
+        state.groups.splice(state.currentIndex, 1);
+        state.assignedGroups += 1;
+        state.currentIndex = Math.min(state.currentIndex, Math.max(0, state.groups.length - 1));
+      }
+      checkPendingSync();
+      renderCurrentGroup();
+    } catch (e) {
+      document.getElementById('locationReviewCorrectionStatus').textContent = e.message || 'Could not save the review. Reload and try again.';
+    } finally {
+      state.isAssigning = false;
+      setAssignmentNavigationDisabled(false);
+      updateDiscrepancySelection();
+    }
+  }
+
+  document.getElementById('locationReviewKeep').addEventListener('click', function() { resolveDiscrepancies('keep'); });
+  document.getElementById('locationReviewSelectAll').addEventListener('click', function() {
+    if (state.isAssigning || !currentGroup()) return;
+    state.selectedGpsPhotos = new Set(currentGroup().photo_ids);
+    updateDiscrepancySelection();
+  });
+  document.getElementById('locationReviewSelectNone').addEventListener('click', function() {
+    if (state.isAssigning) return;
+    state.selectedGpsPhotos.clear();
+    updateDiscrepancySelection();
+  });
 
   async function loadSavedSuggestions(group, token) {
     var radius = Math.min(100000, Math.max(25000, Number(group.spread_m || 0) + 10000));
@@ -1857,6 +2013,7 @@ body {
         state.placesService = new google.maps.places.PlacesService(state.map);
         bindGoogleSearch();
         state.map.addListener('click', function(event) {
+          if (state.mode === 'discrepancies') return;
           if (!event.placeId) return;
           if (event.stop) event.stop();
           state.placesService.getDetails({placeId: event.placeId, fields: ['place_id','name','types','formatted_address','geometry','address_components']}, function(place, status) {
@@ -1963,6 +2120,7 @@ body {
   }
 
   async function assignCurrentGroup() {
+    if (state.mode === 'discrepancies') { await resolveDiscrepancies('assigned'); return; }
     var group = currentGroup();
     var choice = state.selectedChoice;
     if (!group || !choice) return;
@@ -2134,13 +2292,17 @@ body {
   async function initialize() {
     state.source = parseSource();
     var sourceParams = new URLSearchParams(window.location.search);
-    if (state.mode === 'time' && !state.source && !sourceParams.has('source') && !sourceParams.has('collection_id')) {
+    if (state.mode !== 'coordinates' && !state.source && !sourceParams.has('source') && !sourceParams.has('collection_id')) {
       state.source = {scope: 'all'};
     }
     if ([15, 30, 60, 120].indexOf(state.gapMinutes) === -1) state.gapMinutes = 60;
     document.getElementById('locationReviewMode').value = state.mode;
     document.getElementById('locationReviewGap').value = String(state.gapMinutes);
     document.body.classList.toggle('location-review-time', state.mode === 'time');
+    document.body.classList.toggle('location-review-discrepancies', state.mode === 'discrepancies');
+    document.querySelectorAll('.discrepancy-only').forEach(function(el) { el.hidden = state.mode !== 'discrepancies'; });
+    document.getElementById('locationReviewDistance').value = state.minimumDistance;
+    document.getElementById('locationReviewIncludeKept').checked = state.includeKept;
     document.querySelectorAll('.time-only').forEach(function(el) { el.hidden = state.mode !== 'time'; });
     if (state.mode === 'time') {
       document.getElementById('locationReviewScope').textContent = 'Grouping photos by capture time…';
@@ -2178,9 +2340,17 @@ body {
       state.config = await safeFetch('/api/config', {}, {toast: false});
     } catch (e) { state.config = {}; }
     await initMap();
+    if (state.mode === 'discrepancies') {
+      if (state.map) document.getElementById('locationReviewMapMessage').classList.add('location-review-hidden');
+      else document.getElementById('locationReviewMapMessage').textContent = 'Map unavailable. Coordinates, distances and photo review are still available.';
+      checkPendingSync();
+      if (!state.config.write_assigned_location_to_xmp) {
+        document.getElementById('locationReviewCorrectionStatus').textContent = 'To queue corrections, first enable Write assigned locations to XMP in Settings.';
+      }
+    }
     try {
       var preview = await safeFetch('/api/location-review/preview', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({}, state.source, {mode: state.mode, gap_minutes: state.gapMinutes}))
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({}, state.source, {mode: state.mode, gap_minutes: state.gapMinutes, minimum_distance_m: state.minimumDistance, include_reviewed: state.includeKept}))
       });
       state.groups = preview.groups || [];
       state.initialGroupCount = state.groups.length;
@@ -2192,7 +2362,7 @@ body {
       if ((preview.unresolved || []).length) scopeParts.push(formatNumber(preview.unresolved.length) + ' without usable coordinates');
       document.getElementById('locationReviewScope').textContent = scopeParts.join(' · ');
       if (!state.groups.length) {
-        showEmpty('No locations to review', preview.total ? (state.mode === 'time' ? 'Every photo in this set already has a location or usable GPS.' : 'Every photo in this set is already assigned or lacks usable coordinates.') : 'This set contains no photos.');
+        showEmpty('No locations to review', state.mode === 'discrepancies' ? 'No unreviewed GPS differences exceed this distance. Photos need both GPS and an assigned place with coordinates. Existing sidecar corrections are excluded.' : preview.total ? (state.mode === 'time' ? 'Every photo in this set already has a location or usable GPS.' : 'Every photo in this set is already assigned or lacks usable coordinates.') : 'This set contains no photos.');
         updateProgress();
         return;
       }

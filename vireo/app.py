@@ -8499,11 +8499,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/location-review/preview", methods=["POST"])
     def api_location_review_preview():
-        """Return coordinate or capture-time groups without assigning places."""
+        """Preview coordinate, capture-time, or GPS discrepancy groups without edits."""
         body = request.get_json(silent=True) or {}
         mode = body.get("mode", "coordinates")
-        if mode not in ("coordinates", "time"):
-            return json_error("mode must be coordinates or time", 400)
+        if mode not in ("coordinates", "time", "discrepancies"):
+            return json_error("mode must be coordinates, time, or discrepancies", 400)
+        minimum_distance = body.get("minimum_distance_m", 500)
+        if type(minimum_distance) not in (int, float) or not 0 <= minimum_distance <= 20015087:
+            return json_error("minimum_distance_m must be between 0 and 20015087 meters", 400)
+        include_reviewed = body.get("include_reviewed", False)
+        if type(include_reviewed) is not bool:
+            return json_error("include_reviewed must be a boolean", 400)
         gap_minutes = body.get("gap_minutes", 60)
         if type(gap_minutes) is not int or gap_minutes not in (15, 30, 60, 120):
             return json_error("gap_minutes must be 15, 30, 60, or 120", 400)
@@ -8533,6 +8539,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if edit_error is not None:
                 return edit_error
 
+        if mode == "discrepancies":
+            photos = location_review.gps_discrepancies(db, photo_ids, minimum_distance, include_reviewed)
+            return jsonify({
+                "total": len(photo_ids), "reviewable": len(photos),
+                "groups": location_review.discrepancy_groups(photos), "unresolved": [], "skipped": [],
+            })
+
         assigned_ids = _location_keyword_photo_ids(db, photo_ids)
         skipped = [{
             "photo_id": photo_id,
@@ -8560,6 +8573,87 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "unresolved": unresolved,
             "skipped": skipped,
         })
+
+    @app.route("/api/location-review/resolve-discrepancies", methods=["POST"])
+    def api_resolve_location_discrepancies():
+        """Remember an explicit keep decision or re-queue approved GPS corrections."""
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict) or body.get("action") not in ("keep", "assigned"):
+            return json_error("action must be keep or assigned", 400)
+        photo_ids, error = _normalize_photo_id_list(body.get("photo_ids"))
+        if error is not None:
+            return error
+        if len(photo_ids) > 100:
+            return json_error("Review at most 100 photos at a time", 400)
+        fingerprints = body.get("fingerprints")
+        if not isinstance(fingerprints, dict):
+            return json_error("Preview fingerprints are required", 400)
+        db = _get_db()
+        # Network sidecars can take longer than SQLite's busy timeout. Read
+        # them before taking the writer lock, after authorizing the selection.
+        for photo_id in photo_ids:
+            error = _photo_location_edit_error(db, photo_id)
+            if error is not None:
+                return error
+        sidecars = {}
+
+        def capture_sidecar(path):
+            if path not in sidecars:
+                sidecars[path] = read_sync_preview_metadata(path)
+            return sidecars[path]
+
+        location_review.gps_discrepancies(
+            db, photo_ids, 0, include_reviewed=True, sidecar_reader=capture_sidecar,
+        )
+        # Serialize validation and queueing with concurrent assignment edits.
+        db.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for photo_id in photo_ids:
+                error = _photo_location_edit_error(db, photo_id)
+                if error is not None:
+                    db.conn.rollback()
+                    return error
+            photos = location_review.gps_discrepancies(
+                db, photo_ids, 0, include_reviewed=True, sidecar_reader=sidecars.get,
+            )
+            current = {photo["id"]: photo for photo in photos}
+            if any(pid not in current or fingerprints.get(str(pid)) != current[pid]["fingerprint"] for pid in photo_ids):
+                db.conn.rollback()
+                return json_error("Location data changed. Reload this review before applying a decision.", 409)
+            if body["action"] == "assigned":
+                import config as cfg
+                if not db.get_effective_config(cfg.load()).get("write_assigned_location_to_xmp", False):
+                    db.conn.rollback()
+                    return json_error("Enable Write assigned locations to XMP in Settings before queueing corrections.", 409)
+                for photo_id in photo_ids:
+                    _queue_location_sync_if_enabled(photo_id, _commit=False)
+                    db.conn.execute("DELETE FROM location_gps_reviews WHERE photo_id = ?", (photo_id,))
+            else:
+                for photo_id in photo_ids:
+                    if db.conn.execute(
+                        "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location' LIMIT 1",
+                        (photo_id,),
+                    ).fetchone():
+                        db.conn.rollback()
+                        return json_error("A selected photo has a pending location change. Review that change before keeping its GPS.", 409)
+                db.conn.executemany(
+                    "INSERT OR REPLACE INTO location_gps_reviews(photo_id, fingerprint) VALUES (?, ?)",
+                    [(pid, current[pid]["fingerprint"]) for pid in photo_ids],
+                )
+            db.record_edit(
+                'location_gps_review',
+                'Queue assigned place GPS' if body["action"] == "assigned" else 'Keep photo GPS',
+                body["action"],
+                [{'photo_id': pid, 'old_value': current[pid]["fingerprint"], 'new_value': body["action"]}
+                 for pid in photo_ids],
+                is_batch=len(photo_ids) > 1, _commit=False,
+            )
+            db.conn.commit()
+        except BaseException:
+            db.conn.rollback()
+            raise
+        db._prune_edit_history()
+        return jsonify({"reviewed": len(photo_ids), "queued": len(photo_ids) if body["action"] == "assigned" else 0})
 
     @app.route("/api/location-review/saved-suggestions")
     def api_location_review_saved_suggestions():

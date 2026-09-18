@@ -13,10 +13,13 @@ def test_ensure_schema_applies_registry_and_validation(tmp_path):
     schema.ensure_schema(db_path)
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
         assert conn.execute(
             "SELECT value FROM db_meta WHERE key='schema_manager'"
         ).fetchone()[0] == "registry-v1"
+        assert [row[1] for row in conn.execute('PRAGMA table_info(location_gps_reviews)')] == [
+            'photo_id', 'fingerprint', 'reviewed_at',
+        ]
 
 
 def test_initialized_connection_does_not_run_schema_creation(tmp_path, monkeypatch):
@@ -41,14 +44,14 @@ def test_failed_registry_migration_rolls_back_version_and_data(tmp_path, monkeyp
         )
         raise RuntimeError("simulated interruption")
 
-    migration = schema.Migration(11, "interrupted", fail_after_write)
+    migration = schema.Migration(12, "interrupted", fail_after_write)
     monkeypatch.setattr(schema, "MIGRATIONS", (*schema.MIGRATIONS, migration))
 
     with pytest.raises(RuntimeError, match="simulated interruption"):
         schema.ensure_schema(db_path)
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
         assert conn.execute(
             "SELECT 1 FROM db_meta WHERE key='partial_migration'"
         ).fetchone() is None
@@ -73,7 +76,7 @@ def test_concurrent_schema_startup_is_serialized(tmp_path):
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
 
 
 def test_navigation_restore_changes_only_consolidated_default(tmp_path):
@@ -460,7 +463,7 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             (photo_id, "megadetector-v6", 2),
             (empty_photo_id, "megadetector-v6", 0),
         ]
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
     with Database(db_path, initialize_schema=False) as migrated_db:
@@ -1107,7 +1110,7 @@ def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_p
             """,
             (photo_id,),
         ).fetchone() == ("megadetector-v6", 0)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
 
 
 def test_legacy_merge_prompt_remap_skips_when_other_detection_matches(tmp_path):
@@ -1639,7 +1642,7 @@ def test_split_grouping_history_snapshots_migration(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
         rows = conn.execute(
             "SELECT eh.id, eh.action_type, eh.new_value, p.payload "
             "FROM edit_history eh LEFT JOIN edit_history_payloads p ON p.edit_id = eh.id "
