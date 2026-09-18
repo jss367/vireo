@@ -7396,17 +7396,11 @@ async function resetAndLoad(options) {
       return true;
     }
 
-    // The anchor may have been rendered as an offline placeholder — e.g. a
-    // folder-health refresh with ``showOfflineCollectionPhotos`` on keeps the
-    // just-went-missing photo in the reloaded dataset with ``folder_status``
-    // set to a non-``ok``/``partial`` value. Restoring the selection there
-    // would let updateBatchBar() expose Develop/Export/Delete against a
-    // supposedly read-only photo (Codex review r3839992514).
     var anchorPhoto = findBrowsePhoto(anchor.photoId);
     var anchorCoverId = browseStackCoverIdForPhoto(anchor.photoId);
     var anchorGridId = anchorCoverId == null ? anchor.photoId : anchorCoverId;
     var anchorIndex = photos.findIndex(function(p) { return p.id === anchorGridId; });
-    if (anchorIndex < 0 || !anchorPhoto || !browsePhotoIsAvailable(anchorPhoto)) {
+    if (anchorIndex < 0 || !anchorPhoto) {
       clearActiveSelectionAndDetail();
       if (scrollAnchor) {
         await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
@@ -7414,12 +7408,34 @@ async function resetAndLoad(options) {
       return true;
     }
 
+    // Viewport-only anchors just hold position — no selection is restored, so
+    // the availability guard below (which keeps updateBatchBar from exposing
+    // Develop/Export/Delete against a read-only photo) does not apply. In a
+    // dashboard-scoped collection with ``showOfflineCollectionPhotos`` on, the
+    // topmost visible card may legitimately be an offline placeholder;
+    // running the availability guard first would reject it and, when the
+    // reload did not capture a ``scrollAnchor`` (filter removal), leave
+    // Browse at the top (Codex review r4043586005).
     if (anchor.viewportOnly) {
       requestAnimationFrame(function() {
         if (!resetRequestIsCurrent() || !anchorRestoreIsPending(anchor, restoreEpoch)) return;
         restorePhotoAnchor(anchor);
         updateScrollPosition();
       });
+      return true;
+    }
+
+    // The anchor may have been rendered as an offline placeholder — e.g. a
+    // folder-health refresh with ``showOfflineCollectionPhotos`` on keeps the
+    // just-went-missing photo in the reloaded dataset with ``folder_status``
+    // set to a non-``ok``/``partial`` value. Restoring the selection there
+    // would let updateBatchBar() expose Develop/Export/Delete against a
+    // supposedly read-only photo (Codex review r3839992514).
+    if (!browsePhotoIsAvailable(anchorPhoto)) {
+      clearActiveSelectionAndDetail();
+      if (scrollAnchor) {
+        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+      }
       return true;
     }
 

@@ -158,6 +158,47 @@ def test_photo_link_keeps_position_when_removing_chip(live_server, page, selecte
     _check_turning_off(page, live_server, "chip", selected, photo_link=True)
 
 
+def test_offline_viewport_anchor_survives_filter_removal(live_server, page):
+    """Dashboard-scoped collections with ``showOfflineCollectionPhotos`` on can
+    render the topmost visible card as an offline placeholder. Filter removal
+    must keep that anchor in view instead of dropping to page 1 (Codex review
+    r4043586005)."""
+    ids = _prepare(page, live_server, "quick_flag")
+    card = page.locator(f'#grid .grid-card[data-id="{ids[145]}"]')
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(150)
+    anchor = page.evaluate("captureBrowseViewportAnchor()")
+    assert page.evaluate("gridContainer.scrollTop") > 500
+    # Simulate the offline placeholder the reload would return in a dashboard-
+    # scoped collection with offline photos on: rewrite the anchor photo so
+    # ``browsePhotoIsAvailable`` reads it as offline after the fetch.
+    page.evaluate(
+        """id => {
+          const original = window.browsePhotoIsAvailable;
+          window.browsePhotoIsAvailable = function(photo) {
+            if (photo && photo.id === id) return false;
+            return original(photo);
+          };
+        }""",
+        anchor["photoId"],
+    )
+    _turn_off(page, "quick_flag")
+    page.wait_for_function(
+        "!loading && browseDatasetReady && totalPhotos === 185 && anchorScanDepth === 0"
+    )
+    page.wait_for_function(
+        """anchor => {
+          const card = getGridCard(anchor.photoId);
+          if (!card) return false;
+          const rect = card.getBoundingClientRect(), box = gridContainer.getBoundingClientRect();
+          return rect.bottom > box.top && rect.top < box.bottom &&
+            Math.abs(rect.top - box.top - anchor.topOffset) < 4;
+        }""",
+        arg=anchor,
+    )
+    assert page.evaluate("selectedPhotoId") is None
+
+
 @pytest.mark.parametrize("selected", [True, False])
 def test_second_removal_during_reload_keeps_original_photo(live_server, page, selected):
     _stall_first_focused_query(page)
