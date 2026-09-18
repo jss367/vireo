@@ -21,16 +21,24 @@ multi-tenant deployment, no second operator, and no hostile local user. Price
 every finding against that deployment model rather than against the badge the
 reviewer stamped on it:
 
-- A race that needs two user-initiated jobs running concurrently on the same
-  photos is at most P3, however it is graded. The user would have to start the
-  second job by hand, in another tab, inside the window the first one is
-  running.
+- Concurrent pipeline runs are a supported workflow. `SLOT_CAP = 2` in
+  `vireo/jobs.py` allows two pipelines to overlap, and `pipeline.html` flips
+  the Start button to "Queue Pipeline" so a click while another run is
+  active lands on the server-side queue instead of failing. Grade races
+  between those runs by their actual impact — a corruption of processing
+  results, a mis-filed original, or a user-visible untruth stays P0/P1 in
+  the queue workflow the app invites the user to walk away from. Only races
+  that need an interleaving the app does not sanction — a job type
+  coordinated to run alone (its handler takes an exclusive workspace slot
+  or asserts no peer is running), a scenario that assumes a second
+  operator, or a hand-crafted request the UI would never issue — cap at P3.
 - A finding that needs the filesystem changed adversarially mid-job — an
   ancestor swapped for a symlink, a path replaced between validation and use —
   is not a threat model for this app. Handle the case where the user moved
   something themselves; do not harden against an attacker who is not there.
 - An accident that needs a specific thread interleaving *plus* something like
-  SQLite rowid reuse is P3 for the same reason.
+  SQLite rowid reuse is P3: the compound coincidence is narrow enough that
+  hardening against it costs more surface than a real user is likely to hit.
 - Data loss, anything that deletes or mis-files originals, and anything the
   user reads as a statement about their photos that is not true, are still
   P0/P1. This context lowers the price of concurrency and adversarial-local
