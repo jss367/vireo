@@ -523,9 +523,8 @@
     if (!options.noPersist) schedulePersist();
     // `reason` (optional string) is forwarded to onChange so pages can
     // pick per-cause reload behavior — e.g. Browse preserving the
-    // selected-photo anchor when filters are cleared but not for every
-    // filter change (arbitrary edits usually exclude the anchor, and
-    // loadUntilPhotoRendered would then page through the whole set).
+    // current photo when filters are removed, while additions and edits
+    // can start a fresh view.
     if (state.onChange && !options.silent) state.onChange({ reason: options.reason || null });
     if (state.muted) refreshWouldMatch();
   }
@@ -755,12 +754,12 @@
         ? { prompt: value, strength: (state.visual && state.visual.strength) || 'balanced' }
         : null;
       if (!value) state.visualInfo = null;
-    });
+    }, { reason: !value ? 'filterRemoved' : undefined });
   }
 
   function clearVisual() {
     if (!state.visual) return;
-    mutate(() => { state.visual = null; state.visualInfo = null; });
+    mutate(() => { state.visual = null; state.visualInfo = null; }, { reason: 'filterRemoved' });
   }
 
   function hideSearchSuggest() {
@@ -986,6 +985,7 @@
   // that stands alone toggles just its own field.
   function toggleQuickMissing(field, fields) {
     if (!fields.includes(field)) return;
+    const removing = quickMissingFields(fields).includes(field);
     mutate(() => {
       const node = quickMissingNode(fields);
       // Every member of the matched clause, including any whose button is
@@ -1009,7 +1009,7 @@
         mode: 'any',
         rules: Array.from(active, (key) => makeRule(key, 'is', 0)),
       });
-    });
+    }, { reason: removing ? 'filterRemoved' : undefined });
   }
 
   // Clauses an enum shortcut can own: every ``is``/``in`` leaf for the field.
@@ -1047,6 +1047,7 @@
 
   function toggleQuickEnum(field, value) {
     if (!fieldValueAvailable(field, value)) return;
+    const removing = quickEnumValues(field).includes(value);
     mutate(() => {
       if (state.root.mode !== 'all') {
         state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
@@ -1086,12 +1087,13 @@
         if (values.includes(value)) return;
         state.root.rules[i] = makeRule(field, 'in', values.concat([value]));
       });
-    });
+    }, { reason: removing ? 'filterRemoved' : undefined });
   }
 
   // A shortcut that is neither a missing-tag nor an enum value is a saved
   // expression: toggling it adds or removes that exact clause.
   function toggleQuickRules(shortcut) {
+    const removing = shortcutActive(shortcut);
     mutate(() => {
       if (state.root.mode === 'all') {
         const matches = state.root.rules.filter((node) => sameNode(node, shortcut.rules));
@@ -1109,7 +1111,7 @@
         state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
       }
       state.root.rules.unshift(clone(shortcut.rules));
-    });
+    }, { reason: removing ? 'filterRemoved' : undefined });
   }
 
   function toggleShortcut(shortcut) {
@@ -1566,7 +1568,7 @@
             } else if (isGroup(entry.node)) {
               state.root.rules = state.root.rules.filter((n) => n !== entry.node);
             } else removeByReference(state.root, entry.node);
-          });
+          }, { reason: 'filterRemoved' });
           toast('Filter removed', true);
         }
         return;
@@ -1585,13 +1587,15 @@
       if (!btn) return;
       const op = $('.vf-quick-rating select').value;
       const value = Number(btn.dataset.rating);
+      const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === 'rating');
+      const removing = idx >= 0 && state.root.rules[idx].op === op &&
+        Number(state.root.rules[idx].value) === value;
       mutate(() => {
-        const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === 'rating');
-        if (idx >= 0 && state.root.rules[idx].op === op && Number(state.root.rules[idx].value) === value) {
+        if (removing) {
           state.root.rules.splice(idx, 1);
         } else if (idx >= 0) state.root.rules[idx] = makeRule('rating', op, value);
         else state.root.rules.unshift(makeRule('rating', op, value));
-      });
+      }, { reason: removing ? 'filterRemoved' : undefined });
     });
     $('.vf-quick-rating select').addEventListener('change', (e) => {
       const rating = findRootRule('rating');
@@ -1698,7 +1702,7 @@
           const ref = getParentAtPath(path);
           const container = ref.parent === state.root ? state.root.rules : ref.parent.rules;
           container.splice(ref.index, 1);
-        });
+        }, { reason: 'filterRemoved' });
         toast('Rule removed', true);
       } else if (action === 'add-child') {
         mutate(() => getNodeAtPath(path).rules.push(makeRule('keyword')));
@@ -1869,7 +1873,9 @@
 
   function toggleMute() {
     if (!hasUserFilters() && !state.muted) { toast('No filters to pause'); return; }
-    mutate(() => { state.muted = !state.muted; });
+    mutate(() => { state.muted = !state.muted; }, {
+      reason: !state.muted ? 'filtersPaused' : undefined,
+    });
     toast(state.muted ? 'Filters paused — press \\ to resume' : 'Filters resumed');
   }
 

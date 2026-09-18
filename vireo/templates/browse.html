@@ -4956,33 +4956,7 @@ async function bootstrapBrowse() {
           openedCollectionId = null;
           clearOfflineCollectionState();
         }
-        // Clearing filters widens the result set, so the selected photo is
-        // expected to remain present. Preserve it as the viewport anchor so
-        // the newly included photos appear around it instead of resetting
-        // Browse to the first result. Every other filter change may exclude
-        // the selected photo, and loadUntilPhotoRendered would then keep
-        // paging through the whole matching set (potentially many
-        // /api/photos/query requests) just to prove the anchor is gone.
-        var preserveAnchor = info && (
-          info.reason === 'quickSearchCleared' ||
-          info.reason === 'filtersCleared' ||
-          // A selected member of a just-opened collection should stay
-          // anchored (it existed in the old collection view too). But a
-          // membership-refresh reopen (reason 'expressionRefreshed') skips
-          // this — the selected photo may have just left the collection,
-          // and loadUntilPhotoRendered would otherwise page through the
-          // whole refreshed set looking for it (Codex review r3622521603).
-          info.reason === 'expressionLoaded'
-        );
-        // A membership-change refresh ('expressionRefreshed') re-runs the
-        // expression the user is already looking at, so hold their place in
-        // the grid instead of restarting at the first result.
-        var reloadOptions;
-        if (preserveAnchor) reloadOptions = { preserveAnchor: true };
-        else if (info && info.reason === 'expressionRefreshed') {
-          reloadOptions = { preserveScroll: true };
-        }
-        resetAndLoad(reloadOptions);
+        resetAndLoad(browseFilterReloadOptions(info));
         // Summary panel (photo count, classified, top species) is a separate
         // endpoint from the grid; without this the filter changes the grid
         // but leaves the summary showing pre-filter numbers.
@@ -7234,6 +7208,21 @@ async function refreshBrowseWindowInPlace() {
   }
 }
 
+// Both normal Browse and photo deep links initialize the shared filter bar.
+// Keep their reload behavior identical for every way of removing filters.
+function browseFilterReloadOptions(info) {
+  var reason = info && info.reason;
+  // Removing a filter should keep the photo in view. A removal in an
+  // OR/NOT expression can also exclude it, so ask the server for its new
+  // position instead of scanning the catalog to find it.
+  if (['quickSearchCleared', 'filtersCleared', 'filterRemoved', 'filtersPaused'].includes(reason)) {
+    return { preserveAnchor: true, focusAnchor: true, preserveViewport: true };
+  }
+  if (reason === 'expressionLoaded') return { preserveAnchor: true };
+  // A membership-change refresh re-runs the expression already on screen.
+  if (reason === 'expressionRefreshed') return { preserveScroll: true };
+}
+
 async function resetAndLoad(options) {
   // Membership edits keep the current window on screen until its replacement
   // is complete. A reset followed by anchor restoration still paints page 1
@@ -7249,8 +7238,8 @@ async function resetAndLoad(options) {
   var preserveCollection = !!(options && options.preserveCollection);
   var preserveScroll = !!(options && options.preserveScroll);
   // ``focusAnchor``: resolve the anchor's new position server-side instead of
-  // paging forward until it shows up. Set by re-sorts, where the photo is
-  // still in the result set but its old index says nothing about its new one.
+  // paging forward until it shows up. Re-sorts and filter removals can move
+  // the photo far from its old index, or remove it from the results entirely.
   var focusAnchor = !!(options && options.focusAnchor);
   // Try the single-photo anchor whenever a caller has asked us to keep the
   // user's place — ``preserveAnchor`` (explicit) or ``preserveScroll`` (the
@@ -7293,6 +7282,12 @@ async function resetAndLoad(options) {
   }
   if (!anchor && (focusAnchor || preserveAnchor) && pendingFocusAnchor) {
     anchor = pendingFocusAnchor;
+  }
+  // A person browsing without a single selection still has a place in the
+  // grid. Focus the first visible card without turning it into a selection.
+  if (!anchor && options && options.preserveViewport) {
+    anchor = captureBrowseViewportAnchor();
+    if (anchor) anchor.viewportOnly = true;
   }
   if (focusAnchor) {
     pendingFocusAnchor = anchor;
@@ -7416,6 +7411,15 @@ async function resetAndLoad(options) {
       if (scrollAnchor) {
         await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
       }
+      return true;
+    }
+
+    if (anchor.viewportOnly) {
+      requestAnimationFrame(function() {
+        if (!resetRequestIsCurrent() || !anchorRestoreIsPending(anchor, restoreEpoch)) return;
+        restorePhotoAnchor(anchor);
+        updateScrollPosition();
+      });
       return true;
     }
 
@@ -15173,19 +15177,7 @@ async function _runPhotoDeepLink(photoId) {
         onChange: function(info) {
           if (timelineMode) loadCalendarData();
           if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
-          var preserveAnchor = info && (
-            info.reason === 'quickSearchCleared' ||
-            info.reason === 'filtersCleared'
-          );
-          // Same as the bootstrap handler: a membership-change refresh
-          // re-runs the expression already on screen, so keep the user's
-          // place in the grid.
-          var reloadOptions;
-          if (preserveAnchor) reloadOptions = { preserveAnchor: true };
-          else if (info && info.reason === 'expressionRefreshed') {
-            reloadOptions = { preserveScroll: true };
-          }
-          resetAndLoad(reloadOptions);
+          resetAndLoad(browseFilterReloadOptions(info));
           loadSummary();
         },
         getScope: function() {
