@@ -92,19 +92,25 @@ def _xmp_sync_setting_enabled(db, key):
 def _xmp_sync_setting_state(db, key):
     """Return ``"on"``/``"off"``/``"unknown"`` for one XMP-write setting.
 
-    ``"unknown"`` means ``config.load()`` raised or the effective read
-    failed. Callers that gate destructive cleanup on the setting must not
-    treat ``"unknown"`` as an explicit off: a location-keywords cleanup, for
+    ``"unknown"`` means the config read failed (parse error or IO error).
+    Callers that gate destructive cleanup on the setting must not treat
+    ``"unknown"`` as an explicit off: a location-keywords cleanup, for
     instance, would strip the previously-written marker and keywords and
     clear the pending row, so a later config fix would not requeue anything.
     Callers only gating writes can keep treating ``"unknown"`` as "don't
     write" (per ``_xmp_sync_setting_enabled`` above) -- that path leaves
     the queue alone.
+
+    Uses ``config.load_strict`` rather than ``config.load``: the ordinary
+    loader catches parse/IO exceptions and returns ``DEFAULTS``, so a
+    corrupt config would silently return the default False for this key,
+    which is exactly the destructive off/on we need to distinguish from a
+    read failure.
     """
     try:
         import config as cfg
 
-        val = bool(db.get_effective_config(cfg.load()).get(key, False))
+        val = bool(db.get_effective_config(cfg.load_strict()).get(key, False))
         return "on" if val else "off"
     except Exception:
         log.warning("Failed to read %s config", key, exc_info=True)

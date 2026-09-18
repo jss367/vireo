@@ -10088,6 +10088,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                    JOIN tree t ON t.id = pk.keyword_id""",
                 (keyword_id,),
             ).fetchall()
+        # Reject '|' in a rename that lands on a location keyword before we
+        # ever touch the row. ``get_or_create_text_location`` refuses pipes
+        # at creation time because Lightroom reserves it as the hierarchy
+        # delimiter and there is no reversible XMP encoding, but the update
+        # path used to accept them. Once such a rename landed, every sync
+        # of a photo tagged with the row raised in
+        # ``SidecarEditor.set_location_keywords``, leaving the ``location``
+        # change queued forever and blocking any other edit that shared
+        # its sidecar transaction. Guard both a name-only rename of an
+        # existing location and a retype-into-location that also renames.
+        rename_target = body.get("name")
+        if isinstance(rename_target, str) and "|" in rename_target:
+            effective_type = body.get("type")
+            if not isinstance(effective_type, str):
+                effective_type = old_row["type"] if old_row is not None else None
+            if effective_type == "location":
+                return json_error(
+                    "location name may not contain '|' -- Lightroom reserves "
+                    "it as the hierarchy delimiter",
+                    400,
+                )
         # Apply the update first — if it raises, no sidecar changes are queued
         try:
             effective_id = db.update_keyword(keyword_id, **body)

@@ -10567,11 +10567,17 @@ class Database:
         """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
 
         The leaf is chosen exactly as :meth:`get_assigned_photo_location`
-        chooses it -- deepest in the chain, most recent id as the tie-break --
-        so the keywords written to a sidecar always describe the same place as
-        the GPS written beside them. Unlike that method this one does not
-        require coordinates: a free-text location the user typed has a name
-        worth writing even though it has nothing to put on a map.
+        chooses it -- coordinate-bearing first, then deepest in the chain,
+        then most recent id as the tie-break -- so the keywords written to
+        a sidecar always describe the same place as the GPS written beside
+        them. When a photo carries both a coordinate-bearing location and
+        a coordinate-less one (the generic keyword-add endpoint attaches
+        another ``type='location'`` keyword without replacing the
+        current), the coord-bearing row wins here just as it does in
+        :meth:`get_assigned_photo_location`. Unlike that method this one
+        does not *require* coordinates: a free-text location the user
+        typed still has a name worth writing when there is no coord-bearing
+        alternative.
 
         Photos with no linked location are absent from the result, which is
         how the sync engine tells "write these keywords" from "remove the ones
@@ -10588,7 +10594,9 @@ class Database:
                         SELECT pk.photo_id, k.id, k.name, k.parent_id,
                                ROW_NUMBER() OVER (
                                  PARTITION BY pk.photo_id
-                                 ORDER BY (k.parent_id IS NULL) ASC, k.id DESC
+                                 ORDER BY (k.latitude IS NULL OR k.longitude IS NULL) ASC,
+                                          (k.parent_id IS NULL) ASC,
+                                          k.id DESC
                                ) AS rn
                         FROM photo_keywords pk
                         JOIN keywords k ON k.id = pk.keyword_id

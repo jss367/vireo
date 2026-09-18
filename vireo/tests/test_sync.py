@@ -2190,13 +2190,66 @@ def test_sync_to_xmp_defers_location_when_config_read_fails(
 
     # Simulate a malformed config that raises during load. The queued
     # location change must stay in the queue and the sidecar must retain
-    # Vireo's previously-written keyword.
+    # Vireo's previously-written keyword. Patch both ``load`` and
+    # ``load_strict`` -- sync uses ``load_strict`` for the destructive
+    # cleanup gate, but a mock that only replaced one would let a real
+    # ``load`` return the earlier valid config from disk and quietly
+    # cover up the failure mode this regression checks.
     import config as cfg
 
     def _raise(*_args, **_kwargs):
         raise ValueError("config unreadable")
 
     monkeypatch.setattr(cfg, "load", _raise)
+    monkeypatch.setattr(cfg, "load_strict", _raise)
+
+    db.queue_change(pid, "location", "effective")
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 0
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+    pending_kinds = [c["change_type"] for c in db.get_pending_changes()]
+    assert "location" in pending_kinds
+    db.close()
+
+
+def test_sync_to_xmp_defers_location_when_config_file_is_corrupt(
+    tmp_path, monkeypatch,
+):
+    """A real corrupt config file must not silently cleanup Vireo keywords.
+
+    The synthetic ``load`` monkeypatch above covers the tri-state's
+    ``except`` branch, but the actual production path is ``config.load()``
+    catching the ``json.JSONDecodeError`` and returning ``DEFAULTS`` --
+    an off-by-default write flag then reads False, and the tri-state
+    would return an explicit ``"off"``. ``_xmp_sync_setting_state`` uses
+    ``config.load_strict`` for exactly this case; verify it survives
+    contact with a genuinely malformed config file on disk (rather than
+    a patched loader).
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+
+    # Overwrite the config file with malformed JSON. ``config.load()``
+    # will catch and return defaults (write flag = False), so a caller
+    # trusting ``load()`` sees an explicit off; ``load_strict`` raises
+    # and the tri-state returns ``"unknown"``.
+    import config as cfg
+
+    with open(cfg.CONFIG_PATH, "w") as f:
+        f.write("not valid json {{{")
 
     db.queue_change(pid, "location", "effective")
     result = sync_to_xmp(db)

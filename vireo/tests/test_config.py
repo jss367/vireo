@@ -159,6 +159,54 @@ def test_load_falls_back_on_corrupt_file(tmp_path):
     assert loaded == cfg.DEFAULTS
 
 
+def test_load_strict_raises_on_corrupt_file(tmp_path):
+    """load_strict() propagates a parse failure so callers can tell
+    "config unreadable" from "config says False". The ordinary load()
+    catches the parse error and returns DEFAULTS, which is unsafe for
+    destructive cleanup gated on a setting: an off-by-default key would
+    read False from a corrupt config and a caller treating that as an
+    explicit off would strip previously-written metadata and clear the
+    pending row. load_strict() surfaces the failure instead.
+    """
+    import config as cfg
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        f.write("not valid json {{{")
+
+    with pytest.raises(Exception):  # noqa: B017 -- json.JSONDecodeError
+        cfg.load_strict()
+
+
+def test_load_strict_returns_defaults_when_no_file(tmp_path):
+    """load_strict() returns defaults when the file is simply absent --
+    only a real read/parse failure should raise. A fresh install with
+    no config file is not a failure state, and cleanup-gating callers
+    should see the default False just like the ordinary loader."""
+    import config as cfg
+
+    cfg.CONFIG_PATH = str(tmp_path / "nonexistent.json")
+    loaded = cfg.load_strict()
+    assert loaded == cfg.DEFAULTS
+
+
+def test_load_strict_returns_merged_config_when_valid(tmp_path):
+    """load_strict() reads and merges just like load() when the file is
+    parseable -- the strict variant only diverges on parse failure."""
+    import json
+
+    import config as cfg
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"write_location_keywords_to_xmp": True}, f)
+
+    loaded = cfg.load_strict()
+    assert loaded["write_location_keywords_to_xmp"] is True
+    # Non-overridden defaults still land.
+    assert loaded["classification_threshold"] == cfg.DEFAULTS["classification_threshold"]
+
+
 def test_get_and_set_round_trip(tmp_path):
     """get() returns value previously written by set()."""
     import config as cfg

@@ -315,6 +315,30 @@ def load():
     return config
 
 
+def load_strict():
+    """Load config the same as :func:`load`, but raise on read failure.
+
+    ``load()`` catches parse/IO errors and returns ``DEFAULTS`` so callers
+    that only need a value can keep going. That silent fallback is unsafe
+    for destructive cleanup that is gated on a setting: an off-by-default
+    key would come back False from a corrupt config, and a caller reading
+    it as an explicit off would strip previously-written metadata and
+    clear the pending row -- a later config repair would not requeue
+    anything. Those callers use ``load_strict`` and treat the exception
+    as "unknown; leave state alone."
+    """
+    config = copy.deepcopy(DEFAULTS)
+    if not os.path.exists(CONFIG_PATH):
+        return config
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+    except Exception:
+        _preserve_corrupt_config()
+        raise
+    return _deep_merge(config, data)
+
+
 def _replace_with_windows_retry(src, dst):
     # On Windows, ``os.replace`` can transiently raise ``PermissionError``
     # ([WinError 5] / [WinError 32]) when Defender or the Search indexer

@@ -30604,6 +30604,81 @@ def test_get_photo_location_paths_stops_at_a_non_location_parent(tmp_path):
     db.close()
 
 
+def test_get_photo_location_paths_prefers_coordinate_bearing_over_text_only(
+    tmp_path,
+):
+    """The keyword path must name the same place as GPS when both are tagged.
+
+    ``get_assigned_photo_location`` filters to coord-bearing rows for GPS,
+    so when a photo carries both a coord-bearing location and a free-text
+    coord-less one, GPS gets the coord-bearing place. ``dc:subject`` and
+    ``lr:hierarchicalSubject`` must name the same place, not the newer
+    coord-less variant.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="a.jpg", extension=".jpg",
+                       file_size=1, file_mtime=0)
+    # Older coord-bearing chain (id lower) and a newer coord-less text
+    # location the user added afterwards. The newer id would win under
+    # the previous "deepest, then newest" order alone.
+    coord_root = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) "
+        "VALUES ('France', NULL, 'location')",
+    ).lastrowid
+    coord_leaf = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, latitude, longitude) "
+        "VALUES ('Paris', ?, 'location', 48.85, 2.35)",
+        (coord_root,),
+    ).lastrowid
+    text_only = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) "
+        "VALUES ('Backyard', NULL, 'location')",
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?), (?, ?)",
+        (pid, coord_leaf, pid, text_only),
+    )
+    db.conn.commit()
+
+    # GPS side picks the coord-bearing place; the keyword-path side must
+    # match rather than picking the newer text-only row.
+    assigned = db.get_assigned_photo_location(pid)
+    assert assigned is not None
+    assert assigned["keyword_location_name"] == "Paris"
+
+    assert db.get_photo_location_paths([pid]) == {pid: ["France", "Paris"]}
+    db.close()
+
+
+def test_get_photo_location_paths_falls_back_to_text_only_when_no_coordinates(
+    tmp_path,
+):
+    """A free-text location still surfaces when no coord-bearing peer exists."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="a.jpg", extension=".jpg",
+                       file_size=1, file_mtime=0)
+    text_only = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) "
+        "VALUES ('Backyard', NULL, 'location')",
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, text_only),
+    )
+    db.conn.commit()
+
+    assert db.get_photo_location_paths([pid]) == {pid: ["Backyard"]}
+    db.close()
+
+
 def test_queue_location_changes_for_tagged_photos_is_idempotent(tmp_path):
     """The backfill queues each located photo once and reports what it did."""
     from db import Database
