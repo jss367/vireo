@@ -12,6 +12,35 @@ Flask, Jinja2, and vanilla JS. This routine is invoked via the API `/fire`
 endpoint from the repo's `.github/workflows/pr-agent.yml` forwarder. Each
 invocation carries a plain-text payload describing one task.
 
+## Repository Context
+
+Vireo is a single-user desktop application. One person runs it on their own
+Mac, against their own photo library, through one browser UI backed by a
+single-process Flask server. There is no multi-tenant deployment, no second
+operator, and no hostile local user. Price every finding against that
+deployment model rather than against the badge the reviewer stamped on it:
+
+- A race that needs two user-initiated jobs running concurrently on the same
+  photos is at most P3, however it is graded. The user would have to start the
+  second job by hand, in another tab, inside the window the first one is
+  running.
+- A finding that needs the filesystem changed adversarially mid-job — an
+  ancestor swapped for a symlink, a path replaced between validation and use —
+  is not a threat model for this app. Handle the case where the user moved
+  something themselves; do not harden against an attacker who is not there.
+- An accident that needs a specific thread interleaving *plus* something like
+  SQLite rowid reuse is P3 for the same reason.
+- Data loss, anything that deletes or mis-files originals, and anything the
+  user reads as a statement about their photos that is not true, are still
+  P0/P1. This context lowers the price of concurrency and adversarial-local
+  findings. It does not lower the price of ordinary bugs, and it is never a
+  reason to leave a real user-visible defect unfixed.
+
+When you downgrade a finding on these grounds, say so in the thread reply and
+name the interleaving the reviewer's scenario requires. A reviewer that grades
+every race as P1 is not wrong about the code; it is missing this context, and
+the reply is where you supply it.
+
 ## How To Read The Payload
 
 The text passed to you starts with a `Task:` line, followed by structured
@@ -132,13 +161,38 @@ signal; do not limit the work to the triggering payload.
    new subsystem, material scope expansion, conflicts with repository
    requirements, or cannot be handled safely in this PR. The number of earlier
    review/fix rounds is not a reason to stop or escalate.
-7. Apply all selected conflict, review, and CI fixes in one coherent change.
+7. Take the cheapest fix that is actually correct. Before writing one, name the
+   fix you intend to make and the surface it touches, then check it against
+   the PR's own purpose:
+   - Would it change runtime behavior in a PR whose purpose is display? There
+     is nearly always a display-side answer, and it is the right one. A job
+     panel that names the wrong folder is fixed by deriving the label from
+     what the job did, not by making the job do what the label already said.
+   - Would it edit a module the PR does not otherwise touch — especially one
+     that moves, overwrites, or deletes the user's originals? That is scope
+     expansion, and it faces the same bar as a change you proposed unprompted.
+   - Would it introduce an invariant that later rounds must defend? A snapshot
+     that has to stay true over time, a cached plan that has to match live
+     state, a validation that has to re-run at every boundary. Each one is new
+     surface for the next review to probe. If a cheaper fix carries no such
+     invariant, take the cheaper fix.
+   When the only fix that satisfies a finding fails these checks, do not build
+   it. Reply in the thread with the tradeoff — what was asked for, what it
+   would cost, and the cheaper alternative you see — and escalate instead of
+   expanding the PR.
+8. Watch the PR's size against the intent it started with. If the diff has
+   grown past roughly three times its size at the last human-authored commit,
+   stop before pushing and post one deduplicated comment naming what the PR
+   set out to do, what it now contains, and which finding started the growth.
+   This is a checkpoint, not an escalation of any one finding: it exists so the
+   maintainer can redirect a PR that has drifted. Wait for a response.
+9. Apply all selected conflict, review, and CI fixes in one coherent change.
    Run validation and fix failures before pushing. If there is no code or merge
    change, do not create an empty commit or a top-level success comment.
-8. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
-   the push. Commit once with a descriptive subject and include
-   `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
-9. Reply to every inline thread actually addressed or rejected with evidence,
+10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
+    the push. Commit once with a descriptive subject and include
+    `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
+11. Reply to every inline thread actually addressed or rejected with evidence,
     ending each reply with `<!-- pr-agent-generated -->`, then resolve that
     exact thread using GraphQL `resolveReviewThread`. Do not
     blanket-resolve threads. Do not post a separate top-level success summary:
@@ -199,7 +253,9 @@ signal; do not limit the work to the triggering payload.
   explain that you cannot work on a merged PR; the explanation itself is what
   previously caused the post-merge feedback storm.
 - Never impose an autonomous review/fix round cap. Prior rounds may provide
-  context, but their count does not justify stopping or escalating.
+  context, but their count does not justify stopping or escalating. The
+  size-drift checkpoint is not a round cap — it fires on how far the diff has
+  moved from the PR's original intent, never on how many rounds moved it.
 
 ## When In Doubt
 
