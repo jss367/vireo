@@ -534,3 +534,27 @@ def test_keep_survives_unrelated_sidecar_creation_and_removal(discrepancy_catalo
     sidecar.write_text('<broken')
     assert kept['id'] in {p['id'] for p in discrepancy_preview(client)}
     assert resolve(client, [kept], 'assigned').status_code == 409
+
+
+@pytest.mark.parametrize('old_lat,new_lat,expected_kept', [
+    ('33,30N', '33.5N', True),
+    ('33.5N', '33.6N', False),
+    ('invalid', 'still-invalid', False),
+])
+def test_keep_compares_sidecar_coordinates_not_formatting(discrepancy_catalog, old_lat, new_lat, expected_kept):
+    client, _, _, _, folder = discrepancy_catalog
+    initial = discrepancy_preview(client)[0]
+    sidecar = (folder / initial['filename']).with_suffix('.xmp')
+
+    def write(latitude):
+        sidecar.write_text(f'''<x:xmpmeta xmlns:x="adobe:ns:meta/"
+            xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:exif="http://ns.adobe.com/exif/1.0/">
+            <rdf:RDF><rdf:Description exif:GPSLatitude="{latitude}" exif:GPSLongitude="117W" /></rdf:RDF>
+            </x:xmpmeta>''')
+
+    write(old_lat)
+    kept = next(p for p in discrepancy_preview(client) if p['id'] == initial['id'])
+    assert resolve(client, [kept], 'keep').status_code == 200
+    write(new_lat)
+    remaining = {p['id'] for p in discrepancy_preview(client)}
+    assert (kept['id'] not in remaining) == expected_kept

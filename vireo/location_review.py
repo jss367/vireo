@@ -96,7 +96,10 @@ def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=Fa
             # Creating/removing a readable sidecar without GPS does not change
             # location evidence. Unreadable sidecars still need a new review
             # when they become readable, since they may conceal an override.
-            evidence = [photo["latitude"], photo["longitude"], assigned, override,
+            normalized_override = override
+            if override and has_usable_coordinates(override):
+                normalized_override = {key: float(override[key]) for key in ('latitude', 'longitude')}
+            evidence = [photo["latitude"], photo["longitude"], assigned, normalized_override,
                         metadata["status"] == "unreadable"]
             fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
             if not include_reviewed and photo["reviewed_fingerprint"] == fingerprint:
