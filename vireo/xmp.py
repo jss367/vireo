@@ -304,6 +304,16 @@ def _read_bag_values(bag):
 # place is also wide enough to delete a location keyword the user typed in
 # Lightroom.
 LOCATION_KEYWORDS_MARKER = f"{{{NS_VIREO}}}locationKeywords"
+# Companion attribute recording which of the two entries the last write
+# actually inserted into the sidecar. ``add_keywords`` skips an entry the
+# sidecar already carries -- if the user typed "Kumeyaay Lake" in Lightroom
+# themselves, or another Vireo keyword happens to share the leaf name, we
+# have not authored it and must not remove it later. Values are a
+# comma-separated combination of ``flat`` and ``hier``; an empty string
+# means neither entry was ours. A missing attribute is a legacy write from
+# before this record existed and is treated as "both" (the pre-fix
+# assumption) so removal continues to work on sidecars already in the wild.
+LOCATION_KEYWORDS_OWNED = f"{{{NS_VIREO}}}locationKeywordsOwned"
 
 
 def _location_marker_parts(marker_value):
@@ -311,6 +321,30 @@ def _location_marker_parts(marker_value):
     if not marker_value:
         return []
     return [part for part in str(marker_value).split("|") if part.strip()]
+
+
+def _parse_location_keywords_owned(value):
+    """Return ``(owns_flat, owns_hier)`` for a stored owned-marker value.
+
+    ``None`` (attribute missing) means the write pre-dates the marker and is
+    treated as if Vireo owned both entries -- the pre-fix behaviour, kept so
+    a removal against an older sidecar still cleans up what it wrote.
+    """
+    if value is None:
+        return True, True
+    tokens = {token.strip() for token in str(value).split(",")}
+    tokens.discard("")
+    return "flat" in tokens, "hier" in tokens
+
+
+def _format_location_keywords_owned(owns_flat, owns_hier):
+    """Serialize an ownership tuple for the companion marker."""
+    parts = []
+    if owns_flat:
+        parts.append("flat")
+    if owns_hier:
+        parts.append("hier")
+    return ",".join(parts)
 
 
 def _parse_xmp(xmp_path):
@@ -394,6 +428,24 @@ def read_vireo_location_keywords(xmp_path):
     if desc is None:
         return None
     return desc.get(LOCATION_KEYWORDS_MARKER)
+
+
+def read_vireo_location_keywords_owned(xmp_path):
+    """Return the ``vireo:locationKeywordsOwned`` companion value or ``None``.
+
+    ``None`` covers both a missing sidecar and a sidecar that carries the
+    marker but no ownership record -- treat that case as "both were ours"
+    the way :func:`_parse_location_keywords_owned` does, so import callers
+    keep the pre-fix skip behaviour on older sidecars.
+    """
+    result = _parse_xmp(xmp_path)
+    if result is None:
+        return None
+    root, _tree = result
+    desc = root.find(f".//{{{NS_RDF}}}Description")
+    if desc is None:
+        return None
+    return desc.get(LOCATION_KEYWORDS_OWNED)
 
 
 def location_keyword_entries(marker_value):
@@ -864,8 +916,9 @@ class SidecarEditor:
         was_dirty = self._dirty
         desc = self._description()
         previous = desc.get(LOCATION_KEYWORDS_MARKER)
+        previous_owned = desc.get(LOCATION_KEYWORDS_OWNED)
         if previous and previous != path:
-            self._remove_location_keyword_entries(previous)
+            self._remove_location_keyword_entries(previous, previous_owned)
 
         # Canonicalize a flat variant of the leaf the way the species-keyword
         # path does: add_keywords() dedupes on exact text, so a sidecar
@@ -873,8 +926,44 @@ class SidecarEditor:
         # one as a second <rdf:li>. ``keep_exact`` keeps a re-sync of an
         # already-correct sidecar a no-op.
         self.remove_keywords({parts[-1]}, hierarchical=False, keep_exact=True)
+
+        # Snapshot the bags just before adding so we can tell what
+        # add_keywords() would actually insert. An entry the sidecar already
+        # carries -- because the user typed it in Lightroom, or another
+        # Vireo keyword shares its name -- is not ours to claim and must not
+        # be removed on a later clear. Reading the bag also materializes
+        # it, matching what add_keywords() would do; that keeps the dirty
+        # tracking consistent with the pre-fix path.
+        dc_bag = self._bag(desc, NS_DC, "subject")
+        lr_bag = self._bag(desc, NS_LR, "hierarchicalSubject")
+        added_flat = parts[-1] not in _read_bag_values(dc_bag)
+        added_hier = path not in _read_bag_values(lr_bag)
+
         self.add_keywords(flat_keywords={parts[-1]}, hierarchical_keywords={path})
-        self._set_attributes(desc, {LOCATION_KEYWORDS_MARKER: path})
+
+        # A no-op rewrite of the same path must not shrink an ownership
+        # claim we made on a previous run: if the first write inserted an
+        # entry, a second one that finds it already present (because we
+        # wrote it) is still ours. Only a change of path resets ownership,
+        # since ``_remove_location_keyword_entries`` above already stripped
+        # the previous entries we owned.
+        prior_flat, prior_hier = _parse_location_keywords_owned(previous_owned)
+        if previous == path:
+            owns_flat = prior_flat or added_flat
+            owns_hier = prior_hier or added_hier
+        else:
+            owns_flat = added_flat
+            owns_hier = added_hier
+
+        self._set_attributes(
+            desc,
+            {
+                LOCATION_KEYWORDS_MARKER: path,
+                LOCATION_KEYWORDS_OWNED: _format_location_keywords_owned(
+                    owns_flat, owns_hier,
+                ),
+            },
+        )
         return self._dirty != was_dirty
 
     def remove_vireo_location_keywords(self):
@@ -887,46 +976,55 @@ class SidecarEditor:
         previous = desc.get(LOCATION_KEYWORDS_MARKER)
         if not previous:
             return False
-        self._remove_location_keyword_entries(previous)
+        self._remove_location_keyword_entries(
+            previous, desc.get(LOCATION_KEYWORDS_OWNED),
+        )
         # Clearing the marker is itself a change worth publishing: it is what
         # keeps a later re-enable from treating stale entries as ours.
         del desc.attrib[LOCATION_KEYWORDS_MARKER]
+        if LOCATION_KEYWORDS_OWNED in desc.attrib:
+            del desc.attrib[LOCATION_KEYWORDS_OWNED]
         self._dirty = True
         return True
 
-    def _remove_location_keyword_entries(self, marker_value):
-        """Strip the two entries a previous location-keyword write added.
+    def _remove_location_keyword_entries(self, marker_value, owned_value):
+        """Strip only the entries a previous location-keyword write inserted.
 
+        ``owned_value`` says which of the flat leaf and hierarchical path
+        the earlier write actually authored (a missing companion attribute
+        is treated as both, to keep removal working on legacy sidecars).
         Matching is by normalized key rather than exact text so a sidecar
-        Lightroom rewrote with different casing or spacing still resolves to
-        the entry Vireo wrote, and the flat match is restricted to the leaf
-        name while the hierarchical match requires the whole recorded path.
-        Anything else in the sidecar -- including a location keyword the user
-        typed in Lightroom -- is left alone.
+        Lightroom rewrote with different casing or spacing still resolves
+        to the entry Vireo wrote; the flat match is restricted to the leaf
+        name and the hierarchical match requires the whole recorded path.
+        Anything else in the sidecar -- including a matching entry the user
+        typed themselves in Lightroom -- is left alone.
         """
         leaf, path = location_keyword_entries(marker_value)
         if not path:
             return False
+        owns_flat, owns_hier = _parse_location_keywords_owned(owned_value)
         leaf_key = keyword_match_key(leaf)
         path_keys = [keyword_match_key(part) for part in path.split("|")]
         removed = []
 
-        if leaf_key:
+        if owns_flat and leaf_key:
             for bag in self._root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag"):
                 for li in bag.findall(f"{{{NS_RDF}}}li"):
                     if li.text and keyword_match_key(li.text) == leaf_key:
                         removed.append(li.text)
                         bag.remove(li)
 
-        for bag in self._root.findall(
-            f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"
-        ):
-            for li in bag.findall(f"{{{NS_RDF}}}li"):
-                if not li.text:
-                    continue
-                if [keyword_match_key(s) for s in li.text.split("|")] == path_keys:
-                    removed.append(li.text)
-                    bag.remove(li)
+        if owns_hier:
+            for bag in self._root.findall(
+                f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"
+            ):
+                for li in bag.findall(f"{{{NS_RDF}}}li"):
+                    if not li.text:
+                        continue
+                    if [keyword_match_key(s) for s in li.text.split("|")] == path_keys:
+                        removed.append(li.text)
+                        bag.remove(li)
 
         if removed:
             self._dirty = True

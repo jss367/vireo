@@ -8,7 +8,12 @@ import json
 from collections import defaultdict
 
 from keyword_normalization import keyword_match_key
-from xmp import location_keyword_entries, read_vireo_location_keywords
+from xmp import (
+    _parse_location_keywords_owned,
+    location_keyword_entries,
+    read_vireo_location_keywords,
+    read_vireo_location_keywords_owned,
+)
 
 
 def identity_sql(alias="k"):
@@ -81,8 +86,10 @@ def drop_stale_vireo_location_keywords(db, photo_id, xmp_path,
     carrying two locations until someone noticed.
 
     Only the two entries the last write recorded in its sidecar marker are
-    dropped, so a location keyword the user typed in Lightroom is imported
-    exactly as before. Returns ``(flat_set, hierarchical_list)``.
+    dropped, and only when the ownership companion says Vireo actually
+    inserted them -- a matching keyword the user typed in Lightroom is not
+    Vireo's to drop and is imported exactly as before. Returns
+    ``(flat_set, hierarchical_list)``.
     """
     flat, hierarchical = set(flat_keywords), list(hierarchical_keywords)
     if not db.has_pending_location_change(photo_id):
@@ -90,14 +97,20 @@ def drop_stale_vireo_location_keywords(db, photo_id, xmp_path,
     leaf, path = location_keyword_entries(read_vireo_location_keywords(xmp_path))
     if not path:
         return flat, hierarchical
+    owns_flat, owns_hier = _parse_location_keywords_owned(
+        read_vireo_location_keywords_owned(xmp_path),
+    )
 
-    leaf_key = keyword_match_key(leaf)
-    path_keys = [keyword_match_key(part) for part in path.split('|')]
+    leaf_key = keyword_match_key(leaf) if owns_flat else None
+    path_keys = (
+        [keyword_match_key(part) for part in path.split('|')] if owns_hier else None
+    )
     return (
         {name for name in flat
          if not leaf_key or keyword_match_key(name) != leaf_key},
         [entry for entry in hierarchical
-         if [keyword_match_key(part) for part in entry.split('|')] != path_keys],
+         if path_keys is None
+         or [keyword_match_key(part) for part in entry.split('|')] != path_keys],
     )
 
 
