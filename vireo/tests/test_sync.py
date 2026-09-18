@@ -2016,6 +2016,48 @@ def test_sync_to_xmp_creates_a_sidecar_for_location_keywords(tmp_path, monkeypat
     db.close()
 
 
+def test_sync_to_xmp_keeps_pipe_named_location_change_queued(
+    tmp_path, monkeypatch,
+):
+    """A location whose name carries ``|`` fails the sync and stays queued.
+
+    ``get_or_create_text_location`` rejects the pipe at assignment, but a
+    legacy row (or a Google Place name that already carried one) can still
+    reach the writer. A silent skip there would let the sync loop clear
+    the pending ``location`` change without ever writing the keyword,
+    stranding the photo. The writer raises instead so the change survives
+    the sync and the user can rename the location and try again.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    # Insert the location directly, the way legacy rows would reach the
+    # sync path -- the API-level gate is what stops new pipe names from
+    # ever getting here, and this test is about what the writer does when
+    # something slips past it.
+    leaf = _add_location_chain(db, ["Home|Cabin"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    # The write failed, so nothing landed in the sidecar and the change
+    # is still queued for the next attempt.
+    assert result["failed"] == 1
+    assert result["synced"] == 0
+    assert any("|" in reason for reason in result["errors"])
+    assert read_keywords(xmp_path) == set()
+    assert read_hierarchical_keywords(xmp_path) == []
+    assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
+    db.close()
+
+
 def test_sync_to_xmp_rewrites_location_keywords_when_the_place_changes(
     tmp_path, monkeypatch,
 ):

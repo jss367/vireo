@@ -915,23 +915,28 @@ class SidecarEditor:
         # A pipe in a location name would corrupt every downstream reader:
         # Lightroom's ``lr:hierarchicalSubject`` uses ``|`` as the segment
         # delimiter, and Vireo's own marker parser splits on the same
-        # character. ``get_or_create_text_location`` accepts any name the
-        # user types, so a free-text place called ``Home|Cabin`` reaches
-        # this method as one part -- write it and cleanup would mis-parse
-        # the marker leaf as ``Cabin`` and leave the flat ``Home|Cabin``
-        # keyword stale forever, while a later import would read the
-        # entry as a two-level hierarchy. There is no reversible encoding
-        # that survives Lightroom (it would render the escape literally),
-        # so skip the write and log the reason instead of corrupting the
-        # sidecar.
+        # character. ``get_or_create_text_location`` now rejects the pipe
+        # at assignment time, but a legacy row (a keyword created before
+        # that gate, or a Google Place name that already carried one) can
+        # still reach this method. Raise instead of silently returning:
+        # ``sync_to_xmp`` treats a normal return as "the write succeeded"
+        # and clears the pending ``location`` change, so a silent skip
+        # would strand the photo -- either the old Vireo-owned keyword
+        # and marker sit in the sidecar forever (place reassigned) or the
+        # new keyword never gets written and no later sync will try
+        # again. The raised ``ValueError`` propagates through
+        # ``_write_photo_sync``, is recorded as a per-photo failure, and
+        # keeps the change queued so the user can rename the location.
         if any("|" in part for part in parts):
             log.warning(
-                "Skipping location-keyword write for %s: a name contains '|'"
-                " which collides with Lightroom's hierarchy delimiter"
+                "Refusing location-keyword write for %s: a name contains"
+                " '|' which collides with Lightroom's hierarchy delimiter"
                 " (parts=%r)",
                 self.path, parts,
             )
-            return False
+            raise ValueError(
+                f"location name may not contain '|': {parts!r}"
+            )
 
         path = "|".join(parts)
         was_dirty = self._dirty

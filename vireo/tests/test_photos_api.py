@@ -9363,6 +9363,66 @@ def test_post_photo_location_text_queues_cleanup_when_xmp_location_disabled(app_
     assert dict(row) == {"change_type": "location", "value": "effective"}
 
 
+def test_post_photo_location_text_rejects_pipe_in_name(app_and_db):
+    """A pipe in the location name is refused at assignment time.
+
+    Lightroom reserves ``|`` for its hierarchy delimiter, and
+    ``SidecarEditor.set_location_keywords`` cannot round-trip a segment
+    that carries one. Accepting the name would either strand a queued
+    ``location`` change (the writer raises, the sync leaves the change
+    queued forever with no way for the user to fix it without renaming
+    the location) or -- with the earlier silent-skip mitigation --
+    quietly clear the pending change without writing the keyword.
+    Rejecting the name at the API keeps the bad name out of the catalog
+    entirely.
+    """
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "Home|Cabin"},
+    )
+
+    assert resp.status_code == 400, resp.get_json()
+    assert "|" in resp.get_json()["error"]
+    # No keyword row was created and no location association was made.
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM keywords "
+        "WHERE type = 'location' AND name = ?",
+        ("Home|Cabin",),
+    ).fetchone()["n"] == 0
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchone() is None
+
+
+def test_batch_location_text_rejects_pipe_in_name(app_and_db):
+    """The batch endpoint applies the same assignment-time pipe rule."""
+    app, db = app_and_db
+    photos = db.get_photos()
+    ids = [photos[0]["id"]]
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/location/text",
+        json={"photo_ids": ids, "name": "Home|Cabin"},
+    )
+
+    assert resp.status_code == 400, resp.get_json()
+    assert "|" in resp.get_json()["error"]
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM keywords "
+        "WHERE type = 'location' AND name = ?",
+        ("Home|Cabin",),
+    ).fetchone()["n"] == 0
+
+
 def test_delete_photo_location_returns_404_on_missing_photo(app_and_db):
     """DELETE on a missing photo returns 404 for consistency with the
     POST routes (was previously a silent 200 because the underlying

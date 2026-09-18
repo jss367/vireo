@@ -19955,6 +19955,28 @@ def test_get_or_create_text_location_strips_whitespace_and_rejects_empty(db):
         db.get_or_create_text_location("   ")
 
 
+def test_get_or_create_text_location_rejects_pipe_at_assignment(db):
+    """A pipe in the name is refused before a keyword row is written.
+
+    Lightroom reserves ``|`` for the hierarchy delimiter, so a
+    ``Home|Cabin`` place would round-trip through
+    ``SidecarEditor.set_location_keywords`` as a two-segment hierarchy;
+    the writer rejects the name, but a silent skip at sync time would
+    clear the pending change without ever writing the keyword. Catching
+    it here keeps the bad name out of the catalog in the first place.
+    """
+    import pytest
+
+    with pytest.raises(ValueError, match=r"\|"):
+        db.get_or_create_text_location("Home|Cabin")
+    # No location row was written.
+    assert db.conn.execute(
+        "SELECT COUNT(*) AS n FROM keywords "
+        "WHERE type = 'location' AND name = ?",
+        ("Home|Cabin",),
+    ).fetchone()["n"] == 0
+
+
 def test_link_keyword_to_place_attaches_metadata(db):
     """An existing free-text keyword gets place_id, coords, and parent chain."""
     # Create a free-text "Central Park" with a photo tagged.

@@ -13704,7 +13704,12 @@ class Database:
         """Find or create a free-text ``type='location'`` keyword.
 
         No ``place_id``, no coords, no parent. Whitespace is stripped from
-        ``name``; raises ``ValueError`` if the stripped result is empty.
+        ``name``; raises ``ValueError`` if the stripped result is empty or
+        contains ``|`` (Lightroom's hierarchy delimiter -- a pipe in a
+        location name has no reversible XMP encoding, so it is rejected here
+        rather than downstream in ``SidecarEditor.set_location_keywords``,
+        where a silent skip would let ``sync_to_xmp`` clear the pending
+        change without ever writing the keyword).
         Returns the keyword id.
         """
         if name is None:
@@ -13712,6 +13717,11 @@ class Database:
         stripped = name.strip()
         if not stripped:
             raise ValueError("location name must not be empty")
+        if "|" in stripped:
+            raise ValueError(
+                "location name may not contain '|' -- Lightroom reserves it "
+                "as the hierarchy delimiter"
+            )
         with self.conn:
             return self._upsert_one_keyword(
                 name=stripped,

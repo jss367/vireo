@@ -1283,25 +1283,32 @@ def test_set_location_keywords_does_not_claim_a_users_hier_case_variant(tmp_path
 
 def test_set_location_keywords_refuses_a_name_with_a_pipe(tmp_path, caplog):
     """A location whose name contains ``|`` cannot round-trip through
-    Lightroom's hierarchy delimiter, so the write is skipped rather than
-    corrupted.
+    Lightroom's hierarchy delimiter, so the write raises rather than
+    silently succeeding.
 
-    ``get_or_create_text_location`` accepts any free-text name, but the
-    Lightroom hierarchical-subject format and Vireo's own marker parser
-    both split on ``|``. Writing a single-part place named ``Home|Cabin``
-    would leave a flat keyword the cleanup step could never find (its
-    marker parses as a two-level path with leaf ``Cabin``) and an import
-    would misread the entry as a two-node hierarchy. There is no
-    reversible encoding: Lightroom renders escape sequences literally.
+    ``get_or_create_text_location`` now rejects the pipe at assignment,
+    but a legacy row (or a Google Place name that already carried one)
+    can still reach this method. The Lightroom hierarchical-subject
+    format and Vireo's own marker parser both split on ``|``, so writing
+    a single-part place named ``Home|Cabin`` would leave a flat keyword
+    the cleanup step could never find (its marker parses as a two-level
+    path with leaf ``Cabin``) and an import would misread the entry as a
+    two-node hierarchy. There is no reversible encoding: Lightroom
+    renders escape sequences literally. A silent skip would let the
+    sync layer clear the pending ``location`` change, so ``raise`` is
+    the shape that keeps it queued.
     """
     import logging
+
+    import pytest
 
     from xmp import SidecarEditor, read_vireo_location_keywords
 
     path = str(tmp_path / "photo.xmp")
     editor = SidecarEditor(path)
     with caplog.at_level(logging.WARNING, logger="xmp"):
-        assert editor.set_location_keywords(["Home|Cabin"]) is False
+        with pytest.raises(ValueError, match=r"\|"):
+            editor.set_location_keywords(["Home|Cabin"])
     editor.commit()
 
     # Nothing was written -- no keywords, no marker, no ownership record.
@@ -1315,13 +1322,16 @@ def test_set_location_keywords_refuses_a_name_with_a_pipe(tmp_path, caplog):
 
 def test_set_location_keywords_refuses_a_pipe_in_an_ancestor(tmp_path):
     """Any segment containing ``|`` disqualifies the whole chain."""
+    import pytest
+
     from xmp import SidecarEditor, read_vireo_location_keywords
 
     path = str(tmp_path / "photo.xmp")
     editor = SidecarEditor(path)
-    assert editor.set_location_keywords(
-        ["United|States", "California", "Kumeyaay Lake"]
-    ) is False
+    with pytest.raises(ValueError, match=r"\|"):
+        editor.set_location_keywords(
+            ["United|States", "California", "Kumeyaay Lake"]
+        )
     editor.commit()
 
     assert read_keywords(path) == set()

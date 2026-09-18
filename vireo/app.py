@@ -4245,6 +4245,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         payload["request_id"] = getattr(g, "request_id", None)
         return jsonify(payload), 409
 
+    # Shared message for a location name that carries Lightroom's hierarchy
+    # delimiter. Rejecting at assignment time (rather than at sync time) is
+    # what keeps the pending change from being silently cleared for a name
+    # ``SidecarEditor.set_location_keywords`` cannot round-trip.
+    _LOCATION_NAME_PIPE_ERROR = (
+        "location name may not contain '|' -- Lightroom reserves it as the "
+        "hierarchy delimiter"
+    )
+
     def _coerce_collection_id(raw):
         """Parse an optional collection_id from a request body.
 
@@ -10513,6 +10522,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name.strip():
             return json_error("missing name", 400)
         stripped = name.strip()
+        # Reject at assignment time: Lightroom reserves ``|`` for the
+        # hierarchy delimiter, and ``SidecarEditor.set_location_keywords``
+        # cannot round-trip it. Catching it here means the pending change
+        # never gets queued in the first place, so no later sync silently
+        # loses it.
+        if "|" in stripped:
+            return json_error(_LOCATION_NAME_PIPE_ERROR, 400)
         latitude = body.get("latitude")
         longitude = body.get("longitude")
         if (latitude is None) != (longitude is None):
@@ -10538,7 +10554,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             leaf_id = db.get_or_create_text_location(stripped)
         except ValueError:
-            # Defensive: validation above should already catch empty input.
+            # Defensive: validation above should already catch empty input
+            # and pipe characters.
             return json_error("missing name", 400)
         if latitude is not None:
             db.conn.execute(
@@ -10582,6 +10599,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name.strip():
             return json_error("missing name", 400)
         stripped = name.strip()
+        # Reject at assignment time: Lightroom reserves ``|`` for the
+        # hierarchy delimiter, and ``SidecarEditor.set_location_keywords``
+        # cannot round-trip it.
+        if "|" in stripped:
+            return json_error(_LOCATION_NAME_PIPE_ERROR, 400)
         latitude = body.get("latitude")
         longitude = body.get("longitude")
         if (latitude is None) != (longitude is None):
