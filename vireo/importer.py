@@ -113,7 +113,10 @@ def execute_import(
     Returns:
         dict with imported, skipped, failed counts
     """
-    # Build path -> DB photo lookup
+    # Build path -> DB photo lookup. read_catalog concatenates Lightroom's
+    # stored absolutePath and pathFromRoot (both forward-slash) while
+    # os.path.join on Windows produces backslashes, so both sides go through
+    # os.path.normpath to compare equally on every platform.
     photos_by_path = {}
     all_photos = db.get_photos(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
@@ -121,7 +124,7 @@ def execute_import(
         if pause_callback:
             pause_callback()
         folder_path = folders.get(p["folder_id"], "")
-        full_path = os.path.join(folder_path, p["filename"])
+        full_path = os.path.normpath(os.path.join(folder_path, p["filename"]))
         photos_by_path[full_path] = p
 
     # Merge catalog data
@@ -135,9 +138,10 @@ def execute_import(
             log.exception("Failed to read catalog: %s", cat_path)
             continue
 
-        for file_path, kw_data in data.items():
+        for raw_file_path, kw_data in data.items():
             if pause_callback:
                 pause_callback()
+            file_path = os.path.normpath(raw_file_path)
             if file_path not in merged:
                 merged[file_path] = {
                     "flat_keywords": set(),
