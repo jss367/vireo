@@ -9,6 +9,12 @@ import json
 from collections import defaultdict
 
 from keyword_normalization import keyword_match_key
+from xmp import (
+    _parse_location_keywords_owned,
+    location_keyword_entries,
+    read_vireo_location_keywords,
+    read_vireo_location_keywords_owned,
+)
 
 
 def identity_sql(alias="k"):
@@ -142,6 +148,46 @@ def filter_removed_import_aliases(db, photo_id, flat_keywords, hierarchical_keyw
         [path for path in hierarchical_keywords
          if aliases.get(path_key(path.split('|'))) not in hierarchical_removals
          and path_key(path.split('|')) not in blocked_paths],
+    )
+
+
+def drop_stale_vireo_location_keywords(db, photo_id, xmp_path,
+                                       flat_keywords, hierarchical_keywords):
+    """Filter out location keywords Vireo wrote that the DB has since changed.
+
+    Location keywords are the one kind Vireo owns end to end: the user assigns
+    a place in Vireo and the sidecar receives a copy. While a ``location``
+    change is queued the sidecar's copy is by definition out of date -- the
+    user has already picked a different place, or none -- so importing it
+    would re-attach the place they just moved away from and leave the photo
+    carrying two locations until someone noticed.
+
+    Only the two entries the last write recorded in its sidecar marker are
+    dropped, and only when the ownership companion says Vireo actually
+    inserted them -- a matching keyword the user typed in Lightroom is not
+    Vireo's to drop and is imported exactly as before. Returns
+    ``(flat_set, hierarchical_list)``.
+    """
+    flat, hierarchical = set(flat_keywords), list(hierarchical_keywords)
+    if not db.has_pending_location_change(photo_id):
+        return flat, hierarchical
+    leaf, path = location_keyword_entries(read_vireo_location_keywords(xmp_path))
+    if not path:
+        return flat, hierarchical
+    owns_flat, owns_hier = _parse_location_keywords_owned(
+        read_vireo_location_keywords_owned(xmp_path),
+    )
+
+    leaf_key = keyword_match_key(leaf) if owns_flat else None
+    path_keys = (
+        [keyword_match_key(part) for part in path.split('|')] if owns_hier else None
+    )
+    return (
+        {name for name in flat
+         if not leaf_key or keyword_match_key(name) != leaf_key},
+        [entry for entry in hierarchical
+         if path_keys is None
+         or [keyword_match_key(part) for part in entry.split('|')] != path_keys],
     )
 
 

@@ -451,6 +451,7 @@ async function _syncStartPreviewLoad(restartCount) {
           total_photos: page.total_photos,
           change_type_counts: page.change_type_counts || {},
           location_sync_enabled: page.location_sync_enabled,
+          location_keyword_sync_enabled: page.location_keyword_sync_enabled,
           revision: page.revision,
         };
         _syncActiveFilters = new Set(Object.keys(_syncPreviewData.change_type_counts));
@@ -652,11 +653,15 @@ function renderSyncPreview() {
   '</div>';
 
   if (_syncActiveFilters.has('location') && allTypes.location) {
-    if (data.location_sync_enabled) {
-      html += '<div class="sync-review-note"><strong style="color:var(--text-primary);">About location sync:</strong> Location keywords with coordinates are written to XMP as GPS metadata. Their names and hierarchy remain in Vireo.</div>';
-    } else {
-      html += '<div class="sync-review-note"><strong style="color:var(--text-primary);">About location sync:</strong> Location assignments are kept in Vireo. Writing their GPS coordinates to XMP is turned off in Settings; sync only removes GPS previously written by Vireo.</div>';
-    }
+    var locationNotes = [];
+    locationNotes.push(data.location_sync_enabled
+      ? 'A location keyword with coordinates is written to XMP as GPS metadata.'
+      : 'Writing assigned GPS to XMP is turned off in Settings; sync only removes GPS previously written by Vireo.');
+    locationNotes.push(data.location_keyword_sync_enabled
+      ? 'The place and its parent places are written as XMP keywords (the place in dc:subject, the full path in lr:hierarchicalSubject), so a catalog app reading the sidecar lists it as a keyword.'
+      : 'Writing location keywords to XMP is turned off in Settings, so place names stay in Vireo; sync only removes location keywords Vireo wrote earlier.');
+    html += '<div class="sync-review-note"><strong style="color:var(--text-primary);">About location sync:</strong> '
+      + locationNotes.join(' ') + '</div>';
   }
 
   var groups = _syncGroupedChanges(data, _syncActiveFilters);

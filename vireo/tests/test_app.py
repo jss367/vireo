@@ -8343,6 +8343,49 @@ def test_rename_keyword_rejects_empty_after_normalization(app_and_db):
     assert row["name"] == "Real"
 
 
+def test_rename_location_keyword_rejects_pipe(app_and_db):
+    """PUT /api/keywords/<id> must refuse a '|' when the row is (or becomes) a
+    location. ``get_or_create_text_location`` already rejects pipes at
+    creation because Lightroom reserves it as the hierarchy delimiter, but
+    the update path used to accept them. Once a piped rename landed, every
+    sync of a photo tagged with the row raised in
+    ``SidecarEditor.set_location_keywords`` -- the ``location`` change
+    stayed queued forever, and any other edit sharing its sidecar
+    transaction failed to publish."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.get_or_create_text_location("Home")
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "Home|Cabin"})
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "|" in body.get("error", "")
+    row = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Home"
+    assert row["type"] == "location"
+
+
+def test_retype_to_location_with_pipe_in_name_is_rejected(app_and_db):
+    """A retype-INTO-location with a name containing '|' must be rejected
+    for the same reason a location rename is: a location keyword with a
+    pipe in its name has no reversible XMP encoding."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("Somewhere")
+
+    resp = client.put(
+        f"/api/keywords/{kid}", json={"name": "A|B", "type": "location"},
+    )
+    assert resp.status_code == 400
+    row = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Somewhere"
+    assert row["type"] == "general"
+
+
 def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
     """Renaming a top-level keyword to a name that normalizes to an existing
     top-level peer must merge into that peer instead of writing a second row.

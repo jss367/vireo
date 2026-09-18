@@ -1903,3 +1903,487 @@ def test_sync_clears_rows_that_predate_the_change_token_column(tmp_path):
     assert result["synced"] == 1, result
     assert db.count_pending_changes() == 0, "a NULL-token row was left queued"
     db.close()
+
+
+def _location_keyword_config(tmp_path, monkeypatch, *, keywords=True, gps=False):
+    """Point config at a temp file and set both location-write settings."""
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["write_location_keywords_to_xmp"] = keywords
+    config["write_assigned_location_to_xmp"] = gps
+    cfg.save(config)
+
+
+def _add_location_chain(db, names, *, latitude=None, longitude=None):
+    """Insert a parent chain of location keywords and return the leaf id."""
+    parent_id = None
+    for index, name in enumerate(names):
+        leaf = index == len(names) - 1
+        parent_id = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, type, latitude, longitude) "
+            "VALUES (?, ?, 'location', ?, ?)",
+            (name, parent_id, latitude if leaf else None,
+             longitude if leaf else None),
+        ).lastrowid
+    db.conn.commit()
+    return parent_id
+
+
+def test_sync_to_xmp_writes_location_keywords(tmp_path, monkeypatch):
+    """An assigned place reaches Lightroom as a flat and a hierarchical keyword."""
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import (
+        read_hierarchical_keywords,
+        read_keywords,
+        read_sync_preview_metadata,
+    )
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"House finch"})
+
+    leaf = _add_location_chain(
+        db, ["United States", "California", "Kumeyaay Lake"],
+        latitude=32.8415, longitude=-117.0329,
+    )
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1 and result["failed"] == 0
+    assert not db.get_pending_changes()
+    assert read_keywords(xmp_path) == {"House finch", "Kumeyaay Lake"}
+    assert read_hierarchical_keywords(xmp_path) == [
+        "United States|California|Kumeyaay Lake"
+    ]
+    metadata = read_sync_preview_metadata(xmp_path)
+    assert metadata["location_keywords"] == (
+        "United States|California|Kumeyaay Lake"
+    )
+    # Keywords are their own setting: GPS stays off here.
+    assert metadata["location"] is None
+    db.close()
+
+
+def test_sync_to_xmp_writes_location_keywords_without_coordinates(
+    tmp_path, monkeypatch,
+):
+    """A free-text place has no GPS to write but still has a name."""
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch, gps=True)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    leaf = _add_location_chain(db, ["Grandma's garden"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+
+    assert sync_to_xmp(db)["synced"] == 1
+    assert read_keywords(xmp_path) == {"Grandma's garden"}
+    db.close()
+
+
+def test_sync_to_xmp_creates_a_sidecar_for_location_keywords(tmp_path, monkeypatch):
+    """A located photo with no sidecar gets one, the way a keyword add does."""
+    import os
+
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    os.remove(xmp_path)
+
+    leaf = _add_location_chain(db, ["France", "Camargue"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+
+    assert sync_to_xmp(db)["synced"] == 1
+    assert os.path.exists(xmp_path)
+    assert read_keywords(xmp_path) == {"Camargue"}
+    db.close()
+
+
+def test_sync_to_xmp_keeps_pipe_named_location_change_queued(
+    tmp_path, monkeypatch,
+):
+    """A location whose name carries ``|`` fails the sync and stays queued.
+
+    ``get_or_create_text_location`` rejects the pipe at assignment, but a
+    legacy row (or a Google Place name that already carried one) can still
+    reach the writer. A silent skip there would let the sync loop clear
+    the pending ``location`` change without ever writing the keyword,
+    stranding the photo. The writer raises instead so the change survives
+    the sync and the user can rename the location and try again.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    # Insert the location directly, the way legacy rows would reach the
+    # sync path -- the API-level gate is what stops new pipe names from
+    # ever getting here, and this test is about what the writer does when
+    # something slips past it.
+    leaf = _add_location_chain(db, ["Home|Cabin"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    # The write failed, so nothing landed in the sidecar and the change
+    # is still queued for the next attempt.
+    assert result["failed"] == 1
+    assert result["synced"] == 0
+    assert any("|" in reason for reason in result["errors"])
+    assert read_keywords(xmp_path) == set()
+    assert read_hierarchical_keywords(xmp_path) == []
+    assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
+    db.close()
+
+
+def test_sync_to_xmp_rewrites_location_keywords_when_the_place_changes(
+    tmp_path, monkeypatch,
+):
+    """Reassigning a place replaces its keywords instead of stacking them."""
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    first = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, first)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+
+    second = _add_location_chain(db, ["France", "Pont de Gau"])
+    db.set_photo_location(pid, second)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+
+    assert read_keywords(xmp_path) == {"Pont de Gau"}
+    assert read_hierarchical_keywords(xmp_path) == ["France|Pont de Gau"]
+    db.close()
+
+
+def test_sync_to_xmp_removes_location_keywords_when_the_place_is_cleared(
+    tmp_path, monkeypatch,
+):
+    """Clearing the location in Vireo takes its keywords out of the sidecar."""
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"House finch"})
+
+    leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+
+    db.clear_photo_location(pid)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+
+    assert read_keywords(xmp_path) == {"House finch"}
+    assert read_hierarchical_keywords(xmp_path) == []
+    db.close()
+
+
+def test_sync_to_xmp_removes_location_keywords_when_the_setting_is_off(
+    tmp_path, monkeypatch,
+):
+    """Turning the setting off cleans up the keywords Vireo wrote earlier."""
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+
+    _location_keyword_config(tmp_path, monkeypatch, keywords=False)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+
+    assert read_keywords(xmp_path) == set()
+    db.close()
+
+
+def test_sync_to_xmp_leaves_lightroom_location_keywords_alone(tmp_path, monkeypatch):
+    """A place typed in Lightroom is not Vireo's to remove."""
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch, keywords=False)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(
+        tmp_path, db, keywords={"Somebody's own place name"},
+    )
+
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+
+    assert read_keywords(xmp_path) == {"Somebody's own place name"}
+    db.close()
+
+
+def test_sync_to_xmp_defers_location_when_config_read_fails(
+    tmp_path, monkeypatch,
+):
+    """A transient config read failure must not silently cleanup Vireo keywords.
+
+    Regression: ``_write_location_keywords_to_xmp_enabled`` used to return
+    ``False`` both for an explicit off and for a raised ``config.load()``.
+    A queued ``location`` change on a transient malformed config would
+    therefore strip the marker and every keyword Vireo wrote, then clear
+    the pending row -- restoring the config would not requeue anything, and
+    the keywords would stay gone until a manual backfill. The tri-state
+    now returns ``"unknown"`` on read failure, and the change stays queued.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+
+    # Simulate a malformed config that raises during load. The queued
+    # location change must stay in the queue and the sidecar must retain
+    # Vireo's previously-written keyword. Patch both ``load`` and
+    # ``load_strict`` -- sync uses ``load_strict`` for the destructive
+    # cleanup gate, but a mock that only replaced one would let a real
+    # ``load`` return the earlier valid config from disk and quietly
+    # cover up the failure mode this regression checks.
+    import config as cfg
+
+    def _raise(*_args, **_kwargs):
+        raise ValueError("config unreadable")
+
+    monkeypatch.setattr(cfg, "load", _raise)
+    monkeypatch.setattr(cfg, "load_strict", _raise)
+
+    db.queue_change(pid, "location", "effective")
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 0
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+    pending_kinds = [c["change_type"] for c in db.get_pending_changes()]
+    assert "location" in pending_kinds
+    db.close()
+
+
+def test_sync_to_xmp_defers_location_when_config_file_is_corrupt(
+    tmp_path, monkeypatch,
+):
+    """A real corrupt config file must not silently cleanup Vireo keywords.
+
+    The synthetic ``load`` monkeypatch above covers the tri-state's
+    ``except`` branch, but the actual production path is ``config.load()``
+    catching the ``json.JSONDecodeError`` and returning ``DEFAULTS`` --
+    an off-by-default write flag then reads False, and the tri-state
+    would return an explicit ``"off"``. ``_xmp_sync_setting_state`` uses
+    ``config.load_strict`` for exactly this case; verify it survives
+    contact with a genuinely malformed config file on disk (rather than
+    a patched loader).
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+
+    # Overwrite the config file with malformed JSON. ``config.load()``
+    # will catch and return defaults (write flag = False), so a caller
+    # trusting ``load()`` sees an explicit off; ``load_strict`` raises
+    # and the tri-state returns ``"unknown"``.
+    import config as cfg
+
+    with open(cfg.CONFIG_PATH, "w") as f:
+        f.write("not valid json {{{")
+
+    db.queue_change(pid, "location", "effective")
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 0
+    assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
+    pending_kinds = [c["change_type"] for c in db.get_pending_changes()]
+    assert "location" in pending_kinds
+    db.close()
+
+
+def test_sync_to_xmp_preserves_ordinary_keyword_matching_cleared_location_leaf(
+    tmp_path, monkeypatch,
+):
+    """An ordinary keyword_add for the leaf survives the same-sync cleanup.
+
+    Regression: after Vireo wrote "Paris" as part of a location, an ordinary
+    keyword_add for "Paris" in the same sync that clears the location used
+    to leave XMP without "Paris" at all -- the add hit an entry the marker
+    still owned, then cleanup deleted it. Ownership must transfer to the
+    ordinary add.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import (
+        read_hierarchical_keywords,
+        read_keywords,
+        read_vireo_location_keywords,
+    )
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    leaf = _add_location_chain(db, ["France", "Paris"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Paris"}
+
+    # In the same sync: user adds "Paris" as an ordinary keyword AND
+    # clears the location. The flat entry is already there, so add is a
+    # no-op; cleanup must not strip it under the marker's flat ownership.
+    db.clear_photo_location(pid)
+    db.queue_change(pid, "location", "effective")
+    db.queue_change(pid, "keyword_add", "Paris")
+    sync_to_xmp(db)
+
+    assert "Paris" in read_keywords(xmp_path)
+    assert read_hierarchical_keywords(xmp_path) == []
+    assert read_vireo_location_keywords(xmp_path) is None
+    assert not db.get_pending_changes()
+    db.close()
+
+
+def test_sync_to_xmp_preserves_ordinary_keyword_matching_reassigned_location_leaf(
+    tmp_path, monkeypatch,
+):
+    """Reassigning a place with the leaf added as an ordinary keyword keeps it.
+
+    Twin of the cleared-location case above but through the write branch:
+    ``set_location_keywords`` writes a new place while an ordinary
+    keyword_add asks to keep the previous place's leaf as a plain keyword.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    first = _add_location_chain(db, ["France", "Paris"])
+    db.set_photo_location(pid, first)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Paris"}
+
+    second = _add_location_chain(db, ["United Kingdom", "London"])
+    db.set_photo_location(pid, second)
+    db.queue_change(pid, "location", "effective")
+    db.queue_change(pid, "keyword_add", "Paris")
+    sync_to_xmp(db)
+
+    assert read_keywords(xmp_path) == {"Paris", "London"}
+    assert not db.get_pending_changes()
+    db.close()
+
+
+def test_sync_from_xmp_keeps_the_assigned_location(tmp_path, monkeypatch):
+    """Reconciling from a sidecar must not unassign a place set in Vireo."""
+    from db import Database
+    from sync import sync_from_xmp
+
+    _location_keyword_config(tmp_path, monkeypatch, keywords=False)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, _xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"House finch"})
+
+    leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, leaf)
+
+    sync_from_xmp(db, [pid])
+
+    names = {row["name"] for row in db.get_photo_keywords(pid)}
+    assert "Kumeyaay Lake" in names
+    db.close()
+
+
+def test_sync_from_xmp_ignores_a_stale_vireo_location_keyword(tmp_path, monkeypatch):
+    """A queued location change means the sidecar's place is already outdated."""
+    from db import Database
+    from sync import sync_from_xmp, sync_to_xmp
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, _xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    first = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
+    db.set_photo_location(pid, first)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+
+    # Reassigned in Vireo but not yet written out: the sidecar still names the
+    # old place.
+    second = _add_location_chain(db, ["France", "Pont de Gau"])
+    db.set_photo_location(pid, second)
+    db.queue_change(pid, "location", "effective")
+
+    sync_from_xmp(db, [pid])
+
+    names = {row["name"] for row in db.get_photo_keywords(pid)}
+    assert names == {"Pont de Gau"}
+    db.close()

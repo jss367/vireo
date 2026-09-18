@@ -140,6 +140,20 @@ SCHEMA = {
         "label": "Write assigned locations to XMP",
         "desc": "Write Vireo-assigned location coordinates to XMP sidecars so Lightroom exports can include GPS metadata.",
     },
+    "write_location_keywords_to_xmp": {
+        "type": "bool",
+        "category": "Metadata", "scope": "both",
+        "label": "Write location keywords to XMP",
+        "desc": (
+            "Write the assigned place and its parent places into XMP sidecars "
+            "as keywords (dc:subject leaf plus an lr:hierarchicalSubject path "
+            "such as United States|California|Kumeyaay Lake), so a catalog "
+            "app reading the sidecar shows the location as a keyword. "
+            "Turning this off queues "
+            "a location change for every located photo in the affected "
+            "workspace(s), so the next sync removes the keywords Vireo wrote."
+        ),
+    },
     "scan_workers": {
         "type": "int", "min": 0, "max": 64,
         "category": "Behavior", "scope": "global",

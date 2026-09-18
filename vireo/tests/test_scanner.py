@@ -7034,3 +7034,89 @@ def test_scan_indexed_count_never_goes_negative(tmp_path, monkeypatch):
     result = scan(str(empty), db)
 
     assert result["indexed"] == 0, result
+
+
+def _sidecar_with_vireo_location(tmp_path, db, chain):
+    """A photo whose sidecar carries Vireo-written location keywords."""
+    from xmp import SidecarEditor
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root, exist_ok=True)
+    xmp_path = os.path.join(root, "bird.xmp")
+
+    folder_id = db.add_folder(root, name="photos")
+    photo_id = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                            extension=".jpg", file_size=100, file_mtime=1.0)
+    parent_id = None
+    for name in chain:
+        parent_id = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, type) VALUES (?, ?, 'location')",
+            (name, parent_id),
+        ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, parent_id)
+
+    editor = SidecarEditor(xmp_path)
+    editor.add_keywords(flat_keywords={"House finch"})
+    editor.set_location_keywords(chain)
+    editor.commit()
+    return photo_id, parent_id, xmp_path
+
+
+def test_xmp_import_reuses_the_location_keyword_vireo_wrote(tmp_path):
+    """Re-importing Vireo's own location keywords must not fork the vocabulary."""
+    from db import Database
+    from scanner import _import_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    photo_id, leaf_id, xmp_path = _sidecar_with_vireo_location(
+        tmp_path, db, ["United States", "California", "Kumeyaay Lake"],
+    )
+
+    _import_keywords_for_photo(db, photo_id, xmp_path)
+
+    linked = db.conn.execute(
+        "SELECT k.id, k.name, k.type FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["id"] for row in linked] == [leaf_id]
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = 'Kumeyaay Lake'"
+    ).fetchone()[0] == 1
+    db.close()
+
+
+def test_xmp_import_skips_a_location_keyword_the_user_already_changed(tmp_path):
+    """A queued location change means the sidecar's place is out of date."""
+    from db import Database
+    from scanner import _import_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    photo_id, old_leaf, xmp_path = _sidecar_with_vireo_location(
+        tmp_path, db, ["United States", "Kumeyaay Lake"],
+    )
+    new_leaf = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Pont de Gau', 'location')"
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, new_leaf)
+    db.queue_change(photo_id, "location", "effective")
+
+    _import_keywords_for_photo(db, photo_id, xmp_path)
+
+    linked = {
+        row["id"] for row in db.conn.execute(
+            "SELECT k.id FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (photo_id,),
+        )
+    }
+    assert linked == {new_leaf}
+    assert old_leaf not in linked
+    names = {k["name"] for k in db.get_photo_keywords(photo_id)}
+    assert "House finch" in names, "unrelated sidecar keywords still import"
+    db.close()

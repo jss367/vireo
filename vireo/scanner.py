@@ -32,7 +32,11 @@ from image_loader import (
     safe_iter_dir,
     safe_scan_walk,
 )
-from keyword_identity import filter_removed_import_aliases, validate_import_locations
+from keyword_identity import (
+    drop_stale_vireo_location_keywords,
+    filter_removed_import_aliases,
+    validate_import_locations,
+)
 from keyword_normalization import keyword_match_key
 from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns, extract_metadata
 from PIL import Image
@@ -284,6 +288,12 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     """Read flat and hierarchical keywords from XMP and populate the database."""
     flat_keywords = read_keywords(xmp_path_str)
     hier_keywords = read_hierarchical_keywords(xmp_path_str)
+    # A sidecar whose location keywords Vireo wrote describes the place the
+    # photo had at the last sync. If a newer place (or none) is already queued
+    # in Vireo, importing those entries would re-attach the old one.
+    flat_keywords, hier_keywords = drop_stale_vireo_location_keywords(
+        db, photo_id, xmp_path_str, flat_keywords, hier_keywords,
+    )
     pending_flat_removals = db.get_pending_keyword_removal_keys(photo_id)
     pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
         photo_id, hierarchical=True,

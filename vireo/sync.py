@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from db import KEYWORD_SOURCE_UNKNOWN
 from keyword_identity import (
+    drop_stale_vireo_location_keywords,
     filter_removed_import_aliases,
     keyword_paths,
     path_key,
@@ -76,30 +77,73 @@ def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
     return paths
 
 
-def _sync_flags_to_xmp_enabled(db):
-    """Return whether the active workspace should write flags to XMP."""
+def _xmp_sync_setting_enabled(db, key):
+    """Return whether the active workspace enables one XMP-write setting.
+
+    A config file that cannot be read must not abort a sync: every one of
+    these settings is off by default, and defaulting to "don't write" leaves
+    the queue intact for the next run instead of writing something the user
+    may not have asked for.
+    """
     try:
         import config as cfg
 
-        return bool(db.get_effective_config(cfg.load()).get("sync_flags_to_xmp", False))
+        return bool(db.get_effective_config(cfg.load()).get(key, False))
     except Exception:
-        log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
+        log.warning("Failed to read %s config", key, exc_info=True)
         return False
+
+
+def _xmp_sync_setting_state(db, key):
+    """Return ``"on"``/``"off"``/``"unknown"`` for one XMP-write setting.
+
+    ``"unknown"`` means the config read failed (parse error or IO error).
+    Callers that gate destructive cleanup on the setting must not treat
+    ``"unknown"`` as an explicit off: a location-keywords cleanup, for
+    instance, would strip the previously-written marker and keywords and
+    clear the pending row, so a later config fix would not requeue anything.
+    Callers only gating writes can keep treating ``"unknown"`` as "don't
+    write" (per ``_xmp_sync_setting_enabled`` above) -- that path leaves
+    the queue alone.
+
+    Uses ``config.load_strict`` rather than ``config.load``: the ordinary
+    loader catches parse/IO exceptions and returns ``DEFAULTS``, so a
+    corrupt config would silently return the default False for this key,
+    which is exactly the destructive off/on we need to distinguish from a
+    read failure.
+    """
+    try:
+        import config as cfg
+
+        val = bool(db.get_effective_config(cfg.load_strict()).get(key, False))
+        return "on" if val else "off"
+    except Exception:
+        log.warning("Failed to read %s config", key, exc_info=True)
+        return "unknown"
+
+
+def _sync_flags_to_xmp_enabled(db):
+    """Return whether the active workspace should write flags to XMP."""
+    return _xmp_sync_setting_enabled(db, "sync_flags_to_xmp")
 
 
 def _write_assigned_location_to_xmp_enabled(db):
     """Return whether the active workspace should write assigned GPS to XMP."""
-    try:
-        import config as cfg
+    return _xmp_sync_setting_enabled(db, "write_assigned_location_to_xmp")
 
-        return bool(
-            db.get_effective_config(cfg.load()).get(
-                "write_assigned_location_to_xmp", False
-            )
-        )
-    except Exception:
-        log.warning("Failed to read write_assigned_location_to_xmp config", exc_info=True)
-        return False
+
+def _write_location_keywords_to_xmp_enabled(db):
+    """Return whether the active workspace should write location keywords."""
+    return _xmp_sync_setting_enabled(db, "write_location_keywords_to_xmp")
+
+
+def _write_location_keywords_to_xmp_state(db):
+    """Return ``"on"``/``"off"``/``"unknown"`` for the location-keywords setting.
+
+    Cleanup is destructive (drops the marker and every entry it names), so
+    we need to tell an explicit False from a transient config read failure.
+    """
+    return _xmp_sync_setting_state(db, "write_location_keywords_to_xmp")
 
 
 _KEYWORD_CHANGE_TYPES = ("keyword_add", "keyword_remove", "keyword_remove_flat")
@@ -163,6 +207,11 @@ class _PhotoSyncPlan:
     edit_recipe_json: str | None = None
     sync_location: bool = False
     cleanup_location: bool = False
+    # The keyword half of a ``location`` change, gated by its own setting:
+    # GPS puts the photo on a map, keywords put the place name in Lightroom's
+    # keyword list, and the user can want either without the other.
+    sync_location_keywords: bool = False
+    cleanup_location_keywords: bool = False
     # (change_id, change_token) per supported change. The clear runs after
     # the sidecar write, by which time a reused rowid can name a different
     # row -- see Database.clear_pending_by_token.
@@ -170,8 +219,20 @@ class _PhotoSyncPlan:
     unsupported_changes: list = field(default_factory=list)
 
 
-def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
-    """Fold one photo's pending changes into a ``_PhotoSyncPlan``."""
+def _plan_photo_sync(photo_changes, sync_flags, sync_locations,
+                     sync_location_keywords_state="off"):
+    """Fold one photo's pending changes into a ``_PhotoSyncPlan``.
+
+    ``sync_location_keywords_state`` is a tri-state:
+
+    - ``"on"``      -- the queued ``location`` change writes keywords.
+    - ``"off"``     -- the queued ``location`` change runs cleanup.
+    - ``"unknown"`` -- config read failed; leave the ``location`` change
+      unsupported so a future sync with a readable config can decide.
+      Silently running cleanup here would strip the previously-written
+      marker and keywords and clear the pending row, so a later config
+      fix would not requeue anything.
+    """
     plan = _PhotoSyncPlan()
     for c in photo_changes:
         kind = c["change_type"]
@@ -191,10 +252,21 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations):
                 continue
             plan.flag = c["value"] or "none"
         elif kind == "location":
+            if sync_location_keywords_state == "unknown":
+                # A transient malformed config must not be interpreted as
+                # an explicit off: cleanup would strip the previously-
+                # written marker and keywords and clear the pending row,
+                # stranding the sidecars until a manual backfill.
+                plan.unsupported_changes.append(c)
+                continue
             if sync_locations:
                 plan.sync_location = True
             else:
                 plan.cleanup_location = True
+            if sync_location_keywords_state == "on":
+                plan.sync_location_keywords = True
+            else:
+                plan.cleanup_location_keywords = True
         elif kind == "edit_recipe":
             plan.edit_recipe_json = c["value"] or ""
         else:
@@ -258,7 +330,8 @@ def _remove_planned_keywords(editor, plan):
         )
 
 
-def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sidecars=False):
+def _write_photo_sync(xmp_path, plan, assigned_location=None, location_path=None,
+                      create_missing_sidecars=False):
     """Apply a ``_PhotoSyncPlan`` to the photo's sidecar, in dependency order.
 
     Every mutation lands in one ``SidecarEditor``, so the sidecar is parsed
@@ -266,9 +339,9 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sid
     queued. The ordering below still matters: it decides what the single
     published tree contains.
 
-    ``assigned_location`` is passed in rather than looked up here because the
-    writers run on a pool thread and the SQLite connection belongs to the
-    caller's thread.
+    ``assigned_location`` and ``location_path`` are passed in rather than
+    looked up here because the writers run on a pool thread and the SQLite
+    connection belongs to the caller's thread.
 
     ``create_missing_sidecars`` only affects a rating-only photo, the one
     mutation that otherwise declines to create a sidecar; see
@@ -282,6 +355,18 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sid
     # Apply keyword additions after removals so a same-photo remove+add
     # pair does not cancel out (see _remove_planned_keywords).
     if plan.keywords_to_add:
+        # An ordinary ``keyword_add`` for the same leaf a prior location
+        # write authored (say, the user adds "Paris" while the photo's
+        # location has always been "France|Paris") would land on an entry
+        # already in ``dc:subject`` -- ``add_keywords`` is a no-op there --
+        # and a later ``remove_vireo_location_keywords`` or a place-change
+        # in this same sync would then strip the leaf under the marker's
+        # flat ownership claim, leaving the user's keyword absent. Transfer
+        # ownership away from the location marker BEFORE the add, so the
+        # subsequent cleanup respects the transfer and leaves the flat
+        # entry alone. Hierarchical ownership is untouched because
+        # ``keyword_add`` writes ``dc:subject`` only.
+        editor.release_location_flat_ownership_for(plan.keywords_to_add)
         editor.add_keywords(
             flat_keywords=plan.keywords_to_add, hierarchical_keywords=plan.hierarchies_to_add
         )
@@ -290,6 +375,18 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None, create_missing_sid
     # while a rating intentionally only updates existing ones.
     if plan.flag is not None:
         editor.set_pick_flag(plan.flag)
+
+    # Location keywords go in after the queued keyword adds and removes so
+    # that a hierarchical remove sharing a segment with the place chain (say,
+    # a removed keyword named after the town) cannot strip the hierarchy this
+    # write is putting back.
+    if plan.sync_location_keywords:
+        # An empty chain is the "no location any more" case, and
+        # set_location_keywords() routes it to the same removal the disabled
+        # setting takes.
+        editor.set_location_keywords(location_path or ())
+    elif plan.cleanup_location_keywords:
+        editor.remove_vireo_location_keywords()
 
     if plan.sync_location:
         loc = assigned_location
@@ -464,6 +561,12 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
 
     sync_flags = _sync_flags_to_xmp_enabled(db)
     sync_locations = _write_assigned_location_to_xmp_enabled(db)
+    # Tri-state so a config read failure ("unknown") is not treated as an
+    # explicit off -- cleanup would otherwise strip the marker on every
+    # queued location change and clear the pending row, stranding the
+    # sidecars until manual backfill. See _plan_photo_sync.
+    sync_location_keywords_state = _write_location_keywords_to_xmp_state(db)
+    sync_location_keywords = sync_location_keywords_state == "on"
 
     # Everything that needs the database happens here, on the caller's
     # thread: the sidecar writers below run on a pool and must not touch the
@@ -507,6 +610,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         try:
             plans[photo_id] = _plan_photo_sync(
                 photo_changes, sync_flags, sync_locations,
+                sync_location_keywords_state,
             )
         except Exception as e:
             # A malformed queue row -- a rating whose value is NULL or not an
@@ -520,6 +624,19 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             }
 
     _plan_merged_keyword_hierarchies(db, plans)
+
+    # Names, unlike coordinates, come out of one batched query: a shoot
+    # shares a place, and a 38,000-photo backfill cannot afford a chain walk
+    # per photo. No workspace check here -- ``get_pending_changes`` is already
+    # workspace-scoped, and the sidecar path these names are written to was
+    # resolved under the same membership and sync-only rules above.
+    location_paths = {}
+    if sync_location_keywords:
+        keyword_photo_ids = [
+            photo_id for photo_id, plan in plans.items()
+            if plan.sync_location_keywords
+        ]
+        location_paths = db.get_photo_location_paths(keyword_photo_ids)
 
     locations = {}
     if sync_locations:
@@ -613,6 +730,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 with lock_for(xmp_path):
                     _write_photo_sync(
                         xmp_path, plans[photo_id], locations.get(photo_id),
+                        location_paths.get(photo_id),
                         create_missing_sidecars=create_missing_sidecars,
                     )
             except Exception as e:  # recorded per photo, as before
@@ -741,12 +859,21 @@ def sync_from_xmp(db, photo_ids):
             # abort the whole sidecar reconcile on a malformed edge-quote
             # keyword instead of ignoring it and processing the rest.
             xmp_keywords = read_keywords(xmp_path)
+            sidecar_hierarchies = read_hierarchical_keywords(xmp_path)
+            # Vireo-written location keywords for a place the user has since
+            # changed describe the sidecar's past, not the photo's present.
+            xmp_keywords, sidecar_hierarchies = drop_stale_vireo_location_keywords(
+                db, photo_id, xmp_path, xmp_keywords, sidecar_hierarchies,
+            )
             pending_removals = db.get_pending_keyword_removal_keys(photo_id)
             pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
                 photo_id, hierarchical=True,
             )
+            # Chained, not re-read: the alias filter runs on the hierarchy
+            # list the stale-location filter already pruned, so a queued
+            # location change still suppresses the sidecar's old place.
             xmp_keywords, imported_hierarchies = filter_removed_import_aliases(
-                db, photo_id, xmp_keywords, read_hierarchical_keywords(xmp_path),
+                db, photo_id, xmp_keywords, sidecar_hierarchies,
                 pending_removals, pending_hierarchical_removals,
             )
             pending_flat_only_removals = (
@@ -808,6 +935,13 @@ def sync_from_xmp(db, photo_ids):
                     kw["parent_id"] is not None
                     and kw_key in pending_flat_only_removals
                 )
+                # A location is assigned in Vireo and only copied outward, and
+                # whether it appears in the sidecar at all depends on a
+                # setting. Pruning it here would let a reconcile silently
+                # unassign the place -- including every place assigned while
+                # location keyword writes were off.
+                if kw["type"] == "location":
+                    continue
                 if kw_key not in xmp_keywords_by_key and kw['id'] not in resolved_ids and not preserve_hierarchy:
                     db.untag_photo(photo_id, kw["id"], _commit=False)
 

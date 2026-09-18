@@ -393,6 +393,93 @@ def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(cat
     assert {k['id'] for k in db.get_photo_keywords(photos[2])} == before
 
 
+def _sidecar_with_marker(path, *, marker, owned, flat, hierarchical):
+    """Write a sidecar with an explicit Vireo location-keyword ownership marker."""
+    from xmp import (
+        LOCATION_KEYWORDS_MARKER,
+        LOCATION_KEYWORDS_OWNED,
+        SidecarEditor,
+    )
+
+    editor = SidecarEditor(str(path))
+    editor.add_keywords(flat_keywords=set(flat), hierarchical_keywords=set(hierarchical))
+    desc = editor._description()
+    desc.set(LOCATION_KEYWORDS_MARKER, marker)
+    if owned is not None:
+        desc.set(LOCATION_KEYWORDS_OWNED, owned)
+    editor._dirty = True
+    editor.commit()
+
+
+def test_drop_stale_vireo_location_keywords_keeps_a_users_flat_leaf(catalog, tmp_path):
+    """A queued change does not drop a flat leaf Vireo never claimed to own."""
+    from keyword_identity import drop_stale_vireo_location_keywords
+
+    db, photos = catalog
+    db.queue_change(photos[0], 'location', 'effective')
+    sidecar = tmp_path / 'photo.xmp'
+    _sidecar_with_marker(
+        sidecar,
+        marker='United States|California|Kumeyaay Lake',
+        owned='hier',
+        flat={'Kumeyaay Lake', 'House finch'},
+        hierarchical={'United States|California|Kumeyaay Lake', 'Birds|House finch'},
+    )
+    flat, hier = drop_stale_vireo_location_keywords(
+        db, photos[0], str(sidecar),
+        {'Kumeyaay Lake', 'House finch'},
+        ['United States|California|Kumeyaay Lake', 'Birds|House finch'],
+    )
+    assert flat == {'Kumeyaay Lake', 'House finch'}
+    assert 'United States|California|Kumeyaay Lake' not in hier
+    assert 'Birds|House finch' in hier
+
+
+def test_drop_stale_vireo_location_keywords_keeps_a_users_hierarchy(catalog, tmp_path):
+    """A queued change does not drop a hierarchy Vireo never claimed to own."""
+    from keyword_identity import drop_stale_vireo_location_keywords
+
+    db, photos = catalog
+    db.queue_change(photos[0], 'location', 'effective')
+    sidecar = tmp_path / 'photo.xmp'
+    _sidecar_with_marker(
+        sidecar,
+        marker='United States|California|Kumeyaay Lake',
+        owned='flat',
+        flat={'Kumeyaay Lake'},
+        hierarchical={'United States|California|Kumeyaay Lake'},
+    )
+    flat, hier = drop_stale_vireo_location_keywords(
+        db, photos[0], str(sidecar),
+        {'Kumeyaay Lake'},
+        ['United States|California|Kumeyaay Lake'],
+    )
+    assert flat == set()
+    assert hier == ['United States|California|Kumeyaay Lake']
+
+
+def test_drop_stale_vireo_location_keywords_legacy_marker_drops_both(catalog, tmp_path):
+    """A sidecar written before the ownership record keeps the old behaviour."""
+    from keyword_identity import drop_stale_vireo_location_keywords
+
+    db, photos = catalog
+    db.queue_change(photos[0], 'location', 'effective')
+    sidecar = tmp_path / 'photo.xmp'
+    _sidecar_with_marker(
+        sidecar,
+        marker='United States|California|Kumeyaay Lake',
+        owned=None,  # legacy: companion attribute absent
+        flat={'Kumeyaay Lake'},
+        hierarchical={'United States|California|Kumeyaay Lake'},
+    )
+    flat, hier = drop_stale_vireo_location_keywords(
+        db, photos[0], str(sidecar),
+        {'Kumeyaay Lake'},
+        ['United States|California|Kumeyaay Lake'],
+    )
+    assert flat == set()
+    assert hier == []
+
 def test_manual_merge_preview_and_cross_workspace_sidecar_updates(catalog):
     db, photos = catalog
     source = db.add_keyword('Wing St. Canyon', kw_type='location')

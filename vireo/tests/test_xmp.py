@@ -940,3 +940,573 @@ def test_repeated_writer_calls_do_not_republish_unchanged_metadata(
     # A real change still publishes.
     write_rating(sample_xmp, 3)
     assert len(published) == 1
+
+
+# ── Location keywords ───────────────────────────────────────────────────
+
+def test_set_location_keywords_writes_leaf_and_hierarchy(tmp_path):
+    """The place goes into dc:subject, the whole chain into lr:hierarchicalSubject."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(
+        ["United States", "California", "San Carlos", "Kumeyaay Lake"]
+    )
+    assert editor.commit() is True
+
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+    assert read_hierarchical_keywords(path) == [
+        "United States|California|San Carlos|Kumeyaay Lake"
+    ]
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["location_keywords"] == (
+        "United States|California|San Carlos|Kumeyaay Lake"
+    )
+
+
+def test_set_location_keywords_is_a_no_op_when_already_written(tmp_path):
+    """Re-syncing an unchanged place costs a read, not a publish."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Camargue"])
+    editor.commit()
+
+    again = SidecarEditor(path)
+    again.set_location_keywords(["France", "Camargue"])
+    assert again.commit() is False
+
+
+def test_set_location_keywords_replaces_the_previous_place(tmp_path):
+    """A photo moved to another place keeps only its current location keywords."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.add_keywords(flat_keywords={"House finch"})
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    moved = SidecarEditor(path)
+    moved.set_location_keywords(["France", "Camargue", "Pont de Gau"])
+    assert moved.commit() is True
+
+    assert read_keywords(path) == {"House finch", "Pont de Gau"}
+    assert read_hierarchical_keywords(path) == ["France|Camargue|Pont de Gau"]
+
+
+def test_set_location_keywords_canonicalizes_a_case_variant(tmp_path):
+    """A sidecar spelling of the place is rewritten, not duplicated."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(path, flat_keywords={"kumeyaay lake"}, hierarchical_keywords=set())
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "Kumeyaay Lake"])
+    editor.commit()
+
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+
+
+def test_remove_vireo_location_keywords_leaves_user_keywords_alone(tmp_path):
+    """Only the entries recorded by Vireo's own write are removed."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.add_keywords(
+        flat_keywords={"House finch", "Backyard"},
+        hierarchical_keywords={"Places|Backyard"},
+    )
+    editor.set_location_keywords(["United States", "Kumeyaay Lake"])
+    editor.commit()
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    assert read_keywords(path) == {"House finch", "Backyard"}
+    assert read_hierarchical_keywords(path) == ["Places|Backyard"]
+    assert read_sync_preview_metadata(path)["location_keywords"] is None
+
+
+def test_remove_vireo_location_keywords_without_a_marker_is_a_no_op(tmp_path):
+    """A place the user typed in Lightroom is not Vireo's to remove."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(
+        path,
+        flat_keywords={"Kumeyaay Lake"},
+        hierarchical_keywords={"United States|Kumeyaay Lake"},
+    )
+
+    editor = SidecarEditor(path)
+    assert editor.remove_vireo_location_keywords() is False
+    assert editor.commit() is False
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+
+
+def test_set_location_keywords_with_an_empty_chain_removes_them(tmp_path):
+    """An unset location takes the same removal path as the disabled setting."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "Kumeyaay Lake"])
+    editor.commit()
+
+    cleared = SidecarEditor(path)
+    cleared.set_location_keywords([])
+    cleared.commit()
+
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_read_vireo_location_keywords_on_a_missing_sidecar(tmp_path):
+    from xmp import read_vireo_location_keywords
+
+    assert read_vireo_location_keywords(str(tmp_path / "nope.xmp")) is None
+
+
+def test_set_location_keywords_does_not_claim_a_users_flat_leaf(tmp_path):
+    """A pre-existing flat leaf the user typed is not Vireo's to remove."""
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    # The user (or Lightroom, or another Vireo keyword) already has the leaf
+    # in dc:subject before Vireo assigns the place.
+    write_sidecar(path, flat_keywords={"Kumeyaay Lake"}, hierarchical_keywords=set())
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    # Vireo owns only the hierarchy it added; the flat entry was already there.
+    assert read_vireo_location_keywords_owned(path) == "hier"
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # The user's flat leaf survives; only the hierarchy Vireo wrote is removed.
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_set_location_keywords_does_not_claim_a_users_hierarchy(tmp_path):
+    """A pre-existing hierarchy the user typed is not Vireo's to remove."""
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(
+        path,
+        flat_keywords=set(),
+        hierarchical_keywords={"United States|California|Kumeyaay Lake"},
+    )
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    assert read_vireo_location_keywords_owned(path) == "flat"
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == [
+        "United States|California|Kumeyaay Lake"
+    ]
+
+
+def test_set_location_keywords_claims_neither_when_both_pre_exist(tmp_path):
+    """Neither entry becomes Vireo's when the user typed both first."""
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(
+        path,
+        flat_keywords={"Kumeyaay Lake"},
+        hierarchical_keywords={"United States|California|Kumeyaay Lake"},
+    )
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    # Vireo still stamps the marker (so a later re-run knows the state) but
+    # claims neither entry, since add_keywords() inserted nothing.
+    assert read_vireo_location_keywords_owned(path) == ""
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # Both user entries survive.
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+    assert read_hierarchical_keywords(path) == [
+        "United States|California|Kumeyaay Lake"
+    ]
+
+
+def test_set_location_keywords_marks_both_when_it_inserts_both(tmp_path):
+    """A fresh sidecar gets both entries and both are Vireo's to remove."""
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    assert read_vireo_location_keywords_owned(path) == "flat,hier"
+
+
+def test_set_location_keywords_preserves_ownership_on_a_no_op_rewrite(tmp_path):
+    """A repeat write of the same path keeps the earlier ownership claim."""
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+    assert read_vireo_location_keywords_owned(path) == "flat,hier"
+
+    # A second call finds both entries already present -- they are the ones
+    # the first call inserted -- and must not downgrade the claim.
+    again = SidecarEditor(path)
+    again.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    again.commit()
+    assert read_vireo_location_keywords_owned(path) == "flat,hier"
+
+
+def test_set_location_keywords_replaces_previous_only_removes_what_it_owned(tmp_path):
+    """Moving between places does not delete a keyword the user added between."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    # Between the two writes the user adds their own flat "Pont de Gau" -- the
+    # future new leaf -- in Lightroom.
+    write_sidecar(path, flat_keywords={"Pont de Gau"}, hierarchical_keywords=set())
+
+    moved = SidecarEditor(path)
+    moved.set_location_keywords(["France", "Camargue", "Pont de Gau"])
+    moved.commit()
+
+    # The user's "Pont de Gau" survives even though the new place shares its
+    # leaf: the flat is not claimed on the new write, and a later clear won't
+    # touch it.
+    assert read_keywords(path) == {"Pont de Gau"}
+    assert read_hierarchical_keywords(path) == ["France|Camargue|Pont de Gau"]
+
+    cleanup = SidecarEditor(path)
+    cleanup.remove_vireo_location_keywords()
+    cleanup.commit()
+    assert read_keywords(path) == {"Pont de Gau"}
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_set_location_keywords_does_not_claim_a_users_flat_case_variant(tmp_path):
+    """A pre-existing normalized flat variant is the user's, not Vireo's.
+
+    The canonicalization step in ``set_location_keywords`` strips a leaf
+    spelling like ``kumeyaay lake`` before ``add_keywords`` writes the
+    canonical ``Kumeyaay Lake``. A snapshot taken after that removal would
+    misread the canonical entry as a fresh Vireo insert, so a later clear
+    or setting-toggle would delete the user's keyword under a new spelling.
+    """
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(path, flat_keywords={"kumeyaay lake"}, hierarchical_keywords=set())
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    # Vireo added the hierarchy but not the flat leaf (it was the user's).
+    assert read_vireo_location_keywords_owned(path) == "hier"
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # The user's flat leaf (now canonicalized) survives the removal.
+    assert read_keywords(path) == {"Kumeyaay Lake"}
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_set_location_keywords_does_not_claim_a_users_hier_case_variant(tmp_path):
+    """A pre-existing normalized hierarchy variant is the user's, not Vireo's.
+
+    ``_remove_location_keyword_entries`` matches hierarchical entries on
+    normalized keys, so if Vireo claimed the canonical hierarchy it added
+    beside a user's ``united states|california|kumeyaay lake`` variant, a
+    later removal would strip the user's entry too.
+    """
+    from xmp import SidecarEditor, read_vireo_location_keywords_owned
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(
+        path,
+        flat_keywords=set(),
+        hierarchical_keywords={"united states|california|kumeyaay lake"},
+    )
+
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["United States", "California", "Kumeyaay Lake"])
+    editor.commit()
+
+    # Vireo added the flat leaf but not the hierarchy (it was the user's).
+    assert read_vireo_location_keywords_owned(path) == "flat"
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # The user's hierarchy variant survives the removal.
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == [
+        "united states|california|kumeyaay lake"
+    ]
+
+
+def test_remove_vireo_location_keywords_leaves_user_normalized_flat_variant(tmp_path):
+    """A user's normalized flat variant added after our write is not ours to remove.
+
+    Vireo writes canonical ``Paris``. Later, a user (or another metadata
+    tool) adds the normalized variant ``paris`` as a separate ``rdf:li``.
+    A blind normalized-key match would remove both entries on cleanup; the
+    fix restricts removal to the exact spelling recorded in the marker
+    when it is still present in the sidecar.
+    """
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Paris"])
+    editor.commit()
+
+    # User adds a normalized variant of the flat leaf beside our canonical entry.
+    tampered = SidecarEditor(path)
+    tampered.add_keywords(flat_keywords={"paris"}, hierarchical_keywords=set())
+    tampered.commit()
+    assert read_keywords(path) == {"Paris", "paris"}
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # Only our exact entry is gone; the user's variant survives.
+    assert read_keywords(path) == {"paris"}
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_remove_vireo_location_keywords_leaves_user_normalized_hier_variant(tmp_path):
+    """A user's normalized hierarchy variant added after our write is not ours."""
+    from xmp import SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Paris"])
+    editor.commit()
+
+    tampered = SidecarEditor(path)
+    tampered.add_keywords(
+        flat_keywords=set(), hierarchical_keywords={"france|paris"},
+    )
+    tampered.commit()
+    assert set(read_hierarchical_keywords(path)) == {"France|Paris", "france|paris"}
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # Only our exact hierarchy entry is gone; the user's variant survives.
+    assert read_hierarchical_keywords(path) == ["france|paris"]
+    assert read_keywords(path) == set()
+
+
+def test_remove_vireo_location_keywords_falls_back_to_normalized_when_lightroom_rewrote(
+    tmp_path,
+):
+    """When Lightroom rewrites our exact entry, the normalized fallback still cleans it up.
+
+    Vireo writes ``Paris`` and Lightroom later normalizes it to ``paris``
+    in place, so the exact spelling recorded in the marker is no longer
+    present. The removal path falls back to a single normalized match so
+    the entry Vireo wrote still gets cleaned up. Only one entry is
+    removed even if multiple normalized variants are present, so a user
+    variant added independently is not swept up with it.
+    """
+    from xmp import LOCATION_KEYWORDS_MARKER, NS_LR, NS_RDF, SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Paris"])
+    editor.commit()
+
+    # Simulate Lightroom rewriting the exact entry in place.
+    rewritten = SidecarEditor(path)
+    desc = rewritten._description()
+    dc_bag = rewritten._bag(desc, "http://purl.org/dc/elements/1.1/", "subject")
+    for li in dc_bag.findall(f"{{{NS_RDF}}}li"):
+        if li.text == "Paris":
+            li.text = "PARIS"
+    lr_bag = rewritten._bag(desc, NS_LR, "hierarchicalSubject")
+    for li in lr_bag.findall(f"{{{NS_RDF}}}li"):
+        if li.text == "France|Paris":
+            li.text = "france|paris"
+    rewritten._dirty = True
+    rewritten.commit()
+    assert desc.get(LOCATION_KEYWORDS_MARKER) == "France|Paris"
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # The rewritten entries -- our write in Lightroom's spelling -- are gone.
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []
+
+
+def test_remove_vireo_location_keywords_normalized_fallback_removes_only_one_variant(
+    tmp_path,
+):
+    """When no exact match survives, cleanup removes at most one normalized entry.
+
+    If Lightroom rewrote our entry and a user independently added another
+    normalized variant, the marker records what we wrote but the sidecar
+    holds two candidates. Removing every normalized match would delete
+    user data; the fallback drops one entry only so at most one variant
+    is lost.
+    """
+    from xmp import LOCATION_KEYWORDS_MARKER, NS_RDF, SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    editor.set_location_keywords(["France", "Paris"])
+    editor.commit()
+
+    # Rewrite our exact entry to "PARIS" and have the user add "paris" too.
+    tampered = SidecarEditor(path)
+    desc = tampered._description()
+    dc_bag = tampered._bag(desc, "http://purl.org/dc/elements/1.1/", "subject")
+    for li in dc_bag.findall(f"{{{NS_RDF}}}li"):
+        if li.text == "Paris":
+            li.text = "PARIS"
+    tampered._dirty = True
+    tampered.commit()
+
+    tampered = SidecarEditor(path)
+    tampered.add_keywords(flat_keywords={"paris"}, hierarchical_keywords=set())
+    tampered.commit()
+    assert read_keywords(path) == {"PARIS", "paris"}
+    assert (
+        tampered._description().get(LOCATION_KEYWORDS_MARKER) == "France|Paris"
+    )
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    # Exactly one normalized variant survives -- we removed one, not both.
+    assert len(read_keywords(path)) == 1
+    assert read_keywords(path).issubset({"PARIS", "paris"})
+
+
+def test_set_location_keywords_refuses_a_name_with_a_pipe(tmp_path, caplog):
+    """A location whose name contains ``|`` cannot round-trip through
+    Lightroom's hierarchy delimiter, so the write raises rather than
+    silently succeeding.
+
+    ``get_or_create_text_location`` now rejects the pipe at assignment,
+    but a legacy row (or a Google Place name that already carried one)
+    can still reach this method. The Lightroom hierarchical-subject
+    format and Vireo's own marker parser both split on ``|``, so writing
+    a single-part place named ``Home|Cabin`` would leave a flat keyword
+    the cleanup step could never find (its marker parses as a two-level
+    path with leaf ``Cabin``) and an import would misread the entry as a
+    two-node hierarchy. There is no reversible encoding: Lightroom
+    renders escape sequences literally. A silent skip would let the
+    sync layer clear the pending ``location`` change, so ``raise`` is
+    the shape that keeps it queued.
+    """
+    import logging
+
+    import pytest
+    from xmp import SidecarEditor, read_vireo_location_keywords
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    with caplog.at_level(logging.WARNING, logger="xmp"):
+        with pytest.raises(ValueError, match=r"\|"):
+            editor.set_location_keywords(["Home|Cabin"])
+    editor.commit()
+
+    # Nothing was written -- no keywords, no marker, no ownership record.
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []
+    assert read_vireo_location_keywords(path) is None
+    assert any(
+        "Home|Cabin" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_set_location_keywords_refuses_a_pipe_in_an_ancestor(tmp_path):
+    """Any segment containing ``|`` disqualifies the whole chain."""
+    import pytest
+    from xmp import SidecarEditor, read_vireo_location_keywords
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    with pytest.raises(ValueError, match=r"\|"):
+        editor.set_location_keywords(
+            ["United|States", "California", "Kumeyaay Lake"]
+        )
+    editor.commit()
+
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []
+    assert read_vireo_location_keywords(path) is None
+
+
+def test_remove_vireo_location_keywords_defaults_to_both_on_legacy_marker(tmp_path):
+    """A sidecar missing the ownership companion is treated as pre-fix.
+
+    Vireo shipped a first version of this feature that wrote the marker but
+    no ownership record. Removal on such a sidecar must still clear both
+    entries -- the pre-fix behaviour -- or an upgraded Vireo would leak
+    stale keywords into every catalog that ran the old release.
+    """
+    from xmp import LOCATION_KEYWORDS_MARKER, SidecarEditor
+
+    path = str(tmp_path / "photo.xmp")
+    write_sidecar(
+        path,
+        flat_keywords={"Kumeyaay Lake"},
+        hierarchical_keywords={"United States|Kumeyaay Lake"},
+    )
+    # Simulate a legacy write: the marker is present, the companion is not.
+    editor = SidecarEditor(path)
+    desc = editor._description()
+    desc.set(LOCATION_KEYWORDS_MARKER, "United States|Kumeyaay Lake")
+    editor._dirty = True
+    editor.commit()
+
+    cleanup = SidecarEditor(path)
+    assert cleanup.remove_vireo_location_keywords() is True
+    cleanup.commit()
+
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []

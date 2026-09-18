@@ -174,7 +174,7 @@ from working_copy_cache import (
     working_copy_quota_bytes,
     working_copy_stats,
 )
-from xmp import read_sync_preview_metadata
+from xmp import location_keyword_entries, read_sync_preview_metadata
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -555,8 +555,175 @@ def _discard_history_items(db, changes):
     return items
 
 
+def _sync_preview_location_gps_presentation(
+    metadata, assigned_location, write_locations,
+):
+    """Describe the GPS half of a queued ``location`` change."""
+    current_coordinates = _sync_preview_coordinate_text(
+        metadata.get("location")
+    )
+    before = current_coordinates or _sync_preview_absent_xmp_value(
+        metadata, "No GPS in XMP",
+    )
+    location_coordinates = _sync_preview_coordinate_text(assigned_location)
+    location_name = _sync_preview_location_name(assigned_location)
+
+    if write_locations and location_coordinates:
+        return {
+            "field": "Location",
+            "action": "updated",
+            "before": before,
+            "after": location_name or location_coordinates,
+            "after_detail": (
+                f"{location_coordinates} · from a location keyword"
+            ),
+        }
+
+    if assigned_location:
+        if location_coordinates:
+            detail = (
+                f"{location_name} is assigned in Vireo; writing its GPS "
+                "to XMP is turned off"
+            )
+        else:
+            detail = (
+                f"{location_name or 'This location'} is assigned in Vireo; "
+                "it has no GPS coordinates to write to XMP"
+            )
+
+        if metadata.get("location_source"):
+            restored_coordinates = _sync_preview_coordinate_text(
+                metadata.get("previous_location")
+            )
+            if restored_coordinates:
+                detail += f"; XMP GPS returns to {restored_coordinates}"
+            else:
+                detail += "; previously Vireo-assigned GPS is removed from XMP"
+
+        return {
+            "field": "Location",
+            "action": "added",
+            "before": before,
+            "after": location_name or "Assigned location",
+            "after_detail": detail,
+        }
+
+    if metadata.get("location_source"):
+        restored_coordinates = _sync_preview_coordinate_text(
+            metadata.get("previous_location")
+        )
+        return {
+            "field": "Location",
+            "action": "cleared",
+            "before": before,
+            "after": restored_coordinates or "No GPS in XMP",
+            "after_detail": (
+                "Restores the GPS that existed before Vireo"
+                if restored_coordinates
+                else "Removes Vireo-assigned GPS"
+            ),
+        }
+
+    return {
+        "field": "XMP location",
+        "action": "unchanged",
+        "before": before,
+        "after": before,
+        "after_detail": "No Vireo-assigned GPS needs to be removed",
+    }
+
+
+def _sync_preview_merge_location_keywords(
+    presentation, metadata, assigned_location, location_path,
+    write_location_keywords,
+):
+    """Fold the keyword half of a ``location`` change into its presentation.
+
+    One queued ``location`` row can write two different things -- GPS and
+    keywords -- under two independent settings, and the review has one line
+    per row to say what the sync will do. The GPS wording is left exactly as
+    it was and the keyword outcome is appended, so a review of a catalog with
+    location keywords turned off (the default) reads as it always has.
+
+    "Already in XMP" is checked against the sidecar's actual entries, not just
+    the marker Vireo stamped: a keyword deleted in Lightroom must read as a
+    write, not as a no-op.
+    """
+    def in_sidecar(path):
+        """Whether the sidecar still carries both entries for one place path."""
+        leaf, hierarchical = location_keyword_entries(path)
+        if not hierarchical:
+            return False
+        leaf_key = keyword_match_key(leaf)
+        # Match ``set_location_keywords``'s ``existed_hier`` logic: it treats
+        # a sidecar variant that differs only in case or normalized spacing
+        # as already present and skips the write. An exact-string check here
+        # would tell the reviewer "writes the keyword X" for a queued row
+        # the sync will then leave untouched.
+        path_keys = [keyword_match_key(part) for part in hierarchical.split("|")]
+        return (
+            any(
+                [keyword_match_key(s) for s in entry.split("|")] == path_keys
+                for entry in (metadata.get("hierarchical_keywords") or set())
+            )
+            and any(
+                keyword_match_key(keyword) == leaf_key
+                for keyword in (metadata.get("keywords") or set())
+            )
+        )
+
+    hierarchy = "|".join(location_path or ())
+    previously_written = metadata.get("location_keywords")
+
+    if write_location_keywords and hierarchy:
+        already_written = previously_written == hierarchy and in_sidecar(hierarchy)
+        detail = (
+            f"XMP already lists the keyword {hierarchy}"
+            if already_written
+            else f"writes the keyword {hierarchy}"
+        )
+        changes_keywords = not already_written
+    elif previously_written:
+        # The marker can outlive its entries -- someone deleted the keyword in
+        # Lightroom. Clearing the marker is still a write, but promising to
+        # remove a keyword that is already gone would not be true.
+        detail = (
+            f"removes the keyword {previously_written} Vireo wrote"
+            if in_sidecar(previously_written)
+            else "clears the location-keyword marker Vireo left in XMP"
+        )
+        if not write_location_keywords:
+            detail += "; writing location keywords to XMP is turned off"
+        changes_keywords = True
+    else:
+        return presentation
+
+    merged = dict(presentation)
+    merged["after_detail"] = " · ".join(
+        part for part in (presentation.get("after_detail"), detail) if part
+    )
+    if changes_keywords:
+        # The GPS half may have nothing to do -- the setting is off, or there
+        # was never any Vireo GPS to remove -- while the keyword half still
+        # rewrites the sidecar. Reporting that as "unchanged" would promise a
+        # no-op and then write the file.
+        merged["field"] = "Location"
+        if merged["action"] == "unchanged":
+            if hierarchy:
+                merged["action"] = "updated"
+                merged["after"] = (
+                    _sync_preview_location_name(assigned_location)
+                    or location_path[-1]
+                )
+            else:
+                merged["action"] = "cleared"
+                merged["after"] = "No Vireo location keywords in XMP"
+    return merged
+
+
 def _sync_preview_presentation(
     change, metadata, *, assigned_location=None, write_locations=False,
+    location_path=None, write_location_keywords=False,
     sidecar_will_exist=False, sync_flags=False, paired_keyword_rename=False,
     paired_add_value=None, folder_offline=False,
 ):
@@ -744,78 +911,15 @@ def _sync_preview_presentation(
         }
 
     if change_type == "location":
-        current_coordinates = _sync_preview_coordinate_text(
-            metadata.get("location")
+        return _sync_preview_merge_location_keywords(
+            _sync_preview_location_gps_presentation(
+                metadata, assigned_location, write_locations,
+            ),
+            metadata,
+            assigned_location,
+            location_path,
+            write_location_keywords,
         )
-        before = current_coordinates or _sync_preview_absent_xmp_value(
-            metadata, "No GPS in XMP",
-        )
-        location_coordinates = _sync_preview_coordinate_text(assigned_location)
-        location_name = _sync_preview_location_name(assigned_location)
-
-        if write_locations and location_coordinates:
-            return {
-                "field": "Location",
-                "action": "updated",
-                "before": before,
-                "after": location_name or location_coordinates,
-                "after_detail": (
-                    f"{location_coordinates} · from a location keyword"
-                ),
-            }
-
-        if assigned_location:
-            if location_coordinates:
-                detail = (
-                    f"{location_name} is assigned in Vireo; writing its GPS "
-                    "to XMP is turned off"
-                )
-            else:
-                detail = (
-                    f"{location_name or 'This location'} is assigned in Vireo; "
-                    "it has no GPS coordinates to write to XMP"
-                )
-
-            if metadata.get("location_source"):
-                restored_coordinates = _sync_preview_coordinate_text(
-                    metadata.get("previous_location")
-                )
-                if restored_coordinates:
-                    detail += f"; XMP GPS returns to {restored_coordinates}"
-                else:
-                    detail += "; previously Vireo-assigned GPS is removed from XMP"
-
-            return {
-                "field": "Location",
-                "action": "added",
-                "before": before,
-                "after": location_name or "Assigned location",
-                "after_detail": detail,
-            }
-
-        if metadata.get("location_source"):
-            restored_coordinates = _sync_preview_coordinate_text(
-                metadata.get("previous_location")
-            )
-            return {
-                "field": "Location",
-                "action": "cleared",
-                "before": before,
-                "after": restored_coordinates or "No GPS in XMP",
-                "after_detail": (
-                    "Restores the GPS that existed before Vireo"
-                    if restored_coordinates
-                    else "Removes Vireo-assigned GPS"
-                ),
-            }
-
-        return {
-            "field": "XMP location",
-            "action": "unchanged",
-            "before": before,
-            "after": before,
-            "after_detail": "No Vireo-assigned GPS needs to be removed",
-        }
 
     if change_type == "edit_recipe":
         before = (
@@ -1001,13 +1105,16 @@ def _sync_preview_get_snapshot(db, ws_id, requested_revision):
 
 def _sync_preview_change_creates_sidecar(
     change, *, sync_flags=False, write_locations=False, assigned_location=None,
+    write_location_keywords=False, location_path=None,
 ):
     """Mirror sync operations that create a missing XMP sidecar before rating.
 
     Matches the write order in ``sync.py``: ``add_keywords`` (keyword_add),
     ``set_pick_flag`` when flag sync is enabled, ``set_gps_location``
     when location sync is enabled and the linked location has valid
-    coordinates, and ``set_edit_recipe`` with a non-empty payload all
+    coordinates, ``set_location_keywords`` when location keyword sync is
+    enabled and the photo has a place, and ``set_edit_recipe`` with a
+    non-empty payload all
     create a missing sidecar through ``SidecarEditor``. ``set_rating``
     and the ``remove_*`` paths do not, so they are excluded.
     """
@@ -1019,6 +1126,10 @@ def _sync_preview_change_creates_sidecar(
     if change_type == "flag":
         return sync_flags
     if change_type == "location":
+        # ``set_location_keywords`` creates a sidecar exactly like a keyword
+        # add does, and it needs no coordinates to do it.
+        if write_location_keywords and location_path:
+            return True
         if not write_locations or not assigned_location:
             return False
         return (
@@ -4153,6 +4264,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         payload = _location_name_conflict_payload(err)
         payload["request_id"] = getattr(g, "request_id", None)
         return jsonify(payload), 409
+
+    # Shared message for a location name that carries the XMP hierarchy
+    # delimiter. Rejecting at assignment time (rather than at sync time) is
+    # what keeps the pending change from being silently cleared for a name
+    # ``SidecarEditor.set_location_keywords`` cannot round-trip.
+    _LOCATION_NAME_PIPE_ERROR = (
+        "location name may not contain '|' -- XMP keyword hierarchies "
+        "reserve it as the level delimiter"
+    )
 
     def _coerce_collection_id(raw):
         """Parse an optional collection_id from a request body.
@@ -9440,12 +9560,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         keywords = db.get_photo_keywords(photo_id)
         kw_name = ""
+        kw_type = ""
         for k in keywords:
             if k["id"] == keyword_id:
                 kw_name = k["name"]
+                kw_type = k["type"] or ""
                 break
         db.untag_photo(photo_id, keyword_id)
         _queue_keyword_remove(photo_id, kw_name)
+        # A ``keyword_remove`` on a ``type='location'`` tag strips the flat
+        # and hierarchical entries but leaves ``vireo:locationKeywords`` and
+        # its ownership claim in the sidecar. If the user later recreates
+        # that keyword in Lightroom and assigns another place in Vireo,
+        # ``set_location_keywords`` treats the stale marker as authoritative
+        # and can delete the user's new entry. Queue a ``location`` change so
+        # ``sync_to_xmp`` clears the marker (or rewrites it to a still-
+        # tagged location, if the photo has one) on the next sync.
+        if kw_type == "location":
+            _queue_location_sync_if_enabled(photo_id)
         db.record_edit('keyword_remove', f'Removed keyword "{kw_name}"', str(keyword_id),
                        [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
@@ -10067,6 +10199,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                    WHERE pk.keyword_id = ?""",
                 (keyword_id,),
             ).fetchall()
+        # Additionally snapshot photos whose SIDECAR LOCATION path would go
+        # stale from this update. A location-keyword rename does not just
+        # change ``dc:subject`` (the flat leaf, which the ``affected`` set
+        # above covers): it also invalidates the sidecar's
+        # ``vireo:locationKeywords`` marker and ``lr:hierarchicalSubject``
+        # entry. Renaming an ANCESTOR is worse still -- no photo is tagged
+        # with the ancestor directly, so ``affected`` is empty and the
+        # sidecar's hierarchy keeps the old ancestor name forever. Recurse
+        # down from ``keyword_id`` to catch every descendant-leaf-tagged
+        # photo. The gate on ``old_row["type"] == "location"`` covers a
+        # rename or a retype away from location; a retype INTO location is
+        # rare but also queued so a sidecar written under a former
+        # non-location role gets its marker cleaned up on the next sync.
+        location_affected = []
+        if old_row is not None and (
+            old_row["type"] == "location"
+            or (isinstance(body.get("type"), str) and body["type"] == "location")
+        ):
+            location_affected = db.conn.execute(
+                """WITH RECURSIVE tree(id) AS (
+                       SELECT ?
+                       UNION ALL
+                       SELECT k.id FROM keywords k
+                       JOIN tree t ON k.parent_id = t.id
+                   )
+                   SELECT DISTINCT p.id AS photo_id, wf.workspace_id
+                   FROM photos p
+                   JOIN photo_keywords pk ON pk.photo_id = p.id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN tree t ON t.id = pk.keyword_id""",
+                (keyword_id,),
+            ).fetchall()
+        # Reject '|' in a rename that lands on a location keyword before we
+        # ever touch the row. ``get_or_create_text_location`` refuses pipes
+        # at creation time because XMP keyword hierarchies reserve it as the
+        # delimiter and there is no reversible XMP encoding, but the update
+        # path used to accept them. Once such a rename landed, every sync
+        # of a photo tagged with the row raised in
+        # ``SidecarEditor.set_location_keywords``, leaving the ``location``
+        # change queued forever and blocking any other edit that shared
+        # its sidecar transaction. Guard both a name-only rename of an
+        # existing location and a retype-into-location that also renames.
+        rename_target = body.get("name")
+        if isinstance(rename_target, str) and "|" in rename_target:
+            effective_type = body.get("type")
+            if not isinstance(effective_type, str):
+                effective_type = old_row["type"] if old_row is not None else None
+            if effective_type == "location":
+                return json_error(
+                    "location name may not contain '|' -- XMP keyword "
+                    "hierarchies reserve it as the level delimiter",
+                    400,
+                )
         # Apply the update first — if it raises, no sidecar changes are queued
         try:
             effective_id = db.update_keyword(keyword_id, **body)
@@ -10106,9 +10291,101 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     new_name,
                     pairs,
                 )
+            # A pure location-to-location rename is handled entirely by the
+            # ``location`` change queued below WHEN
+            # ``write_location_keywords_to_xmp`` is on for the affected
+            # workspace: set_location_keywords() writes both flat and
+            # hierarchical entries under the new leaf and claims full
+            # marker ownership because the sidecar is stripped of the old
+            # marker's entries first. Queueing a keyword_add for the new
+            # leaf in that case would land it in ``dc:subject`` BEFORE
+            # set_location_keywords() runs, at which point it looks
+            # pre-existing (existed_flat=True) and gets only hierarchical
+            # ownership; a later clear would then leave the renamed flat
+            # leaf in XMP indefinitely.
+            #
+            # When the setting is OFF for a workspace, however, the queued
+            # ``location`` change only runs marker cleanup at sync time;
+            # set_location_keywords() never writes the new flat leaf, so
+            # a pre-existing flat XMP keyword under the OLD name (from a
+            # manual entry or an earlier period when the setting was on)
+            # would stay behind indefinitely. Fall back to the ordinary
+            # keyword_remove + keyword_add for those workspaces so the
+            # flat leaf still gets renamed in XMP.
+            location_to_location_rename = (
+                old_row["type"] == "location"
+                and new_row["type"] == "location"
+            )
+            skip_keyword_requeue_by_ws = {}
+            if location_to_location_rename:
+                import config as cfg
+
+                try:
+                    global_cfg = cfg.load()
+                except Exception:
+                    global_cfg = {}
+                for row in affected:
+                    ws_id = row["workspace_id"]
+                    if ws_id in skip_keyword_requeue_by_ws:
+                        continue
+                    ws = db.get_workspace(ws_id)
+                    raw = ws["config_overrides"] if ws else None
+                    skip_keyword_requeue_by_ws[ws_id] = (
+                        _workspace_effective_setting(
+                            raw, global_cfg, _LOCATION_KEYWORDS_SETTING,
+                        )
+                    )
             for row in affected:
+                if skip_keyword_requeue_by_ws.get(row["workspace_id"], False):
+                    continue
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
+        # A location→non-location retype with no name change queues a
+        # ``location`` change below but no keyword_add — the name-change
+        # block above didn't run. sync_to_xmp() therefore resolves no
+        # location path for the photo and remove_vireo_location_keywords()
+        # strips the marker-owned flat leaf, leaving XMP without a keyword
+        # that the DB still assigns to the photo. Queue an ordinary
+        # keyword_add so the flat leaf survives the location cleanup as
+        # the user's newly ``general`` keyword. Name-changed retypes
+        # already had the add queued for the new spelling above.
+        if (
+            old_row is not None and new_row is not None
+            and old_row["type"] == "location"
+            and new_row["type"] != "location"
+            and old_row["name"] == new_row["name"]
+        ):
+            for row in affected:
+                _queue_keyword_add(
+                    row["photo_id"], new_row["name"],
+                    workspace_id=row["workspace_id"],
+                )
+        # If a location keyword's name or type changed, requeue a
+        # ``location`` change for every descendant-tagged photo so
+        # ``sync_to_xmp`` rewrites the sidecar's hierarchy path and
+        # ``vireo:locationKeywords`` marker under the new spelling.
+        # ``keyword_remove``/``keyword_add`` above only rewrites the flat
+        # ``dc:subject`` entry (and only for a leaf rename); the hierarchy
+        # and marker require the ``location`` change type. ``queue_change``
+        # dedupes silently, so re-running an already-queued photo is
+        # harmless.
+        if location_affected and old_row is not None and new_row is not None:
+            old_was_location = old_row["type"] == "location"
+            new_is_location = new_row["type"] == "location"
+            name_changed = old_row["name"] != new_row["name"]
+            type_changed = old_row["type"] != new_row["type"]
+            if (old_was_location or new_is_location) and (
+                name_changed or type_changed
+            ):
+                for row in location_affected:
+                    db.queue_change(
+                        row["photo_id"],
+                        "location",
+                        "effective",
+                        workspace_id=row["workspace_id"],
+                        _commit=False,
+                    )
+                db.conn.commit()
         # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
         # only when `merged` is truthy; without it the UI keeps the deleted
         # source id and its next edit/delete would 404 or hit the wrong row.
@@ -10120,7 +10397,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         # Queue sidecar removals for all affected workspaces
         kw_row = db.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+            "SELECT name, type FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         if kw_row:
             affected = db.conn.execute(
@@ -10133,6 +10410,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchall()
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], kw_row["name"], workspace_id=row["workspace_id"])
+            # Deleting a location ancestor detaches its children (they
+            # become root-level keywords) but no photo is tagged with the
+            # ancestor directly, so ``affected`` is empty and no
+            # ``keyword_remove`` reaches the sidecar. Meanwhile the
+            # descendant leaves that ARE tagged still export their old
+            # hierarchy path (e.g. ``France|Paris``) and the
+            # ``vireo:locationKeywords`` marker keeps pointing at the
+            # deleted ancestor. Snapshot every descendant-tagged photo
+            # (recursively, including the keyword itself for the leaf
+            # case) and queue a ``location`` change so ``sync_to_xmp``
+            # rewrites the hierarchy path and marker under the surviving
+            # ancestor chain on the next sync. ``queue_change`` dedupes,
+            # so the same photo appearing under ``affected`` above is
+            # harmless.
+            if kw_row["type"] == "location":
+                location_descendants = db.conn.execute(
+                    """WITH RECURSIVE tree(id) AS (
+                           SELECT ?
+                           UNION ALL
+                           SELECT k.id FROM keywords k
+                           JOIN tree t ON k.parent_id = t.id
+                       )
+                       SELECT DISTINCT p.id AS photo_id, wf.workspace_id
+                       FROM photos p
+                       JOIN photo_keywords pk ON pk.photo_id = p.id
+                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                       JOIN tree t ON t.id = pk.keyword_id""",
+                    (keyword_id,),
+                ).fetchall()
+                for row in location_descendants:
+                    db.queue_change(
+                        row["photo_id"],
+                        "location",
+                        "effective",
+                        workspace_id=row["workspace_id"],
+                        _commit=False,
+                    )
         db.conn.execute("UPDATE keywords SET parent_id = NULL WHERE parent_id = ?", (keyword_id,))
         db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
         db.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
@@ -10533,6 +10847,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name.strip():
             return json_error("missing name", 400)
         stripped = name.strip()
+        # Reject at assignment time: Lightroom reserves ``|`` for the
+        # hierarchy delimiter, and ``SidecarEditor.set_location_keywords``
+        # cannot round-trip it. Catching it here means the pending change
+        # never gets queued in the first place, so no later sync silently
+        # loses it.
+        if "|" in stripped:
+            return json_error(_LOCATION_NAME_PIPE_ERROR, 400)
         latitude = body.get("latitude")
         longitude = body.get("longitude")
         if (latitude is None) != (longitude is None):
@@ -10558,7 +10879,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             leaf_id = db.get_or_create_text_location(stripped)
         except ValueError:
-            # Defensive: validation above should already catch empty input.
+            # Defensive: validation above should already catch empty input
+            # and pipe characters.
             return json_error("missing name", 400)
         if latitude is not None:
             db.conn.execute(
@@ -10602,6 +10924,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name.strip():
             return json_error("missing name", 400)
         stripped = name.strip()
+        # Reject at assignment time: Lightroom reserves ``|`` for the
+        # hierarchy delimiter, and ``SidecarEditor.set_location_keywords``
+        # cannot round-trip it.
+        if "|" in stripped:
+            return json_error(_LOCATION_NAME_PIPE_ERROR, 400)
         latitude = body.get("latitude")
         longitude = body.get("longitude")
         if (latitude is None) != (longitude is None):
@@ -11336,7 +11663,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids required")
 
         keyword_row = db.conn.execute(
-            "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+            "SELECT id, name, type FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         if keyword_row is None:
             return json_error("keyword not found", 404)
@@ -11362,9 +11689,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         tagged_set = set(tagged_ids)
         removed_ids = [pid for pid in clean_ids if pid in tagged_set]
         name = keyword_row["name"]
+        is_location = (keyword_row["type"] or "") == "location"
         for pid in removed_ids:
             db.untag_photo(pid, keyword_id)
             _queue_keyword_remove(pid, name)
+            # See ``api_remove_keyword``: a ``keyword_remove`` on a
+            # ``type='location'`` tag leaves the sidecar's
+            # ``vireo:locationKeywords`` marker and ownership claim in
+            # place. Queue a ``location`` change so the next sync clears
+            # the marker (or rewrites it to a still-tagged location).
+            if is_location:
+                _queue_location_sync_if_enabled(pid)
 
         items = [
             {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
@@ -12493,6 +12828,55 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
         )
 
+    @app.route("/api/sync/location-writes")
+    def api_sync_location_writes_status():
+        """Report what queueing location writes for this workspace would do.
+
+        The counts are the honest ones for the button that follows: how many
+        photos carry a place, and how many of those already have a ``location``
+        change waiting in the sync queue. Whether a queued change writes
+        coordinates, keywords, both, or removes what Vireo previously wrote is
+        decided at sync time by the two settings reported here, and shown per
+        photo in the review before anything is written.
+        """
+        db = _get_db()
+        import config as cfg
+
+        effective_config = db.get_effective_config(cfg.load())
+        photos = db.count_photos_with_location()
+        queued = db.conn.execute(
+            """SELECT COUNT(DISTINCT pc.photo_id)
+               FROM pending_changes pc
+               JOIN photo_keywords pk ON pk.photo_id = pc.photo_id
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pc.workspace_id = ? AND pc.change_type = 'location'
+                 AND k.type = 'location'""",
+            (db._ws_id(),),
+        ).fetchone()[0]
+        return jsonify({
+            "photos_with_location": photos,
+            "already_queued": queued,
+            "location_sync_enabled": bool(
+                effective_config.get("write_assigned_location_to_xmp", False)
+            ),
+            "location_keyword_sync_enabled": bool(
+                effective_config.get("write_location_keywords_to_xmp", False)
+            ),
+        })
+
+    @app.route("/api/sync/location-writes", methods=["POST"])
+    def api_sync_queue_location_writes():
+        """Queue a location change for every located photo in the workspace.
+
+        Assigning a place queues its sidecar write at assignment time, so
+        photos located before a location setting was turned on have nothing
+        queued. This is the backfill for that, and it stops at the sync queue:
+        the user still reviews the changes and starts the sync themselves.
+        """
+        db = _get_db()
+        result = db.queue_location_changes_for_tagged_photos()
+        return jsonify({"ok": True, **result})
+
     @app.route("/api/sync/preview")
     def api_sync_preview():
         """Preview pending changes with the XMP values they will replace.
@@ -12574,6 +12958,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         write_locations = bool(
             effective_config.get("write_assigned_location_to_xmp", False)
         )
+        write_location_keywords = bool(
+            effective_config.get("write_location_keywords_to_xmp", False)
+        )
         sync_flags = bool(effective_config.get("sync_flags_to_xmp", False))
         location_photo_ids = [
             photo["photo_id"]
@@ -12581,6 +12968,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if any(change["type"] == "location" for change in photo["changes"])
         ]
         assigned_locations = _serialize_photo_locations(db, location_photo_ids)
+        # Read the keyword chain from the same helper ``sync_to_xmp`` writes
+        # from, so the review cannot name one place and the sync write another.
+        location_paths = db.get_photo_location_paths(location_photo_ids)
         from keyword_identity import keyword_paths, resolve_merge_target
         merge_paths = keyword_paths(db.conn.execute(
             'SELECT id, name, parent_id FROM keywords'
@@ -12625,16 +13015,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "location": None,
                     "previous_location": None,
                     "location_source": None,
+                    "location_keywords": None,
                     "edit_recipe": None,
                 }
             else:
                 metadata = read_sync_preview_metadata(xmp_path)
             assigned_location = None
+            location_path = None
             if (
                 not folder_offline
                 and any(change["type"] == "location" for change in photo["changes"])
             ):
                 assigned_location = assigned_locations.get(photo["photo_id"])
+                location_path = location_paths.get(photo["photo_id"])
             # Map normalized-key -> original add value so a paired
             # keyword_remove can display the clean spelling the paired
             # ``write_sidecar`` will end up writing.
@@ -12670,6 +13063,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             sync_flags=sync_flags,
                             write_locations=write_locations,
                             assigned_location=assigned_location,
+                            write_location_keywords=write_location_keywords,
+                            location_path=location_path,
                         )
                     )
                 )
@@ -12697,6 +13092,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             metadata,
                             assigned_location=assigned_location,
                             write_locations=write_locations,
+                            location_path=location_path,
+                            write_location_keywords=write_location_keywords,
                             sidecar_will_exist=False,
                             sync_flags=sync_flags,
                             paired_keyword_rename=change[
@@ -12711,6 +13108,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             metadata,
                             assigned_location=assigned_location,
                             write_locations=write_locations,
+                            location_path=location_path,
+                            write_location_keywords=write_location_keywords,
                             sidecar_will_exist=True,
                             sync_flags=sync_flags,
                             paired_keyword_rename=change[
@@ -12730,6 +13129,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     metadata,
                     assigned_location=assigned_location,
                     write_locations=write_locations,
+                    location_path=location_path,
+                    write_location_keywords=write_location_keywords,
                     sync_flags=sync_flags,
                     paired_keyword_rename=change["paired_keyword_rename"],
                     paired_add_value=paired_add_value,
@@ -12748,6 +13149,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "has_more": has_more,
             "revision": revision,
             "location_sync_enabled": write_locations,
+            "location_keyword_sync_enabled": write_location_keywords,
         }
         # The sync dialog needs edit recipes for correctly versioned rendered
         # thumbnails, but not the species/life-list enrichment performed by
@@ -15135,13 +15537,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>", methods=["PUT"])
     def api_update_workspace(ws_id):
         db = _get_db()
-        if not db.get_workspace(ws_id):
+        existing_ws = db.get_workspace(ws_id)
+        if not existing_ws:
             return json_error("Workspace not found", 404)
         body = request.get_json(silent=True) or {}
         kwargs = {}
         if "name" in body:
             kwargs["name"] = body["name"]
-        if "config_overrides" in body:
+        overrides_changing = "config_overrides" in body
+        if overrides_changing:
             overrides = body["config_overrides"]
             err = _validate_workspace_config_overrides(overrides, db)
             if err is not None:
@@ -15149,8 +15553,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kwargs["config_overrides"] = overrides
         if "ui_state" in body:
             kwargs["ui_state"] = body["ui_state"]
+        # A full workspace update can silently swap the ``config_overrides``
+        # object, including its own override for ``write_location_keywords_to_xmp``.
+        # The per-key PATCH and DELETE endpoints already run the effective-value
+        # transition check that queues cleanup on a True → False flip; the
+        # bulk PUT must too, otherwise the located photos in this workspace
+        # keep their Vireo-written keywords and markers in XMP indefinitely.
+        prev_effective_location_keywords = None
+        if overrides_changing:
+            import config as cfg
+            global_cfg = cfg.load()
+            prev_effective_location_keywords = _workspace_effective_setting(
+                existing_ws["config_overrides"],
+                global_cfg,
+                _LOCATION_KEYWORDS_SETTING,
+            )
         db.update_workspace(ws_id, **kwargs)
         ws = db.get_workspace(ws_id)
+        if overrides_changing and prev_effective_location_keywords:
+            new_effective = _workspace_effective_setting(
+                ws["config_overrides"],
+                global_cfg,
+                _LOCATION_KEYWORDS_SETTING,
+            )
+            if not new_effective:
+                _queue_location_keyword_cleanup_for_workspace(db, ws_id)
         return jsonify(dict(ws))
 
     @app.route("/api/workspaces/<int:ws_id>", methods=["DELETE"])
@@ -19161,6 +19588,102 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "effective": effective_layer,
         })
 
+    _LOCATION_KEYWORDS_SETTING = "write_location_keywords_to_xmp"
+
+    def _workspace_effective_setting(raw_override, global_cfg, key):
+        """Resolve a workspace's effective boolean setting.
+
+        ``raw_override`` is the ``workspaces.config_overrides`` column value
+        (JSON string, dict, or None). If the workspace defines its own value
+        for ``key``, that wins; otherwise the global config value is used.
+        Kept boolean-only because the location-keywords cleanup transition
+        check is boolean-valued; a future generalization would need to widen
+        the return type.
+        """
+        overrides = None
+        if raw_override:
+            try:
+                parsed = (
+                    json.loads(raw_override) if isinstance(raw_override, str)
+                    else raw_override
+                )
+                if isinstance(parsed, dict):
+                    overrides = parsed
+            except (json.JSONDecodeError, TypeError):
+                overrides = None
+        if overrides is not None and key in overrides:
+            return bool(overrides[key])
+        return bool((global_cfg or {}).get(key, False))
+
+    def _queue_location_keyword_cleanup_for_workspace(db, workspace_id):
+        """Queue ``location`` changes for every located photo in one workspace.
+
+        Runs the workspace-scoped backfill under an explicit active-workspace
+        switch so the caller's active workspace is left untouched.
+        """
+        saved_active = db._active_workspace_id
+        try:
+            db._active_workspace_id = int(workspace_id)
+            db.queue_location_changes_for_tagged_photos()
+        except Exception:
+            log.warning(
+                "Failed to queue location cleanup for workspace %s",
+                workspace_id, exc_info=True,
+            )
+        finally:
+            db._active_workspace_id = saved_active
+
+    def _queue_location_keyword_cleanup_on_global_off(
+        db, previous_global, current_global,
+    ):
+        """Queue cleanup in every workspace whose effective setting flipped off.
+
+        ``write_location_keywords_to_xmp`` promises in its own description
+        that turning it off removes the keywords Vireo wrote on the next
+        sync. But ``sync_to_xmp`` only visits photos with a queued row --
+        after a successful write the previous run's ``location`` row is
+        gone, so a bare setting flip would strand the sidecars until the
+        user reassigned each place by hand or ran the Settings backfill.
+        Detect the True → False transition per workspace here (workspace
+        overrides win over the global) and queue the affected photos.
+        """
+        key = _LOCATION_KEYWORDS_SETTING
+        prev_global_val = bool((previous_global or {}).get(key, False))
+        cur_global_val = bool((current_global or {}).get(key, False))
+        # A workspace with its own override for this key is not affected
+        # by a global toggle -- its effective value doesn't change.
+        if prev_global_val == cur_global_val:
+            return
+        try:
+            workspaces = db.get_workspaces()
+        except Exception:
+            log.warning(
+                "Failed to enumerate workspaces for %s cleanup check",
+                key, exc_info=True,
+            )
+            return
+        for ws in workspaces:
+            override = None
+            raw_override = ws["config_overrides"]
+            if raw_override:
+                try:
+                    parsed = (
+                        json.loads(raw_override) if isinstance(raw_override, str)
+                        else raw_override
+                    )
+                    if isinstance(parsed, dict) and key in parsed:
+                        override = bool(parsed[key])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            prev_effective = (
+                override if override is not None else prev_global_val
+            )
+            cur_effective = (
+                override if override is not None else cur_global_val
+            )
+            if prev_effective and not cur_effective:
+                _queue_location_keyword_cleanup_for_workspace(db, ws["id"])
+
     def _settings_post_save_side_effects(current, previous=None):
         """Side effects mirrored from the legacy /api/config POST handler.
 
@@ -19237,6 +19760,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 arrange_deferred_working_copy_quota_retry(
                     app.config["DB_PATH"], vireo_dir,
                 )
+
+        # A global toggle from on → off must honor the setting's own
+        # description: "Turning this off removes the keywords Vireo wrote
+        # on the next sync." Sync only visits queued photos, so queue them
+        # here for every workspace whose effective value transitioned off.
+        _queue_location_keyword_cleanup_on_global_off(
+            quota_db, previous, current,
+        )
 
     def _read_raw_config_file():
         """Return the parsed contents of ~/.vireo/config.json, or {}.
@@ -19404,9 +19935,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ):
             return json_error(f"unknown process id: {value}", status=400)
         with _settings_write_lock:
+            import config as cfg
+            key_transition_check = (key == _LOCATION_KEYWORDS_SETTING)
+            prev_effective_val = (
+                bool(db.get_effective_config(cfg.load()).get(key, False))
+                if key_transition_check else None
+            )
             overrides = _read_workspace_overrides(db)
             schema.set_dotted(overrides, key, value)
             _write_workspace_overrides(db, overrides)
+            if key_transition_check:
+                new_effective_val = bool(
+                    db.get_effective_config(cfg.load()).get(key, False),
+                )
+                if prev_effective_val and not new_effective_val:
+                    _queue_location_keyword_cleanup_for_workspace(
+                        db, db._active_workspace_id,
+                    )
         return jsonify({"ok": True, "key": key, "value": value})
 
     @app.route("/api/settings/workspace/<path:key>", methods=["DELETE"])
@@ -19418,9 +19963,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(f"unknown setting {key!r}", status=400)
         db = _get_db()
         with _settings_write_lock:
+            import config as cfg
+            key_transition_check = (key == _LOCATION_KEYWORDS_SETTING)
+            prev_effective_val = (
+                bool(db.get_effective_config(cfg.load()).get(key, False))
+                if key_transition_check else None
+            )
             overrides = _read_workspace_overrides(db)
             schema.delete_dotted(overrides, key)
             _write_workspace_overrides(db, overrides)
+            if key_transition_check:
+                new_effective_val = bool(
+                    db.get_effective_config(cfg.load()).get(key, False),
+                )
+                if prev_effective_val and not new_effective_val:
+                    _queue_location_keyword_cleanup_for_workspace(
+                        db, db._active_workspace_id,
+                    )
         return jsonify({"ok": True, "key": key})
 
     @app.route("/api/settings/export")
