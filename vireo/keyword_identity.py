@@ -372,7 +372,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token):
                 'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
                 (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
             )
-            db._merge_keyword_into(source['id'], target_id)
+            db._merge_keyword_into(source['id'], target_id, pending_source_only=True)
         db.conn.execute('UPDATE keywords SET latitude = ?, longitude = ? WHERE id = ?',
                         (preview['latitude'], preview['longitude'], target_id))
         for row, old_name in affected:

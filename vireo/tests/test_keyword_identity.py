@@ -659,3 +659,38 @@ def test_catalog_import_resolves_multiple_non_location_merge_aliases(catalog, mo
     })
     execute_import(['dummy.lrcat'], db, write_xmp=False)
     assert {k['id'] for k in db.get_photo_keywords(photos[0])} == expected
+
+
+def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp_path):
+    from PIL import Image
+    from sync import sync_from_xmp, sync_to_xmp
+    from xmp import read_keywords, write_sidecar
+
+    db, photos = catalog
+    source = db.add_keyword('Old spelling')
+    target = db.add_keyword('Retained spelling')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], source)
+    db.tag_photo(photos[1], target)
+    db.untag_photo(photos[1], source)
+    ws = db._ws_id()
+    other = db.create_workspace('Shared sidecar')
+    folder = db.conn.execute('SELECT folder_id FROM photos WHERE id = ?', (photos[1],)).fetchone()[0]
+    db.add_workspace_folder(other, folder)
+    for workspace in (ws, other):
+        db.queue_change(photos[1], 'keyword_remove', 'Old spelling', workspace_id=workspace)
+    before = [dict(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
+    directory = tmp_path / 'photos'
+    directory.mkdir()
+    Image.new('RGB', (2, 2)).save(directory / '1.jpg')
+    sidecar = str(directory / '1.xmp')
+    write_sidecar(sidecar, {'Old spelling', 'Retained spelling'}, set())
+    preview = preview_keyword_merge(db, [source, target], target)
+    merge_keywords(db, [source, target], target, preview['preview_token'])
+    assert [dict(r) for r in db.conn.execute('SELECT * FROM pending_changes WHERE photo_id = ? ORDER BY id',
+                                           (photos[1],))] == before
+    result = sync_to_xmp(db, change_ids=[r['id'] for r in before if r['workspace_id'] == ws])
+    assert result['failed'] == 0
+    assert read_keywords(sidecar) == {'Retained spelling'}
+    sync_from_xmp(db, [photos[1]])
+    assert {k['id'] for k in db.get_photo_keywords(photos[1])} == {target}

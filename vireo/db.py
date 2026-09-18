@@ -15634,7 +15634,7 @@ class Database:
                 history_curation_fixed,
             )
 
-    def _merge_keyword_into(self, src_id, dst_id):
+    def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
 
         Moves photo associations, then reparents the source's children onto
@@ -15658,6 +15658,11 @@ class Database:
         the merge. Without this, the merge deletes the source row but leaves
         the pending change referring to the old spelling, so the next
         ``sync_to_xmp`` writes a keyword the DB no longer has.
+
+        Explicit merges set ``pending_source_only`` so only photos currently
+        carrying the source have their pending edits rewritten. A photo that
+        already removed the source must still remove that old spelling from
+        its sidecar, even when it also carries the destination keyword.
 
         Returns the number of keyword rows merged away (>= 1). Caller
         commits.
@@ -15777,7 +15782,7 @@ class Database:
                 affected_pcx = [
                     r["photo_id"] for r in self.conn.execute(
                         "SELECT DISTINCT photo_id FROM photo_keywords WHERE keyword_id IN (?, ?)",
-                        (src_id, dst_id),
+                        (src_id, src_id if pending_source_only else dst_id),
                     ).fetchall()
                 ]
                 for chunk in _chunks(affected_pcx):
@@ -16239,7 +16244,9 @@ class Database:
                         (dst_id, disambiguated, child["id"]),
                     )
                 elif existing["type"] == child["type"]:
-                    merged += self._merge_keyword_into(child["id"], existing["id"])
+                    merged += self._merge_keyword_into(
+                        child["id"], existing["id"], pending_source_only=pending_source_only,
+                    )
                 else:
                     # Same name + parent but different type: outside the
                     # (LOWER(name), parent_id, type) dedup boundary, so
