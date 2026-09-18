@@ -13,17 +13,59 @@ from xmp import write_sidecar
 log = logging.getLogger(__name__)
 
 
-def _path_lookup_key(path):
-    """Key a file path so the catalog and scanned spellings of it collide.
+_AMBIGUOUS = object()
 
-    ``os.path.normpath`` already reconciles the separator difference between
-    Lightroom's forward-slashed paths and the backslashed ones ``os.walk``
-    produces. Case is the other half of that on Windows: a catalog holding
-    ``D:/Pictures`` and a scan rooted at ``d:\\Pictures`` name the same file.
-    ``os.path.normcase`` folds both, and is the identity on POSIX, where case
-    is significant and a backslash is a legal filename character.
+
+def _fold(path):
+    """Case-folded key for an already-normalized path. Identity on POSIX."""
+    return os.path.normcase(path)
+
+
+def _same_file(one, other):
+    """Whether two spellings of a path name a single file.
+
+    Only reachable where ``os.path.normcase`` folds anything, i.e. Windows: a
+    case-insensitive directory holds one file under both spellings, while a
+    directory with per-directory case sensitivity enabled can hold two. Ask the
+    filesystem. When it cannot answer — an offline volume, a catalog naming
+    files that are not on this machine — read the spellings as one file, which
+    is overwhelmingly what they are.
     """
-    return os.path.normcase(os.path.normpath(path))
+    try:
+        return os.path.samefile(one, other)
+    except OSError:
+        return True
+
+
+class _PhotoPathIndex:
+    """Find the photo a catalog path names, exact spelling first.
+
+    Lightroom records its own spelling, so on Windows a catalog names
+    ``D:/Pictures/a.jpg`` for the photo the scanner stored as
+    ``d:\\Pictures\\a.jpg`` — without folding case and separator, a real
+    import matches nothing at all. But folding alone would collapse ``Bird.jpg``
+    and ``bird.jpg``, which can coexist in a directory with per-directory case
+    sensitivity enabled. So an exact path wins whenever there is one, and a
+    folded key resolves only when it names exactly one photo.
+    """
+
+    def __init__(self):
+        self._exact = {}
+        self._folded = {}
+
+    def add(self, path, photo):
+        path = os.path.normpath(path)
+        self._exact[path] = photo
+        key = _fold(path)
+        claimed, _ = self._folded.get(key, (path, None))
+        self._folded[key] = (path, photo) if claimed == path else (None, _AMBIGUOUS)
+
+    def get(self, path):
+        path = os.path.normpath(path)
+        if path in self._exact:
+            return self._exact[path]
+        _, photo = self._folded.get(_fold(path), (None, None))
+        return None if photo is _AMBIGUOUS else photo
 
 
 def preview_catalog(catalog_path, db):
@@ -70,7 +112,8 @@ def preview_import(catalog_paths, db):
         dict with catalogs (list of previews), conflict_count, conflicts (list)
     """
     catalogs = []
-    merged = {}  # lookup key -> {file_path, keywords_by_catalog: {cat_name: set}}
+    merged = {}  # normalized path -> {file_path, keywords_by_catalog: {cat_name: set}}
+    spellings = {}  # folded key -> normalized paths already grouped under it
 
     for cat_path in catalog_paths:
         try:
@@ -81,8 +124,17 @@ def preview_import(catalog_paths, db):
             cat_name = Path(cat_path).stem
 
             for file_path, kw_data in data.items():
-                key = _path_lookup_key(file_path)
+                # Two catalogs can spell one file differently, and the user
+                # needs to see that as the conflict it is rather than as two
+                # untroubled singletons. Group those together — but only when
+                # they really are one file, so a case-sensitive directory's
+                # Bird.jpg and bird.jpg stay the two files they are.
+                key = os.path.normpath(file_path)
+                siblings = spellings.setdefault(_fold(key), [])
                 if key not in merged:
+                    key = next((s for s in siblings if _same_file(s, key)), key)
+                if key not in merged:
+                    siblings.append(key)
                     merged[key] = {"file_path": file_path, "keywords_by_catalog": {}}
                 merged[key]["keywords_by_catalog"][cat_name] = kw_data[
                     "flat_keywords"
@@ -127,20 +179,18 @@ def execute_import(
     Returns:
         dict with imported, skipped, failed counts
     """
-    # Build path -> DB photo lookup. Both sides go through _path_lookup_key
-    # so a catalog path and a scanned path that name the same file agree.
-    photos_by_path = {}
+    # Build path -> DB photo lookup.
+    photos_by_path = _PhotoPathIndex()
     all_photos = db.get_photos(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     for p in all_photos:
         if pause_callback:
             pause_callback()
         folder_path = folders.get(p["folder_id"], "")
-        full_path = os.path.join(folder_path, p["filename"])
-        photos_by_path[_path_lookup_key(full_path)] = p
+        photos_by_path.add(os.path.join(folder_path, p["filename"]), p)
 
     # Merge catalog data
-    merged = {}  # lookup key -> {path, flat_keywords, hierarchical_keywords}
+    merged = {}  # group key -> {path, photo, flat_keywords, hierarchical_keywords}
     for idx, cat_path in enumerate(catalog_paths):
         if pause_callback:
             pause_callback()
@@ -153,15 +203,19 @@ def execute_import(
         for raw_file_path, kw_data in data.items():
             if pause_callback:
                 pause_callback()
-            # Group on the same key the photo lookup uses. Two catalogs that
-            # spell one photo differently are one entry, so the conflict
-            # strategy decides between them instead of both being imported in
-            # turn onto the photo they both resolve to. The entry keeps an
-            # original spelling for the sidecar path.
-            key = _path_lookup_key(raw_file_path)
+            # Group on the photo the entry resolves to. Two catalogs that
+            # spell one photo differently are then a single entry, so the
+            # conflict strategy decides between them instead of both being
+            # imported in turn onto the photo they both land on. Entries that
+            # match no photo keep their own spelling; they are only counted.
+            # The entry carries an original path for the sidecar write.
+            path = os.path.normpath(raw_file_path)
+            photo = photos_by_path.get(path)
+            key = ("photo", photo["id"]) if photo else ("path", path)
             if key not in merged:
                 merged[key] = {
-                    "path": os.path.normpath(raw_file_path),
+                    "path": path,
+                    "photo": photo,
                     "flat_keywords": set(),
                     "hierarchical_keywords": set(),
                 }
@@ -172,7 +226,7 @@ def execute_import(
                     kw_data["hierarchical_keywords"]
                 )
             elif strategy == "prefer_first" and not merged[key]["flat_keywords"] or strategy == "prefer_last":
-                merged[key]["path"] = os.path.normpath(raw_file_path)
+                merged[key]["path"] = path
                 merged[key]["flat_keywords"] = kw_data["flat_keywords"]
                 merged[key]["hierarchical_keywords"] = kw_data[
                     "hierarchical_keywords"
@@ -188,8 +242,7 @@ def execute_import(
             db.conn.commit()
             pause_callback()
         file_path = kw_data["path"]
-        # Find matching photo in DB
-        photo = photos_by_path.get(key)
+        photo = kw_data["photo"]
         if not photo:
             skipped += 1
             if progress_callback:
