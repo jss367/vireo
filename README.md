@@ -23,6 +23,7 @@ Vireo helps wildlife photographers triage thousands of photos using machine lear
 - **Non-destructive photo editing** — Adjust geometry, tone, white balance, detail, five-point curves, individual color ranges, and shadow/midtone/highlight grading with reusable presets
 - **Map view** — Geographic visualization of geotagged photos
 - **Photo location review** — In Review Photo Locations, choose **Missing GPS · group by time** to review suggested outings across all available photos or a collection. Preview examples, inspect and split groups, and assign a saved place or custom name in batches. Also available from Browse’s **Add Locations by Capture Time** menu action.
+- **GPS discrepancy review** — Choose **GPS differs from assigned place** in Review Photo Locations to compare photo GPS with assigned places on a map. Adjust the distance threshold (500 meters by default), select photos, and keep their GPS or queue the assigned coordinates for metadata sync. Skipping makes no changes. Kept decisions can be revisited; corrections remain reviewable until written to XMP, and original photo GPS is preserved.
 - **Workspaces** — Isolated projects with independent predictions, collections, and settings
 - **Lightroom migration** — Import keyword hierarchies from `.lrcat` catalogs via XMP sidecars
 - **Transparent by design** — Live log panel, job progress streaming, pipeline inspector, and full audit system

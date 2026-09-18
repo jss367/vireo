@@ -50,7 +50,9 @@ routine** and fill in:
 
 - **Name**: `Vireo PR Fix Agent`
 - **Prompt**: paste the contents of [`pr-agent-routine-prompt.md`](./pr-agent-routine-prompt.md)
-- **Model**: whatever you normally use for code edits (Sonnet 4.6 is fine)
+- **Model**: Opus 5. The routine's hardest call is *which* fix to build for a
+  finding, not whether it can write the fix — that is the wrong place to
+  economize. Reasoning effort: High.
 - **Repositories**: add `jss367/vireo`
 - **Allow unrestricted branch pushes** — **enable this**. The routine must
   push to arbitrary PR head branches (including those created by the Codex
@@ -278,6 +280,14 @@ stop.
 - **Commit attribution.** Commits appear under the claude.ai account's
   connected GitHub identity, the same as when you push from a local
   checkout logged in as yourself.
+- **Scope drift under review bots.** Codex and CodeRabbit grade findings for a
+  server-shaped threat model, so a single-user desktop race reads as P1 to
+  them. The routine used to accept that grading and fix each finding as
+  posted, which on PR #1678 turned a display-only fix into 12 rounds and
+  ~1.8k lines of concurrency hardening in the module that deletes originals.
+  The prompt's **Repository Context** section and the cheapest-fix/size-drift
+  steps exist to stop that; if a PR starts ballooning under review again,
+  check those sections are actually in the routine's stored prompt.
 - **Review-thread gate is author-blind.** `has-open-threads` treats any
   thread whose latest comment is from the PR author as "already answered". If
   the PR author leaves an *inline review comment* asking the agent to do

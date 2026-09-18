@@ -1136,6 +1136,12 @@ class Database:
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS location_gps_reviews (
+                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+                fingerprint TEXT NOT NULL,
+                reviewed_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS detections (
                 id                  INTEGER PRIMARY KEY,
                 photo_id            INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
@@ -5258,6 +5264,7 @@ class Database:
                 (target_folder_id, photo["filename"]),
             ).fetchone()
             if existing:
+                self._transfer_gps_review_for_merge(photo["id"], existing["id"])
                 drop_ids.append(photo["id"])
             elif os.path.exists(os.path.join(new_path, photo["filename"])):
                 self.conn.execute(
@@ -5895,6 +5902,22 @@ class Database:
             if keyword_match_key(r["name"]) == match_key
         ]
 
+    def _transfer_gps_review_for_merge(self, losing_id, surviving_id):
+        """Carry the newest GPS keep decision across an identity merge.
+
+        Prefer the survivor on timestamp ties. The fingerprint still has to
+        match its coordinates, assigned place and sidecar before review will
+        suppress a discrepancy; moving the decision cannot bless new data.
+        The caller owns the transaction and deletion of the losing row.
+        """
+        self.conn.execute("""
+            INSERT INTO location_gps_reviews(photo_id, fingerprint, reviewed_at)
+            SELECT ?, fingerprint, reviewed_at FROM location_gps_reviews WHERE photo_id = ?
+            ON CONFLICT(photo_id) DO UPDATE SET
+                fingerprint = excluded.fingerprint, reviewed_at = excluded.reviewed_at
+            WHERE excluded.reviewed_at > location_gps_reviews.reviewed_at
+        """, (surviving_id, losing_id))
+
     def _transfer_review_state_for_merge(self, losing_id, surviving_id):
         """Carry queued rating / flag state onto the survivor by chronology.
 
@@ -5918,6 +5941,7 @@ class Database:
 
         Returns the number of queue rows dropped.
         """
+        self._transfer_gps_review_for_merge(losing_id, surviving_id)
         dropped = 0
         for change_type, column in (("rating", "rating"), ("flag", "flag")):
             rows = self.conn.execute(
@@ -12792,7 +12816,7 @@ class Database:
             source_taxon_id: Explicit iNaturalist ID for a species keyword;
                      bypass common-name inference and reuse only that identity.
             _resolve_alias: Import callers opt in for leaf keywords only.
-                     Manual additions must not inherit imported place aliases,
+                     Manual additions must not inherit imported keyword aliases,
                      and a leaf alias must not relocate a new parent chain.
         """
         if kw_type is not None and kw_type not in KEYWORD_TYPES:
@@ -12811,7 +12835,7 @@ class Database:
         if not name:
             raise ValueError("keyword name is empty after normalization")
         if _resolve_alias and not is_species and source_taxon_id is None and kw_type in (None, 'location'):
-            resolved = resolve_import_alias(self, name, parent_id)
+            resolved = resolve_import_alias(self, name, parent_id, kw_type=kw_type)
             if resolved is not None:
                 return resolved
         # Reconcile is_species and kw_type to keep the legacy column coherent
@@ -15795,7 +15819,7 @@ class Database:
                 history_curation_fixed,
             )
 
-    def _merge_keyword_into(self, src_id, dst_id):
+    def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
 
         Moves photo associations, then reparents the source's children onto
@@ -15819,6 +15843,11 @@ class Database:
         the merge. Without this, the merge deletes the source row but leaves
         the pending change referring to the old spelling, so the next
         ``sync_to_xmp`` writes a keyword the DB no longer has.
+
+        Explicit merges set ``pending_source_only`` so only photos currently
+        carrying the source have their pending edits rewritten. A photo that
+        already removed the source must still remove that old spelling from
+        its sidecar, even when it also carries the destination keyword.
 
         Returns the number of keyword rows merged away (>= 1). Caller
         commits.
@@ -15938,7 +15967,7 @@ class Database:
                 affected_pcx = [
                     r["photo_id"] for r in self.conn.execute(
                         "SELECT DISTINCT photo_id FROM photo_keywords WHERE keyword_id IN (?, ?)",
-                        (src_id, dst_id),
+                        (src_id, src_id if pending_source_only else dst_id),
                     ).fetchall()
                 ]
                 for chunk in _chunks(affected_pcx):
@@ -16400,7 +16429,9 @@ class Database:
                         (dst_id, disambiguated, child["id"]),
                     )
                 elif existing["type"] == child["type"]:
-                    merged += self._merge_keyword_into(child["id"], existing["id"])
+                    merged += self._merge_keyword_into(
+                        child["id"], existing["id"], pending_source_only=pending_source_only,
+                    )
                 else:
                     # Same name + parent but different type: outside the
                     # (LOWER(name), parent_id, type) dedup boundary, so
@@ -23069,7 +23100,7 @@ class Database:
         # in v1 — _apply_undo has no handlers for them, so including them
         # would silently advance the undo cursor without reverting state.
         # Adding undo support is a follow-up if it becomes important.
-        'location_set', 'location_clear', 'location_link',
+        'location_set', 'location_clear', 'location_link', 'location_gps_review',
         # Compare-page review actions are auditable but not undoable in v1
         # for the same reason: _apply_undo/_apply_redo have no handlers, so
         # leaving them undoable would mark the entry undone without

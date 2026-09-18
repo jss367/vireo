@@ -2,16 +2,9 @@
 
 The live preview in ``_navbar.html`` (``VireoToneGL``) is a GLSL transcription
 of :mod:`tone`. This test mirrors that GLSL arithmetic in numpy and asserts it
-reproduces ``tone.apply_adjustments`` for the **first-edit case only** — the
-displayed image has no baked adjustments (base == zeros), so the previewed
-"delta" equals the full recipe and the two pipelines must agree exactly.
-
-It deliberately does *not* claim parity for re-edits: there the preview applies
-a delta on top of already tone-mapped pixels, and the highlight rolloff /
-clamping are neither reversible nor associative, so the preview is only an
-approximation that snaps to the exact server render after save. We test the
-exact case because it's the one the two formulas are supposed to match; if they
-drift, that case fails.
+reproduces ``tone.apply_adjustments`` for a neutral source with the complete
+recipe. Quick adjustments use that same source across saves and re-edits;
+browser tests cover the actual GPU pixels through repeated slider changes.
 
 It can't execute the actual shader headlessly, but it locks the *formula*:
 sRGB<->linear transfer, the highlight-knee rolloff, the white-balance gains and
@@ -196,8 +189,7 @@ def test_shader_matches_tone_for_full_recipe():
             saturation=sat,
         )[0]
 
-        # The dispatcher (_lbApplyAdjustmentPreview) derives these from a base of
-        # all-zeros for a first edit, so the deltas equal the full values.
+        # The dispatcher applies the complete values to a neutral source.
         gr, gg, gb = tone.white_balance_gains(wb)
         pushed = (2.0 ** ev) * max(gr, gg, gb) > 1.0 + 1e-6
         got = _shader_mirror(

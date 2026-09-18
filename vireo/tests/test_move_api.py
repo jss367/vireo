@@ -396,8 +396,100 @@ def test_move_folder_job_organizes_photos_into_capture_date_folders(
     assert job["config"]["source_path"] == str(src)
     assert job["config"]["resolved_destination"] == str(archive)
     assert job["config"]["folder_template"] == "%Y-%m-%d"
+    # Two capture dates means no single landing folder, so the panel needs
+    # the fan-out listed under the selected root.
+    assert job["config"]["date_destination_count"] == 2
+    assert job["config"]["date_photo_count"] == 2
+    assert job["config"]["date_destinations"] == [
+        {
+            "path": str(archive / "2026-07-12"),
+            "relative_path": "2026-07-12",
+            "photo_count": 1,
+        },
+        {
+            "path": str(archive / "2026-07-13"),
+            "relative_path": "2026-07-13",
+            "photo_count": 1,
+        },
+    ]
     assert (archive / "2026-07-12" / "dated-1.jpg").exists()
     assert (archive / "2026-07-13" / "dated-2.jpg").exists()
+
+
+def test_move_folder_job_single_date_shows_the_date_folder_as_destination(
+    app_and_db, tmp_path,
+):
+    """One capture date means one landing folder — show it, not its parent."""
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    src = tmp_path / "one-date-source"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="one-date-source")
+    for index in (1, 2, 3):
+        filename = f"same-day-{index}.jpg"
+        (src / filename).write_bytes(b"photo")
+        db.add_photo(
+            folder_id=fid, filename=filename, extension=".jpg",
+            file_size=5, file_mtime=float(index),
+            timestamp=f"2026-09-12T1{index}:00:00",
+        )
+    archive = tmp_path / "archive"
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(archive),
+        "folder_template": "%Y-%m-%d",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["config"]["resolved_destination"] == str(archive / "2026-09-12")
+    assert job["config"]["date_destination_count"] == 1
+    assert job["config"]["date_photo_count"] == 3
+    assert (archive / "2026-09-12" / "same-day-1.jpg").exists()
+
+
+def test_move_folder_job_caps_the_stored_date_folder_list(
+    app_and_db, tmp_path,
+):
+    """A many-date move stores a preview of the folders plus the real totals."""
+    import app as app_module
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    src = tmp_path / "many-dates-source"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="many-dates-source")
+    days = range(1, app_module.MOVE_DATE_DEST_PREVIEW_LIMIT + 3)
+    for day in days:
+        filename = f"day-{day:02d}.jpg"
+        (src / filename).write_bytes(b"photo")
+        db.add_photo(
+            folder_id=fid, filename=filename, extension=".jpg",
+            file_size=5, file_mtime=float(day),
+            timestamp=f"2026-07-{day:02d}T10:00:00",
+        )
+    archive = tmp_path / "archive"
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(archive),
+        "folder_template": "%Y-%m-%d",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    config = job["config"]
+    assert len(config["date_destinations"]) == \
+        app_module.MOVE_DATE_DEST_PREVIEW_LIMIT
+    assert config["date_destination_count"] == len(days)
+    assert config["date_photo_count"] == len(days)
+    assert config["resolved_destination"] == str(archive)
 
 
 def test_move_folder_job_invalidates_missing_originals_cache(

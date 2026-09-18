@@ -34,6 +34,7 @@ from image_loader import (
 )
 from keyword_identity import (
     drop_stale_vireo_location_keywords,
+    filter_removed_import_aliases,
     validate_import_locations,
 )
 from keyword_normalization import keyword_match_key
@@ -296,6 +297,9 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     pending_flat_removals = db.get_pending_keyword_removal_keys(photo_id)
     pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
         photo_id, hierarchical=True,
+    )
+    flat_keywords, hier_keywords = filter_removed_import_aliases(
+        db, photo_id, flat_keywords, hier_keywords, pending_flat_removals, pending_hierarchical_removals,
     )
     validate_import_locations(
         db, photo_id,
@@ -878,6 +882,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                     (primary["id"],),
                 )
         # Remove keyword associations then the duplicate JPEG record
+        db._transfer_gps_review_for_merge(companion["id"], primary["id"])
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
         merged_ids.add(companion["id"])

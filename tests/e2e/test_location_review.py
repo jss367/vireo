@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -176,6 +177,83 @@ def _stub_leaflet(route):
             content_type="application/javascript",
             body=LEAFLET_STUB,
         )
+
+
+def _seed_gps_discrepancies(live_server):
+    import config as cfg
+
+    config = cfg.load()
+    config['write_assigned_location_to_xmp'] = True
+    cfg.save(config)
+    db = live_server['db']
+    photo_ids = live_server['data']['photos'][:2]
+    keyword = db.get_or_create_text_location('Kumeyaay Lake')
+    db.conn.execute('UPDATE keywords SET latitude=?, longitude=? WHERE id=?', (32.841515, -117.032998, keyword))
+    for pid in photo_ids:
+        db.set_photo_location(pid, keyword)
+        db.conn.execute(
+            'UPDATE photos SET latitude=?, longitude=?, timestamp=? WHERE id=?',
+            (32.8360733333333, -117.029203333333, '2026-09-12T10:31:33', pid),
+        )
+        folder_id = db.conn.execute('SELECT folder_id FROM photos WHERE id=?', (pid,)).fetchone()[0]
+        folder = Path(db._db_path).parent / f'gps-review-{folder_id}'
+        folder.mkdir(exist_ok=True)
+        db.conn.execute('UPDATE folders SET path=? WHERE id=?', (str(folder), folder_id))
+    db.conn.commit()
+    return photo_ids
+
+
+def test_gps_discrepancy_review_requires_selection_and_queues_only_selected(live_server, page):
+    photo_ids = _seed_gps_discrepancies(live_server)
+    page_errors = []
+    page.on('pageerror', lambda error: page_errors.append(str(error)))
+    page.route('https://unpkg.com/**', _stub_leaflet)
+    page.goto(f"{live_server['url']}/locations/review?mode=discrepancies&scope=all")
+    expect(page.locator('#locationReviewGroupTitle')).to_have_text('Kumeyaay Lake')
+    expect(page.locator('[data-gps-select]')).to_have_count(2)
+    expect(page.locator('#locationReviewSpread')).to_contain_text('701 m')
+    expect(page.locator('#locationReviewAssign')).to_be_disabled()
+    expect(page.locator('#locationReviewKeep')).to_be_disabled()
+    markers = page.evaluate('window.__locationReviewLeafletMarkers.map(m => m.latlng)')
+    assert [32.841515, -117.032998] in markers
+    assert len(markers) == 3
+    page.locator(f'[data-gps-select="{photo_ids[0]}"]').check()
+    page.locator('#locationReviewAssign').click()
+    expect(page.locator('[data-gps-select]')).to_have_count(1)
+    expect(page.locator('#locationReviewCorrectionStatus')).to_contain_text('1 correction queued')
+    pending = live_server['db'].get_pending_changes()
+    assert [(p['photo_id'], p['change_type']) for p in pending] == [(photo_ids[0], 'location')]
+    # Keeping the second photo writes no metadata and survives reopening.
+    page.locator('#locationReviewSelectAll').click()
+    page.locator('#locationReviewKeep').click()
+    expect(page.locator('#locationReviewEmptyTitle')).to_have_text('All locations reviewed')
+    expect(page.locator('#locationReviewEmptyMessage')).to_contain_text('queued')
+    page.reload()
+    expect(page.locator('[data-gps-select]')).to_have_count(1)
+    expect(page.locator(f'[data-gps-select="{photo_ids[0]}"]')).to_be_visible()
+    # Until sync succeeds the queued correction is still reviewable.
+    page.locator('#locationReviewIncludeKept').check()
+    expect(page.locator('[data-gps-select]')).to_have_count(2)
+    page.get_by_role('button', name='Review queued metadata changes', exact=True).first.click()
+    expect(page.locator('#syncPreviewOverlay')).to_be_visible()
+    expect(page.locator('#syncPreviewContent')).to_contain_text('Kumeyaay Lake')
+    assert page_errors == []
+
+
+def test_gps_discrepancy_skip_and_distance_filter_do_not_change_metadata(live_server, page):
+    _seed_gps_discrepancies(live_server)
+    page.route('https://unpkg.com/**', _stub_leaflet)
+    page.goto(f"{live_server['url']}/locations/review?mode=discrepancies&scope=all")
+    expect(page.locator('#locationReviewGroupTitle')).to_have_text('Kumeyaay Lake')
+    page.locator('#locationReviewSkip').click()
+    expect(page.locator('#locationReviewEmptyTitle')).to_have_text('Location review paused')
+    page.reload()
+    expect(page.locator('[data-gps-select]')).to_have_count(2)
+    page.locator('#locationReviewDistance').fill('1000')
+    page.locator('#locationReviewDistance').press('Tab')
+    expect(page.locator('#locationReviewEmptyTitle')).to_have_text('No locations to review')
+    assert live_server['db'].get_pending_changes() == []
+    assert live_server['db'].conn.execute('SELECT COUNT(*) FROM location_gps_reviews').fetchone()[0] == 0
 
 
 def test_location_review_is_a_navigable_collection_page(live_server, page):

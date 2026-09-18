@@ -189,6 +189,12 @@ _WIN_ERROR_MODE_LOCK = threading.Lock()
 # clearly reports truncation and lets users narrow the shared filters.
 MAP_RENDER_PHOTO_LIMIT = 10_000
 
+# How many planned capture-date folders a date-organized move job snapshots
+# into its config for the jobs panel. The panel lists these and reports the
+# real total separately, so the route stays readable (and the job row small)
+# even when a source folder spans hundreds of dates.
+MOVE_DATE_DEST_PREVIEW_LIMIT = 8
+
 
 class _ArtifactResponseError(RuntimeError):
     """Carry a producer's non-success Flask response to equal-key waiters."""
@@ -456,6 +462,7 @@ _SYNC_PREVIEW_FIELD_LABELS = {
     "keyword_add": "Keyword",
     "keyword_remove": "Keyword",
     "keyword_remove_flat": "Keyword",
+    "keyword_merge": "Keyword hierarchy",
     "rating": "Rating",
     "flag": "Flag",
     "location": "Location",
@@ -726,6 +733,17 @@ def _sync_preview_presentation(
 
     if folder_offline:
         return _sync_preview_folder_offline_presentation(change_type)
+
+    if change_type == 'keyword_merge':
+        merge = json.loads(value)
+        target_path = change.get('merge_target_path')
+        return {
+            'field': 'Keyword hierarchy',
+            'action': 'updated' if target_path else 'removed',
+            'before': ' → '.join(merge['source_path']),
+            'after': ' → '.join(target_path) if target_path else 'Removed',
+            'after_detail': 'The merged keyword and its hierarchy sync together',
+        }
 
     if change_type in {"keyword_add", "keyword_remove", "keyword_remove_flat"}:
         existing = next(
@@ -1101,6 +1119,8 @@ def _sync_preview_change_creates_sidecar(
     and the ``remove_*`` paths do not, so they are excluded.
     """
     change_type = change["change_type"]
+    if change_type == 'keyword_merge':
+        return bool(change.get('merge_target_path'))
     if change_type == "keyword_add":
         return True
     if change_type == "flag":
@@ -8075,6 +8095,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(error), 400)
         return jsonify(result)
 
+    @app.route('/api/keywords/merge-preview', methods=['POST'])
+    @app.route('/api/keywords/merge', methods=['POST'])
+    def api_merge_keywords():
+        from keyword_identity import merge_keywords, preview_keyword_merge
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error('Expected a keyword selection and a keyword to keep.', 400)
+        try:
+            args = (_get_db(), body.get('keyword_ids'), body.get('target_id'))
+            if request.path.endswith('/merge-preview'):
+                result = preview_keyword_merge(*args)
+            else:
+                result = merge_keywords(*args, body.get('preview_token'))
+        except ValueError as error:
+            return json_error(str(error), 400)
+        return jsonify(result)
+
     @app.route("/api/keywords")
     def api_keywords():
         db = _get_db()
@@ -8582,11 +8619,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/location-review/preview", methods=["POST"])
     def api_location_review_preview():
-        """Return coordinate or capture-time groups without assigning places."""
+        """Preview coordinate, capture-time, or GPS discrepancy groups without edits."""
         body = request.get_json(silent=True) or {}
         mode = body.get("mode", "coordinates")
-        if mode not in ("coordinates", "time"):
-            return json_error("mode must be coordinates or time", 400)
+        if mode not in ("coordinates", "time", "discrepancies"):
+            return json_error("mode must be coordinates, time, or discrepancies", 400)
+        minimum_distance = body.get("minimum_distance_m", 500)
+        if type(minimum_distance) not in (int, float) or not 0 <= minimum_distance <= 20015087:
+            return json_error("minimum_distance_m must be between 0 and 20015087 meters", 400)
+        include_reviewed = body.get("include_reviewed", False)
+        if type(include_reviewed) is not bool:
+            return json_error("include_reviewed must be a boolean", 400)
         gap_minutes = body.get("gap_minutes", 60)
         if type(gap_minutes) is not int or gap_minutes not in (15, 30, 60, 120):
             return json_error("gap_minutes must be 15, 30, 60, or 120", 400)
@@ -8616,6 +8659,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if edit_error is not None:
                 return edit_error
 
+        if mode == "discrepancies":
+            photos = location_review.gps_discrepancies(db, photo_ids, minimum_distance, include_reviewed)
+            return jsonify({
+                "total": len(photo_ids), "reviewable": len(photos),
+                "groups": location_review.discrepancy_groups(photos), "unresolved": [], "skipped": [],
+            })
+
         assigned_ids = _location_keyword_photo_ids(db, photo_ids)
         skipped = [{
             "photo_id": photo_id,
@@ -8643,6 +8693,87 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "unresolved": unresolved,
             "skipped": skipped,
         })
+
+    @app.route("/api/location-review/resolve-discrepancies", methods=["POST"])
+    def api_resolve_location_discrepancies():
+        """Remember an explicit keep decision or re-queue approved GPS corrections."""
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict) or body.get("action") not in ("keep", "assigned"):
+            return json_error("action must be keep or assigned", 400)
+        photo_ids, error = _normalize_photo_id_list(body.get("photo_ids"))
+        if error is not None:
+            return error
+        if len(photo_ids) > 100:
+            return json_error("Review at most 100 photos at a time", 400)
+        fingerprints = body.get("fingerprints")
+        if not isinstance(fingerprints, dict):
+            return json_error("Preview fingerprints are required", 400)
+        db = _get_db()
+        # Network sidecars can take longer than SQLite's busy timeout. Read
+        # them before taking the writer lock, after authorizing the selection.
+        for photo_id in photo_ids:
+            error = _photo_location_edit_error(db, photo_id)
+            if error is not None:
+                return error
+        sidecars = {}
+
+        def capture_sidecar(path):
+            if path not in sidecars:
+                sidecars[path] = read_sync_preview_metadata(path)
+            return sidecars[path]
+
+        location_review.gps_discrepancies(
+            db, photo_ids, 0, include_reviewed=True, sidecar_reader=capture_sidecar,
+        )
+        # Serialize validation and queueing with concurrent assignment edits.
+        db.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for photo_id in photo_ids:
+                error = _photo_location_edit_error(db, photo_id)
+                if error is not None:
+                    db.conn.rollback()
+                    return error
+            photos = location_review.gps_discrepancies(
+                db, photo_ids, 0, include_reviewed=True, sidecar_reader=sidecars.get,
+            )
+            current = {photo["id"]: photo for photo in photos}
+            if any(pid not in current or fingerprints.get(str(pid)) != current[pid]["fingerprint"] for pid in photo_ids):
+                db.conn.rollback()
+                return json_error("Location data changed. Reload this review before applying a decision.", 409)
+            if body["action"] == "assigned":
+                import config as cfg
+                if not db.get_effective_config(cfg.load()).get("write_assigned_location_to_xmp", False):
+                    db.conn.rollback()
+                    return json_error("Enable Write assigned locations to XMP in Settings before queueing corrections.", 409)
+                for photo_id in photo_ids:
+                    _queue_location_sync_if_enabled(photo_id, _commit=False)
+                    db.conn.execute("DELETE FROM location_gps_reviews WHERE photo_id = ?", (photo_id,))
+            else:
+                for photo_id in photo_ids:
+                    if db.conn.execute(
+                        "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location' LIMIT 1",
+                        (photo_id,),
+                    ).fetchone():
+                        db.conn.rollback()
+                        return json_error("A selected photo has a pending location change. Review that change before keeping its GPS.", 409)
+                db.conn.executemany(
+                    "INSERT OR REPLACE INTO location_gps_reviews(photo_id, fingerprint) VALUES (?, ?)",
+                    [(pid, current[pid]["fingerprint"]) for pid in photo_ids],
+                )
+            db.record_edit(
+                'location_gps_review',
+                'Queue assigned place GPS' if body["action"] == "assigned" else 'Keep photo GPS',
+                body["action"],
+                [{'photo_id': pid, 'old_value': current[pid]["fingerprint"], 'new_value': body["action"]}
+                 for pid in photo_ids],
+                is_batch=len(photo_ids) > 1, _commit=False,
+            )
+            db.conn.commit()
+        except BaseException:
+            db.conn.rollback()
+            raise
+        db._prune_edit_history()
+        return jsonify({"reviewed": len(photo_ids), "queued": len(photo_ids) if body["action"] == "assigned" else 0})
 
     @app.route("/api/location-review/saved-suggestions")
     def api_location_review_saved_suggestions():
@@ -12820,8 +12951,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Read the keyword chain from the same helper ``sync_to_xmp`` writes
         # from, so the review cannot name one place and the sync write another.
         location_paths = db.get_photo_location_paths(location_photo_ids)
+        from keyword_identity import keyword_paths, resolve_merge_target
+        merge_paths = keyword_paths(db.conn.execute(
+            'SELECT id, name, parent_id FROM keywords'
+        ).fetchall()) if any(
+            change['type'] == 'keyword_merge'
+            for photo in page_photos for change in photo['changes']
+        ) else {}
         folder_accessibility = {}
         for photo in page_photos:
+            merges = [c for c in photo['changes'] if c['type'] == 'keyword_merge']
+            if merges:
+                tagged_ids = {k['id'] for k in db.get_photo_keywords(photo['photo_id'])}
+                for change in merges:
+                    target_id = resolve_merge_target(db, json.loads(change['value']))
+                    change['merge_target_path'] = merge_paths.get(target_id) if target_id in tagged_ids else None
             xmp_path = os.path.join(
                 photo["folder"],
                 os.path.splitext(photo["filename"])[0] + ".xmp",
@@ -25125,6 +25269,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                destination, display_dest, destination_name,
                                source_path, resolved_destination,
                                merge, remote, developed_dir, folder_template="",
+                               date_destinations=None,
                                chained_from=None, serialize_lock=None,
                                allow_tracked_merge=False,
                                managed_staging_root=None, mount_baseline=None,
@@ -25145,6 +25290,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         chained import→process→move hook opts in (see the why-comment in
         ``_enqueue_move_folder_job``); the manual move endpoint keeps the
         default refusal of tracked destinations.
+
+        ``date_destinations``: the planned capture-date folders for a
+        date-organized move (``path``/``relative_path``/``photo_count`` per
+        entry, as produced by ``plan_folder_date_moves``). Snapshotted into
+        the job config so the jobs panel can name the folders photos actually
+        land in rather than only the selected root.
         """
         def work(job):
             from move import move_folder, move_folder_by_date
@@ -25332,6 +25483,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
         if folder_template:
             job_config["folder_template"] = folder_template
+        if date_destinations:
+            # Cap the stored list: a multi-year source folder can plan
+            # thousands of date folders, and the whole config is serialized
+            # into the job row and every status poll. The panel shows the
+            # first few and reports the true totals from the counts below,
+            # which are computed over the full plan.
+            job_config["date_destinations"] = [
+                {
+                    "path": item["path"],
+                    "relative_path": item["relative_path"],
+                    "photo_count": item["photo_count"],
+                }
+                for item in date_destinations[:MOVE_DATE_DEST_PREVIEW_LIMIT]
+            ]
+            job_config["date_destination_count"] = len(date_destinations)
+            job_config["date_photo_count"] = sum(
+                item["photo_count"] for item in date_destinations)
         if destination_name:
             job_config["destination_name"] = destination_name
         if remote:
@@ -25480,6 +25648,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("destination must be an absolute path")
             display_dest = destination
 
+        date_plan = None
+        date_destinations = None
         if folder_template:
             try:
                 date_plan = move_mod.plan_folder_date_moves(
@@ -25489,11 +25659,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error(str(exc))
             if not date_plan:
                 return json_error("No tracked photos found in the source folder")
+            date_destinations = [
+                {
+                    "path": item["destination"],
+                    "relative_path": item["relative_path"],
+                    "photo_count": item["photo_count"],
+                }
+                for item in date_plan
+            ]
 
         if folder_template:
-            # A date-organized move fans out into several final folders. The
-            # selected root is the most truthful single destination to show.
-            resolved_destination = display_dest
+            # A date-organized move fans out into one folder per capture date.
+            # When the plan resolves to a single date folder — the common case
+            # for a one-shoot source folder — that folder *is* where every
+            # photo lands, so show it in full instead of the selected root the
+            # user would otherwise read as the landing path. With several date
+            # folders there is no single landing path; keep the root and let
+            # the jobs panel list the folders underneath it.
+            resolved_destination = (
+                date_destinations[0]["path"] if len(date_destinations) == 1
+                else display_dest
+            )
         elif remote:
             import posixpath
 
@@ -25521,6 +25707,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             remote=remote,
             developed_dir=developed_dir,
             folder_template=folder_template,
+            date_destinations=date_destinations,
         )
         return jsonify({"job_id": job_id})
 
