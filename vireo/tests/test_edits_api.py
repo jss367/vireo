@@ -2094,6 +2094,50 @@ def test_sync_preview_reports_a_location_keyword_already_in_xmp(client_with_phot
     assert change["creates_xmp_sidecar"] is True
 
 
+def test_sync_preview_reports_a_normalized_hierarchy_variant_as_already_listed(
+    client_with_photo,
+):
+    """A sidecar spelling that differs only in case matches the writer.
+
+    ``set_location_keywords`` treats a normalized hierarchy variant as
+    already present and skips the keyword insert. The preview used to
+    do an exact string check and would tell the reviewer the sync is
+    about to write the canonical keyword even though the writer would
+    make no keyword mutation on that photo.
+    """
+    import os
+
+    from xmp import LOCATION_KEYWORDS_MARKER, SidecarEditor, write_sidecar
+
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["France", "Camargue", "Pont de Gau"])
+    db.queue_change(photo_id, "location", "effective")
+
+    photo = db.get_photo(photo_id)
+    folder = db.get_folder(photo["folder_id"])["path"]
+    xmp_path = os.path.join(folder, "test.xmp")
+    # Simulate a sidecar where Vireo previously wrote the location but the
+    # user (or Lightroom) later rewrote the hierarchy in a different case.
+    write_sidecar(
+        xmp_path,
+        flat_keywords={"Pont de Gau"},
+        hierarchical_keywords={"france|camargue|pont de gau"},
+    )
+    editor = SidecarEditor(xmp_path)
+    desc = editor._description()
+    desc.set(LOCATION_KEYWORDS_MARKER, "France|Camargue|Pont de Gau")
+    editor._dirty = True
+    editor.commit()
+
+    payload = app.test_client().get("/api/sync/preview").get_json()
+
+    change = payload["photos"][0]["changes"][0]
+    assert change["presentation"]["after_detail"].endswith(
+        "XMP already lists the keyword France|Camargue|Pont de Gau"
+    )
+
+
 def test_sync_preview_reports_removing_location_keywords_when_disabled(
     client_with_photo,
 ):

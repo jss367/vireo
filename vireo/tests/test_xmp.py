@@ -1281,6 +1281,54 @@ def test_set_location_keywords_does_not_claim_a_users_hier_case_variant(tmp_path
     ]
 
 
+def test_set_location_keywords_refuses_a_name_with_a_pipe(tmp_path, caplog):
+    """A location whose name contains ``|`` cannot round-trip through
+    Lightroom's hierarchy delimiter, so the write is skipped rather than
+    corrupted.
+
+    ``get_or_create_text_location`` accepts any free-text name, but the
+    Lightroom hierarchical-subject format and Vireo's own marker parser
+    both split on ``|``. Writing a single-part place named ``Home|Cabin``
+    would leave a flat keyword the cleanup step could never find (its
+    marker parses as a two-level path with leaf ``Cabin``) and an import
+    would misread the entry as a two-node hierarchy. There is no
+    reversible encoding: Lightroom renders escape sequences literally.
+    """
+    import logging
+
+    from xmp import SidecarEditor, read_vireo_location_keywords
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    with caplog.at_level(logging.WARNING, logger="xmp"):
+        assert editor.set_location_keywords(["Home|Cabin"]) is False
+    editor.commit()
+
+    # Nothing was written -- no keywords, no marker, no ownership record.
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []
+    assert read_vireo_location_keywords(path) is None
+    assert any(
+        "Home|Cabin" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_set_location_keywords_refuses_a_pipe_in_an_ancestor(tmp_path):
+    """Any segment containing ``|`` disqualifies the whole chain."""
+    from xmp import SidecarEditor, read_vireo_location_keywords
+
+    path = str(tmp_path / "photo.xmp")
+    editor = SidecarEditor(path)
+    assert editor.set_location_keywords(
+        ["United|States", "California", "Kumeyaay Lake"]
+    ) is False
+    editor.commit()
+
+    assert read_keywords(path) == set()
+    assert read_hierarchical_keywords(path) == []
+    assert read_vireo_location_keywords(path) is None
+
+
 def test_remove_vireo_location_keywords_defaults_to_both_on_legacy_marker(tmp_path):
     """A sidecar missing the ownership companion is treated as pre-fix.
 

@@ -912,6 +912,27 @@ class SidecarEditor:
         if not parts:
             return self.remove_vireo_location_keywords()
 
+        # A pipe in a location name would corrupt every downstream reader:
+        # Lightroom's ``lr:hierarchicalSubject`` uses ``|`` as the segment
+        # delimiter, and Vireo's own marker parser splits on the same
+        # character. ``get_or_create_text_location`` accepts any name the
+        # user types, so a free-text place called ``Home|Cabin`` reaches
+        # this method as one part -- write it and cleanup would mis-parse
+        # the marker leaf as ``Cabin`` and leave the flat ``Home|Cabin``
+        # keyword stale forever, while a later import would read the
+        # entry as a two-level hierarchy. There is no reversible encoding
+        # that survives Lightroom (it would render the escape literally),
+        # so skip the write and log the reason instead of corrupting the
+        # sidecar.
+        if any("|" in part for part in parts):
+            log.warning(
+                "Skipping location-keyword write for %s: a name contains '|'"
+                " which collides with Lightroom's hierarchy delimiter"
+                " (parts=%r)",
+                self.path, parts,
+            )
+            return False
+
         path = "|".join(parts)
         was_dirty = self._dirty
         desc = self._description()

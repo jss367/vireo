@@ -648,8 +648,17 @@ def _sync_preview_merge_location_keywords(
         if not hierarchical:
             return False
         leaf_key = keyword_match_key(leaf)
+        # Match ``set_location_keywords``'s ``existed_hier`` logic: it treats
+        # a sidecar variant that differs only in case or normalized spacing
+        # as already present and skips the write. An exact-string check here
+        # would tell the reviewer "writes the keyword X" for a queued row
+        # the sync will then leave untouched.
+        path_keys = [keyword_match_key(part) for part in hierarchical.split("|")]
         return (
-            hierarchical in (metadata.get("hierarchical_keywords") or set())
+            any(
+                [keyword_match_key(s) for s in entry.split("|")] == path_keys
+                for entry in (metadata.get("hierarchical_keywords") or set())
+            )
             and any(
                 keyword_match_key(keyword) == leaf_key
                 for keyword in (metadata.get("keywords") or set())
