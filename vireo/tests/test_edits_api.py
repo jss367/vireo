@@ -2193,6 +2193,93 @@ def test_queue_location_writes_route(client_with_photo):
     assert client.post("/api/sync/location-writes").get_json()["queued"] == 0
 
 
+def test_disabling_location_keywords_globally_queues_cleanup(client_with_photo):
+    """Flipping the setting off through /api/config queues a cleanup pass.
+
+    Regression: after a successful location-keyword sync, the ``location``
+    pending row is gone. Toggling the setting off through the config
+    endpoint used to leave those sidecars untouched forever -- the sync
+    only walks queued rows, and the config write didn't enqueue any.
+    """
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    # Clear anything the assignment queued so the transition is the only
+    # source of the location row we assert on.
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/config", json={"write_location_keywords_to_xmp": False},
+    )
+    assert resp.status_code == 200
+
+    assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
+
+
+def test_disabling_location_keywords_via_settings_patch_queues_cleanup(
+    client_with_photo,
+):
+    """Same transition through /api/settings/global (per-key PATCH)."""
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "write_location_keywords_to_xmp", "value": False},
+    )
+    assert resp.status_code == 200
+
+    assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
+
+
+def test_disabling_location_keywords_via_workspace_override_queues_cleanup(
+    client_with_photo,
+):
+    """A workspace override that flips off queues cleanup for just that workspace."""
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)  # global on
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "write_location_keywords_to_xmp", "value": False},
+    )
+    assert resp.status_code == 200
+
+    assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
+
+
+def test_enabling_location_keywords_does_not_queue_cleanup(client_with_photo):
+    """The False → True direction is a no-op for the cleanup helper.
+
+    Guards against a helper that would queue on any change of the setting
+    -- turning writes on is what the backfill button is for, not the
+    setting flip.
+    """
+    app, db, photo_id = client_with_photo
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    _drop_all_pending(db)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/config", json={"write_location_keywords_to_xmp": True},
+    )
+    assert resp.status_code == 200
+    assert db.get_pending_changes() == []
+
+
+def _drop_all_pending(db):
+    """Remove every pending row so a later assertion sees only new inserts."""
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+
 def test_sync_preview_says_marker_only_when_the_keyword_is_already_gone(
     client_with_photo,
 ):

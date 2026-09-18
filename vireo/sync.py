@@ -280,6 +280,18 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None, location_path=None
     # Apply keyword additions after removals so a same-photo remove+add
     # pair does not cancel out (see _remove_planned_keywords).
     if plan.keywords_to_add:
+        # An ordinary ``keyword_add`` for the same leaf a prior location
+        # write authored (say, the user adds "Paris" while the photo's
+        # location has always been "France|Paris") would land on an entry
+        # already in ``dc:subject`` -- ``add_keywords`` is a no-op there --
+        # and a later ``remove_vireo_location_keywords`` or a place-change
+        # in this same sync would then strip the leaf under the marker's
+        # flat ownership claim, leaving the user's keyword absent. Transfer
+        # ownership away from the location marker BEFORE the add, so the
+        # subsequent cleanup respects the transfer and leaves the flat
+        # entry alone. Hierarchical ownership is untouched because
+        # ``keyword_add`` writes ``dc:subject`` only.
+        editor.release_location_flat_ownership_for(plan.keywords_to_add)
         editor.add_keywords(
             flat_keywords=plan.keywords_to_add, hierarchical_keywords=set()
         )

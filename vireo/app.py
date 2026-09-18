@@ -19217,6 +19217,77 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "effective": effective_layer,
         })
 
+    _LOCATION_KEYWORDS_SETTING = "write_location_keywords_to_xmp"
+
+    def _queue_location_keyword_cleanup_for_workspace(db, workspace_id):
+        """Queue ``location`` changes for every located photo in one workspace.
+
+        Runs the workspace-scoped backfill under an explicit active-workspace
+        switch so the caller's active workspace is left untouched.
+        """
+        saved_active = db._active_workspace_id
+        try:
+            db._active_workspace_id = int(workspace_id)
+            db.queue_location_changes_for_tagged_photos()
+        except Exception:
+            log.warning(
+                "Failed to queue location cleanup for workspace %s",
+                workspace_id, exc_info=True,
+            )
+        finally:
+            db._active_workspace_id = saved_active
+
+    def _queue_location_keyword_cleanup_on_global_off(
+        db, previous_global, current_global,
+    ):
+        """Queue cleanup in every workspace whose effective setting flipped off.
+
+        ``write_location_keywords_to_xmp`` promises in its own description
+        that turning it off removes the keywords Vireo wrote on the next
+        sync. But ``sync_to_xmp`` only visits photos with a queued row --
+        after a successful write the previous run's ``location`` row is
+        gone, so a bare setting flip would strand the sidecars until the
+        user reassigned each place by hand or ran the Settings backfill.
+        Detect the True → False transition per workspace here (workspace
+        overrides win over the global) and queue the affected photos.
+        """
+        key = _LOCATION_KEYWORDS_SETTING
+        prev_global_val = bool((previous_global or {}).get(key, False))
+        cur_global_val = bool((current_global or {}).get(key, False))
+        # A workspace with its own override for this key is not affected
+        # by a global toggle -- its effective value doesn't change.
+        if prev_global_val == cur_global_val:
+            return
+        try:
+            workspaces = db.get_workspaces()
+        except Exception:
+            log.warning(
+                "Failed to enumerate workspaces for %s cleanup check",
+                key, exc_info=True,
+            )
+            return
+        for ws in workspaces:
+            override = None
+            raw_override = ws["config_overrides"]
+            if raw_override:
+                try:
+                    parsed = (
+                        json.loads(raw_override) if isinstance(raw_override, str)
+                        else raw_override
+                    )
+                    if isinstance(parsed, dict) and key in parsed:
+                        override = bool(parsed[key])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            prev_effective = (
+                override if override is not None else prev_global_val
+            )
+            cur_effective = (
+                override if override is not None else cur_global_val
+            )
+            if prev_effective and not cur_effective:
+                _queue_location_keyword_cleanup_for_workspace(db, ws["id"])
+
     def _settings_post_save_side_effects(current, previous=None):
         """Side effects mirrored from the legacy /api/config POST handler.
 
@@ -19293,6 +19364,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 arrange_deferred_working_copy_quota_retry(
                     app.config["DB_PATH"], vireo_dir,
                 )
+
+        # A global toggle from on → off must honor the setting's own
+        # description: "Turning this off removes the keywords Vireo wrote
+        # on the next sync." Sync only visits queued photos, so queue them
+        # here for every workspace whose effective value transitioned off.
+        _queue_location_keyword_cleanup_on_global_off(
+            quota_db, previous, current,
+        )
 
     def _read_raw_config_file():
         """Return the parsed contents of ~/.vireo/config.json, or {}.
@@ -19460,9 +19539,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ):
             return json_error(f"unknown process id: {value}", status=400)
         with _settings_write_lock:
+            import config as cfg
+            key_transition_check = (key == _LOCATION_KEYWORDS_SETTING)
+            prev_effective_val = (
+                bool(db.get_effective_config(cfg.load()).get(key, False))
+                if key_transition_check else None
+            )
             overrides = _read_workspace_overrides(db)
             schema.set_dotted(overrides, key, value)
             _write_workspace_overrides(db, overrides)
+            if key_transition_check:
+                new_effective_val = bool(
+                    db.get_effective_config(cfg.load()).get(key, False),
+                )
+                if prev_effective_val and not new_effective_val:
+                    _queue_location_keyword_cleanup_for_workspace(
+                        db, db._active_workspace_id,
+                    )
         return jsonify({"ok": True, "key": key, "value": value})
 
     @app.route("/api/settings/workspace/<path:key>", methods=["DELETE"])
@@ -19474,9 +19567,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(f"unknown setting {key!r}", status=400)
         db = _get_db()
         with _settings_write_lock:
+            import config as cfg
+            key_transition_check = (key == _LOCATION_KEYWORDS_SETTING)
+            prev_effective_val = (
+                bool(db.get_effective_config(cfg.load()).get(key, False))
+                if key_transition_check else None
+            )
             overrides = _read_workspace_overrides(db)
             schema.delete_dotted(overrides, key)
             _write_workspace_overrides(db, overrides)
+            if key_transition_check:
+                new_effective_val = bool(
+                    db.get_effective_config(cfg.load()).get(key, False),
+                )
+                if prev_effective_val and not new_effective_val:
+                    _queue_location_keyword_cleanup_for_workspace(
+                        db, db._active_workspace_id,
+                    )
         return jsonify({"ok": True, "key": key})
 
     @app.route("/api/settings/export")

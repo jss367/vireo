@@ -2160,6 +2160,86 @@ def test_sync_to_xmp_leaves_lightroom_location_keywords_alone(tmp_path, monkeypa
     db.close()
 
 
+def test_sync_to_xmp_preserves_ordinary_keyword_matching_cleared_location_leaf(
+    tmp_path, monkeypatch,
+):
+    """An ordinary keyword_add for the leaf survives the same-sync cleanup.
+
+    Regression: after Vireo wrote "Paris" as part of a location, an ordinary
+    keyword_add for "Paris" in the same sync that clears the location used
+    to leave XMP without "Paris" at all -- the add hit an entry the marker
+    still owned, then cleanup deleted it. Ownership must transfer to the
+    ordinary add.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import (
+        read_hierarchical_keywords,
+        read_keywords,
+        read_vireo_location_keywords,
+    )
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    leaf = _add_location_chain(db, ["France", "Paris"])
+    db.set_photo_location(pid, leaf)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Paris"}
+
+    # In the same sync: user adds "Paris" as an ordinary keyword AND
+    # clears the location. The flat entry is already there, so add is a
+    # no-op; cleanup must not strip it under the marker's flat ownership.
+    db.clear_photo_location(pid)
+    db.queue_change(pid, "location", "effective")
+    db.queue_change(pid, "keyword_add", "Paris")
+    sync_to_xmp(db)
+
+    assert "Paris" in read_keywords(xmp_path)
+    assert read_hierarchical_keywords(xmp_path) == []
+    assert read_vireo_location_keywords(xmp_path) is None
+    assert not db.get_pending_changes()
+    db.close()
+
+
+def test_sync_to_xmp_preserves_ordinary_keyword_matching_reassigned_location_leaf(
+    tmp_path, monkeypatch,
+):
+    """Reassigning a place with the leaf added as an ordinary keyword keeps it.
+
+    Twin of the cleared-location case above but through the write branch:
+    ``set_location_keywords`` writes a new place while an ordinary
+    keyword_add asks to keep the previous place's leaf as a plain keyword.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    _location_keyword_config(tmp_path, monkeypatch)
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    first = _add_location_chain(db, ["France", "Paris"])
+    db.set_photo_location(pid, first)
+    db.queue_change(pid, "location", "effective")
+    sync_to_xmp(db)
+    assert read_keywords(xmp_path) == {"Paris"}
+
+    second = _add_location_chain(db, ["United Kingdom", "London"])
+    db.set_photo_location(pid, second)
+    db.queue_change(pid, "location", "effective")
+    db.queue_change(pid, "keyword_add", "Paris")
+    sync_to_xmp(db)
+
+    assert read_keywords(xmp_path) == {"Paris", "London"}
+    assert not db.get_pending_changes()
+    db.close()
+
+
 def test_sync_from_xmp_keeps_the_assigned_location(tmp_path, monkeypatch):
     """Reconciling from a sidecar must not unassign a place set in Vireo."""
     from db import Database

@@ -1047,6 +1047,47 @@ class SidecarEditor:
         self._dirty = True
         return True
 
+    def release_location_flat_ownership_for(self, keywords):
+        """Drop the marker's flat ownership when an ordinary add claims the leaf.
+
+        When the sync queue holds a ``keyword_add`` for the same leaf name
+        Vireo previously wrote as a location keyword, ``add_keywords()`` is a
+        no-op (the entry is already in ``dc:subject``) -- but a later
+        ``remove_vireo_location_keywords()`` or a place-change would then
+        strip the entry the user asked us to keep. Rewrite the owned marker
+        so the flat leaf is no longer claimed as ours; the hierarchical
+        ownership is left alone because an ordinary ``keyword_add`` only
+        touches ``dc:subject``. A no-op when the sidecar has no marker or
+        no matching keyword is queued.
+        """
+        if not keywords:
+            return False
+        if not self._readable():
+            return False
+        desc = self._find_description()
+        if desc is None:
+            return False
+        previous = desc.get(LOCATION_KEYWORDS_MARKER)
+        if not previous:
+            return False
+        owned = desc.get(LOCATION_KEYWORDS_OWNED)
+        owns_flat, owns_hier = _parse_location_keywords_owned(owned)
+        if not owns_flat:
+            return False
+        leaf, _path = location_keyword_entries(previous)
+        leaf_key = keyword_match_key(leaf)
+        if not leaf_key:
+            return False
+        for kw in keywords:
+            if keyword_match_key(kw) == leaf_key:
+                desc.set(
+                    LOCATION_KEYWORDS_OWNED,
+                    _format_location_keywords_owned(False, owns_hier),
+                )
+                self._dirty = True
+                return True
+        return False
+
     def _remove_location_keyword_entries(self, marker_value, owned_value):
         """Strip only the entries a previous location-keyword write inserted.
 

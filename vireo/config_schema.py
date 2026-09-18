@@ -148,8 +148,9 @@ SCHEMA = {
             "Write the assigned place and its parent places into XMP sidecars "
             "as keywords (dc:subject leaf plus an lr:hierarchicalSubject path "
             "such as United States|California|Kumeyaay Lake), so Lightroom "
-            "shows the location in its keyword list. Turning this off removes "
-            "the keywords Vireo wrote on the next sync."
+            "shows the location in its keyword list. Turning this off queues "
+            "a location change for every located photo in the affected "
+            "workspace(s), so the next sync removes the keywords Vireo wrote."
         ),
     },
     "scan_workers": {
