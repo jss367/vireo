@@ -515,3 +515,22 @@ def test_discrepancy_preview_reads_sidecars_off_request_thread(discrepancy_catal
     monkeypatch.setattr(location_review, 'read_sync_preview_metadata', read)
     assert len(discrepancy_preview(client)) == len(photo_ids)
     assert threads and request_thread not in threads
+
+
+def test_keep_survives_unrelated_sidecar_creation_and_removal(discrepancy_catalog):
+    from xmp import write_rating, write_sidecar
+
+    client, _, _, _, folder = discrepancy_catalog
+    photos = discrepancy_preview(client)
+    kept = photos[0]
+    assert resolve(client, [kept], 'keep').status_code == 200
+    sidecar = (folder / kept['filename']).with_suffix('.xmp')
+    write_sidecar(sidecar, {'bird'}, {'Subject|bird'})
+    write_rating(sidecar, 4)
+    assert kept['id'] not in {p['id'] for p in discrepancy_preview(client)}
+    sidecar.unlink()
+    assert kept['id'] not in {p['id'] for p in discrepancy_preview(client)}
+    # Losing the ability to inspect GPS evidence is a meaningful change.
+    sidecar.write_text('<broken')
+    assert kept['id'] in {p['id'] for p in discrepancy_preview(client)}
+    assert resolve(client, [kept], 'assigned').status_code == 409
