@@ -282,3 +282,182 @@ def test_preview_import_detects_conflicts(tmp_path):
     result = preview_import([cat1, cat2], db)
 
     assert result['conflict_count'] >= 1
+
+
+def _cased_apart(root):
+    """The same directory as `root`, spelled the way a second catalog might."""
+    return root.replace('/photos/', '/PHOTOS/')
+
+
+def test_execute_import_prefers_last_across_cased_paths(tmp_path, monkeypatch):
+    """Two catalogs spelling one photo apart in case are a single entry.
+
+    On Windows the same file is reachable as `D:/Pictures/a.nef` and
+    `d:/pictures/a.nef`. Group those apart and both entries resolve to the one
+    photo, so prefer_last imports the earlier catalog's keywords too instead of
+    letting the last one win. Windows' normalizers are patched in because the
+    POSIX ones are identities and the mismatch is otherwise unreachable here.
+    """
+    import ntpath
+
+    import importer
+    from db import Database
+    from importer import execute_import
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    cat1 = str(tmp_path / "cat1.lrcat")
+    cat2 = str(tmp_path / "cat2.lrcat")
+    _create_test_catalog(cat1, root, [('DSC_0001.NEF', '', [('Cardinal', None)])])
+    _create_test_catalog(cat2, _cased_apart(root), [('DSC_0001.NEF', '', [('Blue jay', None)])])
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(root, name='photos')
+    pid = db.add_photo(folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
+                       file_size=100, file_mtime=1.0)
+
+    monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
+    monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
+    result = execute_import([cat1, cat2], db, write_xmp=False, strategy='prefer_last')
+
+    assert result['imported'] == 1
+    names = {k['name'] for k in db.get_photo_keywords(pid)}
+    assert 'Blue jay' in names
+    assert 'Cardinal' not in names
+
+
+def test_preview_import_detects_conflicts_across_cased_paths(tmp_path, monkeypatch):
+    """The preview must report that cased-apart spellings are one file.
+
+    Otherwise two catalogs that both claim the photo look like two untroubled
+    singletons and the user is never told there is a conflict to resolve.
+    """
+    import ntpath
+
+    import importer
+    from db import Database
+    from importer import preview_import
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    cat1 = str(tmp_path / "cat1.lrcat")
+    cat2 = str(tmp_path / "cat2.lrcat")
+    _create_test_catalog(cat1, root, [('DSC_0001.NEF', '', [('Cardinal', None)])])
+    _create_test_catalog(cat2, _cased_apart(root), [('DSC_0001.NEF', '', [('Blue jay', None)])])
+
+    db = Database(str(tmp_path / "test.db"))
+    monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
+    monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
+    result = preview_import([cat1, cat2], db)
+
+    assert result['conflict_count'] == 1
+    conflict = result['conflicts'][0]
+    assert conflict['file_path'].endswith('DSC_0001.NEF')
+    assert set(conflict['keywords_by_catalog']) == {'cat1', 'cat2'}
+
+
+def _windows_paths(monkeypatch):
+    """Make importer path handling behave the way it does on Windows.
+
+    normcase and normpath are identities on POSIX, so nothing about case
+    folding is observable from this runner without them.
+    """
+    import ntpath
+
+    import importer
+
+    monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
+    monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
+
+
+def test_execute_import_keeps_case_distinct_photos_apart(tmp_path, monkeypatch):
+    """Two photos that differ only in case each keep their own keywords.
+
+    A Windows directory with per-directory case sensitivity enabled can hold
+    both Bird.NEF and bird.NEF. Case folding is what lets a catalog path find
+    its photo at all, but folding these two together would hand one photo both
+    catalogs' keywords and leave the other untouched, so an exact spelling has
+    to win whenever there is one.
+    """
+    from db import Database
+    from importer import execute_import
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    cat_path = str(tmp_path / "test.lrcat")
+    _create_test_catalog(cat_path, root, [
+        ('Bird.NEF', '', [('Cardinal', None)]),
+        ('bird.NEF', '', [('Blue jay', None)]),
+    ])
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(root, name='photos')
+    upper = db.add_photo(folder_id=fid, filename='Bird.NEF', extension='.nef',
+                         file_size=100, file_mtime=1.0)
+    lower = db.add_photo(folder_id=fid, filename='bird.NEF', extension='.nef',
+                         file_size=100, file_mtime=1.0)
+
+    _windows_paths(monkeypatch)
+    result = execute_import([cat_path], db, write_xmp=False)
+
+    assert result['imported'] == 2
+    assert {k['name'] for k in db.get_photo_keywords(upper)} == {'Cardinal'}
+    assert {k['name'] for k in db.get_photo_keywords(lower)} == {'Blue jay'}
+
+
+def test_execute_import_skips_a_path_that_folds_onto_two_photos(tmp_path, monkeypatch):
+    """An inexact path matching two case-apart photos must tag neither.
+
+    Folding is a fallback for finding the one photo a catalog means. When it
+    names two, there is no answer, and picking one at random would tag the
+    wrong photo.
+    """
+    from db import Database
+    from importer import execute_import
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    cat_path = str(tmp_path / "test.lrcat")
+    _create_test_catalog(cat_path, root, [('BIRD.NEF', '', [('Cardinal', None)])])
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(root, name='photos')
+    upper = db.add_photo(folder_id=fid, filename='Bird.NEF', extension='.nef',
+                         file_size=100, file_mtime=1.0)
+    lower = db.add_photo(folder_id=fid, filename='bird.NEF', extension='.nef',
+                         file_size=100, file_mtime=1.0)
+
+    _windows_paths(monkeypatch)
+    result = execute_import([cat_path], db, write_xmp=False)
+
+    assert result['imported'] == 0
+    assert result['skipped'] == 1
+    assert db.get_photo_keywords(upper) == []
+    assert db.get_photo_keywords(lower) == []
+
+
+def test_preview_import_keeps_two_case_distinct_files_apart(tmp_path, monkeypatch):
+    """Cased-apart spellings of two real files are not one conflict.
+
+    The filesystem is what decides: on a case-insensitive directory the two
+    spellings open the same file, and on a case-sensitive one they do not.
+    samefile stands in for the latter here, which macOS and Linux runners
+    cannot produce on their own.
+    """
+    import importer
+    from db import Database
+    from importer import preview_import
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    cat1 = str(tmp_path / "cat1.lrcat")
+    cat2 = str(tmp_path / "cat2.lrcat")
+    _create_test_catalog(cat1, root, [('Bird.NEF', '', [('Cardinal', None)])])
+    _create_test_catalog(cat2, root, [('bird.NEF', '', [('Blue jay', None)])])
+
+    db = Database(str(tmp_path / "test.db"))
+    _windows_paths(monkeypatch)
+    monkeypatch.setattr(importer.os.path, 'samefile', lambda one, other: False)
+    result = preview_import([cat1, cat2], db)
+
+    assert result['conflict_count'] == 0
