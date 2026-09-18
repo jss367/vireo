@@ -190,39 +190,32 @@ signal; do not limit the work to the triggering payload.
    would cost, and the cheaper alternative you see — and escalate instead of
    expanding the PR.
 8. Apply all selected conflict, review, and CI fixes in one coherent change.
-   Run validation and fix failures. Stage the result but do not commit yet:
-   the size-drift checkpoint in step 9 needs to see the cumulative PR diff
-   this round would produce, including the fix that closed the finding it
-   might trip on. If there is no code or merge change to stage, do not create
-   an empty commit or a top-level success comment.
-9. Size-drift checkpoint. Measure the PR's cumulative diff — everything on the
-   branch above the base branch, including this round's staged fix — and
-   compare it against the PR's size at its baseline. The baseline is the PR
-   state at the parent of the first commit on the branch whose message carries
-   a routine marker (`[pr-agent-review-fix:$PR]` or `[pr-agent-fix-ci:$PR]`);
-   this is mechanically identifiable even for PRs opened by another agent
-   (e.g., Codex), whose commits do not carry those markers even when they
-   author under the maintainer's connected GitHub identity. If no
-   routine-marker commit exists on the branch yet, the baseline is the current
-   PR head — the checkpoint still fires this round, so a first-round fix that
-   grows the staged diff past three times that pre-fix head is drift too and
-   trips the same reset. If the cumulative diff has grown past roughly three
-   times the baseline, do not commit or push: reset the working tree, then
-   post one deduplicated comment naming what the PR set out to do, what it
-   now contains, and which finding pushed it past the threshold. This is a
-   checkpoint, not an escalation of any one finding: it exists so the
-   maintainer can redirect a PR that has drifted. Wait for a response. The
-   maintainer clears the checkpoint by replying with the scope they authorize
-   you to proceed with — the full finding, a narrower fix, a different
-   approach, or "leave it, reply and move on": treat that reply as this
-   round's new baseline anchor, apply only what they authorized, and do not
-   re-fire the checkpoint against the pre-authorization staged diff. A reply
-   that only says "carry on" without naming a scope is not authorization;
-   ask what scope to apply. Repeat the live state/head check from Common
-   Setup immediately before posting the drift comment: edits and validation
-   can span long enough for the PR to close or its head to advance, and a
-   drift alert on a stale or closed PR is a user-visible untruth. Skip the
-   comment silently if either check fails.
+   Run validation and fix failures. Stage the result but do not commit yet —
+   the checkpoint below judges the diff this round would produce, including
+   the fix that might trip it. If there is nothing to stage, do not create an
+   empty commit or a top-level success comment.
+9. Size-drift checkpoint. Look at the whole branch above the base, staged fix
+   included, and ask whether the PR still looks like the change it set out to
+   be. Two rough conditions, both required: it is more than about three times
+   the size it was when a human last committed to the branch (for a PR opened
+   by another agent, where no human commit exists, use the PR as it stood when
+   it was opened), and it is large in absolute terms — several hundred changed
+   lines at least. A 60-line PR that needs a 40-line fix has not drifted; a
+   130-line display fix now carrying 1,800 lines of concurrency hardening has.
+   This is a judgment call by design, not an accounting rule: it exists to hand
+   a drifting PR back to the maintainer. Err toward continuing when the growth
+   is plainly on-topic; stop when you would struggle to explain the current
+   diff in terms of the PR's title. It applies to every automated push,
+   `fix-ci` included.
+
+   When it fires, do not commit or push. Repeat the live state/head check from
+   Common Setup first — edits and validation can run long enough for the PR to
+   close or its head to move, and a drift alert on a stale PR is itself a
+   user-visible untruth, so skip silently on either mismatch. Otherwise post
+   one deduplicated comment naming what the PR set out to do, what it now
+   contains, and which finding pushed it past the line, then wait. Any
+   maintainer reply telling you to proceed clears the checkpoint for this PR:
+   apply what they authorized and do not fire again on the same growth.
 10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
     the push. Commit once with a descriptive subject and include
     `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
