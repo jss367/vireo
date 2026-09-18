@@ -13727,8 +13727,8 @@ class Database:
             raise ValueError("location name must not be empty")
         if "|" in stripped:
             raise ValueError(
-                "location name may not contain '|' -- Lightroom reserves it "
-                "as the hierarchy delimiter"
+                "location name may not contain '|' -- XMP keyword "
+                "hierarchies reserve it as the level delimiter"
             )
         with self.conn:
             return self._upsert_one_keyword(

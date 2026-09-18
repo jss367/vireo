@@ -657,7 +657,7 @@ function renderSyncPreview() {
       ? 'A location keyword with coordinates is written to XMP as GPS metadata.'
       : 'Writing assigned GPS to XMP is turned off in Settings; sync only removes GPS previously written by Vireo.');
     locationNotes.push(data.location_keyword_sync_enabled
-      ? 'The place and its parent places are written as XMP keywords (the place in dc:subject, the full path in lr:hierarchicalSubject), so Lightroom lists it as a keyword.'
+      ? 'The place and its parent places are written as XMP keywords (the place in dc:subject, the full path in lr:hierarchicalSubject), so a catalog app reading the sidecar lists it as a keyword.'
       : 'Writing location keywords to XMP is turned off in Settings, so place names stay in Vireo; sync only removes location keywords Vireo wrote earlier.');
     html += '<div class="sync-review-note"><strong style="color:var(--text-primary);">About location sync:</strong> '
       + locationNotes.join(' ') + '</div>';

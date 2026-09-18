@@ -4245,13 +4245,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         payload["request_id"] = getattr(g, "request_id", None)
         return jsonify(payload), 409
 
-    # Shared message for a location name that carries Lightroom's hierarchy
+    # Shared message for a location name that carries the XMP hierarchy
     # delimiter. Rejecting at assignment time (rather than at sync time) is
     # what keeps the pending change from being silently cleared for a name
     # ``SidecarEditor.set_location_keywords`` cannot round-trip.
     _LOCATION_NAME_PIPE_ERROR = (
-        "location name may not contain '|' -- Lightroom reserves it as the "
-        "hierarchy delimiter"
+        "location name may not contain '|' -- XMP keyword hierarchies "
+        "reserve it as the level delimiter"
     )
 
     def _coerce_collection_id(raw):
@@ -10090,7 +10090,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchall()
         # Reject '|' in a rename that lands on a location keyword before we
         # ever touch the row. ``get_or_create_text_location`` refuses pipes
-        # at creation time because Lightroom reserves it as the hierarchy
+        # at creation time because XMP keyword hierarchies reserve it as the
         # delimiter and there is no reversible XMP encoding, but the update
         # path used to accept them. Once such a rename landed, every sync
         # of a photo tagged with the row raised in
@@ -10105,8 +10105,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 effective_type = old_row["type"] if old_row is not None else None
             if effective_type == "location":
                 return json_error(
-                    "location name may not contain '|' -- Lightroom reserves "
-                    "it as the hierarchy delimiter",
+                    "location name may not contain '|' -- XMP keyword "
+                    "hierarchies reserve it as the level delimiter",
                     400,
                 )
         # Apply the update first — if it raises, no sidecar changes are queued
