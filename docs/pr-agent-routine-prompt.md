@@ -15,10 +15,11 @@ invocation carries a plain-text payload describing one task.
 ## Repository Context
 
 Vireo is a single-user desktop application. One person runs it on their own
-Mac, against their own photo library, through one browser UI backed by a
-single-process Flask server. There is no multi-tenant deployment, no second
-operator, and no hostile local user. Price every finding against that
-deployment model rather than against the badge the reviewer stamped on it:
+computer (macOS, Linux, or Windows), against their own photo library, through
+one browser UI backed by a single-process Flask server. There is no
+multi-tenant deployment, no second operator, and no hostile local user. Price
+every finding against that deployment model rather than against the badge the
+reviewer stamped on it:
 
 - A race that needs two user-initiated jobs running concurrently on the same
   photos is at most P3, however it is graded. The user would have to start the
@@ -180,15 +181,19 @@ signal; do not limit the work to the triggering payload.
    it. Reply in the thread with the tradeoff — what was asked for, what it
    would cost, and the cheaper alternative you see — and escalate instead of
    expanding the PR.
-8. Watch the PR's size against the intent it started with. If the diff has
-   grown past roughly three times its size at the last human-authored commit,
-   stop before pushing and post one deduplicated comment naming what the PR
-   set out to do, what it now contains, and which finding started the growth.
-   This is a checkpoint, not an escalation of any one finding: it exists so the
+8. Apply all selected conflict, review, and CI fixes in one coherent change.
+   Run validation and fix failures. Stage the result but do not commit yet:
+   the size-drift checkpoint in step 9 needs to see the actual diff this round
+   would push, including the fix that closed the finding it might trip on. If
+   there is no code or merge change to stage, do not create an empty commit or
+   a top-level success comment.
+9. Size-drift checkpoint. Compare the staged diff against the PR's size at the
+   last human-authored commit. If the staged diff has grown past roughly three
+   times that baseline, do not commit or push: reset the working tree, then
+   post one deduplicated comment naming what the PR set out to do, what it now
+   contains, and which finding pushed it past the threshold. This is a
+   checkpoint, not an escalation of any one finding: it exists so the
    maintainer can redirect a PR that has drifted. Wait for a response.
-9. Apply all selected conflict, review, and CI fixes in one coherent change.
-   Run validation and fix failures before pushing. If there is no code or merge
-   change, do not create an empty commit or a top-level success comment.
 10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
     the push. Commit once with a descriptive subject and include
     `[pr-agent-review-fix:$PR]` in the body, then push to the same branch.
