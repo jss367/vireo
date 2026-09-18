@@ -180,3 +180,42 @@ def test_removing_one_of_two_flags_can_exclude_selected_photo(live_server, page)
     assert page.evaluate("selectedPhotoId") is None
     assert page.evaluate("totalPhotos") == 120
     assert page.evaluate("photos.length") < 120, "must not scan all results for an excluded photo"
+
+
+@pytest.mark.parametrize("op", ["in", "not_in"])
+@pytest.mark.parametrize("selected", [True, False])
+def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, op, selected):
+    ids = _prepare(page, live_server, "quick_flag")
+    values = ["none", "flagged" if op == "in" else "rejected"]
+    page.evaluate("rule => VireoFilter.loadExpression([rule])", {
+        "field": "flag", "op": op, "value": values,
+    })
+    page.wait_for_function("!loading && browseDatasetReady")
+    page.evaluate("async () => { while (!allLoaded) await loadPhotos(); }")
+    card = page.locator(f'#grid .grid-card[data-id="{ids[145]}"]')
+    card.scroll_into_view_if_needed()
+    if selected:
+        card.click()
+    page.wait_for_timeout(150)
+    anchor = page.evaluate(
+        "captureSelectedPhotoAnchor()" if selected else "captureBrowseViewportAnchor()"
+    )
+    page.click('.vf-filters-btn')
+    with page.expect_request('**/api/photos/query') as query:
+        page.click('.vf-rule-tree [data-action="multi"][data-value="none"]')
+    assert query.value.post_data_json.get('focus_photo_id') == anchor['photoId']
+    page.click('.vf-done')
+    # Removing an excluded value widens the view; removing an included
+    # value narrows it. The flagged anchor remains eligible in both cases.
+    page.wait_for_function(
+        "total => !loading && browseDatasetReady && totalPhotos === total && anchorScanDepth === 0",
+        arg=60 if op == "in" else 185,
+    )
+    assert page.evaluate("selectedPhotoId") == (anchor["photoId"] if selected else None)
+    page.wait_for_function("""anchor => {
+      const card = getGridCard(anchor.photoId);
+      if (!card) return false;
+      const rect = card.getBoundingClientRect(), box = gridContainer.getBoundingClientRect();
+      return rect.bottom > box.top && rect.top < box.bottom &&
+        Math.abs(rect.top - box.top - anchor.topOffset) < 4;
+    }""", arg=anchor)

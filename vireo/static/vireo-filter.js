@@ -1686,14 +1686,15 @@
         return;
       }
       if (action === 'multi') {
+        const node = getNodeAtPath(path);
+        if (!node || isGroup(node)) return;
+        const values = Array.isArray(node.value) ? node.value.slice() : [node.value];
+        const removing = values.includes(target.dataset.value);
         mutate(() => {
-          const node = getNodeAtPath(path);
-          if (!node || isGroup(node)) return;
-          let values = Array.isArray(node.value) ? node.value.slice() : [node.value];
-          if (values.includes(target.dataset.value)) values = values.filter((v) => v !== target.dataset.value);
-          else values.push(target.dataset.value);
-          node.value = values;
-        });
+          node.value = removing
+            ? values.filter((v) => v !== target.dataset.value)
+            : values.concat([target.dataset.value]);
+        }, { reason: removing ? 'filterRemoved' : undefined });
         return;
       }
       if (action === 'remove') {
