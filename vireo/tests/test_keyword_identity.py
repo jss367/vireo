@@ -761,6 +761,11 @@ def test_manual_merge_asks_which_species_link_to_keep(catalog):
 
     preview = preview_keyword_merge(db, [source, target], target)
     assert preview['requires_choice'] == ['species']
+    # The chooser has to say which species, not which row number -- and an
+    # iNat id the local taxonomy lacks must not borrow the other option's name.
+    assert {(o['source_taxon_id'], o['taxon_name'], o['taxon_common_name'])
+            for o in preview['options']['species']} == {
+        (None, 'Testus bird', 'Test bird'), (999, None, None)}
     pick = {'species': {'taxon_id': preview['options']['species'][0]['taxon_id'],
                         'source_taxon_id': 999}}
     preview = preview_keyword_merge(db, [source, target], target, pick)

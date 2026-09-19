@@ -491,6 +491,35 @@ def _merge_options(records, paths, valid_parents):
     }
 
 
+
+def _label_species_options(db, species_options):
+    """Name the taxon behind each species link.
+
+    The chooser asks which species the combined keyword keeps, so it has to
+    show the species. A bare ``taxon_id`` is a row number the user has never
+    seen and cannot answer the question with.
+    """
+    for option in species_options:
+        # ``source_taxon_id`` is the label source's own identity and outranks
+        # the common-name lookup (see identity_sql). When it names a taxon the
+        # local taxonomy does not have, falling back to ``taxon_id``'s name
+        # would print the OTHER option's species and make the two choices
+        # indistinguishable in the dialog.
+        if option['source_taxon_id'] is not None:
+            row = db.conn.execute(
+                'SELECT name, common_name FROM taxa WHERE inat_id = ?',
+                (option['source_taxon_id'],),
+            ).fetchone()
+        elif option['taxon_id'] is not None:
+            row = db.conn.execute(
+                'SELECT name, common_name FROM taxa WHERE id = ?',
+                (option['taxon_id'],),
+            ).fetchone()
+        else:
+            row = None
+        option['taxon_name'] = row['name'] if row else None
+        option['taxon_common_name'] = row['common_name'] if row else None
+
 def _coerce_coordinate(value, limit, label):
     if type(value) is bool or not isinstance(value, (int, float)):
         raise ValueError(f'Enter a numeric {label}.')
@@ -644,6 +673,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     valid_parents = ({r['parent_id'] for r in records}
                      - selected - _subtree_ids(children, target_id))
     options = _merge_options(records, paths, valid_parents)
+    _label_species_options(db, options['species'])
     resolved, requires_choice = _resolve_merge_fields(records, options, overrides)
 
     notes = []

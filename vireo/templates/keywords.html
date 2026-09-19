@@ -674,6 +674,28 @@
     mergeDebounce = setTimeout(refreshMergePreview, 300);
   }
 
+  /* Name the species, so the chooser answers "which species is this" rather
+     than showing a row id. An iNat id with no local taxon still has to read
+     as its own distinct answer, not borrow the other option's name. */
+  function speciesTitle(option) {
+    if (option.taxon_common_name || option.taxon_name) {
+      return option.taxon_common_name || option.taxon_name;
+    }
+    if (option.source_taxon_id !== null) {
+      return 'iNaturalist taxon ' + option.source_taxon_id;
+    }
+    return option.name;
+  }
+
+  function speciesSubtitle(option) {
+    if (option.taxon_name && option.taxon_name !== speciesTitle(option)) {
+      return option.taxon_name;
+    }
+    if (option.taxon_name || option.taxon_common_name) return 'linked taxon';
+    if (option.source_taxon_id !== null) return 'not in the local taxonomy';
+    return 'no taxon record';
+  }
+
   function mergeChoice(group, value, checked, title, subtitle) {
     return '<label class="kw-merge-choice">' +
       '<input type="radio" name="' + group + '" value="' + escapeHtml(value) + '"' +
@@ -750,9 +772,8 @@
         options.species.map((o, index) => mergeChoice('kwMergeSpecies', String(index),
           !needed.has('species') && o.taxon_id === resolved.taxon_id &&
             o.source_taxon_id === resolved.source_taxon_id,
-          escapeHtml(o.name),
-          'taxon ' + (o.taxon_id === null ? '—' : o.taxon_id) +
-            ' · source taxon ' + (o.source_taxon_id === null ? '—' : o.source_taxon_id))).join('') +
+          escapeHtml(speciesTitle(o)),
+          escapeHtml([speciesSubtitle(o), 'from “' + o.name + '”'].join(' · ')))).join('') +
         mergeChoice('kwMergeSpecies', '', !needed.has('species') && resolved.taxon_id === null &&
           resolved.source_taxon_id === null, 'No species link', '') +
         '</div>' +
@@ -880,7 +901,8 @@
     let html = '<div class="kw-merge-result">' +
       '<p><strong>' + escapeHtml(resolved.path.join(' → ')) + '</strong> · ' +
       escapeHtml(resolved.type) + '</p>' +
-      '<p>' + data.combined_count + ' distinct photos after merging · ' +
+      '<p>' + data.combined_count + ' distinct photo' +
+      (data.combined_count === 1 ? '' : 's') + ' after merging · ' +
       data.removed_count + ' keyword record' + (data.removed_count === 1 ? '' : 's') +
       ' removed</p>';
     if (resolved.place_id) {
