@@ -15849,9 +15849,10 @@ class Database:
         don't clash (the UNIQUE index is case-sensitive); they reparent
         cleanly and collapse on the caller's next convergence pass. Cycles
         are impossible: parent_id chains are acyclic by construction.
-        Non-link metadata (is_species, coordinates, taxon_id) folds into
-        the destination when it lacks its own, so deleting the source can't
-        silently drop species/location info that only the duplicate carried.
+        Non-link metadata (is_species, coordinates, taxon_id,
+        source_taxon_id) folds into the destination when it lacks its own,
+        so deleting the source can't silently drop species/location info
+        that only the duplicate carried.
 
         Rewrites pending_changes so an unsynced keyword_add/keyword_remove
         queued under the source spelling points at the surviving name after
@@ -15874,7 +15875,7 @@ class Database:
         )
         src = self.conn.execute(
             "SELECT name, type, is_species, latitude, longitude, taxon_id, "
-            "place_id FROM keywords WHERE id = ?",
+            "source_taxon_id, place_id FROM keywords WHERE id = ?",
             (src_id,),
         ).fetchone()
         dst = self.conn.execute(
@@ -15945,26 +15946,39 @@ class Database:
                 # 'individual'/'general' rows) or a stale taxon_id, and
                 # keeping either lets `is_species = 1 OR type = 'taxonomy'`
                 # keep matching every photo that already used the dst row.
-                # Clear both alongside the metadata fold.
+                # Clear all species claims (taxon_id AND source_taxon_id)
+                # alongside the metadata fold; a lingering iNat
+                # source_taxon_id would keep the survivor resolving to a
+                # species identity the retype was meant to drop.
                 self.conn.execute(
                     """UPDATE keywords
-                       SET is_species = 0,
-                           latitude   = COALESCE(latitude, ?),
-                           longitude  = COALESCE(longitude, ?),
-                           taxon_id   = NULL
+                       SET is_species        = 0,
+                           latitude          = COALESCE(latitude, ?),
+                           longitude         = COALESCE(longitude, ?),
+                           taxon_id          = NULL,
+                           source_taxon_id   = NULL
                        WHERE id = ?""",
                     (src["latitude"], src["longitude"], dst_id),
                 )
             else:
+                # Fold ``source_taxon_id`` alongside ``taxon_id``: a
+                # source row can carry an iNat id without a resolved local
+                # taxon (see ``_add_source_species_keyword``), and
+                # ``keywords_claim_different_taxa`` treats a bare
+                # ``source_taxon_id`` as identity. Without this COALESCE
+                # the recursive child collapse would drop the only
+                # external taxon claim and leave the survivor an unlinked
+                # species row.
                 self.conn.execute(
                     """UPDATE keywords
-                       SET is_species = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
-                           latitude   = COALESCE(latitude, ?),
-                           longitude  = COALESCE(longitude, ?),
-                           taxon_id   = COALESCE(taxon_id, ?)
+                       SET is_species        = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
+                           latitude          = COALESCE(latitude, ?),
+                           longitude         = COALESCE(longitude, ?),
+                           taxon_id          = COALESCE(taxon_id, ?),
+                           source_taxon_id   = COALESCE(source_taxon_id, ?)
                        WHERE id = ?""",
                     (src["is_species"], src["latitude"], src["longitude"],
-                     src["taxon_id"], dst_id),
+                     src["taxon_id"], src["source_taxon_id"], dst_id),
                 )
         # Retarget pending keyword_add/keyword_remove rows queued under the
         # source name onto the destination name. A pending row that would
@@ -16426,10 +16440,11 @@ class Database:
                 if keywords_claim_different_taxa(self, existing, child):
                     # Two same-named species rows that resolve to DIFFERENT
                     # taxa. A recursive merge keeps the destination's taxon
-                    # and does not fold `source_taxon_id`, so every photo
-                    # under the migrating row would silently come out tagged
-                    # as the other species. Same reasoning as the distinct
-                    # place case below; keep both rows instead.
+                    # claim (COALESCE folds only fill missing fields), so
+                    # every photo under the migrating row would silently
+                    # come out tagged as the other species. Same reasoning
+                    # as the distinct place case below; keep both rows
+                    # instead.
                     disambiguated = f"{child['name']} (id-{child['id']})"
                     self.conn.execute(
                         "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",

@@ -791,6 +791,41 @@ def test_merging_parents_still_collapses_children_of_the_same_species(catalog):
         photos[0], photos[1]}
 
 
+def test_child_collapse_folds_source_taxon_id_onto_unlinked_survivor(catalog):
+    """`keywords_claim_different_taxa` treats a bare `source_taxon_id` as
+    identity, so it lets the collapse proceed when the destination has no
+    claim of its own. The recursive merge then has to fold that iNat id
+    onto the survivor -- otherwise the migrating row's only external
+    taxon identity is deleted and its photos land on an unlinked species
+    row."""
+    db, photos = catalog
+    old = db.add_keyword('Trip A')
+    new = db.add_keyword('Trip B')
+    old_bird = db.add_keyword('Hummingbird', parent_id=old, is_species=True)
+    new_bird = db.add_keyword('Hummingbird', parent_id=new, is_species=True)
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', source_taxon_id = 5112 WHERE id = ?",
+                    (old_bird,))
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy' WHERE id = ?",
+                    (new_bird,))
+    db.conn.commit()
+    db.tag_photo(photos[0], old_bird)
+    db.tag_photo(photos[1], new_bird)
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [
+        ('Hummingbird', 'merge')]
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (old_bird,)).fetchone()
+    survivor = db.conn.execute(
+        'SELECT source_taxon_id, taxon_id FROM keywords WHERE id = ?',
+        (new_bird,)).fetchone()
+    assert (survivor['source_taxon_id'], survivor['taxon_id']) == (5112, None)
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?', (new_bird,))} == {
+        photos[0], photos[1]}
+
+
 def test_merge_conflict_guard_covers_photos_tagged_only_on_a_moved_descendant(catalog):
     """The selected rows are not the whole blast radius -- a photo can be
     tagged only on a descendant the merge is about to move. If that photo also
