@@ -39,7 +39,7 @@ var VireoExportPresets = (function() {
   // elsewhere after our last listing: the next submit of that same name is
   // an explicit replace.
   var dialogReplaceName = null;
-  var dialogEscHandler = null;
+  var dialogKeyHandler = null;
   var dialogRestoreFocus = null;
 
   function $(id) { return document.getElementById(id); }
@@ -392,13 +392,38 @@ var VireoExportPresets = (function() {
     }
 
     modal.classList.add('open');
-    dialogEscHandler = function(event) {
+    var panel = modal.querySelector('.export-preset-dialog-panel');
+    dialogKeyHandler = function(event) {
       if (event.key === 'Escape') {
         event.preventDefault();
         closeDialog();
+        return;
+      }
+      if (event.key !== 'Tab' || !panel) return;
+      // The export modal behind this dialog stays enabled, so an untrapped
+      // Shift+Tab out of the name field reaches its Cancel — which closes
+      // #exportOverlay and leaves this dialog orphaned — or Export, which
+      // would start an export mid-save. Keep Tab inside the dialog.
+      var focusable = Array.prototype.filter.call(
+        panel.querySelectorAll('input, button'),
+        function(el) { return !el.disabled && el.offsetParent !== null; }
+      );
+      if (!focusable.length) {
+        // Everything is disabled because a save or delete is in flight.
+        event.preventDefault();
+        return;
+      }
+      var firstControl = focusable[0];
+      var lastControl = focusable[focusable.length - 1];
+      var active = document.activeElement;
+      var inside = panel.contains(active);
+      if (event.shiftKey ? (!inside || active === firstControl)
+                         : (!inside || active === lastControl)) {
+        event.preventDefault();
+        (event.shiftKey ? lastControl : firstControl).focus();
       }
     };
-    document.addEventListener('keydown', dialogEscHandler);
+    document.addEventListener('keydown', dialogKeyHandler);
     setTimeout(function() {
       if (mode === 'save') {
         input.focus();
@@ -413,9 +438,9 @@ var VireoExportPresets = (function() {
     if (dialogBusy) return;
     var modal = $('exportPresetDialog');
     if (modal) modal.classList.remove('open');
-    if (dialogEscHandler) {
-      document.removeEventListener('keydown', dialogEscHandler);
-      dialogEscHandler = null;
+    if (dialogKeyHandler) {
+      document.removeEventListener('keydown', dialogKeyHandler);
+      dialogKeyHandler = null;
     }
     dialogMode = null;
     dialogDeleteName = null;

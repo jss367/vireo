@@ -27,8 +27,10 @@
          class="export-preset-dialog-description"></p>
       <div id="exportPresetDialogNameField">
         <label class="modal-label" for="exportPresetDialogName">Preset name</label>
+        <!-- Matches MAX_EXPORT_PRESET_NAME_LEN in vireo/export.py: a longer
+             name the field accepted would only fail at the API. -->
         <input type="text" id="exportPresetDialogName" class="modal-input"
-               maxlength="120" autocomplete="off" spellcheck="false">
+               maxlength="80" autocomplete="off" spellcheck="false">
       </div>
       <div class="modal-error" id="exportPresetDialogError" role="alert"></div>
       <div class="modal-actions">

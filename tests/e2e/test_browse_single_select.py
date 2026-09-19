@@ -821,6 +821,43 @@ def test_export_preset_save_uses_in_page_dialog(live_server, page):
     assert presets[0]["settings"]["naming_template"] == "{original}_web"
 
 
+def test_export_preset_dialog_keeps_keyboard_focus_inside(live_server, page):
+    """Tab and Shift+Tab cycle within the dialog.
+
+    The export modal underneath stays enabled, so an untrapped Shift+Tab
+    reached its Cancel — closing ``#exportOverlay`` and orphaning this
+    dialog — or its Export, starting an export mid-save.
+    """
+    page.goto(f"{live_server['url']}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+    page.get_by_role("button", name="Export", exact=True).click()
+    expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
+
+    page.locator("#exportPresetSaveBtn").click()
+    name = page.locator("#exportPresetDialogName")
+    expect(name).to_be_focused()
+    # The API rejects anything longer (MAX_EXPORT_PRESET_NAME_LEN in
+    # vireo/export.py), so the field must not accept it either.
+    assert name.get_attribute("maxlength") == "80"
+
+    # Backwards off the first control wraps to the last, not into the export
+    # modal; forwards off the last wraps back to the first.
+    page.keyboard.press("Shift+Tab")
+    expect(page.locator("#exportPresetDialogSubmitBtn")).to_be_focused()
+    page.keyboard.press("Tab")
+    expect(name).to_be_focused()
+
+    for _ in range(6):
+        page.keyboard.press("Tab")
+        assert page.evaluate(
+            "() => document.getElementById('exportPresetDialog')"
+            ".contains(document.activeElement)"
+        )
+    expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
+
+
 def test_export_preset_save_dialog_names_the_preset_it_replaces(live_server, page):
     """Reusing a saved name says so before the click, not after."""
     page.goto(f"{live_server['url']}/browse")
