@@ -98,6 +98,7 @@ def test_rejects_invalid_curves(value):
     [{'sample': [0, 50, 50], 'hue': float('inf')}], [{'sample': [True, 50, 50]}],
     [{'sample': [0, 50, 50]}] * 9,
     *[[{'sample': [0, saturation, 50]}] for saturation in (0, .5, 1, 1.0000004)],
+    *[[{'sample': [0, 100, luminance]}] for luminance in (0, .0000004, 99.9999996, 100)],
 ])
 def test_rejects_invalid_samples(value):
     with pytest.raises(RecipeError):

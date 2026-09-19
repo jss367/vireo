@@ -183,6 +183,8 @@ def _normalize_point_color(value):
         ]}
         if normalized["sample"][1] <= 1.0:
             raise RecipeError("point_color sample saturation must be greater than 1%")
+        if not 0.0 < normalized["sample"][2] < 100.0:
+            raise RecipeError("point_color sample luminance must be between 0% and 100%, exclusive")
         for key, (lo, hi, default) in _POINT_COLOR_RANGES.items():
             amount = _number(item.get(key, default), f"point_color.{key}", lo, hi)
             if abs(amount - default) > 1e-6:

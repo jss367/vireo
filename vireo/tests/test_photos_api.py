@@ -14492,3 +14492,18 @@ def test_point_color_api_rejects_achromatic_recipes_and_presets(client_with_phot
     assert 'greater than 1%' in preset.get_json()['error']
     assert db.get_photo_edit_recipe(photo_id) is None
     assert client.get('/api/edit-presets').get_json()['presets'] == []
+
+
+@pytest.mark.parametrize('luminance', [0, .0000004, 99.9999996, 100])
+def test_point_color_api_rejects_black_and_white_samples(client_with_photo, luminance):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    recipe = {'adjustments': {'point_color': [{'sample': [0, 100, luminance]}]}}
+    saved = client.put(f'/api/photos/{photo_id}/edit-recipe', json={'recipe': recipe})
+    preset = client.post('/api/edit-presets', json={'name': 'Endpoint sample', 'recipe': recipe})
+    assert saved.status_code == 400
+    assert preset.status_code == 400
+    assert 'luminance' in saved.get_json()['error']
+    assert 'luminance' in preset.get_json()['error']
+    assert db.get_photo_edit_recipe(photo_id) is None
+    assert client.get('/api/edit-presets').get_json()['presets'] == []
