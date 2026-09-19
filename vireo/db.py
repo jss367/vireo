@@ -1695,13 +1695,7 @@ class Database:
         """
         )
         cur = self.conn.cursor()
-        removal_col_info = cur.execute(
-            "PRAGMA table_info(workspace_folder_removals)"
-        ).fetchall()
-        removal_cols = {r[1] for r in removal_col_info}
-        recursive_default = next(
-            (r[4] for r in removal_col_info if r[1] == "recursive"), None,
-        )
+        removal_cols = {r[1] for r in cur.execute("PRAGMA table_info(workspace_folder_removals)")}
         if "recursive" not in removal_cols:
             # The old table only recorded exact folder IDs. A single-folder
             # unlink and a subtree removal followed by an explicit child
@@ -1712,28 +1706,10 @@ class Database:
                 "ALTER TABLE workspace_folder_removals "
                 "ADD COLUMN recursive INTEGER NOT NULL DEFAULT 0"
             )
-            recursive_default = "0"
         scope_version = cur.execute(
             "SELECT value FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'"
         ).fetchone()
         if scope_version is None or scope_version[0] != "1":
-            # An intermediate branch build added ``recursive`` with
-            # ``DEFAULT 1``, so every pre-existing exact tombstone in a
-            # catalog opened by that build was upgraded to recursive
-            # scope — including single-folder unlinks, which must still
-            # leave descendants visible. Once scope_version is set the
-            # only recursive rows are ones the writer wrote explicitly,
-            # but at this point we cannot distinguish those from the
-            # DEFAULT-upgrade. Reset the column to exact scope and let
-            # the next tree removal record recursion again; keeping the
-            # accidental recursive marks would silently hide any newly
-            # discovered descendants of what was really a single-folder
-            # unlink.
-            if str(recursive_default) == "1":
-                cur.execute(
-                    "UPDATE workspace_folder_removals SET recursive = 0 "
-                    "WHERE recursive = 1"
-                )
             # Upgrade catalogs created by earlier branch builds too: their
             # view scanned the full catalog for every exact removal, and
             # every descendant could carry a redundant recursive record.

@@ -239,10 +239,19 @@ def test_catalog_upgrade_preserves_legacy_exact_scope(shared_tree, operation):
         assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == expected
 
 
-def test_upgrade_preserves_recorded_recursive_scope_with_restored_child(shared_tree):
+@pytest.mark.parametrize("column_default", [0, 1])
+def test_upgrade_preserves_recorded_recursive_scope_with_restored_child(shared_tree, column_default):
     db, workspace, other, parent, missing, child = shared_tree
     db.delete_folder(missing)
     db.add_workspace_folder(workspace, child)
+    # Earlier branch schemas used either default, but explicit tree removals
+    # stored the same recursive flag in both. Preserve that recorded intent.
+    db.conn.execute("DROP VIEW workspace_removed_folders")
+    db.conn.execute("ALTER TABLE workspace_folder_removals DROP COLUMN recursive")
+    db.conn.execute(
+        f"ALTER TABLE workspace_folder_removals ADD COLUMN recursive INTEGER NOT NULL DEFAULT {column_default}"
+    )
+    db.conn.execute("UPDATE workspace_folder_removals SET recursive = 1 WHERE folder_id = ?", (missing,))
     db.conn.execute("DELETE FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'")
     db.conn.commit()
     with Database(db._db_path) as upgraded:
@@ -252,45 +261,6 @@ def test_upgrade_preserves_recorded_recursive_scope_with_restored_child(shared_t
         new_child = upgraded.add_folder(upgraded.get_folder(child)["path"] + "/new",
                                         parent_id=child, workspace_root=False)
         assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent, child, new_child}
-
-
-def test_upgrade_from_intermediate_default_one_column_preserves_exact_scope(shared_tree):
-    """An intermediate branch build set every legacy exact tombstone to
-    recursive on schema upgrade because it added the column with
-    ``DEFAULT 1``. Reopening such a catalog must roll those accidental
-    recursive marks back to exact — otherwise a single-folder unlink
-    starts hiding newly discovered descendants that used to stay
-    visible.
-    """
-    db, workspace, other, parent, missing, child = shared_tree
-    # Original catalog: single-folder unlink recorded as exact.
-    db.remove_workspace_folder(workspace, child)
-    # Simulate the ``1141b93`` intermediate schema: drop the column and
-    # re-add it with ``DEFAULT 1``, so the surviving exact row gets
-    # bumped to recursive, and clear the scope-version marker so the
-    # newer build's compaction pass runs from scratch.
-    db.conn.execute("DROP VIEW workspace_removed_folders")
-    db.conn.execute("ALTER TABLE workspace_folder_removals DROP COLUMN recursive")
-    db.conn.execute(
-        "ALTER TABLE workspace_folder_removals "
-        "ADD COLUMN recursive INTEGER NOT NULL DEFAULT 1"
-    )
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'"
-    )
-    db.conn.commit()
-    with Database(db._db_path) as upgraded:
-        upgraded.set_active_workspace(other)
-        new_descendant = upgraded.add_folder(
-            upgraded.get_folder(child)["path"] + "/deeper",
-            parent_id=child, workspace_root=False,
-        )
-        upgraded.set_active_workspace(workspace)
-        visible = {f["id"] for f in upgraded.get_workspace_folders(workspace)}
-        # A single-folder unlink of `child` still leaves the fresh
-        # descendant visible; the intermediate DEFAULT-1 mark did not
-        # promote the unlink to a recursive scope.
-        assert new_descendant in visible
 
 
 def test_global_folder_delete_cleans_up_removal_records(shared_tree):
