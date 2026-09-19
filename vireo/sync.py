@@ -763,17 +763,10 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                     resolved_paths[path] = future.result()
                 except OSError as error:
                     resolve_errors[path] = error
-    # Two keys per photo: a case-folded canonical key groups conservative
-    # aliases onto one worker so a case-insensitive host never publishes an
-    # aliased sidecar in parallel; a filesystem identity key names the
-    # actual target file, so two case variants on a case-sensitive host share
-    # a worker but keep independent failure fates. Coupling by the case-folded
-    # key would retain an unrelated photo's queued edits whenever a persistent
-    # error dogged one of the aliases.
+    # Keep conservative aliases on one worker, including preparation failures.
+    # Their identity may only become clear after a sibling creates its sidecar.
     by_sidecar = defaultdict(list)
     sidecar_for_photo = {}
-    identity_for_photo = {}
-    target_identities = _sidecar_target_identities(resolved_paths)
     for photo_id in accessible_photos:
         path = xmp_paths[photo_id]
         if path in resolve_errors:
@@ -783,46 +776,20 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             }
             plans.pop(photo_id, None)
             continue
-        resolved = resolved_paths[xmp_paths[photo_id]]
-        canonical_key = os.path.normcase(resolved).casefold()
-        identity_key = target_identities[resolved]
+        canonical_key = os.path.normcase(resolved_paths[path]).casefold()
         by_sidecar[canonical_key].append(photo_id)
         sidecar_for_photo[photo_id] = canonical_key
-        identity_for_photo[photo_id] = identity_key
-
-    # A preparation failure must preserve the whole shared queue too: otherwise
-    # repairing an older malformed edit later could overwrite a cleared newer
-    # one. Couple only photos that resolve to the same file, so a case-folded
-    # alias on a case-sensitive host is not dragged down with an unrelated
-    # failure. The prepared photo is dropped from its canonical group; when the
-    # group empties, drop the group entirely.
-    photos_by_identity = defaultdict(list)
-    for pid, identity in identity_for_photo.items():
-        photos_by_identity[identity].append(pid)
-    for pid in list(prepare_failures):
-        identity = identity_for_photo.get(pid)
-        if identity is None:
-            continue
-        for other in photos_by_identity[identity]:
-            prepare_failures.setdefault(other, {**prepare_failures[pid], "photo_id": other})
-            plans.pop(other, None)
-            key = sidecar_for_photo.pop(other, None)
-            identity_for_photo.pop(other, None)
-            if key is not None and other in by_sidecar[key]:
-                by_sidecar[key].remove(other)
-                if not by_sidecar[key]:
-                    del by_sidecar[key]
 
     shared_changes = defaultdict(list)
     for change in changes:
         key = sidecar_for_photo.get(change["photo_id"])
-        if key is not None and len(by_sidecar[key]) > 1:
+        if key is not None and len(by_sidecar[key]) > 1 and change["photo_id"] in plans:
             shared_changes[key].append(change)
     write_steps = {}
     for key, photo_ids in by_sidecar.items():
         if len(photo_ids) == 1:
             pid = photo_ids[0]
-            write_steps[key] = [(pid, plans[pid])]
+            write_steps[key] = [(pid, plans[pid])] if pid in plans else []
         else:
             write_steps[key] = _ordered_sidecar_steps(
                 db, shared_changes[key], sync_flags, sync_locations,
@@ -830,44 +797,47 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             )
 
     def write_sidecar_group(canonical_key):
-        """Replay a sidecar's edits in order; acknowledge only a complete partition.
+        """Attempt ordered writes, then couple failures by the resulting files.
 
-        Photos that share a canonical key run on one worker so a case-insensitive
-        host never overlaps aliased writes. But two case variants on a
-        case-sensitive host are distinct files: a persistent failure on one must
-        not retain the other's queued edits. Partition by the filesystem
-        identity so each true target's fate is independent, while cross-photo
-        queue order within a truly shared target is still preserved.
+        Never stop a conservative alias group at its first failure: another
+        spelling may be an unrelated, not-yet-created file. Once all writes
+        were attempted, stat can distinguish that new file from a failed path
+        on case-sensitive storage, or prove both spellings name one file on
+        case-insensitive storage. The latter must retain its entire sequence
+        for retry, including any preparation failures.
         """
-        partitions = defaultdict(list)
+        photo_ids = by_sidecar[canonical_key]
+        errors = {
+            pid: RuntimeError(prepare_failures[pid]["error"])
+            for pid in photo_ids if pid in prepare_failures
+        }
         for photo_id, plan in write_steps[canonical_key]:
-            partitions[identity_for_photo[photo_id]].append((photo_id, plan))
-        outcomes = {}
-        for steps in partitions.values():
             try:
-                for photo_id, plan in steps:
-                    _write_photo_sync(
-                        xmp_paths[photo_id], plan, locations.get(photo_id),
-                        location_paths.get(photo_id),
-                        create_missing_sidecars=create_missing_sidecars,
-                    )
+                _write_photo_sync(
+                    xmp_paths[photo_id], plan, locations.get(photo_id),
+                    location_paths.get(photo_id),
+                    create_missing_sidecars=create_missing_sidecars,
+                )
             except Exception as e:
-                # Retain this partition's sequence on failure. Clearing a later
-                # edit while an earlier one remains would let a retry overwrite
-                # it. Other partitions in the group write independent files, so
-                # their outcomes are decided on their own.
-                for pid, _ in steps:
-                    outcomes[pid] = e
-                continue
-            for pid, _ in steps:
-                outcomes[pid] = None
-        return outcomes
+                errors.setdefault(photo_id, e)
+        if not errors:
+            return dict.fromkeys(photo_ids)
+        identities = _sidecar_target_identities({
+            xmp_paths[pid]: resolved_paths[xmp_paths[pid]] for pid in photo_ids
+        })
+        failed_targets = {
+            identities[resolved_paths[xmp_paths[pid]]]: error for pid, error in errors.items()
+        }
+        return {
+            pid: failed_targets.get(identities[resolved_paths[xmp_paths[pid]]])
+            for pid in photo_ids
+        }
 
     results = {}
     total = len(by_photo)
-    completed = len(prepare_failures)
+    completed = len(prepare_failures.keys() - sidecar_for_photo.keys())
     synced = 0
-    failed = len(prepare_failures)
+    failed = completed
     synced_tokens = []
     synced_legacy_ids = []
     checkpoint = 0
@@ -914,10 +884,10 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 results.update(outcomes)
                 completed += len(outcomes)
                 for photo_id, error in outcomes.items():
-                    plan = plans[photo_id]
                     if error is not None:
                         failed += 1
                         continue
+                    plan = plans[photo_id]
                     if plan.unsupported_changes:
                         failed += 1
                     if plan.supported_changes:

@@ -2935,3 +2935,74 @@ def test_sync_case_aliases_preserve_order_and_retry(tmp_path, db, monkeypatch, f
     assert sync.sync_to_xmp(db, create_missing_sidecars=True)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "3"
     assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize("failure_kind", ["write", "prepare"])
+@pytest.mark.parametrize("failing_first", [False, True])
+def test_sync_distinct_missing_aliases_make_independent_progress(
+    tmp_path, db, monkeypatch, failure_kind, failing_first,
+):
+    """Model case-sensitive storage on every host using separate backing files."""
+    import sync
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    bad, initial = _setup_photo_with_xmp(tmp_path, db)
+    os.unlink(initial)
+    folder_id = db.get_photo(bad)["folder_id"]
+    db.conn.execute("UPDATE photos SET filename = 'Bird.nef' WHERE id = ?", (bad,))
+    good = db.add_photo(folder_id=folder_id, filename="BIRD.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    folder = os.path.dirname(initial)
+    bad_path, good_path = os.path.join(folder, "Bird.xmp"), os.path.join(folder, "BIRD.xmp")
+    backing = {bad_path: str(tmp_path / "bad.xmp"), good_path: str(tmp_path / "good.xmp")}
+    for pid in ([bad, good] if failing_first else [good, bad]):
+        db.queue_change(pid, "rating" if pid == bad and failure_kind == "prepare" else "keyword_add",
+                        "malformed" if pid == bad and failure_kind == "prepare" else "Osprey")
+    real_stat, real_write = os.stat, sync._write_photo_sync
+    written = []
+
+    def storage_stat(path, *args, **kwargs):
+        return real_stat(backing.get(os.fspath(path), path), *args, **kwargs)
+
+    def storage_write(path, *args, **kwargs):
+        if path == bad_path:
+            raise OSError("persistent storage failure")
+        written.append(path)
+        return real_write(backing[path], *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", storage_stat)
+    monkeypatch.setattr(sync, "_write_photo_sync", storage_write)
+    result = sync.sync_to_xmp(db)
+    assert result["synced"] == 1
+    assert result["failed"] == 1
+    assert [c["photo_id"] for c in db.get_pending_changes()] == [bad]
+    assert read_keywords(backing[good_path]) == {"Osprey"}
+    assert not sync.sync_to_xmp(db)["ok"]
+    assert written == [good_path]
+
+
+def test_sync_missing_case_alias_preparation_failure_keeps_shared_queue(tmp_path, db):
+    import sync
+    from xmp import read_sync_preview_metadata
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(tmp_path, db)
+    alias = os.path.join(os.path.dirname(path), "BIRD.xmp")
+    if not os.path.exists(alias) or not os.path.samefile(path, alias):
+        pytest.skip("needs a case-insensitive filesystem")
+    os.unlink(path)
+    second = db.add_photo(folder_id=db.get_photo(first)["folder_id"], filename="BIRD.nef",
+                          extension=".nef", file_size=100, file_mtime=1.0)
+    db.queue_change(first, "rating", "malformed")
+    db.queue_change(second, "keyword_add", "Osprey")
+    result = sync.sync_to_xmp(db)
+    assert result["synced"] == 0
+    assert result["failed"] == 2
+    assert len(db.get_pending_changes()) == 2
+    assert os.path.exists(path)
+    db.conn.execute("UPDATE pending_changes SET value = '3' WHERE photo_id = ?", (first,))
+    db.conn.commit()
+    assert sync.sync_to_xmp(db)["ok"]
+    assert read_sync_preview_metadata(path)["rating"] == "3"
+    assert not db.get_pending_changes()
