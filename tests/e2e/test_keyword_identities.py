@@ -123,6 +123,10 @@ def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(liv
     db = live_server['db']
     photos = live_server['data']['photos']
     hostile = db.add_keyword('<img src=x onerror="window.__xssRan=1">', kw_type='location')
+    # A quote breaks out of an attribute value; escapeHtml serializes a text
+    # node and does not encode quotes, so only escapeAttr stops this one.
+    quoted = db.add_keyword('q" onfocus="window.__attrXss=1" autofocus x="',
+                            kw_type='location')
     located = db.add_keyword('Overlook Point', kw_type='location')
     coordless = db.add_keyword('Overlook Unmapped', kw_type='location')
     db.conn.execute("UPDATE keywords SET place_id = 'place-hostile', latitude = 48.10, "
@@ -131,13 +135,13 @@ def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(liv
                     "longitude = 11.60 WHERE id = ?", (located,))
     db.conn.execute("UPDATE keywords SET place_id = 'place-coordless' WHERE id = ?", (coordless,))
     db.conn.commit()
-    for index, keyword in enumerate((hostile, located, coordless)):
+    for index, keyword in enumerate((hostile, located, coordless, quoted)):
         db.tag_photo(photos[index % len(photos)], keyword)
 
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_server['url'] + '/keywords')
-    for keyword in (hostile, located, coordless):
+    for keyword in (hostile, located, coordless, quoted):
         page.locator(f'.kw-cb[data-id="{keyword}"]').check()
     page.locator('#kwBulkMerge').click()
     expect(page.locator('#kwMergeMap')).to_be_visible()
@@ -148,6 +152,14 @@ def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(liv
     expect(page.locator('.leaflet-tooltip')).to_be_visible()
     assert page.evaluate("document.querySelectorAll('.leaflet-tooltip img').length") == 0
     assert page.evaluate('window.__xssRan') is None
+
+    # ...and a quote in a keyword name must not escape an attribute value.
+    # The name chips and the radio values both interpolate into attributes.
+    page.wait_for_selector('.kw-merge-chip[data-name]')
+    assert page.evaluate('window.__attrXss') is None
+    assert page.evaluate(
+        "document.querySelectorAll('#kwMergeFields [onfocus],"
+        " #kwMergeFields [autofocus]').length") == 0
 
     # The coordinate boxes must always show what the merge will really use.
     # A chosen place owns its own point; a coordless one leaves none behind.

@@ -1560,6 +1560,41 @@ def test_moving_a_location_under_a_location_ancestor_still_resyncs(catalog):
         "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location'",
         (photos[0],)).fetchone()
 
+
+def test_collapsing_into_a_later_source_follows_the_landing_chain(catalog):
+    """A source may sit under the target -- the overlap guard only refuses a
+    source that CONTAINS another selected row. So a child of an earlier
+    source can collapse into a later source, which is itself removed when
+    its turn comes. Recording that doomed row as the destination wrote an
+    alias against a deleted keyword (FOREIGN KEY constraint failed, a 500
+    out of /api/keywords/merge) and queued a rewrite with a null path."""
+    db, photos = catalog
+    kept = db.add_keyword('Target')
+    first = db.add_keyword('S1')
+    under_target = db.add_keyword('S2', parent_id=kept)
+    colliding = db.add_keyword('S2', parent_id=first)
+    db.conn.commit()
+    db.tag_photo(photos[0], colliding)
+    db.tag_photo(photos[1], under_target)
+    db.tag_photo(photos[2], kept)
+
+    preview = preview_keyword_merge(db, [first, under_target, kept], kept)
+    entry = next(c for c in preview['children'] if c['id'] == colliding)
+    assert entry['outcome'] == 'merge'
+    assert entry['into_id'] == kept        # resolved past the doomed source
+    assert entry['to_path'] == ['Target']
+    merge_keywords(db, [first, under_target, kept], kept, preview['preview_token'])
+
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?', (kept,))} == {
+        photos[0], photos[1], photos[2]}
+    assert not db.conn.execute(
+        'SELECT 1 FROM keyword_import_aliases a LEFT JOIN keywords k '
+        'ON k.id = a.keyword_id WHERE k.id IS NULL').fetchone()
+    for row in db.conn.execute(
+            "SELECT value FROM pending_changes WHERE change_type = 'keyword_merge'"):
+        assert json.loads(row['value'])['target_path'] is not None
+
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
     default, so the preview names the field and withholds its token rather

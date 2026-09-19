@@ -1042,6 +1042,15 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     landing = {source['id']: target_id for source in sources}
     landing.update({entry['id']: entry['into_id'] for entry in plan['children']
                     if entry['outcome'] == 'merge'})
+    # A source may sit under the target, which the overlap guard allows. A
+    # child of an earlier source can therefore collapse into a LATER source,
+    # which is itself removed when its turn comes -- so the recorded
+    # ``into_id`` names a row that will not exist. Follow the chain to the
+    # row that actually survives, or the alias write hits the keywords
+    # foreign key and the queued rewrite carries a null target path.
+    for entry in plan['children']:
+        if entry['outcome'] == 'merge':
+            entry['into_id'] = _resolve_landing(entry['id'], landing)
     parent_of = {node['id']: node['parent_id'] for node in surviving}
     post_types = {node['id']: node['type'] for node in surviving}
     post_types[target_id] = resolved['type']

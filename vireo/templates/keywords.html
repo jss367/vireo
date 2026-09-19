@@ -643,7 +643,7 @@
     const url = 'https://www.openstreetmap.org/?mlat=' + encodeURIComponent(latitude) +
       '&mlon=' + encodeURIComponent(longitude) + '#map=14/' + encodeURIComponent(latitude) +
       '/' + encodeURIComponent(longitude);
-    return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener" ' +
+    return '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener" ' +
       'onclick="return openExternalLink(event, this.href)">' + escapeHtml(label) + '</a>';
   }
 
@@ -698,9 +698,13 @@
     return 'no taxon record';
   }
 
+  /* escapeHtml serializes a text node, which does NOT encode quotes, so it is
+     only safe between tags. Anything landing inside an attribute value needs
+     escapeAttr or a quote in a keyword name closes the attribute and can add
+     an event handler. Keyword names come from imported XMP. */
   function mergeChoice(group, value, checked, title, subtitle) {
     return '<label class="kw-merge-choice">' +
-      '<input type="radio" name="' + group + '" value="' + escapeHtml(value) + '"' +
+      '<input type="radio" name="' + group + '" value="' + escapeAttr(value) + '"' +
       (checked ? ' checked' : '') + '>' +
       '<span>' + title + (subtitle ? '<br><span class="kw-merge-sub">' + subtitle + '</span>' : '') +
       '</span></label>';
@@ -718,10 +722,10 @@
     parts.push('<div class="kw-merge-field">' +
       '<label class="modal-label" for="kwMergeName">Name</label>' +
       '<input type="text" id="kwMergeName" class="modal-input" value="' +
-      escapeHtml(resolved.name) + '">' +
+      escapeAttr(resolved.name) + '">' +
       (options.name.length > 1 ? '<div class="kw-merge-chips">' +
         options.name.map(o => '<button type="button" class="kw-merge-chip" data-name="' +
-          escapeHtml(o.value) + '">' + escapeHtml(o.value) + '</button>').join('') +
+          escapeAttr(o.value) + '">' + escapeHtml(o.value) + '</button>').join('') +
         '</div>' : '') +
       '</div>');
 
@@ -740,7 +744,7 @@
       parts.push('<div class="kw-merge-field">' +
         '<label class="modal-label" for="kwMergeType">Type</label>' +
         '<select id="kwMergeType" class="modal-input">' +
-        options.type.map(o => '<option value="' + escapeHtml(o.value) + '"' +
+        options.type.map(o => '<option value="' + escapeAttr(o.value) + '"' +
           (o.value === resolved.type ? ' selected' : '') + '>' + escapeHtml(o.value) +
           '</option>').join('') +
         '</select></div>');
