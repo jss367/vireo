@@ -7215,6 +7215,20 @@ async function refreshBrowseWindowInPlace() {
         return stillExpandedIds.has(id);
       })) expandedBrowseStacks.add(photo.id);
     });
+    // "Select all matching" seeds ``selectedPhotos`` with IDs beyond the
+    // loaded pages; a refresh that only sees this window cannot tell whether
+    // those off-page IDs are still in the result set, so pruning by window
+    // membership alone would silently shrink the selection to the current
+    // window (Codex P1 on PR #1715). Remember which IDs the OLD window held
+    // — those, and only those, are what this refresh has evidence about —
+    // and later drop only the ones this refresh proves are gone.
+    var previousWindowIds = new Set();
+    photos.forEach(function(photo) {
+      previousWindowIds.add(photo.id);
+      if (photo.browse_stack) photo.browse_stack.photo_ids.forEach(function(id) {
+        previousWindowIds.add(id);
+      });
+    });
     browseStackMembers = nextMembers;
     browseStackErrors = {};
     browseStackHydrationRequests = {};
@@ -7238,7 +7252,7 @@ async function refreshBrowseWindowInPlace() {
       });
     });
     selectedPhotos.forEach(function(id) {
-      if (!availableIds.has(id)) selectedPhotos.delete(id);
+      if (previousWindowIds.has(id) && !availableIds.has(id)) selectedPhotos.delete(id);
     });
     if (selectedPhotoId != null && !availableIds.has(selectedPhotoId)) closeDetail();
     var selectedCover = loadedBrowseStackCoverForPhoto(selectedPhotoId);
