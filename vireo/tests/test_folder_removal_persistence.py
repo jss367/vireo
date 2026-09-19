@@ -216,18 +216,23 @@ def test_existing_catalog_gains_removal_tracking(shared_tree):
         assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent}
 
 
-def test_catalog_with_exact_removal_records_gains_subtree_tracking(shared_tree):
+@pytest.mark.parametrize("recursive_removal", [True, False])
+def test_catalog_with_exact_removal_records_gains_subtree_tracking(shared_tree, recursive_removal):
     db, workspace, other, parent, missing, child = shared_tree
-    db.delete_folder(missing)
+    if recursive_removal:
+        db.delete_folder(missing)
+    else:
+        db.remove_workspace_folder(workspace, missing)
     db.conn.execute("DROP VIEW workspace_removed_folders")
     db.conn.execute("ALTER TABLE workspace_folder_removals DROP COLUMN recursive")
     db.conn.execute("DELETE FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'")
     db.conn.commit()
     with Database(db._db_path) as upgraded:
         upgraded.set_active_workspace(other)
-        upgraded.add_folder(upgraded.get_folder(missing)["path"] + "/new",
-                            parent_id=missing, workspace_root=False)
-        assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent}
+        new_folder = upgraded.add_folder(upgraded.get_folder(missing)["path"] + "/new",
+                                         parent_id=missing, workspace_root=False)
+        expected = {parent} if recursive_removal else {parent, child, new_folder}
+        assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == expected
 
 
 def test_global_folder_delete_cleans_up_removal_records(shared_tree):
