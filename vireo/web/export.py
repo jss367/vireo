@@ -33,6 +33,57 @@ def create_export_blueprint(
     blueprint = Blueprint("export", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
+    @blueprint.route("/api/jobs/panorama", methods=["POST"])
+    @background_job
+    def api_job_panorama(ctx):
+        """Create a panorama from every selected photo in this workspace."""
+        from panorama import create_panorama, validate_options
+
+        try:
+            options = validate_options(request.get_json(silent=True))
+        except ValueError as exc:
+            return json_error(str(exc))
+        db = get_db()
+        ids = options["photo_ids"]
+        placeholders = ",".join("?" for _ in ids)
+        visible = db.conn.execute(
+            f"""SELECT p.id FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+            [ctx.workspace_id, *ids],
+        ).fetchall()
+        if {row["id"] for row in visible} != set(ids):
+            return json_error("Every selected photo must be available in the current workspace")
+        if options["destination"] and not os.path.isdir(options["destination"]):
+            return json_error("Choose an existing destination folder")
+        effective_cfg = db.get_effective_config(cfg.load())
+        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        reveal = options.pop("reveal")
+
+        def work(job):
+            from export import reveal_exported_files
+
+            def progress(current, total, phase):
+                event = {"current": current, "total": total, "phase": phase, "current_file": phase}
+                job["progress"].update(event)
+                ctx.runner.push_event(job["id"], "progress", event)
+
+            thread_db = ctx.thread_db()
+            try:
+                result = create_panorama(
+                    thread_db, vireo_dir, **options, config=effective_cfg,
+                    checkpoint=lambda: ctx.checkpoint(job), progress=progress,
+                )
+                result["revealed"] = bool(
+                    reveal and not ctx.runner.cancellation_requested(job["id"])
+                    and reveal_exported_files([result["path"]])
+                )
+                return result
+            finally:
+                thread_db.close()
+
+        return ctx.start("panorama", work, config={**options, "reveal": reveal})
+
     @blueprint.route("/api/export/presets")
     def api_export_presets_list():
         """List saved export presets (global; shared by every workspace)."""

@@ -2203,6 +2203,7 @@ body.sidebar-resizing {
 
     {% include '_folder_browser.html' %}
     {% include '_export_preset_dialog.html' %}
+    {% include '_panorama_dialog.html' %}
 
     <!-- Grid -->
     <div class="grid-container" id="gridContainer">
@@ -2540,6 +2541,7 @@ body.sidebar-resizing {
 <script src="/static/vireo-folder-browser.js"></script>
 <script src="/static/vireo-export-presets.js"></script>
 <script src="/static/vireo-thumbnail-queue.js"></script>
+<script src="/static/vireo-panorama.js"></script>
 <script>
 /* Google Maps API key — populated from /api/config below (window._cfgPromise).
    Empty string when no key is configured; the Location section then
@@ -13934,6 +13936,7 @@ document.addEventListener('keydown', function(e) {
       if (openModal.id === 'batchKeywordModal') hideBatchKeywordModal();
       else if (openModal.id === 'batchCollectionModal') hideBatchCollectionModal();
       else if (openModal.id === 'exportOverlay') closeExportModal();
+      else if (openModal.id === 'panoramaOverlay') closePanoramaModal();
       else openModal.classList.remove('open');
     }
     return;
@@ -14703,6 +14706,9 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
     { label: 'Prepare Full Resolution',
       onClick: function() { prepareFullResolutionSelection(photoIds); } },
     { label: 'Export\u2026', onClick: function() { openExportModal(); } },
+    { label: 'Create Panorama\u2026', disabled: photoIds.length < 2 || photoIds.length > 12,
+      disabledHint: 'Select 2–12 overlapping photos',
+      onClick: function() { openPanoramaModal(photoIds); } },
     { separator: true },
     { label: 'Delete', onClick: function() { batchDelete(); } },
   ]);
@@ -15602,6 +15608,13 @@ const exportFolderBrowser = new VireoFolderBrowser({
   overlayId: 'folderBrowser',
   defaultMode: 'destination',
   modes: {
+    panorama: {
+      title: 'Choose Panorama Folder',
+      multiple: false,
+      showCounts: false,
+      startPath: function() { return document.getElementById('panoramaDestination').value.trim(); },
+      onSelect: function(path) { document.getElementById('panoramaDestination').value = path; },
+    },
     destination: {
       title: 'Select Export Folder',
       multiple: false,

@@ -1,0 +1,30 @@
+<div id="panoramaOverlay" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="panoramaTitle" style="width:480px;max-width:calc(100vw - 32px);max-height:calc(100vh - 48px);">
+    <h3 id="panoramaTitle">Create Panorama</h3>
+    <p id="panoramaSelection" style="color:var(--text-secondary);"></p>
+    <p style="font-size:12px;color:var(--text-secondary);margin:8px 0 16px;line-height:1.4;">Choose 2–12 views taken from the same position with about 30–50% overlap. Current edits are included. Originals stay unchanged.</p>
+    <label for="panoramaDestination" style="font-size:12px;">Save in folder</label>
+    <div style="display:flex;gap:8px;margin:6px 0;">
+      <input id="panoramaDestination" class="modal-input" type="text" placeholder="Beside the first selected photo" style="flex:1;min-width:0;margin:0;">
+      <button id="panoramaBrowse" class="modal-btn modal-btn-cancel" type="button" onclick="exportFolderBrowser.open('panorama')">Browse…</button>
+    </div>
+    <p style="font-size:12px;color:var(--text-secondary);margin:8px 0 16px;line-height:1.4;">Saved as the first photo’s name plus “_panorama”. Existing files are preserved by adding a number. Rescan the output folder to add the result to Browse.</p>
+    <label for="panoramaFormat" style="font-size:12px;display:block;margin-bottom:4px;">Format</label>
+    <select id="panoramaFormat" class="modal-input">
+      <option value="jpg">JPEG</option>
+      <option value="png">PNG (lossless)</option>
+    </select>
+    <label for="panoramaInputSize" style="font-size:12px;display:block;margin-bottom:4px;">Maximum long edge per input photo</label>
+    <select id="panoramaInputSize" class="modal-input">
+      <option value="2048">2,048 pixels — faster</option>
+      <option value="4096">4,096 pixels — more detail, more memory</option>
+    </select>
+    <p style="font-size:12px;color:var(--text-secondary);">The panorama can be wider than this limit. Output is 8-bit color; alignment can leave black borders that you can crop after importing.</p>
+    <label style="font-size:12px;display:block;margin:12px 0;"><input id="panoramaReveal" type="checkbox" checked> Show the result in the file manager</label>
+    <p id="panoramaStatus" role="status" style="font-size:12px;overflow-wrap:anywhere;"></p>
+    <div class="modal-actions">
+      <button id="panoramaSubmit" class="modal-btn modal-btn-primary" type="button" onclick="startPanorama()">Create Panorama</button>
+      <button class="modal-btn modal-btn-cancel" type="button" onclick="closePanoramaModal()">Close</button>
+    </div>
+  </div>
+</div>

@@ -295,6 +295,7 @@ POST         /api/jobs/ingest
 POST         /api/jobs/move-folder
 POST         /api/jobs/move-photos
 POST         /api/jobs/offline-cache
+POST         /api/jobs/panorama
 POST         /api/jobs/pipeline
 POST         /api/jobs/precompute-embeddings
 POST         /api/jobs/prepare-full-resolution
