@@ -233,6 +233,36 @@ def test_interrupted_export_removes_only_its_own_files(tmp_path, monkeypatch, fa
     db.close()
 
 
+@pytest.mark.parametrize('mode', ['RGBA', 'P'])
+def test_site_export_saves_non_jpeg_modes_as_jpeg(tmp_path, monkeypatch, mode):
+    import site_export
+
+    app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
+    original_load = site_export.load_export_image
+
+    def load_alpha(photo, *args, **kwargs):
+        img = original_load(photo, *args, **kwargs)
+        try:
+            return img.convert(mode)
+        finally:
+            img.close()
+
+    monkeypatch.setattr(site_export, 'load_export_image', load_alpha)
+    job = _run_export(app, tmp_path / 'export')
+    assert job['status'] == 'completed', job
+    result = job['result']
+    assert result['errors'] == []
+    output = Path(result['destination'])
+    photos = _read(output, 'photos.json')
+    assert photos
+    for photo in photos:
+        assert 'error' not in photo
+        with Image.open(output / photo['image']) as rendered:
+            assert rendered.format == 'JPEG'
+            assert rendered.mode in ('RGB', 'L')
+    db.close()
+
+
 @pytest.mark.parametrize('visual_available', [True, False])
 def test_visual_album_never_silently_exports_metadata_only_matches(tmp_path, monkeypatch, visual_available):
     from site_export import export_site

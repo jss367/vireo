@@ -174,7 +174,12 @@ def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
                             developed_index=index,
                         )
                         try:
-                            img.save(output / path, "JPEG", quality=95)
+                            save_img = img if img.mode in ("RGB", "L") else img.convert("RGB")
+                            try:
+                                save_img.save(output / path, "JPEG", quality=95)
+                            finally:
+                                if save_img is not img:
+                                    save_img.close()
                         finally:
                             img.close()
                         record["image"] = path
