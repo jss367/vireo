@@ -792,9 +792,11 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     nodes[target_id]['name'] = resolved['name']
     nodes[target_id]['parent_id'] = resolved['parent_id']
     surviving = [node for node in nodes.values() if node['id'] not in plan['removed']]
-    # Match SQLite's case-insensitive UNIQUE(name, parent_id) — a raw string
-    # compare would miss `foo` colliding with an unselected `Foo`, and the
-    # merge would then leave two peers whose imports could not tell apart.
+    # SQLite's UNIQUE(name, parent_id) is BINARY, so it would happily store
+    # `foo` beside an unselected `Foo` — that permissiveness is the bug, not
+    # the guard. Every dedup and lookup path in the app matches on the folded
+    # key, so the pair would read as a duplicate forever after and imports
+    # could not tell them apart. Compare on the same key those paths use.
     resolved_key = keyword_match_key(resolved['name'])
     clash = next((n for n in surviving
                   if n['id'] != target_id
