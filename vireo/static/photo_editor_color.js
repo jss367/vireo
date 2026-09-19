@@ -217,6 +217,8 @@ function cancelPointColorPicker() {
 function togglePointColorPicker() {
   if (colorEditor.picking) { cancelPointColorPicker(); return; }
   if (editorState.loading || pointColorSamples().length >= 8) return;
+  // A new picking session supersedes any preview request still in flight.
+  colorEditor.pickSequence++;
   colorEditor.picking = true;
   document.getElementById('editorCanvasWrap').classList.add('picking-color');
   document.getElementById('pointColorPick').textContent = 'Cancel Picking';

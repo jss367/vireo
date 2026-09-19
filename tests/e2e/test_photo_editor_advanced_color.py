@@ -416,3 +416,29 @@ def test_new_color_controls_survive_presets_and_copy(live_server, page, color_ph
     assert page.evaluate('vireoEditNav.getCopiedRecipe().recipe.adjustments') == expected
     assert page.evaluate('saveRecipe()') is True
     assert live_server['db'].get_photo_edit_recipe(photo_id)['adjustments'] == expected
+
+
+@pytest.mark.parametrize('old_request_fails', [False, True])
+def test_reopening_color_picker_ignores_previous_pending_sample(live_server, page, color_photo, old_request_fails):
+    page.goto(f"{live_server['url']}/edit/{color_photo}")
+    _wait_color_preview(page)
+    page.evaluate("""() => {
+      window.originalColorImageLoader = _loadImage;
+      _loadImage = () => new Promise((resolve, reject) => {
+        window.releaseOldColorSample = fails => fails
+          ? reject(new Error('delayed sample failed'))
+          : resolve(document.getElementById('editorImg'));
+      });
+    }""")
+    page.locator('#pointColorPick').click()
+    page.locator('#editorImg').click(force=True)
+    expect(page.locator('#pointColorStatus')).to_have_text('Sampling color…')
+    page.locator('#pointColorPick').click()
+    page.evaluate('async fails => { releaseOldColorSample(fails); await Promise.resolve(); }', old_request_fails)
+    assert page.evaluate('pointColorSamples()') == []
+    expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'true')
+    expect(page.locator('#pointColorStatus')).to_have_text('Click a color in the photo. Escape cancels.')
+    page.evaluate('() => { _loadImage = originalColorImageLoader; }')
+    page.locator('#editorImg').click(force=True)
+    expect(page.locator('#pointColorStatus')).to_contain_text('Color sampled')
+    assert len(page.evaluate('pointColorSamples()')) == 1
