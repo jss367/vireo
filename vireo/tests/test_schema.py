@@ -13,7 +13,7 @@ def test_ensure_schema_applies_registry_and_validation(tmp_path):
     schema.ensure_schema(db_path)
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.MIGRATIONS[-1].version
         assert conn.execute(
             "SELECT value FROM db_meta WHERE key='schema_manager'"
         ).fetchone()[0] == "registry-v1"
@@ -44,14 +44,15 @@ def test_failed_registry_migration_rolls_back_version_and_data(tmp_path, monkeyp
         )
         raise RuntimeError("simulated interruption")
 
-    migration = schema.Migration(12, "interrupted", fail_after_write)
+    previous_version = schema.MIGRATIONS[-1].version
+    migration = schema.Migration(previous_version + 1, "interrupted", fail_after_write)
     monkeypatch.setattr(schema, "MIGRATIONS", (*schema.MIGRATIONS, migration))
 
     with pytest.raises(RuntimeError, match="simulated interruption"):
         schema.ensure_schema(db_path)
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == previous_version
         assert conn.execute(
             "SELECT 1 FROM db_meta WHERE key='partial_migration'"
         ).fetchone() is None
@@ -76,7 +77,7 @@ def test_concurrent_schema_startup_is_serialized(tmp_path):
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.MIGRATIONS[-1].version
 
 
 def test_navigation_restore_changes_only_consolidated_default(tmp_path):
@@ -463,7 +464,7 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             (photo_id, "megadetector-v6", 2),
             (empty_photo_id, "megadetector-v6", 0),
         ]
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.MIGRATIONS[-1].version
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
     with Database(db_path, initialize_schema=False) as migrated_db:
@@ -1110,7 +1111,7 @@ def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_p
             """,
             (photo_id,),
         ).fetchone() == ("megadetector-v6", 0)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.MIGRATIONS[-1].version
 
 
 def test_legacy_merge_prompt_remap_skips_when_other_detection_matches(tmp_path):
@@ -1642,7 +1643,7 @@ def test_split_grouping_history_snapshots_migration(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.MIGRATIONS[-1].version
         rows = conn.execute(
             "SELECT eh.id, eh.action_type, eh.new_value, p.payload "
             "FROM edit_history eh LEFT JOIN edit_history_payloads p ON p.edit_id = eh.id "
@@ -1671,3 +1672,23 @@ def test_split_grouping_history_snapshots_migration(tmp_path):
         assert db.conn.execute(
             "SELECT COUNT(*) FROM edit_history_payloads"
         ).fetchone()[0] == 0
+
+
+def test_sync_claim_migration_preserves_queue_and_does_not_claim_reused_ids(tmp_path):
+    path = str(tmp_path / 'catalog.db')
+    with Database(path) as db:
+        folder = db.add_folder(str(tmp_path / 'photos'), name='Photos')
+        photo = db.add_photo(folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=1, file_mtime=1)
+        db.queue_change(photo, 'keyword_add', 'Osprey')
+        selected = db.get_pending_changes()[0]['id']
+        db.conn.execute('DROP TABLE pending_change_sync_attempts')
+        db.conn.execute('PRAGMA user_version = 11')
+        db.conn.commit()
+    schema.ensure_schema(path)
+    with Database(path, initialize_schema=False) as db:
+        assert db.get_pending_changes()[0]['id'] == selected
+        db.conn.execute('INSERT INTO pending_change_sync_attempts VALUES (?)', (selected,))
+        db.clear_pending([selected])
+        db.queue_change(photo, 'keyword_remove', 'Osprey')
+        assert db.get_pending_changes()[0]['id'] == selected
+        assert not db.conn.execute('SELECT * FROM pending_change_sync_attempts').fetchall()

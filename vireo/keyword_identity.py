@@ -1155,6 +1155,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             raise ValueError('The selected keywords changed. Review the updated preview before merging.')
         target = preview['target']
         resolved = preview['resolved']
+        location_export_settings = {}
         # A child that collapses into an existing sibling loses its
         # photo_keywords rows to that sibling, so the photos carrying it have
         # to be read before the merge runs.
@@ -1188,7 +1189,8 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
                 )
             db._merge_keyword_into(source['id'], target_id, pending_source_only=True)
         _apply_merge_overrides(db, target_id, resolved)
-        _queue_survivor_rename(db, target_id, target['name'], resolved['name'])
+        _queue_survivor_rename(db, target_id, target['name'], resolved['name'],
+                               resolved['type'], location_export_settings)
         for row, source in affected:
             pid, ws = row['photo_id'], row['workspace_id']
             old_name = source['name']
@@ -1209,10 +1211,11 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             db.clear_equivalent_flat_removals(
                 [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}], _commit=False,
             )
-            db.queue_change(pid, 'keyword_add', resolved['name'], workspace_id=ws, _commit=False)
+            _queue_merge_keyword_add(db, pid, ws, resolved['name'], resolved['type'],
+                                     location_export_settings)
         _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
                                      set(preview['location_change_ids']))
-        _queue_disambiguated_child_renames(db, preview, renamed_tags)
+        _queue_disambiguated_child_renames(db, preview, renamed_tags, location_export_settings)
         # A retained location child that gained place_id/coords via
         # ``_merge_keyword_into``'s COALESCE fold has photos whose sidecars
         # still hold the old (or empty) location. ``_queue_moved_subtree_changes``
@@ -1331,7 +1334,28 @@ def _apply_merge_overrides(db, target_id, resolved):
 
 
 
-def _queue_survivor_rename(db, target_id, old_name, new_name):
+def _queue_merge_keyword_add(db, photo_id, workspace_id, name, keyword_type, settings):
+    """Let location sync own generated terms; ordinary additions mean user ownership."""
+    if keyword_type == 'location':
+        if workspace_id not in settings:
+            import config as cfg
+
+            if 'global' not in settings:
+                # A failed config read must not silently transfer ownership.
+                # The surrounding merge transaction rolls back on failure.
+                settings['global'] = cfg.load_strict()
+            workspace = db.get_workspace(workspace_id)
+            overrides = json.loads(workspace['config_overrides'] or '{}') if workspace else {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+            key = 'write_location_keywords_to_xmp'
+            settings[workspace_id] = bool(overrides.get(key, settings['global'].get(key, False)))
+        if settings[workspace_id]:
+            return
+    db.queue_change(photo_id, 'keyword_add', name, workspace_id=workspace_id, _commit=False)
+
+
+def _queue_survivor_rename(db, target_id, old_name, new_name, keyword_type, settings):
     """Re-export photos that already carried the survivor under a new spelling.
 
     The source loop only covers photos tagged with a row the merge deleted.
@@ -1357,7 +1381,7 @@ def _queue_survivor_rename(db, target_id, old_name, new_name):
                    for r in still_used):
             db.queue_change(pid, 'keyword_remove_flat', old_name,
                             workspace_id=ws, _commit=False)
-        db.queue_change(pid, 'keyword_add', new_name, workspace_id=ws, _commit=False)
+        _queue_merge_keyword_add(db, pid, ws, new_name, keyword_type, settings)
 
 def _collapsing_child_tags(db, preview):
     """Photos carrying a child that is about to collapse into a sibling.
@@ -1398,7 +1422,7 @@ def _renamed_child_tags(db, preview):
     return [(dict(row), renamed[row['keyword_id']]) for row in rows]
 
 
-def _queue_disambiguated_child_renames(db, preview, renamed_tags):
+def _queue_disambiguated_child_renames(db, preview, renamed_tags, settings):
     """Carry a collision rename out to the flat ``dc:subject`` keyword.
 
     A child kept under a suffixed name is renamed as far as the user is
@@ -1419,8 +1443,10 @@ def _queue_disambiguated_child_renames(db, preview, renamed_tags):
                    for r in still_used):
             db.queue_change(pid, 'keyword_remove_flat', child['name'],
                             workspace_id=ws, _commit=False)
-        db.queue_change(pid, 'keyword_add', child['new_name'],
-                        workspace_id=ws, _commit=False)
+        keyword_type = db.conn.execute(
+            'SELECT type FROM keywords WHERE id = ?', (child['id'],),
+        ).fetchone()['type']
+        _queue_merge_keyword_add(db, pid, ws, child['new_name'], keyword_type, settings)
 
 def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
                                  location_change_ids):
