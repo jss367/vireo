@@ -1874,3 +1874,121 @@ def test_merge_resyncs_photos_on_a_metadata_folded_child(catalog):
         "SELECT photo_id FROM pending_changes WHERE change_type = 'location'")}
     assert photos[0] in resynced
     assert photos[1] in resynced
+
+
+def test_manual_merge_case_variant_child_collapses_into_destination_sibling(catalog):
+    """SQLite's UNIQUE(name, parent_id) is BINARY, so a source child named
+    ``heron`` can reparent under a destination that already holds ``Heron``
+    without hitting an IntegrityError. Every keyword lookup uses
+    ``keyword_match_key`` though, so leaving both rows in place would create
+    two semantic peers no import could tell apart. The planner has to catch
+    the folded collision the way the exact-name path does, and the write
+    path has to mirror the same outcome."""
+    db, photos = catalog
+    old = db.add_keyword('Trip A', kw_type='general')
+    new = db.add_keyword('Trip B', kw_type='general')
+    old_bird = db.add_keyword('heron', parent_id=old, kw_type='general')
+    # Bypass ``add_keyword``'s ``COLLATE NOCASE`` dedupe to plant a
+    # case-variant sibling; the underlying table constraint is BINARY so it
+    # permits the raw INSERT.
+    new_bird = db.conn.execute(
+        'INSERT INTO keywords(name, parent_id, type) VALUES (?, ?, ?)',
+        ('Heron', new, 'general'),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photos[0], old_bird)
+    db.tag_photo(photos[1], new_bird)
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    outcomes = {c['id']: (c['outcome'], c['new_name']) for c in preview['children']}
+    assert outcomes[old_bird] == ('merge', 'heron')
+
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+    # Only one Heron survives under the retained parent, carrying both photos.
+    survivors = [dict(r) for r in db.conn.execute(
+        "SELECT id, name FROM keywords WHERE parent_id = ?", (new,))]
+    assert len(survivors) == 1
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?',
+        (survivors[0]['id'],))} == {photos[0], photos[1]}
+
+
+def test_manual_merge_case_variant_child_disambiguates_when_taxa_differ(catalog):
+    """When the case-folded collision names two rows that carry different
+    taxa, the planner has to preserve them the same way an exact-name
+    same-taxon collision does -- suffix the migrating child rather than
+    collapsing it and silently retagging its photos as the other species."""
+    db, photos = catalog
+    anna = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte anna', 'Anna bird', 'species', 5112)").lastrowid
+    costa = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte costae', 'Costa bird', 'species', 5113)").lastrowid
+    old = db.add_keyword('Trip A')
+    new = db.add_keyword('Trip B')
+    # Raw INSERTs to bypass ``add_keyword``'s casing normalization: this
+    # test needs the two branches to hold the case-variant spellings the
+    # BINARY UNIQUE(name, parent_id) index still permits.
+    old_bird = db.conn.execute(
+        'INSERT INTO keywords(name, parent_id, type, is_species, taxon_id) '
+        'VALUES (?, ?, ?, 1, ?)',
+        ('hummingbird', old, 'taxonomy', anna),
+    ).lastrowid
+    new_bird = db.conn.execute(
+        'INSERT INTO keywords(name, parent_id, type, is_species, taxon_id) '
+        'VALUES (?, ?, ?, 1, ?)',
+        ('Hummingbird', new, 'taxonomy', costa),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photos[0], old_bird)
+    db.tag_photo(photos[1], new_bird)
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    outcomes = {c['id']: (c['outcome'], c['new_name']) for c in preview['children']}
+    assert outcomes[old_bird] == ('rename', f'hummingbird (id-{old_bird})')
+
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+    # Both taxa survive under the retained parent, each keeping its photo.
+    rows = {dict(r)['id']: dict(r) for r in db.conn.execute(
+        "SELECT id, name, taxon_id FROM keywords WHERE parent_id = ?", (new,))}
+    assert rows[new_bird]['taxon_id'] == costa
+    assert rows[old_bird]['taxon_id'] == anna
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?',
+        (old_bird,))} == {photos[0]}
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?',
+        (new_bird,))} == {photos[1]}
+
+
+def test_manual_merge_resyncs_descendants_when_survivor_crosses_location_boundary(catalog):
+    """``get_photo_location_paths`` stops walking at the first non-location
+    ancestor. Retyping the retained parent between 'location' and something
+    else changes what that walk includes for every location descendant under
+    it, even when their own textual paths are unchanged -- and
+    ``_queue_moved_subtree_changes`` covers only descendants whose path
+    changed. The merge has to queue a ``location`` resync for photos tagged
+    directly with any location descendant in the retained subtree when the
+    survivor crosses the boundary."""
+    db, photos = catalog
+    # Retained parent is currently 'location', but the chooser retypes it
+    # to 'general'; its descendant Trail (also location) has photos.
+    kept = db.add_keyword('Park', kw_type='location')
+    trail = db.add_keyword('Trail', parent_id=kept, kw_type='location')
+    stray = db.add_keyword('Yard', kw_type='general')
+    db.tag_photo(photos[0], trail)
+    db.tag_photo(photos[1], stray)
+
+    preview = preview_keyword_merge(db, [kept, stray], kept, {'type': 'general'})
+    assert preview['resolved']['type'] == 'general'
+    merge_keywords(db, [kept, stray], kept, preview['preview_token'],
+                   {'type': 'general'})
+
+    resynced = {r['photo_id'] for r in db.conn.execute(
+        "SELECT photo_id FROM pending_changes WHERE change_type = 'location'")}
+    # The photo tagged only on the location descendant of the retyped
+    # survivor is included: the walk now stops at the retyped parent, so
+    # its exported location chain shifted even though Trail itself did not
+    # move.
+    assert photos[0] in resynced

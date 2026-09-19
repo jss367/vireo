@@ -428,10 +428,17 @@ def free_sibling_name(taken, base, suffix):
     Appending an ordinal until the slot is free keeps the merge from hitting
     ``UNIQUE(name, parent_id)``, which surfaced as an uncaught SQLite error.
     Deterministic so the preview and the write path agree on the result.
+
+    Comparison uses ``keyword_match_key`` so a case-different sibling still
+    counts as occupied: SQLite's UNIQUE(name, parent_id) is BINARY, but every
+    lookup and dedup path in the app folds case, and picking `Foo (id-3)`
+    while `foo (id-3)` already sits under this parent would leave two
+    semantic peers no import could tell apart.
     """
+    taken_keys = {keyword_match_key(name) for name in taken}
     candidate = f'{base} ({suffix})'
     ordinal = 2
-    while candidate in taken:
+    while keyword_match_key(candidate) in taken_keys:
         candidate = f'{base} ({suffix}) {ordinal}'
         ordinal += 1
     return candidate
@@ -467,7 +474,16 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
     for child_id in list(children.get(src_id, ())):
         child = nodes[child_id]
         siblings = [nodes[k] for k in children.get(dst_id, ()) if k not in plan['removed']]
-        existing = next((n for n in siblings if n['name'] == child['name']), None)
+        # SQLite's UNIQUE(name, parent_id) is BINARY, so `foo` beside `Foo`
+        # slips past the write path's IntegrityError guard. Every lookup and
+        # dedup path uses ``keyword_match_key``, so a case-only sibling is a
+        # semantic collision that has to travel the same collapse-or-rename
+        # branch the exact-name case does; ``_merge_keyword_into`` mirrors
+        # the same fold.
+        child_key = keyword_match_key(child['name'])
+        existing = next(
+            (n for n in siblings if keyword_match_key(n['name']) == child_key),
+            None)
         taken = {n['name'] for n in siblings}
         if existing is None:
             outcome = 'move'
@@ -1061,6 +1077,35 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             ).fetchall():
                 db.remove_pending_changes(row['photo_id'], 'location', workspace_id=row['workspace_id'], _commit=False)
                 db.queue_change(row['photo_id'], 'location', 'effective', workspace_id=row['workspace_id'], _commit=False)
+        if (target['type'] == 'location') != (resolved['type'] == 'location'):
+            # ``get_photo_location_paths`` stops walking at the first
+            # non-location ancestor, so retyping the retained parent across
+            # the location boundary shifts the effective exported chain of
+            # every location descendant under it -- even though those
+            # descendants' textual paths are unchanged and
+            # ``_queue_moved_subtree_changes`` therefore skipped them. Cover
+            # photos tagged directly with any location row in the retained
+            # subtree here; the block above already handled ``target_id``.
+            for row in db.conn.execute(
+                '''WITH RECURSIVE subtree(id) AS (
+                       SELECT id FROM keywords WHERE parent_id = ?
+                       UNION
+                       SELECT k.id FROM keywords k
+                       JOIN subtree s ON k.parent_id = s.id
+                   )
+                   SELECT DISTINCT pk.photo_id, wf.workspace_id
+                   FROM photo_keywords pk
+                   JOIN keywords k ON k.id = pk.keyword_id
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE pk.keyword_id IN (SELECT id FROM subtree)
+                     AND k.type = 'location' ''',
+                (target_id,),
+            ).fetchall():
+                db.remove_pending_changes(row['photo_id'], 'location',
+                                          workspace_id=row['workspace_id'], _commit=False)
+                db.queue_change(row['photo_id'], 'location', 'effective',
+                                workspace_id=row['workspace_id'], _commit=False)
     return preview
 
 

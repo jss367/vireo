@@ -15861,17 +15861,20 @@ class Database:
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
 
         Moves photo associations, then reparents the source's children onto
-        the destination. A child whose exact name already exists under the
-        destination (UNIQUE(name, parent_id) clash) merges into that sibling
-        recursively only when both share the same ``type`` — "Birds > Heron"
-        and "birds > Heron" must converge on one Heron. When the existing
-        sibling has a different ``type`` (e.g. a 'general' Macro vs. a
-        'genre' Macro), the dedup boundary is (LOWER(name), parent_id, type),
-        so they are NOT duplicates; preserve both by disambiguating the
-        migrating child's name with an id suffix. Case-variant children
-        don't clash (the UNIQUE index is case-sensitive); they reparent
-        cleanly and collapse on the caller's next convergence pass. Cycles
-        are impossible: parent_id chains are acyclic by construction.
+        the destination. A child whose name matches an existing sibling
+        under the destination merges into that sibling recursively only when
+        both share the same ``type`` — "Birds > Heron" and "birds > Heron"
+        must converge on one Heron. Match uses ``keyword_match_key`` (ASCII
+        case fold on the display-normalized name), the same key every lookup
+        and dedup path uses, so a case-only variant is a collision even
+        though SQLite's UNIQUE(name, parent_id) index is BINARY — an
+        unchecked reparent would otherwise leave two semantic peers no
+        import could tell apart. When the existing sibling has a different
+        ``type`` (e.g. a 'general' Macro vs. a 'genre' Macro), the dedup
+        boundary is (LOWER(name), parent_id, type), so they are NOT
+        duplicates; preserve both by disambiguating the migrating child's
+        name with an id suffix. Cycles are impossible: parent_id chains are
+        acyclic by construction.
         Non-link metadata (is_species, coordinates, taxon_id,
         source_taxon_id) folds into the destination when it lacks its own,
         so deleting the source can't silently drop species/location info
@@ -16449,27 +16452,34 @@ class Database:
             (src_id,),
         ).fetchall()
         for child in children:
-            try:
+            # Detect the collision explicitly: SQLite's UNIQUE(name, parent_id)
+            # is BINARY, so `foo` reparenting under a destination that already
+            # holds `Foo` would UPDATE cleanly and leave two semantic peers no
+            # keyword lookup (all folded through ``keyword_match_key``) could
+            # tell apart. Fold every sibling's name to check for either shape
+            # of collision, and only reparent when the folded slot is free.
+            siblings = self.conn.execute(
+                "SELECT id, name, type, place_id, taxon_id, source_taxon_id, is_species "
+                "FROM keywords WHERE parent_id = ? AND id != ?",
+                (dst_id, child["id"]),
+            ).fetchall()
+            child_key = keyword_match_key(child["name"])
+            existing = next(
+                (s for s in siblings if keyword_match_key(s["name"]) == child_key),
+                None,
+            )
+            if existing is None:
                 self.conn.execute(
                     "UPDATE keywords SET parent_id = ? WHERE id = ?",
                     (dst_id, child["id"]),
                 )
-            except sqlite3.IntegrityError:
-                existing = self.conn.execute(
-                    "SELECT id, type, place_id, taxon_id, source_taxon_id, is_species "
-                    "FROM keywords WHERE parent_id = ? AND name = ?",
-                    (dst_id, child["name"]),
-                ).fetchone()
+            else:
                 # Every disambiguation below has to dodge the whole sibling
                 # set, not just the row it collided with: the suffixed name
                 # can itself be occupied (a user typed it, or an earlier
                 # disambiguation produced it), and a second
                 # UNIQUE(name, parent_id) violation here is uncaught.
-                taken = {
-                    row["name"] for row in self.conn.execute(
-                        "SELECT name FROM keywords WHERE parent_id = ?", (dst_id,)
-                    )
-                }
+                taken = {row["name"] for row in siblings}
                 if keywords_claim_different_taxa(self, existing, child):
                     # Two same-named species rows that resolve to DIFFERENT
                     # taxa. A recursive merge keeps the destination's taxon
