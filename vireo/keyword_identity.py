@@ -763,7 +763,13 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
         # Ancestors of the retained path and everything under it are one
         # place chain; a second independent linked place on an affected
         # photo is a real conflict the user has to resolve first.
-        compatible = set(selected) | _subtree_ids(_child_index(surviving), target_id)
+        # Every row the plan absorbs ends up inside the retained subtree --
+        # its place either transfers to the survivor or already matches, so
+        # no photo comes out of the merge holding it as an independent place.
+        # The conflict query below still sees those rows' pre-merge ids, so
+        # leaving them out rejects valid subtree merges.
+        compatible = (set(selected) | set(plan['removed'])
+                      | _subtree_ids(_child_index(surviving), target_id))
         parent_id = resolved['parent_id']
         while parent_id is not None and parent_id not in compatible:
             compatible.add(parent_id)
@@ -887,10 +893,15 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             )
             db.queue_change(pid, 'keyword_add', resolved['name'], workspace_id=ws, _commit=False)
         _queue_moved_subtree_changes(db, preview, target_id, collapsed)
-        if resolved['type'] == 'location' or target['type'] == 'location':
+        if (resolved['type'] == 'location' or target['type'] == 'location'
+                or any(s['type'] == 'location' for s in preview['sources'])):
             # Filling previously missing coordinates, or moving the retained
             # place in the hierarchy, also affects photos that already had the
-            # retained keyword before the merge.
+            # retained keyword before the merge. A merged-away LOCATION source
+            # counts even when the result is general: its photos (now on the
+            # survivor) still carry that source's vireo location marker,
+            # hierarchy and coordinates in their sidecars, and only a
+            # ``location`` resync clears them.
             for row in db.conn.execute(
                 'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
                 'JOIN photos p ON p.id = pk.photo_id '
@@ -993,10 +1004,12 @@ def _queue_moved_subtree_changes(db, preview, target_id, collapsed):
     the sibling instead; without this their sidecars keep the retired
     hierarchy and a later rescan recreates the branch just merged away.
     """
-    rewrites = {}
-    for kid, (old_path, new_path) in preview['path_changes'].items():
-        if int(kid) != target_id:
-            rewrites[int(kid)] = (old_path, new_path, int(kid))
+    # The retained row counts as relocated too. When the chooser renames or
+    # reparents it, ``_queue_survivor_rename`` only rewrites the flat
+    # dc:subject word -- a photo tagged directly with it would keep the old
+    # lr:hierarchicalSubject path, which a later scan can rebuild from.
+    rewrites = {int(kid): (old_path, new_path, int(kid))
+                for kid, (old_path, new_path) in preview['path_changes'].items()}
     for _, child in collapsed:
         rewrites[child['id']] = (child['from_path'], child['to_path'], child['into_id'])
     if not rewrites:

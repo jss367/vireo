@@ -846,6 +846,82 @@ def test_merge_rewrites_sidecars_for_children_collapsed_by_recursion(catalog):
         (path_key(['Trip A', 'Lake']),)).fetchone()
     assert alias['keyword_id'] == new_lake
 
+
+def test_merge_rewrites_the_survivors_own_hierarchy_when_the_chooser_renames_it(catalog):
+    """A photo tagged only with the retained row still has that row's OLD path
+    in its sidecar after a chooser rename. The flat remove/add pair does not
+    touch lr:hierarchicalSubject, so without a rewrite the retired hierarchy
+    survives and a later scan can rebuild it."""
+    db, photos = catalog
+    county = db.add_keyword('San Diego County', kw_type='location')
+    junk = db.add_keyword('92004', kw_type='location')
+    stray = db.add_keyword('Borrego', parent_id=junk, kw_type='location')
+    kept = db.add_keyword('Borrego', parent_id=county, kw_type='location')
+    db.tag_photo(photos[0], kept)
+    db.tag_photo(photos[1], stray)
+
+    overrides = {'name': 'Borrego Springs'}
+    preview = preview_keyword_merge(db, [stray, kept], kept, overrides)
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'], overrides)
+
+    merges = [json.loads(r['value']) for r in db.conn.execute(
+        "SELECT value FROM pending_changes WHERE photo_id = ? AND change_type = 'keyword_merge'",
+        (photos[0],))]
+    assert {'source_path': ['San Diego County', 'Borrego'], 'target_id': kept,
+            'target_path': ['San Diego County', 'Borrego Springs']} in merges
+    alias = db.conn.execute(
+        'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
+        (path_key(['San Diego County', 'Borrego']),)).fetchone()
+    assert alias['keyword_id'] == kept
+
+
+def test_merging_a_location_away_resyncs_even_when_the_result_is_general(catalog):
+    """The type chooser allows a location source to merge into a general
+    target. The photos keep the survivor's general tag, but their sidecars
+    still hold the vireo location marker, hierarchy and coordinates that the
+    deleted location row exported -- only a `location` change clears those."""
+    db, photos = catalog
+    location = db.add_keyword('Wing Canyon', kw_type='location')
+    general = db.add_keyword('Wing Cyn', kw_type='general')
+    db.tag_photo(photos[0], location)
+    db.tag_photo(photos[1], general)
+
+    preview = preview_keyword_merge(db, [location, general], general)
+    assert preview['resolved']['type'] == 'general'
+    merge_keywords(db, [location, general], general, preview['preview_token'])
+
+    resynced = {r['photo_id'] for r in db.conn.execute(
+        "SELECT photo_id FROM pending_changes WHERE change_type = 'location'")}
+    assert photos[0] in resynced
+
+
+def test_merge_allows_a_linked_descendant_to_collapse_into_an_unlinked_twin(catalog):
+    """A source descendant carrying a place, colliding with a same-named
+    destination descendant that has none, collapses safely -- the merge hands
+    its place to the survivor. The conflict guard reads pre-merge ids, so it
+    has to count rows the plan absorbs as compatible or it rejects a perfectly
+    valid subtree merge."""
+    db, photos = catalog
+    kept = db.add_keyword('Park', kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'kept-place' WHERE id = ?", (kept,))
+    kept_lake = db.add_keyword('Lake', parent_id=kept, kw_type='location')
+    stray = db.add_keyword('Parc', kw_type='location')
+    stray_lake = db.add_keyword('Lake', parent_id=stray, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'lake-place' WHERE id = ?", (stray_lake,))
+    db.conn.commit()
+    db.tag_photo(photos[0], stray_lake)
+    db.tag_photo(photos[1], kept_lake)
+
+    preview = preview_keyword_merge(db, [stray, kept], kept)
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [('Lake', 'merge')]
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'])
+    # The absorbed row's place moved onto the surviving twin rather than vanishing.
+    assert db.conn.execute(
+        'SELECT place_id FROM keywords WHERE id = ?', (kept_lake,)).fetchone()[0] == 'lake-place'
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?', (kept_lake,))} == {
+        photos[0], photos[1]}
+
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
     default, so the preview names the field and withholds its token rather
