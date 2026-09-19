@@ -284,6 +284,7 @@ POST         /api/jobs/download-hf-model
 POST         /api/jobs/download-model
 POST         /api/jobs/download-taxonomy
 POST         /api/jobs/export
+POST         /api/jobs/export-site
 POST         /api/jobs/export/preflight
 POST         /api/jobs/extract-masks
 POST         /api/jobs/fetch-labels
@@ -295,6 +296,7 @@ POST         /api/jobs/ingest
 POST         /api/jobs/move-folder
 POST         /api/jobs/move-photos
 POST         /api/jobs/offline-cache
+POST         /api/jobs/panorama
 POST         /api/jobs/pipeline
 POST         /api/jobs/precompute-embeddings
 POST         /api/jobs/prepare-full-resolution

@@ -11448,3 +11448,136 @@ def test_extract_masks_route_reports_unreadable_sources(
     assert any("could not be read" in e for e in (result.get("errors") or [])), (
         f"The job needs an actionable error, not just a counter; got {result!r}"
     )
+
+
+def test_pending_archive_sync_repairs_keyword_cancelled_during_publish(app_and_db, tmp_path, monkeypatch):
+    """The NAS receives the cancellation before the local original is deleted."""
+    import move
+    import xmp
+    from db import Database
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+    db.queue_change(photo_id, "keyword_add", "Osprey")
+    real_publish = xmp._write_tree_atomic
+    cancelled = []
+
+    def cancel_before_publish(tree, path):
+        if not cancelled:
+            with Database(db._db_path, initialize_schema=False) as editor_db:
+                editor_db.set_active_workspace(db._ws_id())
+                editor_db._flip_pending_keyword_change(
+                    photo_id, "Osprey", "keyword_add", "keyword_remove",
+                )
+            cancelled.append(True)
+        return real_publish(tree, path)
+
+    monkeypatch.setattr(xmp, "_write_tree_atomic", cancel_before_publish)
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    client = app.test_client()
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert cancelled
+    assert sent["status"] == "completed", sent
+    assert not os.path.exists(staging)
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1
+    assert "Osprey" not in xmp.read_keywords(sidecars[0])
+    assert db.count_pending_changes() == 0
+    assert sent["result"]["metadata_queued_during_transfer"] == 0
+
+
+@pytest.mark.parametrize("template", ["{file_type}/%Y", "%Y/{file_type}", "{file_type}"])
+def test_file_type_template_cannot_land_on_after_process_mount(
+    app_and_db, tmp_path, stub_move, template,
+):
+    import config as cfg
+
+    root = tmp_path / "Photos"
+    mount = root / ("2026/RAW" if template.startswith("%Y") else "RAW")
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos", "mount_path": str(mount),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    client = app_and_db[0].test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)], "destination": str(root),
+        "folder_template": template,
+        "after_import": _process_id(app_and_db[1], "Cull-ready"),
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "mount" in resp.get_json()["error"]
+
+
+def test_file_type_template_mount_check_skips_unused_categories(
+    app_and_db, tmp_path, stub_move,
+):
+    # A RAW-only import can never render a JPEG folder even with a
+    # ``{file_type}`` template, so a mount at ``<root>/JPEG`` must not block
+    # the request. The old guard iterated every DESTINATION_FILE_TYPES entry
+    # unconditionally and rejected renders the run could never produce.
+    import config as cfg
+
+    root = tmp_path / "Photos"
+    root.mkdir()
+    mount = root / "JPEG"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos", "mount_path": str(mount),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    client = app_and_db[0].test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)], "destination": str(root),
+        "folder_template": "{file_type}",
+        "file_types": "raw",
+        "after_import": _process_id(app_and_db[1], "Cull-ready"),
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    # A JPEG mount is out of reach for a RAW-only run — the endpoint must
+    # accept the request rather than reject it on a hypothetical JPEG render.
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_file_type_template_mount_check_still_blocks_used_categories(
+    app_and_db, tmp_path, stub_move,
+):
+    # The narrowed guard must still catch a mount that overlaps a category
+    # the selected ``file_types`` CAN produce — RAW-only against a RAW mount
+    # is a genuine collision.
+    import config as cfg
+
+    root = tmp_path / "Photos"
+    root.mkdir()
+    mount = root / "RAW"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos", "mount_path": str(mount),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    client = app_and_db[0].test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)], "destination": str(root),
+        "folder_template": "{file_type}",
+        "file_types": "raw",
+        "after_import": _process_id(app_and_db[1], "Cull-ready"),
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "mount" in resp.get_json()["error"]

@@ -6,6 +6,7 @@
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/vireo-base.css">
+<link rel="stylesheet" href="/static/vireo-folder-browser.css">
 <title>Vireo - Settings</title>
 <style>
   body { padding-bottom: 36px; }
@@ -1246,6 +1247,10 @@
 
 <!-- Reused for its rule-description helper so a quick filter reads the same
      here as it will on the filter bar's chip. -->
+<script src="/static/vireo-search.js"></script>
+{% include '_folder_browser.html' %}
+<script src="/static/vireo-folder-browser.js"></script>
+<script src="/static/vireo-rsync-help.js"></script>
 <script src="/static/vireo-filter.js"></script>
 <script>
 loadModels();
@@ -2366,10 +2371,48 @@ function _genTargetId() {
 
 var _rtInputCss = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;';
 
+var _rtFolderInput = null;
+var _rtFolderBrowser = new VireoFolderBrowser({
+  overlayId: 'folderBrowser',
+  modes: {
+    local: {
+      title: function() { return 'Choose ' + _rtFolderInput.getAttribute('aria-label'); },
+      startPath: function() { return _rtFolderInput.value.trim(); },
+      onSelect: function(path) { _rtSelectFolder(_rtFolderInput, path); },
+    },
+  },
+});
+
+function _rtSelectFolder(input, path) {
+  // A target may have been removed while a native dialog was open.
+  if (!input || !input.isConnected || !path) return;
+  input.value = path;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+async function _rtBrowseFolder(input, button) {
+  button.disabled = true;
+  try {
+    if (typeof isTauri === 'function' && isTauri()) {
+      var path = await pickDirectory('Choose ' + input.getAttribute('aria-label'), {
+        defaultPath: input.value.trim() || undefined,
+      });
+      _rtSelectFolder(input, Array.isArray(path) ? path[0] : path);
+      return;
+    }
+    _rtFolderInput = input;
+    _rtFolderBrowser.open('local');
+  } catch (e) {
+    showToast('Could not open folder picker: ' + e.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function _rtField(label, value, placeholder, onInput, opts) {
   opts = opts || {};
   var wrap = document.createElement('div');
-  wrap.style.cssText = 'display:flex;flex-direction:column;gap:3px;'
+  wrap.style.cssText = 'display:flex;flex-direction:column;gap:3px;min-width:0;'
     + (opts.flex ? ('flex:' + opts.flex + ';') : '') + (opts.width ? ('width:' + opts.width + ';') : '');
   var lab = document.createElement('label');
   lab.textContent = label;
@@ -2378,10 +2421,28 @@ function _rtField(label, value, placeholder, onInput, opts) {
   inp.type = opts.type || 'text';
   inp.value = (value == null ? '' : value);
   inp.placeholder = placeholder || '';
+  inp.setAttribute('aria-label', label);
+  inp.title = inp.value;
   inp.style.cssText = _rtInputCss + (opts.mono ? 'font-family:monospace;' : '');
-  inp.addEventListener('input', function() { onInput(inp.value); });
+  inp.addEventListener('input', function() { inp.title = inp.value; onInput(inp.value); });
   wrap.appendChild(lab);
-  wrap.appendChild(inp);
+  if (opts.folder) {
+    wrap.style.flexBasis = '100%';
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;';
+    inp.style.flex = '1';
+    inp.style.minWidth = '0';
+    var browse = document.createElement('button');
+    browse.type = 'button';
+    browse.className = 'btn-sm';
+    browse.textContent = 'Browse…';
+    browse.setAttribute('aria-label', 'Browse for ' + label);
+    browse.onclick = function() { _rtBrowseFolder(inp, browse); };
+    row.append(inp, browse);
+    wrap.appendChild(row);
+  } else {
+    wrap.appendChild(inp);
+  }
   return wrap;
 }
 
@@ -2401,7 +2462,7 @@ function renderRemoteTargets() {
     card.style.cssText = 'border:1px solid var(--border-secondary);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--bg-secondary);';
 
     var save = function(field) {
-      return function(v) { _remoteTargetsState[i][field] = v; saveConfig(); };
+      return function(v) { t[field] = v; saveConfig(); };
     };
 
     var r1 = document.createElement('div');
@@ -2415,9 +2476,9 @@ function renderRemoteTargets() {
     var r2 = document.createElement('div');
     r2.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
     r2.appendChild(_rtField('Remote path (NAS side)', t.remote_path, '/volume1/Photography', save('remote_path'), {flex: '1', mono: true}));
-    r2.appendChild(_rtField('Local mount path', t.mount_path, '/Volumes/Photography', save('mount_path'), {flex: '1', mono: true}));
+    r2.appendChild(_rtField('Local mount path', t.mount_path, '/Volumes/Photography', save('mount_path'), {flex: '1', mono: true, folder: true}));
     r2.appendChild(_rtField('Local archive root (chained moves)', t.local_archive_root,
-      '/Users/you/Photos', save('local_archive_root'), {flex: '1', mono: true}));
+      '/Users/you/Photos', save('local_archive_root'), {flex: '1', mono: true, folder: true}));
     card.appendChild(r2);
 
     var r3 = document.createElement('div');
@@ -2511,6 +2572,7 @@ async function testRemoteTarget(i, btn, statusEl) {
       + (res.mount_path && !res.mount_present
           ? ' (mount path not currently present — fine if the NAS just isn’t mounted right now.)' : '');
     statusEl.style.color = res.ok && !archiveRootProblem ? 'var(--success, #4caf50)' : 'var(--warning)';
+    appendRsyncInstallCommands(statusEl, res.rsync_install_commands);
     // Only a missing-but-valid root can be fixed by creating it; an invalid
     // one needs the path changed, and an unreachable volume needs
     // reconnecting (creating a folder on it would hang or fail).
@@ -3075,6 +3137,7 @@ async function nwReviewStep(body) {
     if (!_nw || _nw.step !== 'review') return;
     status.style.cssText = res.ok ? _nwOkCss : _nwErrCss;
     status.textContent = (res.ok ? '✓ ' : '⚠ ') + (res.message || '');
+    appendRsyncInstallCommands(status, res.rsync_install_commands);
     if (res.ok) _nwSetNext(true, 'Save');
   } catch (e) {
     if (!_nw || _nw.step !== 'review') return;
@@ -4014,11 +4077,17 @@ function renderPlatformReadiness(support) {
     var ready = dep.state === 'ready';
     var color = ready ? 'var(--accent)' : (dep.required ? 'var(--danger)' : 'var(--warning)');
     var label = ready ? 'Ready' : (dep.state === 'misconfigured' ? 'Needs repair' : 'Unavailable');
-    var detail = dep.path || dep.hint || '';
+    var detail = ready ? (dep.path || dep.hint || '') : (dep.hint || dep.path || '');
     return '<div class="setting-row"><div class="setting-label">' + escapeHtml(names[key]) +
-      '<small>' + escapeHtml(detail) + '</small></div><span class="setting-value" style="color:' +
+      '<small data-dependency="' + key + '">' + escapeHtml(detail) + '</small></div><span class="setting-value" style="color:' +
       color + ';">' + label + '</span></div>';
   }).join('');
+  keys.forEach(function(key) {
+    if (deps[key].state !== 'ready') {
+      appendRsyncInstallCommands(
+        document.querySelector('[data-dependency="' + key + '"]'), deps[key].install_commands);
+    }
+  });
 }
 
 // exiftool is the metadata backbone for every scan; a missing binary

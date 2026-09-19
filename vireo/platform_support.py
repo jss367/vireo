@@ -13,7 +13,7 @@ from pathlib import Path
 
 from develop import find_darktable, find_dng_converter
 from metadata import exiftool_status
-from move import is_gnu_rsync, resolve_rsync_bin
+from move import is_gnu_rsync, resolve_rsync_bin, rsync_install_guidance
 from proc import no_window_kwargs
 
 
@@ -198,7 +198,8 @@ def dependency_readiness(config: dict | None = None) -> dict:
             "required": False,
             "state": "ready" if rsync_ok else ("misconfigured" if rsync else "missing"),
             "path": rsync,
-            "hint": "Install GNU rsync and configure its executable under Settings → Paths.",
+            "hint": rsync_install_guidance()["hint"],
+            "install_commands": rsync_install_guidance()["commands"],
         },
         "remote_transfer": {
             "required": False,

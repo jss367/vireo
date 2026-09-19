@@ -380,11 +380,17 @@ body { display: flex; flex-direction: column; height: 100vh; }
           <option value="%Y/%m">%Y/%m</option>
           <option value="%Y">%Y</option>
           <option value="%Y-%m-%d">%Y-%m-%d</option>
+          <option value="{file_type}/%Y/%Y-%m-%d" data-label="File type / date">File type / date</option>
+          <option value="%Y/%Y-%m-%d/{file_type}" data-label="Date / file type">Date / file type</option>
+          <option value="{file_type}" data-label="File type only">File type only</option>
           <option value="__custom__">Custom…</option>
         </select>
-        <input type="text" id="folderTemplate" value="" placeholder="Enter a strftime format"
+        <input type="text" id="folderTemplate" value="" placeholder="e.g. {file_type}/%Y/%Y-%m-%d"
                aria-label="Custom folder template" style="display:none;max-width:240px;flex:0 1 240px;">
       </div>
+      <div class="hint">Choose a file-type template to put JPEGs and RAW files in separate folders under the destination.
+        Custom templates can use <code>{file_type}</code> (JPEG, RAW, PNG, TIFF, BMP, or WEBP) and date codes such as <code>%Y/%Y-%m-%d</code>.
+        With file-type and date codes together, undated files go into <code>{file_type}/unsorted</code>.</div>
       <div id="destStructure" class="dest-structure" data-testid="resulting-folders" style="display:none;"></div>
       <div class="section-divider">
         <div class="option-stack">
@@ -492,6 +498,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 
 {% include '_folder_browser.html' %}
 
+<script src="/static/vireo-rsync-help.js"></script>
 <script src="/static/vireo-folder-browser.js"></script>
 <script>
 /* Import page: adds folders in place or copies them to an archive, renders
@@ -813,7 +820,8 @@ function applyFolderTemplateSamples(templateSamples) {
   Array.from(preset.options).forEach((option) => {
     if (option.value === '__custom__') return;
     const sample = samples[option.value];
-    option.textContent = sample ? option.value + ' — ' + sample : option.value;
+    const label = option.dataset.label || option.value;
+    option.textContent = sample ? label + ' — ' + sample : label;
   });
 }
 
@@ -1020,7 +1028,7 @@ function updateRemoteDestPreview() {
   }
   if (input) input.classList.toggle('input-invalid', !!fieldError);
   if (!importRsyncAvailable) {
-    el.appendChild(remotePreviewWarn('Warning: no GNU rsync found. Install GNU rsync or set its path under Settings > Paths.'));
+    el.appendChild(remotePreviewWarn('Warning: no GNU rsync found. ' + rsyncInstallHint()));
   }
   if (!t.mount_path) {
     el.appendChild(remotePreviewWarn('Warning: this target needs a local mount path for cataloging. Add one under Settings > Remote targets.'));
@@ -2065,7 +2073,7 @@ function updateAfterMoveUI() {
   preview.appendChild(line);
   if (!importRsyncAvailable) {
     preview.appendChild(remotePreviewWarn(
-      'Warning: no GNU rsync found, so the move to NAS would fail. Install GNU rsync or set its path under Settings > Paths.'));
+      'Warning: no GNU rsync found, so the move to NAS would fail. ' + rsyncInstallHint()));
   }
   if (!importSshAvailable) {
     preview.appendChild(remotePreviewWarn(
@@ -2288,7 +2296,7 @@ function importFormProblem() {
     }
     if (!importRsyncAvailable) {
       return {
-        message: 'Direct NAS transfer needs GNU rsync. Repair its path in Settings, or use the mounted Local path.',
+        message: 'Direct NAS transfer needs GNU rsync. ' + rsyncInstallHint(),
         target: document.getElementById('destMode'),
       };
     }

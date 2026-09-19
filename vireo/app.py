@@ -5303,6 +5303,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         wording is injected here as ``window.*`` globals. This script is loaded
         first in ``_navbar.html``, before any inline page script runs.
         """
+        from move import rsync_install_guidance
+
         labels = _file_manager_labels()
         preview_max_size = _get_db().get_effective_config(cfg.load()).get("preview_max_size")
         return Response(
@@ -5312,6 +5314,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + json.dumps(1920 if preview_max_size is None else preview_max_size)
             + ";\nwindow.VIREO_PLATFORM = "
             + json.dumps(sys.platform)
+            + ";\nwindow.VIREO_RSYNC_INSTALL = "
+            + json.dumps(rsync_install_guidance())
             + ";\nwindow.VIREO_REVEAL_LABEL = "
             + json.dumps(labels["reveal"])
             + ";\nwindow.VIREO_FILE_MANAGER_NAME = "
@@ -31590,6 +31594,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             settings_write_lock=_settings_write_lock,
             build_life_list_payload=_build_life_list_payload,
             build_highlights_payload=_build_highlights_payload,
+            resolve_visual=_resolve_visual,
         )
     )
     app.register_blueprint(

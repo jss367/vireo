@@ -274,6 +274,23 @@
     "answer": "Every photo page (Browse, Map, Review, Duplicates) shares one filter bar. Start typing in the search box to filter text matches immediately. Rating, flag, and color quick filters are always visible below the search box; open Filters for a rule builder over every metadata field — camera, lens, ISO, capture date (including “in the last N months”), species, and more. Active filters appear as chips you can remove individually; the dashed chip shows the page's fixed scope. Flags and colors multi-select into a single “is one of” rule, and typed values suggest real values from your library with live match counts."
   },
   {
+    "question": "How do I search across photo metadata?",
+    "category": "Browsing",
+    "keywords": [
+      "search",
+      "metadata",
+      "boolean",
+      "AND",
+      "OR",
+      "NOT",
+      "phrase",
+      "caption",
+      "author",
+      "copyright"
+    ],
+    "answer": "The shared search box searches filenames, folders, keywords, species, camera settings, locations, ratings, color labels, current predictions, and stored file-tag values such as captions, authors, and copyright. Separate words require every word to match, even in different fields. Use uppercase AND, OR, and NOT, parentheses to group terms, and double quotes for an exact phrase. For example: (hawk OR owl) NOT perched, or \"morning light\" AND Monterey. NOT applies first, then AND, then OR. Lowercase operator words are literal text. An unfinished expression shows a message and keeps the last valid filters applied. Save the expression with Filters → Save as Collection…."
+  },
+  {
     "question": "How do I search photos visually?",
     "category": "Browsing",
     "keywords": [

@@ -501,6 +501,44 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   background: rgba(28,31,34,0.92);
   border-color: rgba(255,255,255,0.58);
 }
+/* Detail-load chip. Matches the zoom badge so it stays legible over any photo
+   -- unstyled dim text washes out completely on a bright frame. */
+.lightbox-detail-status {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0,0,0,0.6);
+  color: var(--text-primary);
+  border: 1px solid rgba(255,255,255,0.24);
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.25s ease;
+}
+.lightbox-detail-status.is-fading { opacity: 0; }
+.lb-detail-spinner {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.26);
+  border-top-color: rgba(255,255,255,0.92);
+  animation: lb-detail-spin 0.7s linear infinite;
+}
+.lightbox-detail-status.is-full .lb-detail-spinner {
+  animation: none;
+  border-color: var(--success);
+  background: var(--success);
+}
+@keyframes lb-detail-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .lb-detail-spinner { animation: none; border-top-color: rgba(255,255,255,0.26); }
+  .lightbox-detail-status { transition: none; }
+}
 .lightbox-zoom-badge:focus-visible,
 .lb-zoom-step:focus-visible,
 .lb-zoom-stop:focus-visible,
@@ -3951,7 +3989,10 @@ async function createWorkspace() {
   <div id="lightboxNext" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
   <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!_lbVisualTransitionPending && Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <div class="lightbox-zoom-control" id="lightboxZoomControl" onclick="event.stopPropagation();">
-      <span id="lightboxPreviewStatus" role="status" style="display:none;font-size:11px;color:var(--text-dim);">Loading detail…</span>
+      <div id="lightboxPreviewStatus" class="lightbox-detail-status" role="status" aria-live="polite" style="display:none;">
+        <span class="lb-detail-spinner" aria-hidden="true"></span>
+        <span id="lightboxPreviewStatusText"></span>
+      </div>
       <button type="button" class="lightbox-zoom-badge" id="lightboxZoomBadge"
               aria-haspopup="true" aria-expanded="false"
               onclick="toggleLightboxZoomPopover();" title="Zoom controls">Fit</button>
@@ -4322,6 +4363,9 @@ function _lbSetPhotoTransitionPending(pending) {
     controls.inert = !!pending;
     controls.setAttribute('aria-busy', pending ? 'true' : 'false');
   });
+  // Every caller assigns _lbVisualTransitionPending immediately before this, so
+  // the phase derived here is already current.
+  _lbRenderDetailStatus();
 }
 
 // --- Species Representative panel, shared across every page's lightbox.
@@ -5397,23 +5441,47 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     _lbSwapTimer = null;
   }
   _lbDesiredSrcKey = null;
+  _lbProgressiveTargetKey = null;
+  // Cancelling _lbSwapTimer and clearing the desired key makes the old
+  // preloader callbacks return as stale, so nothing else will ever turn this
+  // off. Left set, the phase stays 'sharpening' with no request behind it.
+  _lbSetPreviewLoading(false);
   if (wrap) wrap.classList.remove('zoomed');
   _lbApplyTransform();
+  // Replacing img.onload/onerror orphans handleInitialImageLoad when the
+  // metadata fetch beats the initial image, so this reload inherits the job of
+  // ending that photo's initial load -- otherwise nothing ever clears the
+  // pending decode and the chip stays on Loading indefinitely. The flag is
+  // cleared on completion, not here: the reload is itself a load in flight.
   img.onload = function() {
     img.onload = null;
     img.onerror = null;
     if (_lightboxCurrentId !== photoId) return;
+    _lbInitialDecodePending = false;
     if (img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
     }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
-    _lbScheduleOriginalPreload(photoId);
+    // Settle the load this reload displaced. It schedules the neighbours and
+    // renders the status itself, so only do that work when there was nothing
+    // pending (a reload from the adjustments panel, long after the open).
+    if (!_lbFinishInitialLoad()) {
+      _lbRenderDetailStatus();
+      _lbScheduleOriginalPreload(photoId);
+    }
   };
   img.onerror = function() {
     img.onload = null;
     img.onerror = null;
-    if (_lightboxCurrentId === photoId && typeof showToast === 'function') {
+    if (_lightboxCurrentId !== photoId) return;
+    _lbInitialDecodePending = false;
+    // Nothing is going to render. Hand the displaced load its failure path,
+    // which commits the incoming photo's identity before bringing the controls
+    // back -- unfreezing without that hands the user live controls against the
+    // outgoing photo's filename and counter.
+    if (!_lbAbandonInitialLoad()) _lbRenderDetailStatus();
+    if (typeof showToast === 'function') {
       showToast('Could not reload edited photo', 'error');
     }
   };
@@ -7872,6 +7940,11 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbCancelOriginalPreload();
   _lbCancelAdjacentPreloadTimer();
   _lbProgressiveTargetKey = null;
+  // Each photo earns its own quiet period. The outgoing photo's swap is dead as
+  // soon as _lbOpenSeq bumps below, so neither its pending tier nor an
+  // already-visible chip may carry over -- inheriting them would let a photo
+  // that decodes in 100ms still announce Loading and then Full detail.
+  _lbResetDetailStatus();
   _lbSetPreviewLoading(false);
   var fallbackViewportState = options.fallbackViewportState || null;
   var eyeTrackAnchor = options.eyeTrackAnchor || null;
@@ -8196,7 +8269,50 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbSetAdjustmentStatus('Could not load recipe', true);
     });
 
+  // Give up on ever displaying this photo, without leaving the lightbox frozen:
+  // while the transition is pending the metadata callback skips layout updates
+  // and _lbSaveViewportState treats the incoming photo as mid-flight. The
+  // identity commit comes first on purpose -- releasing the controls while the
+  // filename, counter and _lightboxCommittedId still name the outgoing photo
+  // would let the user act on a photo the UI is not showing. The outgoing
+  // bitmap is dropped for the same reason: leaving it painted under the
+  // incoming filename would let a flag or delete land on a photo the user
+  // cannot see.
+  function abandonInitialLoad() {
+    commitVisiblePhotoIdentity();
+    img.onload = null;
+    img.onerror = null;
+    img.removeAttribute('src');
+    _lbInitialDecodePending = false;
+    _lbVisualTransitionPending = false;
+    _lbSetPhotoTransitionPending(false);
+    _lbRecomputeNativeZoom();
+    // Apply any deferred viewport state so the layout reflects the incoming
+    // photo instead of the frozen outgoing bitmap.
+    if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+    _lbTryApplyPendingEyeTrack();
+    _lbApplyTransform();
+    _lbFlushDeferredOverlayApply();
+    if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
+      window._lbFlushDeferredLightboxLayoutRefresh();
+    }
+    _lbRenderDetailStatus();
+  }
+
   function handleInitialImageLoad() {
+    if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbClearPendingInitialLoad();
+    // The commit below momentarily clears the transition before deciding whether
+    // a sharper tier is still needed. Paint once, at the end, so the chip does
+    // not blink off and restart its show delay between those two states.
+    _lbDetailStatusHold += 1;
+    try {
+      commitInitialImageLoad();
+    } finally {
+      _lbDetailStatusHold -= 1;
+      _lbRenderDetailStatus();
+    }
+  }
+  function commitInitialImageLoad() {
     img.onload = null;
     img.onerror = null;
     if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
@@ -8212,6 +8328,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoW = img.naturalWidth;
       _lbPhotoH = img.naturalHeight;
     }
+    _lbInitialDecodePending = false;
     _lbVisualTransitionPending = false;
     _lbSetPhotoTransitionPending(false);
     _lbRecomputeNativeZoom();
@@ -8242,6 +8359,17 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbSetPreviewLoading(true);
       _lbScheduleSourceSwap(_lbPending1To1 ? (_lbNativeZoom || transitionZoom) : _lbZoom, true);
     } else {
+      // No sharper tier is wanted for the current zoom, so what is on screen is
+      // everything this view can show. (_lbScheduleOriginalPreload only warms a
+      // background copy for a later 1:1 -- it does not change these pixels.)
+      // A user zoom during the initial /full load (e.g. clicking 1:1) can leave
+      // _lbDesiredSrcKey/_lbPreviewLoading describing an upgrade in flight even
+      // though _lbProgressiveTargetKey is null. Settling here would arm the fade
+      // timer and race the pending upgrade -- confirming a load whose pixels
+      // have not arrived yet. The upgrade's own preloader will settle when it
+      // lands, or clear the chip when it fails. Match the phase predicate so
+      // the chip stays on 'Sharpening…' until then.
+      if (!_lbPreviewLoading && !_lbDetailSharpeningPending()) _lbMarkDetailSettled();
       _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
       if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
     }
@@ -8267,23 +8395,9 @@ function openLightbox(photoId, filename, photoList, options) {
     if (_lbCurrentSrcKey !== 'original') {
       img.onload = null;
       img.onerror = null;
-      // No further fallback tier is available. Clear the pending visual
-      // transition — otherwise the metadata callback would keep skipping
-      // layout updates and _lbSaveViewportState would keep treating the
-      // incoming photo as mid-transition. Apply any deferred viewport state
-      // so the layout reflects the incoming photo instead of the frozen
-      // outgoing bitmap.
-      commitVisiblePhotoIdentity();
-      _lbVisualTransitionPending = false;
-      _lbSetPhotoTransitionPending(false);
-      _lbRecomputeNativeZoom();
-      if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
-      _lbTryApplyPendingEyeTrack();
-      _lbApplyTransform();
-      _lbFlushDeferredOverlayApply();
-      if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
-        window._lbFlushDeferredLightboxLayoutRefresh();
-      }
+      if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbClearPendingInitialLoad();
+      // No further fallback tier is available.
+      abandonInitialLoad();
       return;
     }
     _lbOriginalUnavailable = true;
@@ -8295,7 +8409,25 @@ function openLightbox(photoId, filename, photoList, options) {
   }
   img.onload = handleInitialImageLoad;
   img.onerror = handleInitialImageError;
-  img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
+  var initialSrc = _lbSrcUrl(photoId, _lbCurrentSrcKey);
+  // Reopening the photo already on screen at the same source starts no load:
+  // the bitmap is decoded and still displayed. Reassigning an identical src is
+  // not guaranteed to emit a fresh load event, so arming a pending decode here
+  // could leave a wait that nothing ever ends. A reopen that lands on a
+  // different tier -- restoring a 1:1 viewport, say -- really is loading.
+  var reusingVisibleBitmap = !!(
+    reopeningVisiblePhoto &&
+    img.getAttribute('src') === initialSrc &&
+    img.complete &&
+    img.naturalWidth > 0
+  );
+  if (!reusingVisibleBitmap) {
+    _lbPendingInitialLoadCommit = handleInitialImageLoad;
+    _lbPendingInitialLoadAbandon = abandonInitialLoad;
+    _lbInitialDecodePending = true;
+  }
+  _lbRenderDetailStatus();
+  img.src = initialSrc;
   if (!_lbVisualTransitionPending) commitVisiblePhotoIdentity();
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
@@ -8765,6 +8897,9 @@ function closeLightbox(e) {
   _lbEyeTrackScreenAnchor = null;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
+  _lbInitialDecodePending = false;
+  _lbClearPendingInitialLoad();
+  _lbResetDetailStatus();
   _lbCancelOriginalPreload();
   _lbClearAdjacentPreloads();
   _lbClearAdjustmentPreview();
@@ -10496,8 +10631,171 @@ var _lbDesiredSrcKey = null;
 
 function _lbSetPreviewLoading(loading) {
   _lbPreviewLoading = !!loading;
-  var status = document.getElementById('lightboxPreviewStatus');
-  if (status) status.style.display = loading ? '' : 'none';
+  _lbRenderDetailStatus();
+}
+
+// ---- Detail-load status chip ------------------------------------------------
+// The lightbox paints a lower-resolution tier first and swaps a sharper one in
+// behind it, so "this photo is soft" and "this photo is still arriving" look
+// identical on screen. The chip names which one it is: Loading (the incoming
+// photo has not decoded yet), Sharpening (a sharper tier is in flight), then a
+// brief Full detail once the tier the current zoom needs is the one displayed.
+// Loads that finish inside LB_DETAIL_SHOW_DELAY_MS never show anything, so
+// arrowing through cached photos stays quiet instead of strobing.
+var LB_DETAIL_SHOW_DELAY_MS = 250;
+var LB_DETAIL_SETTLED_MS = 900;
+var LB_DETAIL_FADE_MS = 250;
+var _lbInitialDecodePending = false; // this photo's first bitmap has not decoded
+// openLightbox publishes its completion here so anything that takes the image
+// loader over mid-load can still end that load properly. Replacing
+// img.onload/img.onerror without this leaves the navigation transition frozen:
+// the action bar stays inert, deferred overlays never paint, and the status chip
+// never clears, all long after the replacement bitmap has rendered.
+var _lbPendingInitialLoadCommit = null;
+var _lbPendingInitialLoadAbandon = null;
+
+function _lbClearPendingInitialLoad() {
+  _lbPendingInitialLoadCommit = null;
+  _lbPendingInitialLoadAbandon = null;
+}
+
+function _lbFinishInitialLoad() {
+  var finish = _lbPendingInitialLoadCommit;
+  if (!finish) return false;
+  _lbClearPendingInitialLoad();
+  finish();
+  return true;
+}
+
+// The failure counterpart. A displaced load that will never produce a bitmap
+// still has to hand over: the incoming photo's identity must be committed
+// before its controls come back, or the user can act on a photo the filename,
+// counter and _lightboxCommittedId are not showing.
+function _lbAbandonInitialLoad() {
+  var abandon = _lbPendingInitialLoadAbandon;
+  if (!abandon) return false;
+  _lbClearPendingInitialLoad();
+  abandon();
+  return true;
+}
+var _lbDetailStatusShown = false;    // chip is on screen (past the show delay)
+var _lbDetailStatusSettled = false;  // showing the Full detail confirmation
+var _lbDetailStatusHold = 0;         // >0 suppresses paints mid-transition
+var _lbDetailShowTimer = null;
+var _lbDetailSettleTimer = null;
+var _lbDetailFadeTimer = null;
+
+function _lbDetailSharpeningPending() {
+  // Derived rather than read off _lbPreviewLoading: the first drag of a pan
+  // calls _lbClearPendingViewportRestore, which drops that flag even though the
+  // queued swap keeps running. Panning around while the original loads at 1:1
+  // is the pixel-peeping path, so the chip has to survive it.
+  if (_lbProgressiveTargetKey) return true;
+  if (!_lbDesiredSrcKey || _lbDesiredSrcKey === _lbCurrentSrcKey) return false;
+  // A known-missing original is never going to arrive; claiming otherwise would
+  // leave the chip spinning forever.
+  if (_lbOriginalUnavailable && _lbDesiredSrcKey === 'original') return false;
+  return _lbSrcRank(_lbDesiredSrcKey) > _lbSrcRank(_lbCurrentSrcKey);
+}
+
+function _lbDetailStatusPhase() {
+  // _lbVisualTransitionPending is navigation-only -- it stays false when the
+  // lightbox opens from closed, which is the case with the emptiest overlay and
+  // the most need for a signal. _lbInitialDecodePending covers both.
+  if (_lbVisualTransitionPending || _lbInitialDecodePending) return 'loading';
+  if (_lbPreviewLoading || _lbDetailSharpeningPending()) return 'sharpening';
+  if (_lbDetailStatusSettled) return 'full';
+  return 'off';
+}
+
+function _lbDetailStatusLabel(phase) {
+  if (phase === 'loading') return 'Loading\u2026';
+  if (phase === 'sharpening') return 'Sharpening\u2026';
+  return 'Full detail';
+}
+
+function _lbPaintDetailStatus(phase) {
+  var el = document.getElementById('lightboxPreviewStatus');
+  if (!el) return;
+  var text = document.getElementById('lightboxPreviewStatusText');
+  if (phase === 'off') {
+    el.style.display = 'none';
+    el.classList.remove('is-full');
+    el.classList.remove('is-fading');
+    el.removeAttribute('data-phase');
+    if (text) text.textContent = '';
+    return;
+  }
+  el.style.display = 'inline-flex';
+  el.setAttribute('data-phase', phase);
+  el.classList.toggle('is-full', phase === 'full');
+  if (phase !== 'full') el.classList.remove('is-fading');
+  if (text) text.textContent = _lbDetailStatusLabel(phase);
+}
+
+function _lbCancelDetailConfirmation() {
+  if (_lbDetailSettleTimer) { clearTimeout(_lbDetailSettleTimer); _lbDetailSettleTimer = null; }
+  if (_lbDetailFadeTimer) { clearTimeout(_lbDetailFadeTimer); _lbDetailFadeTimer = null; }
+  _lbDetailStatusSettled = false;
+}
+
+function _lbResetDetailStatus() {
+  if (_lbDetailShowTimer) { clearTimeout(_lbDetailShowTimer); _lbDetailShowTimer = null; }
+  _lbCancelDetailConfirmation();
+  _lbDetailStatusShown = false;
+  _lbPaintDetailStatus('off');
+}
+
+function _lbRenderDetailStatus() {
+  if (_lbDetailStatusHold > 0) return;
+  var phase = _lbDetailStatusPhase();
+  if (phase === 'off') {
+    _lbResetDetailStatus();
+    return;
+  }
+  if (phase === 'full') {
+    // Only confirm a load the user actually watched happen.
+    if (!_lbDetailStatusShown) { _lbResetDetailStatus(); return; }
+    _lbPaintDetailStatus('full');
+    return;
+  }
+  // A fresh load started: the previous confirmation is stale.
+  _lbCancelDetailConfirmation();
+  if (_lbDetailStatusShown) { _lbPaintDetailStatus(phase); return; }
+  if (_lbDetailShowTimer) return;  // delay already armed; do not restart it
+  _lbDetailShowTimer = setTimeout(function() {
+    _lbDetailShowTimer = null;
+    var next = _lbDetailStatusPhase();
+    if (next !== 'loading' && next !== 'sharpening') { _lbResetDetailStatus(); return; }
+    _lbDetailStatusShown = true;
+    _lbPaintDetailStatus(next);
+  }, LB_DETAIL_SHOW_DELAY_MS);
+}
+
+function _lbMarkDetailSettled() {
+  // Nothing was announced, so there is nothing to confirm.
+  if (!_lbDetailStatusShown) return;
+  // /original failed for this photo, so the displayed tier may hold fewer pixels
+  // than the file does -- and when it does, _lbLayoutDims rebases onto the
+  // fallback, making 1:1 mean 1:1 of the preview while the zoom badge still
+  // reads 100%. Rather than work out whether this particular view loses detail
+  // (crop, rotation, JPEG companion, viewport and DPR all change the answer),
+  // withhold the claim whenever the original is gone. Absence asserts nothing;
+  // "Full detail" would assert something we cannot vouch for.
+  if (_lbOriginalUnavailable) return;
+  _lbCancelDetailConfirmation();
+  _lbDetailStatusSettled = true;
+  _lbDetailFadeTimer = setTimeout(function() {
+    _lbDetailFadeTimer = null;
+    var el = document.getElementById('lightboxPreviewStatus');
+    if (el && _lbDetailStatusSettled) el.classList.add('is-fading');
+  }, Math.max(0, LB_DETAIL_SETTLED_MS - LB_DETAIL_FADE_MS));
+  _lbDetailSettleTimer = setTimeout(function() {
+    _lbDetailSettleTimer = null;
+    _lbDetailStatusSettled = false;
+    _lbDetailStatusShown = false;
+    _lbRenderDetailStatus();
+  }, LB_DETAIL_SETTLED_MS);
 }
 
 function _lbFullPreviewLimit() {
@@ -10903,6 +11201,14 @@ function _lbScheduleAdjacentPhoto(sourceKey, delay) {
 
 function _lbScheduleSourceSwap(targetZoom, immediate) {
   if (!_lightboxCurrentId) return;
+  // Was a sharper tier already requested for the displayed bitmap? Read this
+  // before retargeting: if the new target is the tier already on screen, that
+  // request is being abandoned rather than fulfilled. _lbProgressiveTargetKey
+  // deliberately does not count -- it is the initial pick being evaluated for
+  // the first time, not a request in flight.
+  var abandoningRequest = !!_lbDesiredSrcKey
+    && _lbDesiredSrcKey !== _lbCurrentSrcKey
+    && _lbSrcRank(_lbDesiredSrcKey) > _lbSrcRank(_lbCurrentSrcKey);
   var desired = _lbPickSourceKey(targetZoom);
   // Metadata may still be in flight when a warm preview first becomes visible.
   // Keep the initial conservative tier until geometry can refine it.
@@ -10913,6 +11219,10 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
   }
   if (desired === _lbCurrentSrcKey) {
     _lbProgressiveTargetKey = null;
+    // Zooming back to a level the current tier already satisfies cancels the
+    // sharper request. Nothing loaded, so go quiet rather than claim the pixels
+    // the user was waiting on arrived.
+    if (!abandoningRequest) _lbMarkDetailSettled();
     _lbSetPreviewLoading(false);
     _lbScheduleAdjacentPhoto(desired);
     return;
@@ -10950,6 +11260,7 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
         // `key`, so bail rather than record wrong dims or recalibrate stale state.
         if (_lbCurrentSrcKey !== key) return;
         _lbProgressiveTargetKey = null;
+        _lbMarkDetailSettled();
         _lbSetPreviewLoading(false);
         // Keep the decoded background original alive until the visible image
         // has adopted it; releasing it earlier can make some WebViews decode
@@ -10980,10 +11291,15 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
       if (_lbOpenSeq !== swapOpenSeq) return;
       if (_lbDesiredSrcKey !== key) return;
       _lbProgressiveTargetKey = null;
-      _lbSetPreviewLoading(false);
+      // Record the failure BEFORE clearing the loading flag. The chip's
+      // sharpening state is derived from the desired/current tiers, so a tier
+      // that is never going to arrive has to stop counting as in flight first
+      // -- clearing the flag while _lbDesiredSrcKey still names the failed tier
+      // leaves the spinner up with no request behind it.
       if (key === 'original') {
         var had1To1Pending = _lbPending1To1;
         _lbOriginalUnavailable = true;
+        _lbSetPreviewLoading(false);
         _lbRecomputeNativeZoom();
         if (had1To1Pending) {
           _lbDeferPendingOneToOneToPreviewFallback();
@@ -10998,6 +11314,7 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
         // The failed request is no longer pending. Keep the usable bitmap
         // and resume its neighbors without automatically retrying this tier.
         _lbDesiredSrcKey = _lbCurrentSrcKey;
+        _lbSetPreviewLoading(false);
         if (_lbPending1To1) {
           _lbPending1To1 = false;
           _lbPending1To1Anchor = null;

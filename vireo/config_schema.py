@@ -411,7 +411,7 @@ SCHEMA = {
         "type": "string",
         "category": "Ingest", "scope": "global",
         "label": "Ingest folder template",
-        "desc": "Strftime template for ingest destination subfolders (e.g. %Y/%Y-%m-%d).",
+        "desc": "Destination subfolders using date codes and optional {file_type} (e.g. {file_type}/%Y/%Y-%m-%d separates JPEG and RAW).",
     },
     "ingest.skip_duplicates": {
         "type": "bool",

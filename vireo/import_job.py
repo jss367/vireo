@@ -2322,7 +2322,7 @@ def _plan_import(db, params, emit, state):
     groups = {}
     for f in files:
         rel = build_destination_path(
-            timestamps.get(f), params.folder_template,
+            timestamps.get(f), params.folder_template, f,
         ) or "."
         groups.setdefault(rel, []).append(f)
     batches = []

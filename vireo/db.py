@@ -1137,6 +1137,7 @@ class Database:
                 change_type TEXT,
                 value       TEXT,
                 change_token TEXT,
+                sync_started INTEGER NOT NULL DEFAULT 0,
                 created_at  TEXT DEFAULT (datetime('now')),
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
             );
@@ -1674,6 +1675,9 @@ class Database:
         """
         )
         cur = self.conn.cursor()
+        pending_cols = {r[1] for r in cur.execute("PRAGMA table_info(pending_changes)")}
+        if "sync_started" not in pending_cols:
+            cur.execute("ALTER TABLE pending_changes ADD COLUMN sync_started INTEGER NOT NULL DEFAULT 0")
         pred_cols = {r[1] for r in cur.execute("PRAGMA table_info(predictions)")}
         if "source_taxon_id" not in pred_cols:
             cur.execute("ALTER TABLE predictions ADD COLUMN source_taxon_id INTEGER")
@@ -1702,13 +1706,6 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id "
             "ON keywords(place_id) WHERE place_id IS NOT NULL"
         )
-        # A selected keyword edit may already have reached its sidecar even
-        # if the process stopped before acknowledging it. Keep that fact
-        # until the pending row itself is cleared; a new row reusing its id
-        # must not inherit it.
-        cur.execute("""CREATE TABLE IF NOT EXISTS pending_change_sync_attempts (
-            change_id INTEGER PRIMARY KEY REFERENCES pending_changes(id) ON DELETE CASCADE
-        )""")
         # Migration: folders.parent_id. Truly legacy databases predate the
         # column, and CREATE TABLE IF NOT EXISTS above is a no-op for them —
         # so add the column here so repair_missing_folder_parents() (and
@@ -22878,19 +22875,20 @@ class Database:
                 ).fetchone() is None
         elif change_type in ("keyword_add", "keyword_remove", "keyword_remove_flat"):
             latest = self.conn.execute(
-                "SELECT id, change_type FROM pending_changes WHERE photo_id = ? "
-                "AND workspace_id = ? AND value = ? AND change_type IN "
+                "SELECT id, change_type, value FROM pending_changes WHERE photo_id = ? "
+                "AND workspace_id = ? AND value = ? COLLATE NOCASE AND change_type IN "
                 "('keyword_add', 'keyword_remove', 'keyword_remove_flat') "
                 "ORDER BY created_at DESC, id DESC LIMIT 1",
                 (photo_id, ws_id, value),
             ).fetchone()
-            existing = latest is not None and latest["change_type"] == change_type
+            existing = (latest is not None and latest["change_type"] == change_type
+                        and latest["value"] == value)
             if existing:
                 # Another photo can share this sidecar. Do not discard a
                 # repeated intent after an intervening edit on that photo.
                 existing = self.conn.execute(
                     "SELECT 1 FROM pending_changes WHERE workspace_id = ? AND id > ? "
-                    "AND photo_id != ? AND value = ? AND change_type IN "
+                    "AND photo_id != ? AND value = ? COLLATE NOCASE AND change_type IN "
                     "('keyword_add', 'keyword_remove', 'keyword_remove_flat') LIMIT 1",
                     (ws_id, latest["id"], photo_id, value),
                 ).fetchone() is None
@@ -22916,6 +22914,33 @@ class Database:
             "SELECT * FROM pending_changes WHERE workspace_id = ? ORDER BY created_at, id",
             (self._ws_id(),),
         ).fetchall()
+
+    def claim_pending_changes_for_sync(self, changes):
+        """Mark selected edits as possibly written and return surviving rows.
+
+        A cancelled keyword must leave an opposing edit once a writer can
+        have seen it. Persist that fact before any filesystem work, including
+        across failed writes or a process restart. Match immutable tokens so
+        a cancellation between selection and this claim cannot resurrect the
+        old edit or claim a replacement that reused its rowid.
+        """
+        if not changes:
+            return []
+        claimed = {}
+        with self.conn:
+            for chunk in _chunks(changes, size=400):
+                placeholders = ",".join("(?, ?)" for _ in chunk)
+                params = [part for c in chunk for part in (c["id"], c["change_token"] or "")]
+                rows = self.conn.execute(
+                    f"""UPDATE pending_changes SET sync_started = 1
+                        WHERE workspace_id = ?
+                          AND (id, COALESCE(change_token, '')) IN (VALUES {placeholders})
+                        RETURNING *""",
+                    [self._ws_id(), *params],
+                ).fetchall()
+                claimed.update({(c["id"], c["change_token"]): c for c in rows})
+        return [claimed[key] for c in changes
+                if (key := (c["id"], c["change_token"])) in claimed]
 
     def get_pending_keyword_removal_keys(self, photo_id, hierarchical=False):
         """Return normalized keyword keys awaiting removal for a photo.
@@ -22943,15 +22968,54 @@ class Database:
             if (key := keyword_match_key(row["value"]))
         }
 
+    def _pending_keyword_sidecar_alias(self, photo_id, workspace_id, value):
+        """Return whether another queued keyword edit reaches this sidecar."""
+        needs_inverse = False
+        # Resolve all candidate sidecars, as sync does: differing
+        # basenames or folder spellings may still alias one file.
+        # Do not conservatively treat unrelated homonyms as shared;
+        # that would turn a cancelled add into a destructive removal.
+        candidates = self.conn.execute(
+            "SELECT DISTINCT f.path, p.filename FROM photos p "
+            "JOIN folders f ON f.id = p.folder_id "
+            "JOIN pending_changes pc ON pc.photo_id = p.id "
+            "WHERE p.id != ? AND pc.workspace_id = ? AND pc.value = ? COLLATE NOCASE "
+            "AND pc.change_type IN ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
+            (photo_id, workspace_id, value),
+        ).fetchall()
+        if candidates:
+            own = self.conn.execute(
+                "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id = p.folder_id "
+                "WHERE p.id = ?", (photo_id,),
+            ).fetchone()
+            if own is not None:
+                def sidecar_path(row):
+                    return os.path.join(row["path"], os.path.splitext(row["filename"])[0] + ".xmp")
+
+                own_path = os.path.normcase(os.path.realpath(sidecar_path(own)))
+                for path in {sidecar_path(row) for row in candidates}:
+                    other_path = os.path.normcase(os.path.realpath(path))
+                    if own_path == other_path:
+                        needs_inverse = True
+                        break
+                    if own_path.casefold() == other_path.casefold():
+                        # Scheduling may over-group case variants;
+                        # cancellation must confirm they are aliases.
+                        with contextlib.suppress(OSError):
+                            needs_inverse = os.path.samefile(own_path, other_path)
+                        if needs_inverse:
+                            break
+        return needs_inverse
+
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
         """Delete matching pending changes, preserving captured keyword intents.
 
-        Return the number removed, or zero when keyword cancellation needs
-        a corrective write even if rows were removed. Cancellation callers
-        then queue the opposite intent: an earlier write may be in flight,
-        have finished just before a crash, or target a shared RAW/JPEG
-        sidecar. Retaining selected rows also makes an add/remove/add
-        sequence safe if that write fails.
+        Return the number of rows removed.
+
+        If a keyword may already have reached a writer, cancelling it queues
+        its inverse in the same transaction. The inverse is also marked as
+        possibly written: further toggles must keep explicit repair work
+        until a sync acknowledges it, even if the first write fails.
 
         Args:
             _commit: If False, skip the internal commit (caller is responsible
@@ -22967,69 +23031,25 @@ class Database:
             clauses.append("value = ?")
             params.append(value)
 
-        keyword_cancellation = change_type in ("keyword_add", "keyword_remove")
-        if keyword_cancellation:
-            clauses.append("id NOT IN (SELECT change_id FROM pending_change_sync_attempts)")
-        # DELETE acquires the writer lock before consulting the claims. A
-        # sync cannot capture a row between its cancellation and this check.
-        cur = self.conn.execute(
-            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)}",
+        removed = self.conn.execute(
+            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)} RETURNING *",
             params,
-        )
-        needs_inverse = False
-        if keyword_cancellation and cur.rowcount:
-            # A captured opposite intent can still land after this edit.
-            remaining_sql = (
-                "SELECT 1 FROM pending_changes WHERE photo_id = ? AND workspace_id = ? "
-                "AND change_type IN ('keyword_add', 'keyword_remove') "
-                "AND id IN (SELECT change_id FROM pending_change_sync_attempts)"
-            )
-            remaining_params = [photo_id, ws_id]
-            if value is not None:
-                remaining_sql += " AND value = ?"
-                remaining_params.append(value)
-            needs_inverse = self.conn.execute(
-                remaining_sql + " LIMIT 1", remaining_params,
-            ).fetchone() is not None
-            if not needs_inverse and value is not None:
-                # Resolve all candidate sidecars, as sync does: differing
-                # basenames or folder spellings may still alias one file.
-                # Do not conservatively treat unrelated homonyms as shared;
-                # that would turn a cancelled add into a destructive removal.
-                candidates = self.conn.execute(
-                    "SELECT DISTINCT f.path, p.filename FROM photos p "
-                    "JOIN folders f ON f.id = p.folder_id "
-                    "JOIN pending_changes pc ON pc.photo_id = p.id "
-                    "WHERE p.id != ? AND pc.workspace_id = ? AND pc.value = ? "
-                    "AND pc.change_type IN ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
-                    (photo_id, ws_id, value),
-                ).fetchall()
-                if candidates:
-                    own = self.conn.execute(
-                        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id = p.folder_id "
-                        "WHERE p.id = ?", (photo_id,),
-                    ).fetchone()
-                    if own is not None:
-                        def sidecar_path(row):
-                            return os.path.join(row["path"], os.path.splitext(row["filename"])[0] + ".xmp")
-
-                        own_path = os.path.normcase(os.path.realpath(sidecar_path(own)))
-                        for path in {sidecar_path(row) for row in candidates}:
-                            other_path = os.path.normcase(os.path.realpath(path))
-                            if own_path == other_path:
-                                needs_inverse = True
-                                break
-                            if own_path.casefold() == other_path.casefold():
-                                # Scheduling may over-group case variants;
-                                # cancellation must confirm they are aliases.
-                                with contextlib.suppress(OSError):
-                                    needs_inverse = os.path.samefile(own_path, other_path)
-                                if needs_inverse:
-                                    break
-
+        ).fetchall()
+        inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
+        for row in removed:
+            if row["change_type"] in inverse and (
+                row["sync_started"] or self._pending_keyword_sidecar_alias(photo_id, ws_id, row["value"])
+            ):
+                kind = inverse[row["change_type"]]
+                self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id, _commit=False)
+                self.conn.execute(
+                    "UPDATE pending_changes SET sync_started = 1 "
+                    "WHERE photo_id = ? AND workspace_id = ? AND change_type = ? AND value = ?",
+                    (photo_id, ws_id, kind, row["value"]),
+                )
         if _commit:
             self.conn.commit()
-        return 0 if needs_inverse else cur.rowcount
+        return len(removed)
 
     def remove_pending_change_token(self, change_token):
         """Delete a single pending change by immutable token. Returns rows removed."""
@@ -24694,6 +24714,42 @@ class Database:
             field = rule["field"]
             op = rule.get("op", "")
             value = rule.get("value")
+
+            if field == "metadata":
+                from metadata_search import (
+                    PREDICTION_COLUMNS,
+                    photo_metadata_predicates,
+                    values_contain,
+                )
+
+                if op not in ("contains", "not_contains") or not isinstance(value, str) or not value.strip():
+                    raise ValueError("metadata search requires contains/not_contains and a nonempty string")
+                if len(value) > 4096:
+                    raise ValueError("metadata search is limited to 4,096 characters")
+                like = f"%{_escape_like(value)}%"
+                parts = photo_metadata_predicates()
+                params = [like] * len(parts)
+                parts.append(
+                    "EXISTS (SELECT 1 FROM photo_color_labels search_color "
+                    "WHERE search_color.photo_id = p.id AND search_color.workspace_id = ? "
+                    "AND search_color.color LIKE ? ESCAPE '\\')"
+                )
+                params.extend([self._ws_id(), like])
+                # Preserve the displayed canonical species-name lookup from
+                # quick search, including hierarchy leaves linked to a root.
+                species_sql, species_params = _build_leaf(
+                    {"field": "species", "op": "contains", "value": value}
+                )
+                parts.append(species_sql)
+                params.extend(species_params)
+                prediction_sql, prediction_params = _prediction_exists(
+                    values_contain([f"pred.{col}" for col in PREDICTION_COLUMNS]
+                                   + ["COALESCE(prv.status, 'pending')"]), [like],
+                )
+                parts.append(prediction_sql)
+                params.extend(prediction_params)
+                condition = "(" + " OR ".join(parts) + ")"
+                return (f"NOT {condition}" if op == "not_contains" else condition), params
 
             if field == "keyword_identity":
                 if op != 'equals' or not isinstance(value, str) or not value:

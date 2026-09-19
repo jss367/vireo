@@ -1020,12 +1020,6 @@ def _add_location_gps_reviews(conn):
     """)
 
 
-def _add_sync_attempts(conn):
-    conn.execute("""CREATE TABLE IF NOT EXISTS pending_change_sync_attempts (
-        change_id INTEGER PRIMARY KEY REFERENCES pending_changes(id) ON DELETE CASCADE
-    )""")
-
-
 MIGRATIONS = (
     Migration(
         version=5,
@@ -1062,7 +1056,6 @@ MIGRATIONS = (
         validate=_validate_grouping_history_snapshots_split,
     ),
     Migration(version=11, name="remember-gps-discrepancy-reviews", apply=_add_location_gps_reviews),
-    Migration(version=12, name="preserve-captured-keyword-intents", apply=_add_sync_attempts),
 )
 
 

@@ -39,8 +39,6 @@
     ['months', 'month', 'months'],
     ['years', 'year', 'years'],
   ];
-  // Quick search fans out over these fields as one replaceable any-group.
-  const QUICK_SEARCH_FIELDS = ['filename', 'keyword', 'species', 'camera_make', 'camera_model', 'lens'];
   // Chip wording for the two boolean fields the bar has always shipped a
   // quick filter for. A configured shortcut's own label wins (see
   // ``shortcutLabelFor``); this is the fallback for a rule built in the
@@ -530,6 +528,7 @@
   }
 
   function undo() {
+    setSearchError('');
     const prev = snapshots.pop();
     if (!prev) return;
     state.root = prev.root;
@@ -668,7 +667,12 @@
       rules.push(makeRule('has_coord_location_keyword', 'is', 0));
     }
     const keyword = params.get('keyword');
-    if (keyword) rules.push(buildQuickSearchGroup(keyword));
+    if (keyword) {
+      // Legacy keyword links treated punctuation and operator words literally.
+      rules.push({ mode: 'all', _qs: true, _qs_text: keyword,
+        rules: keyword.trim().split(/\s+/).filter(Boolean).map((value) =>
+          ({ field: 'metadata', op: 'contains', value })) });
+    }
     if (!rules.length) return false;
     state.root = { mode: 'all', rules };
     state.muted = false;
@@ -678,28 +682,22 @@
   // ---- quick search -----------------------------------------------------
 
   function buildQuickSearchGroup(text) {
-    // Whitespace tokenizes: "red bill" matches (any field contains "red")
-    // AND (any field contains "bill"), so a filename token plus a keyword
-    // token still hit — pre-Phase 2 Browse search behavior. Single-token
-    // input keeps the original flat any-group shape.
-    const tokens = String(text).trim().split(/\s+/).filter(Boolean);
-    if (tokens.length <= 1) {
-      return {
-        mode: 'any',
-        _qs: true,
-        _qs_text: text,
-        rules: QUICK_SEARCH_FIELDS.map((field) => ({ field, op: 'contains', value: text })),
-      };
-    }
     return {
-      mode: 'all',
-      _qs: true,
-      _qs_text: text,
-      rules: tokens.map((tok) => ({
-        mode: 'any',
-        rules: QUICK_SEARCH_FIELDS.map((field) => ({ field, op: 'contains', value: tok })),
-      })),
+      mode: 'all', _qs: true, _qs_text: text, _qs_version: 2,
+      rules: [window.VireoSearch.parse(text)],
     };
+  }
+
+  function setSearchError(message) {
+    const input = $('.vf-search input');
+    const error = $('.vf-search-error');
+    if (input) input.setAttribute('aria-invalid', message ? 'true' : 'false');
+    if (error) {
+      error.textContent = message ? `${message} Showing the last applied filters.` : '';
+      error.hidden = !message;
+    }
+    const clear = $('.vf-clear');
+    if (clear) clear.hidden = !message && !hasUserFilters();
   }
 
   function cancelQuickSearchTimer() {
@@ -712,15 +710,24 @@
   function clearUnappliedQuickSearchText() {
     const input = $('.vf-search input');
     if (input) input.value = '';
+    setSearchError('');
     hideSearchSuggest();
   }
 
   function applyQuickSearch(text, opts) {
     cancelQuickSearchTimer();
     const value = String(text || '').trim();
+    let group;
+    try {
+      group = value ? buildQuickSearchGroup(value) : null;
+    } catch (error) {
+      setSearchError(error.message);
+      return;
+    }
+    setSearchError('');
     const current = quickSearchGroup();
     if ((!value && !current) ||
-        (value && current && current._qs_text === value && !state.visual)) return;
+        (value && current && current._qs_text === value && current._qs_version === 2 && !state.visual)) return;
     // A cleared quick search widens the result set, so the previously
     // selected/open photo is expected to reappear. Flag it so the page can
     // preserve the anchor for this case without reintroducing preservation
@@ -728,7 +735,7 @@
     const cleared = !value && !!quickSearchGroup();
     mutate(() => {
       state.root.rules = state.root.rules.filter((n) => !(isGroup(n) && n._qs));
-      if (value) state.root.rules.unshift(buildQuickSearchGroup(value));
+      if (group) state.root.rules.unshift(group);
       // The visual clause and the quick-search clause are alternatives for
       // the top bar: setting one replaces the other. Without this, a
       // text search would compose with a still-active visual clause
@@ -745,6 +752,7 @@
 
   function applyVisualSearch(text) {
     cancelQuickSearchTimer();
+    setSearchError('');
     const value = String(text || '').trim();
     mutate(() => {
       // The visual clause and the quick-search clause are alternatives for
@@ -774,6 +782,7 @@
     if (!drop) return;
     if (!q) { drop.hidden = true; return; }
     drop.innerHTML = `
+      <p class="vf-search-help">Search all metadata. Use AND, OR, NOT, parentheses, or &quot;quoted phrases&quot;.</p>
       <button type="button" data-search-kind="text"><span>⌕</span><span>Text matches for “${esc(q)}”</span><em>Live</em></button>
       <button type="button" data-search-kind="visual" class="vf-suggest-visual"><span>✦</span><span>Visually similar to “${esc(q)}”</span><em></em></button>`;
     drop.hidden = false;
@@ -804,7 +813,7 @@
 
   function syncQuickSearchInput() {
     const input = $('.vf-search input');
-    if (!input || document.activeElement === input) return;
+    if (!input || document.activeElement === input || input.getAttribute('aria-invalid') === 'true') return;
     const group = quickSearchGroup();
     input.value = group ? group._qs_text : (state.visual ? state.visual.prompt : '');
   }
@@ -838,7 +847,7 @@
     const badge = $('.vf-filters-btn .vf-count');
     badge.textContent = count;
     badge.hidden = count === 0;
-    $('.vf-clear').hidden = !hasUserFilters();
+    $('.vf-clear').hidden = !hasUserFilters() && $('.vf-search input').getAttribute('aria-invalid') !== 'true';
     $('.vf-mute').hidden = !hasUserFilters() && !state.muted;
     const saveBtn = $('.vf-save-collection');
     if (saveBtn) saveBtn.hidden = !hasUserFilters();
@@ -1235,7 +1244,7 @@
     if (isGroup(node)) {
       if (node._qs) {
         return `<div class="vf-rule-row vf-qs-row">
-          <span class="vf-qs-label">Search all text contains “${esc(node._qs_text)}”</span>
+          <span class="vf-qs-label">Search: ${esc(node._qs_text)}</span>
           <button class="vf-remove" data-action="remove" data-path="${path}" type="button" aria-label="Remove search">×</button>
         </div>`;
       }
@@ -1523,6 +1532,7 @@
       });
     }
     $('.vf-clear').addEventListener('click', () => {
+      clearUnappliedQuickSearchText();
       if (!hasUserFilters() && !state.muted) return;
       // Kill any pending live-search debounce so it can't silently reinstate
       // the just-typed text after "Filters cleared" (Codex review r3791783342).
@@ -1536,6 +1546,7 @@
       toast('Filters cleared', true);
     });
     $('.vf-clear-rules').addEventListener('click', () => {
+      clearUnappliedQuickSearchText();
       cancelQuickSearchTimer();
       // This control stays visible in the popover even when no filters are
       // active. A search may still be waiting on its live-input debounce, so
@@ -1571,6 +1582,10 @@
         e.stopPropagation();
         const entry = chipEntries()[Number(x.dataset.chipX)];
         if (entry) {
+          if (entry.visual || (entry.node && entry.node._qs)) {
+            cancelQuickSearchTimer();
+            clearUnappliedQuickSearchText();
+          }
           mutate(() => {
             if (entry.visual) {
               state.visual = null;
@@ -1709,6 +1724,10 @@
       }
       if (action === 'remove') {
         clearTimeout(editDebounce);
+        if (getNodeAtPath(path)._qs) {
+          cancelQuickSearchTimer();
+          clearUnappliedQuickSearchText();
+        }
         mutate(() => {
           const ref = getParentAtPath(path);
           const container = ref.parent === state.root ? state.root.rules : ref.parent.rules;
@@ -2012,6 +2031,7 @@
       // A pending debounce from just-typed text would fire after the load
       // and overwrite the collection's expression (Codex r3791783342).
       cancelQuickSearchTimer();
+      clearUnappliedQuickSearchText();
       mutate(() => {
         state.root = root;
         state.muted = false;
@@ -2098,6 +2118,7 @@
     // wrong photo set and desyncs chips from the visible grid.
     clearAll(silent) {
       cancelQuickSearchTimer();
+      clearUnappliedQuickSearchText();
       if (silent) {
         state.root = { mode: 'all', rules: [] };
         state.muted = false;

@@ -64,6 +64,8 @@ def _field(label, category, type_, ops, *, changed_by, **extra):
 
 
 FILTER_FIELDS = {
+    "metadata": _field("All metadata", "File", "text", ["contains", "not_contains"],
+                       changed_by=[MUTATION_KEYWORD, MUTATION_PREDICTION]),
     # File
     "filename": _field("Filename", "File", "text", TEXT_OPS, case_toggle=True,
                        changed_by=[]),

@@ -2836,7 +2836,7 @@ wheels = [
 
 [[package]]
 name = "vireo"
-version = "0.48.1"
+version = "0.56.2"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
@@ -2846,6 +2846,7 @@ dependencies = [
     { name = "imagehash" },
     { name = "numpy" },
     { name = "onnxruntime" },
+    { name = "opencv-python-headless" },
     { name = "pillow" },
     { name = "rawpy" },
     { name = "requests" },
@@ -2891,6 +2892,7 @@ requires-dist = [
     { name = "onnxruntime", specifier = ">=1.22.0" },
     { name = "onnxscript", marker = "extra == 'export'", specifier = ">=0.1" },
     { name = "open-clip-torch", marker = "extra == 'export'", specifier = ">=2.0" },
+    { name = "opencv-python-headless", specifier = ">=4.13.0.92" },
     { name = "pillow", specifier = ">=12.1.1" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5" },
     { name = "psutil", marker = "extra == 'dev'", specifier = ">=7.0" },
