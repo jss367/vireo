@@ -1706,6 +1706,77 @@ def test_sync_serializes_case_variant_sidecars_without_merging_them(tmp_path):
     assert "Kestrel" in read_keywords(upper_path)
 
 
+def _filesystem_is_case_sensitive(base_dir):
+    """Return True when ``base_dir`` distinguishes two case variants."""
+    probe = os.path.join(base_dir, "vireo_case_probe")
+    open(probe, "w").close()
+    try:
+        return not os.path.exists(os.path.join(base_dir, "VIREO_CASE_PROBE"))
+    finally:
+        os.unlink(probe)
+
+
+def test_sync_decouples_failure_between_case_variant_sidecars(tmp_path):
+    """One file's persistent failure must not retain another's queued edits.
+
+    Case-folded grouping conservatively serializes case-variant sidecar
+    paths onto one worker so a case-insensitive host never publishes an
+    aliased sidecar in parallel. On a case-sensitive host, though, those
+    two paths name genuinely different files: coupling their failure
+    fates would let one file's I/O error retain edits queued for the
+    unrelated file next to it.
+    """
+    import xmp as xmp_module
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords, write_sidecar
+
+    if not _filesystem_is_case_sensitive(str(tmp_path)):
+        pytest.skip("needs a case-sensitive filesystem to hold two distinct case variants")
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    a_id, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    folder = os.path.dirname(xmp_path)
+    folder_id = db.get_photo(a_id)["folder_id"]
+    mixed_path = os.path.join(folder, "Bird.xmp")
+    os.rename(xmp_path, mixed_path)
+    db.conn.execute(
+        "UPDATE photos SET filename = ?, extension = ? WHERE id = ?",
+        ("Bird.CR3", ".CR3", a_id),
+    )
+    b_id = db.add_photo(
+        folder_id=folder_id, filename="BIRD.JPG", extension=".JPG",
+        file_size=100, file_mtime=1.0,
+    )
+    upper_path = os.path.join(folder, "BIRD.xmp")
+    write_sidecar(upper_path, flat_keywords=set(), hierarchical_keywords=set())
+
+    db.queue_change(a_id, "keyword_add", "Osprey")
+    db.queue_change(b_id, "keyword_add", "Kestrel")
+
+    original = xmp_module._write_tree_atomic
+
+    def fail_upper_only(tree, path):
+        if path == upper_path:
+            raise OSError("simulated persistent write failure")
+        return original(tree, path)
+
+    xmp_module._write_tree_atomic = fail_upper_only
+    try:
+        result = sync_to_xmp(db)
+    finally:
+        xmp_module._write_tree_atomic = original
+
+    assert result["synced"] == 1
+    assert result["failed"] == 1
+    assert {failure["photo_id"] for failure in result["failures"]} == {b_id}
+    assert "Osprey" in read_keywords(mixed_path)
+    # The successful photo's queue is cleared even though its case-folded
+    # neighbour failed; only the failed photo's edit stays queued for retry.
+    assert [c["photo_id"] for c in db.get_pending_changes()] == [b_id]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs elevation")
 def test_sync_serializes_photos_whose_sidecars_are_symlinked_together(tmp_path):
     """A sidecar that is a symlink to another photo's sidecar is one file.
