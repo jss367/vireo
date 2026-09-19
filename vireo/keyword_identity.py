@@ -499,6 +499,14 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
             'new_name': plan['renames'].get(child_id, child['name']),
         })
         if outcome == 'merge':
+            # ``_merge_keyword_into`` folds the absorbed row's identity into
+            # the survivor. With three or more branches the NEXT same-named
+            # child is compared against that folded row, so a simulation that
+            # skips the fold predicts a collapse where the write path
+            # disambiguates -- and the aliases and hierarchy rewrites queued
+            # from the prediction would point those photos at the wrong
+            # sibling.
+            _fold_merged_identity(nodes[existing['id']], child)
             _plan_subtree_merge(db, nodes, children, child_id, existing['id'], plan)
         else:
             children[src_id].remove(child_id)
@@ -506,6 +514,21 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
             nodes[child_id]['parent_id'] = dst_id
             nodes[child_id]['name'] = plan['renames'].get(child_id, child['name'])
 
+
+
+def _fold_merged_identity(destination, absorbed):
+    """Apply ``_merge_keyword_into``'s metadata fold to a simulated row.
+
+    Mirrors the COALESCE semantics of the same-type merge: the destination
+    keeps whatever it already claims and inherits only what it is missing.
+    The recursive-child path is always same-type, so the retype branch that
+    clears species claims cannot apply here.
+    """
+    for field in ('place_id', 'taxon_id', 'source_taxon_id', 'latitude', 'longitude'):
+        if destination[field] is None:
+            destination[field] = absorbed[field]
+    if absorbed['is_species']:
+        destination['is_species'] = 1
 
 def _coordinate_pair(row):
     if row['latitude'] is None or row['longitude'] is None:
@@ -522,7 +545,7 @@ def _distinct(values):
     return list(ordered.values())
 
 
-def _merge_options(records, paths, valid_parents):
+def _merge_options(db, records, paths, valid_parents):
     """Every value each editable attribute can take, tagged with its source rows."""
     return {
         'name': _distinct([(r['name'], r['id'], {'value': r['name']}) for r in records]),
@@ -538,12 +561,15 @@ def _merge_options(records, paths, valid_parents):
               'latitude': r['latitude'], 'longitude': r['longitude']})
             for r in records if r['place_id'] is not None
         ]),
+        # Keyed by RESOLVED identity, not the raw columns: a row linked by
+        # local ``taxon_id`` and one linked by the matching iNat
+        # ``source_taxon_id`` name one species, and offering them as two
+        # indistinguishable choices would demand a decision with no answer.
         'species': _distinct([
-            ((r['taxon_id'], r['source_taxon_id']), r['id'],
+            (taxon_identity(db, r), r['id'],
              {'taxon_id': r['taxon_id'], 'source_taxon_id': r['source_taxon_id'],
               'name': r['name']})
-            for r in records
-            if r['taxon_id'] is not None or r['source_taxon_id'] is not None
+            for r in records if taxon_identity(db, r) is not None
         ]),
         'coordinates': _distinct([
             (_coordinate_pair(r), r['id'],
@@ -672,14 +698,18 @@ def _resolve_merge_fields(records, options, overrides):
         else:
             raise ValueError('Enter both a latitude and a longitude, or clear the coordinates.')
     else:
-        # Coordinates travel as a pair, and a chosen place outranks an
-        # unrelated row's point: a marker drawn from stale coordinates would
-        # put the retained Google place somewhere it isn't.
-        linked = next((o for o in options['place']
-                       if o['place_id'] == resolved['place_id']
-                       and o['latitude'] is not None and o['longitude'] is not None), None)
-        fallback = next((o for o in options['coordinates']), None)
-        picked = linked or fallback
+        # Coordinates travel as a pair, and a retained place owns its own
+        # point. Borrowing another row's coordinates for a chosen place would
+        # put that Google place somewhere it isn't -- and the merge exports
+        # the result as GPS to every tagged photo. A place with no
+        # coordinates of its own therefore resolves to none, not to a
+        # neighbour's; only an unlinked result falls back.
+        if resolved['place_id'] is not None:
+            picked = next((o for o in options['place']
+                           if o['place_id'] == resolved['place_id']
+                           and o['latitude'] is not None and o['longitude'] is not None), None)
+        else:
+            picked = next((o for o in options['coordinates']), None)
         resolved['latitude'] = picked['latitude'] if picked else None
         resolved['longitude'] = picked['longitude'] if picked else None
 
@@ -735,7 +765,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
 
     valid_parents = ({r['parent_id'] for r in records}
                      - selected - _subtree_ids(children, target_id))
-    options = _merge_options(records, paths, valid_parents)
+    options = _merge_options(db, records, paths, valid_parents)
     _label_species_options(db, options['species'])
     resolved, requires_choice = _resolve_merge_fields(records, options, overrides)
 
@@ -817,11 +847,27 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
         )
         if any(r['id'] not in compatible for r in others):
             raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
-    for source in sources:
+    # Every path this merge retires gets aliased to wherever its photos land,
+    # so every one of them can steal a durable alias an unrelated keyword
+    # already owns. Check them all, not just the directly selected sources:
+    # the survivor's old path and each moved or collapsed descendant path is
+    # written with INSERT OR REPLACE further down.
+    retiring = [(paths[source['id']], source['id']) for source in sources]
+    retiring += [(old_path, int(kid))
+                 for kid, (old_path, _) in path_changes.items()]
+    retiring += [(paths[entry['id']], entry['into_id'])
+                 for entry in plan['children'] if entry['outcome'] == 'merge']
+    survivors = {n['id'] for n in surviving}
+    for retired_path, destination_id in retiring:
         alias = db.conn.execute('SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
-                                (path_key(paths[source['id']]),)).fetchone()
-        if alias and alias['keyword_id'] not in selected:
-            raise ValueError('An imported path already resolves to a different keyword.')
+                                (path_key(retired_path),)).fetchone()
+        if alias is None or alias['keyword_id'] in selected:
+            continue
+        # An alias already pointing at the row this path will resolve to is
+        # the state we are about to write, not a conflict.
+        if alias['keyword_id'] == destination_id or alias['keyword_id'] not in survivors:
+            continue
+        raise ValueError('An imported path already resolves to a different keyword.')
 
     subtree_counts = {}
     for entry in plan['children']:

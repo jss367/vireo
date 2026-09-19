@@ -636,6 +636,8 @@
   let mergeDebounce = null;
   let mergeMap = null;
   let mergeMapLayer = null;
+  // Latest option set, read by the once-registered delegated handlers.
+  let mergeFieldOptions = null;
 
   function osmLink(latitude, longitude, label) {
     const url = 'https://www.openstreetmap.org/?mlat=' + encodeURIComponent(latitude) +
@@ -800,10 +802,17 @@
       '</div></div>');
 
     mergeFields.innerHTML = parts.join('');
-    wireMergeFields(data);
+    mergeFieldOptions = options;
+    wireMergeFields();
   }
 
-  function wireMergeFields(data) {
+  /* Per-control handlers only. These elements are replaced wholesale by the
+     next renderMergeFields, which discards their listeners with them. The two
+     delegated handlers live on the persistent #kwMergeFields container and are
+     registered once below — re-adding them here would stack a duplicate on
+     every target change and dialog reopen, so one chip click would fire a
+     growing number of preview requests against stale option data. */
+  function wireMergeFields() {
     const nameInput = document.getElementById('kwMergeName');
     nameInput.addEventListener('input', function() {
       mergeOverrides.name = nameInput.value;
@@ -825,25 +834,6 @@
     latInput.addEventListener('input', readCoords);
     lngInput.addEventListener('input', readCoords);
 
-    mergeFields.addEventListener('click', function(event) {
-      const chip = event.target.closest('.kw-merge-chip');
-      if (!chip) return;
-      if (chip.dataset.name !== undefined) {
-        nameInput.value = chip.dataset.name;
-        mergeOverrides.name = chip.dataset.name;
-      } else if (chip.dataset.clearCoords) {
-        latInput.value = ''; lngInput.value = '';
-        mergeOverrides.coordinates = null;
-      } else {
-        latInput.value = chip.dataset.lat;
-        lngInput.value = chip.dataset.lng;
-        mergeOverrides.coordinates = {
-          latitude: Number(chip.dataset.lat), longitude: Number(chip.dataset.lng)
-        };
-      }
-      scheduleMergePreview(true);
-    });
-
     const parentSelect = document.getElementById('kwMergeParent');
     if (parentSelect) {
       parentSelect.addEventListener('change', function() {
@@ -858,32 +848,56 @@
         scheduleMergePreview(true);
       });
     }
-    mergeFields.addEventListener('change', function(event) {
-      const input = event.target;
-      if (input.name === 'kwMergePlace') {
-        mergeOverrides.place_id = input.value === '' ? null : input.value;
-        // A newly chosen place brings its own point unless the user has
-        // already typed one; a marker left on the old row's coordinates
-        // would put the retained place somewhere it isn't.
-        if (mergeOverrides.coordinates === undefined) {
-          const picked = data.options.place.find(o => o.place_id === input.value);
-          if (picked && picked.latitude != null && picked.longitude != null) {
-            latInput.value = picked.latitude;
-            lngInput.value = picked.longitude;
-          }
-        }
-        scheduleMergePreview(true);
-      } else if (input.name === 'kwMergeSpecies') {
-        mergeOverrides.species = input.value === ''
-          ? null
-          : {
-              taxon_id: data.options.species[Number(input.value)].taxon_id,
-              source_taxon_id: data.options.species[Number(input.value)].source_taxon_id
-            };
-        scheduleMergePreview(true);
-      }
-    });
   }
+
+  mergeFields.addEventListener('click', function(event) {
+    const chip = event.target.closest('.kw-merge-chip');
+    if (!chip) return;
+    const nameInput = document.getElementById('kwMergeName');
+    const latInput = document.getElementById('kwMergeLat');
+    const lngInput = document.getElementById('kwMergeLng');
+    if (chip.dataset.name !== undefined) {
+      nameInput.value = chip.dataset.name;
+      mergeOverrides.name = chip.dataset.name;
+    } else if (chip.dataset.clearCoords) {
+      latInput.value = ''; lngInput.value = '';
+      mergeOverrides.coordinates = null;
+    } else {
+      latInput.value = chip.dataset.lat;
+      lngInput.value = chip.dataset.lng;
+      mergeOverrides.coordinates = {
+        latitude: Number(chip.dataset.lat), longitude: Number(chip.dataset.lng)
+      };
+    }
+    scheduleMergePreview(true);
+  });
+
+  mergeFields.addEventListener('change', function(event) {
+    const input = event.target;
+    if (!mergeFieldOptions) return;
+    if (input.name === 'kwMergePlace') {
+      mergeOverrides.place_id = input.value === '' ? null : input.value;
+      // A newly chosen place brings its own point unless the user has
+      // already typed one; a marker left on the old row's coordinates
+      // would put the retained place somewhere it isn't.
+      if (mergeOverrides.coordinates === undefined) {
+        const picked = mergeFieldOptions.place.find(o => o.place_id === input.value);
+        if (picked && picked.latitude != null && picked.longitude != null) {
+          document.getElementById('kwMergeLat').value = picked.latitude;
+          document.getElementById('kwMergeLng').value = picked.longitude;
+        }
+      }
+      scheduleMergePreview(true);
+    } else if (input.name === 'kwMergeSpecies') {
+      mergeOverrides.species = input.value === ''
+        ? null
+        : {
+            taxon_id: mergeFieldOptions.species[Number(input.value)].taxon_id,
+            source_taxon_id: mergeFieldOptions.species[Number(input.value)].source_taxon_id
+          };
+      scheduleMergePreview(true);
+    }
+  });
 
   function renderMergeSummary(data) {
     const resolved = data.resolved;
