@@ -1753,3 +1753,34 @@ def test_flat_merge_alias_does_not_override_ambiguous_live_identity(catalog):
     assert resolve_import_path(db, ['Robin']) is None
     assert resolve_import_path(db, ['Robin'], kw_type='taxonomy') == target
     assert resolve_import_path(db, ['Old parent', 'Robin']) == target
+
+
+def test_manual_merge_rejects_case_insensitive_sibling_collision(catalog):
+    """Every keyword lookup uses ``keyword_match_key`` and ``add_keyword``
+    dedupes case-insensitively, but SQLite's own UNIQUE(name, parent_id) is
+    BINARY so ``foo`` and ``Foo`` can already coexist under one parent from a
+    legacy path. An override renaming the survivor to a name whose match key
+    a sibling already owns has to be rejected at preview time -- the write
+    path would otherwise leave two semantic peers no import could tell apart.
+    """
+    db, photos = catalog
+    parent = db.add_keyword('Parent')
+    source = db.add_keyword('foo', parent_id=parent)
+    target = db.add_keyword('bar', parent_id=parent)
+    # Bypass ``add_keyword``'s ``COLLATE NOCASE`` dedupe to plant a same-key
+    # sibling; the underlying table constraint permits it.
+    squatter = db.conn.execute(
+        'INSERT INTO keywords(name, parent_id) VALUES (?, ?)', ('Foo', parent),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    db.tag_photo(photos[2], squatter)
+
+    for override in ('foo', 'FOO'):
+        with pytest.raises(ValueError, match='Another keyword already sits'):
+            preview_keyword_merge(db, [source, target], target, {'name': override})
+    # Sanity: an override with a genuinely free key still succeeds, so the
+    # guard has not swallowed the normal case.
+    ok = preview_keyword_merge(db, [source, target], target, {'name': 'baz'})
+    assert ok['resolved']['name'] == 'baz'

@@ -882,9 +882,17 @@
       // would put the retained place somewhere it isn't.
       if (mergeOverrides.coordinates === undefined) {
         const picked = mergeFieldOptions.place.find(o => o.place_id === input.value);
+        const latInput = document.getElementById('kwMergeLat');
+        const lngInput = document.getElementById('kwMergeLng');
         if (picked && picked.latitude != null && picked.longitude != null) {
-          document.getElementById('kwMergeLat').value = picked.latitude;
-          document.getElementById('kwMergeLng').value = picked.longitude;
+          latInput.value = picked.latitude;
+          lngInput.value = picked.longitude;
+        } else {
+          // The chosen place has no point; leaving the old row's numbers
+          // visible invites editing one and submitting the other place's
+          // coordinates for this one.
+          latInput.value = '';
+          lngInput.value = '';
         }
       }
       scheduleMergePreview(true);
@@ -999,7 +1007,9 @@
         : L.circleMarker([point.latitude, point.longitude], {
             radius: 7, color: '#888', weight: 2, fillOpacity: 0.35
           });
-      return marker.bindTooltip(point.label);
+      // Leaflet inserts a string tooltip via innerHTML, so a keyword path
+      // carrying markup from imported XMP would run in the app's origin.
+      return marker.bindTooltip(escapeHtml(point.label));
     })).addTo(mergeMap);
     mergeMap.invalidateSize();
     mergeMap.fitBounds(L.latLngBounds(points.map(p => [p.latitude, p.longitude])),

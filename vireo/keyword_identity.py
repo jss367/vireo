@@ -792,8 +792,13 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     nodes[target_id]['name'] = resolved['name']
     nodes[target_id]['parent_id'] = resolved['parent_id']
     surviving = [node for node in nodes.values() if node['id'] not in plan['removed']]
+    # Match SQLite's case-insensitive UNIQUE(name, parent_id) — a raw string
+    # compare would miss `foo` colliding with an unselected `Foo`, and the
+    # merge would then leave two peers whose imports could not tell apart.
+    resolved_key = keyword_match_key(resolved['name'])
     clash = next((n for n in surviving
-                  if n['id'] != target_id and n['name'] == resolved['name']
+                  if n['id'] != target_id
+                  and keyword_match_key(n['name']) == resolved_key
                   and n['parent_id'] == resolved['parent_id']), None)
     if clash is not None:
         raise ValueError('Another keyword already sits at that name and parent path. '
