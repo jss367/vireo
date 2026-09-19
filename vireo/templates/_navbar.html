@@ -5472,13 +5472,11 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     img.onerror = null;
     if (_lightboxCurrentId !== photoId) return;
     _lbInitialDecodePending = false;
-    // Nothing is going to render, so release the displaced load rather than
-    // leaving the transition frozen on a photo that failed.
-    _lbPendingInitialLoadCommit = null;
-    _lbVisualTransitionPending = false;
-    _lbSetPhotoTransitionPending(false);
-    _lbFlushDeferredOverlayApply();
-    _lbRenderDetailStatus();
+    // Nothing is going to render. Hand the displaced load its failure path,
+    // which commits the incoming photo's identity before bringing the controls
+    // back -- unfreezing without that hands the user live controls against the
+    // outgoing photo's filename and counter.
+    if (!_lbAbandonInitialLoad()) _lbRenderDetailStatus();
     if (typeof showToast === 'function') {
       showToast('Could not reload edited photo', 'error');
     }
@@ -8267,8 +8265,32 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbSetAdjustmentStatus('Could not load recipe', true);
     });
 
+  // Give up on ever displaying this photo, without leaving the lightbox frozen:
+  // while the transition is pending the metadata callback skips layout updates
+  // and _lbSaveViewportState treats the incoming photo as mid-flight. The
+  // identity commit comes first on purpose -- releasing the controls while the
+  // filename, counter and _lightboxCommittedId still name the outgoing photo
+  // would let the user act on a photo the UI is not showing.
+  function abandonInitialLoad() {
+    commitVisiblePhotoIdentity();
+    _lbInitialDecodePending = false;
+    _lbVisualTransitionPending = false;
+    _lbSetPhotoTransitionPending(false);
+    _lbRecomputeNativeZoom();
+    // Apply any deferred viewport state so the layout reflects the incoming
+    // photo instead of the frozen outgoing bitmap.
+    if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+    _lbTryApplyPendingEyeTrack();
+    _lbApplyTransform();
+    _lbFlushDeferredOverlayApply();
+    if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
+      window._lbFlushDeferredLightboxLayoutRefresh();
+    }
+    _lbRenderDetailStatus();
+  }
+
   function handleInitialImageLoad() {
-    if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbPendingInitialLoadCommit = null;
+    if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbClearPendingInitialLoad();
     // The commit below momentarily clears the transition before deciding whether
     // a sharper tier is still needed. Paint once, at the end, so the chip does
     // not blink off and restart its show delay between those two states.
@@ -8356,25 +8378,9 @@ function openLightbox(photoId, filename, photoList, options) {
     if (_lbCurrentSrcKey !== 'original') {
       img.onload = null;
       img.onerror = null;
-      if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbPendingInitialLoadCommit = null;
-      // No further fallback tier is available. Clear the pending visual
-      // transition — otherwise the metadata callback would keep skipping
-      // layout updates and _lbSaveViewportState would keep treating the
-      // incoming photo as mid-transition. Apply any deferred viewport state
-      // so the layout reflects the incoming photo instead of the frozen
-      // outgoing bitmap.
-      commitVisiblePhotoIdentity();
-      _lbInitialDecodePending = false;
-      _lbVisualTransitionPending = false;
-      _lbSetPhotoTransitionPending(false);
-      _lbRecomputeNativeZoom();
-      if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
-      _lbTryApplyPendingEyeTrack();
-      _lbApplyTransform();
-      _lbFlushDeferredOverlayApply();
-      if (typeof window._lbFlushDeferredLightboxLayoutRefresh === 'function') {
-        window._lbFlushDeferredLightboxLayoutRefresh();
-      }
+      if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbClearPendingInitialLoad();
+      // No further fallback tier is available.
+      abandonInitialLoad();
       return;
     }
     _lbOriginalUnavailable = true;
@@ -8387,6 +8393,7 @@ function openLightbox(photoId, filename, photoList, options) {
   img.onload = handleInitialImageLoad;
   img.onerror = handleInitialImageError;
   _lbPendingInitialLoadCommit = handleInitialImageLoad;
+  _lbPendingInitialLoadAbandon = abandonInitialLoad;
   _lbInitialDecodePending = true;
   _lbRenderDetailStatus();
   img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
@@ -8860,7 +8867,7 @@ function closeLightbox(e) {
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbInitialDecodePending = false;
-  _lbPendingInitialLoadCommit = null;
+  _lbClearPendingInitialLoad();
   _lbResetDetailStatus();
   _lbCancelOriginalPreload();
   _lbClearAdjacentPreloads();
@@ -10614,12 +10621,30 @@ var _lbInitialDecodePending = false; // this photo's first bitmap has not decode
 // the action bar stays inert, deferred overlays never paint, and the status chip
 // never clears, all long after the replacement bitmap has rendered.
 var _lbPendingInitialLoadCommit = null;
+var _lbPendingInitialLoadAbandon = null;
+
+function _lbClearPendingInitialLoad() {
+  _lbPendingInitialLoadCommit = null;
+  _lbPendingInitialLoadAbandon = null;
+}
 
 function _lbFinishInitialLoad() {
   var finish = _lbPendingInitialLoadCommit;
   if (!finish) return false;
-  _lbPendingInitialLoadCommit = null;
+  _lbClearPendingInitialLoad();
   finish();
+  return true;
+}
+
+// The failure counterpart. A displaced load that will never produce a bitmap
+// still has to hand over: the incoming photo's identity must be committed
+// before its controls come back, or the user can act on a photo the filename,
+// counter and _lightboxCommittedId are not showing.
+function _lbAbandonInitialLoad() {
+  var abandon = _lbPendingInitialLoadAbandon;
+  if (!abandon) return false;
+  _lbClearPendingInitialLoad();
+  abandon();
   return true;
 }
 var _lbDetailStatusShown = false;    // chip is on screen (past the show delay)

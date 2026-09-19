@@ -770,3 +770,46 @@ def test_edit_reload_completes_the_navigation_it_displaced(live_server, page):
         "document.getElementById('lightboxActions').getAttribute('aria-busy')"
     ) == "false"
     expect(page.locator("#lightboxPreviewStatus")).not_to_have_text("Loading…")
+
+
+def test_failed_edit_reload_commits_identity_before_freeing_controls(live_server, page):
+    held = []
+    serving = {"ready": True}
+
+    def serve(route):
+        if serving["ready"]:
+            route.fulfill(body=_jpeg(), content_type="image/jpeg")
+        else:
+            held.append(route)
+
+    page.route("**/photos/*/full*", serve)
+    _open_window(page, live_server)
+    page.evaluate(
+        """() => {
+          LB_DETAIL_SHOW_DELAY_MS = 0;
+          _lbClearAdjacentPreloads();
+          _lbScheduleAdjacentPhoto = function() {};
+        }"""
+    )
+    serving["ready"] = False
+    page.evaluate("lightboxNav(1)")
+    page.wait_for_function("_lbVisualTransitionPending && _lightboxCurrentId === 116")
+
+    # The displaced load fails outright: no bitmap will ever arrive for 116.
+    page.evaluate("_lbReloadCurrentRenderAfterEdit(116)")
+    page.wait_for_timeout(150)
+    assert held
+    for route in held:
+        route.abort()
+
+    page.wait_for_function("!_lbVisualTransitionPending")
+    # Freeing the controls without committing the identity would leave the
+    # filename, counter and committed id naming 115 while the action bar acts
+    # on 116 -- the user flags a photo the lightbox is not showing.
+    assert page.evaluate("_lightboxCommittedId") == 116
+    assert page.evaluate(
+        "document.getElementById('lightboxCounter').textContent"
+    ).endswith("photo-16.jpg")
+    assert page.evaluate(
+        "document.getElementById('lightboxActions').getAttribute('aria-busy')"
+    ) == "false"
