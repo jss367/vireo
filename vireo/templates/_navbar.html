@@ -501,6 +501,44 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   background: rgba(28,31,34,0.92);
   border-color: rgba(255,255,255,0.58);
 }
+/* Detail-load chip. Matches the zoom badge so it stays legible over any photo
+   -- unstyled dim text washes out completely on a bright frame. */
+.lightbox-detail-status {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0,0,0,0.6);
+  color: var(--text-primary);
+  border: 1px solid rgba(255,255,255,0.24);
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.25s ease;
+}
+.lightbox-detail-status.is-fading { opacity: 0; }
+.lb-detail-spinner {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.26);
+  border-top-color: rgba(255,255,255,0.92);
+  animation: lb-detail-spin 0.7s linear infinite;
+}
+.lightbox-detail-status.is-full .lb-detail-spinner {
+  animation: none;
+  border-color: var(--success);
+  background: var(--success);
+}
+@keyframes lb-detail-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .lb-detail-spinner { animation: none; border-top-color: rgba(255,255,255,0.26); }
+  .lightbox-detail-status { transition: none; }
+}
 .lightbox-zoom-badge:focus-visible,
 .lb-zoom-step:focus-visible,
 .lb-zoom-stop:focus-visible,
@@ -3951,7 +3989,10 @@ async function createWorkspace() {
   <div id="lightboxNext" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
   <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!_lbVisualTransitionPending && Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <div class="lightbox-zoom-control" id="lightboxZoomControl" onclick="event.stopPropagation();">
-      <span id="lightboxPreviewStatus" role="status" style="display:none;font-size:11px;color:var(--text-dim);">Loading detail…</span>
+      <div id="lightboxPreviewStatus" class="lightbox-detail-status" role="status" aria-live="polite" style="display:none;">
+        <span class="lb-detail-spinner" aria-hidden="true"></span>
+        <span id="lightboxPreviewStatusText"></span>
+      </div>
       <button type="button" class="lightbox-zoom-badge" id="lightboxZoomBadge"
               aria-haspopup="true" aria-expanded="false"
               onclick="toggleLightboxZoomPopover();" title="Zoom controls">Fit</button>
@@ -4322,6 +4363,9 @@ function _lbSetPhotoTransitionPending(pending) {
     controls.inert = !!pending;
     controls.setAttribute('aria-busy', pending ? 'true' : 'false');
   });
+  // Every caller assigns _lbVisualTransitionPending immediately before this, so
+  // the phase derived here is already current.
+  _lbRenderDetailStatus();
 }
 
 // --- Species Representative panel, shared across every page's lightbox.
@@ -7872,6 +7916,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbCancelOriginalPreload();
   _lbCancelAdjacentPreloadTimer();
   _lbProgressiveTargetKey = null;
+  _lbCancelDetailConfirmation();
   _lbSetPreviewLoading(false);
   var fallbackViewportState = options.fallbackViewportState || null;
   var eyeTrackAnchor = options.eyeTrackAnchor || null;
@@ -8197,6 +8242,18 @@ function openLightbox(photoId, filename, photoList, options) {
     });
 
   function handleInitialImageLoad() {
+    // The commit below momentarily clears the transition before deciding whether
+    // a sharper tier is still needed. Paint once, at the end, so the chip does
+    // not blink off and restart its show delay between those two states.
+    _lbDetailStatusHold += 1;
+    try {
+      commitInitialImageLoad();
+    } finally {
+      _lbDetailStatusHold -= 1;
+      _lbRenderDetailStatus();
+    }
+  }
+  function commitInitialImageLoad() {
     img.onload = null;
     img.onerror = null;
     if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
@@ -8242,6 +8299,10 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbSetPreviewLoading(true);
       _lbScheduleSourceSwap(_lbPending1To1 ? (_lbNativeZoom || transitionZoom) : _lbZoom, true);
     } else {
+      // No sharper tier is wanted for the current zoom, so what is on screen is
+      // everything this view can show. (_lbScheduleOriginalPreload only warms a
+      // background copy for a later 1:1 -- it does not change these pixels.)
+      _lbMarkDetailSettled();
       _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
       if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
     }
@@ -8765,6 +8826,7 @@ function closeLightbox(e) {
   _lbEyeTrackScreenAnchor = null;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
+  _lbResetDetailStatus();
   _lbCancelOriginalPreload();
   _lbClearAdjacentPreloads();
   _lbClearAdjustmentPreview();
@@ -10496,8 +10558,127 @@ var _lbDesiredSrcKey = null;
 
 function _lbSetPreviewLoading(loading) {
   _lbPreviewLoading = !!loading;
-  var status = document.getElementById('lightboxPreviewStatus');
-  if (status) status.style.display = loading ? '' : 'none';
+  _lbRenderDetailStatus();
+}
+
+// ---- Detail-load status chip ------------------------------------------------
+// The lightbox paints a lower-resolution tier first and swaps a sharper one in
+// behind it, so "this photo is soft" and "this photo is still arriving" look
+// identical on screen. The chip names which one it is: Loading (the incoming
+// photo has not decoded yet), Sharpening (a sharper tier is in flight), then a
+// brief Full detail once the tier the current zoom needs is the one displayed.
+// Loads that finish inside LB_DETAIL_SHOW_DELAY_MS never show anything, so
+// arrowing through cached photos stays quiet instead of strobing.
+var LB_DETAIL_SHOW_DELAY_MS = 250;
+var LB_DETAIL_SETTLED_MS = 900;
+var LB_DETAIL_FADE_MS = 250;
+var _lbDetailStatusShown = false;    // chip is on screen (past the show delay)
+var _lbDetailStatusSettled = false;  // showing the Full detail confirmation
+var _lbDetailStatusHold = 0;         // >0 suppresses paints mid-transition
+var _lbDetailShowTimer = null;
+var _lbDetailSettleTimer = null;
+var _lbDetailFadeTimer = null;
+
+function _lbDetailSharpeningPending() {
+  // Derived rather than read off _lbPreviewLoading: the first drag of a pan
+  // calls _lbClearPendingViewportRestore, which drops that flag even though the
+  // queued swap keeps running. Panning around while the original loads at 1:1
+  // is the pixel-peeping path, so the chip has to survive it.
+  if (_lbProgressiveTargetKey) return true;
+  if (!_lbDesiredSrcKey || _lbDesiredSrcKey === _lbCurrentSrcKey) return false;
+  // A known-missing original is never going to arrive; claiming otherwise would
+  // leave the chip spinning forever.
+  if (_lbOriginalUnavailable && _lbDesiredSrcKey === 'original') return false;
+  return _lbSrcRank(_lbDesiredSrcKey) > _lbSrcRank(_lbCurrentSrcKey);
+}
+
+function _lbDetailStatusPhase() {
+  if (_lbVisualTransitionPending) return 'loading';
+  if (_lbPreviewLoading || _lbDetailSharpeningPending()) return 'sharpening';
+  if (_lbDetailStatusSettled) return 'full';
+  return 'off';
+}
+
+function _lbDetailStatusLabel(phase) {
+  if (phase === 'loading') return 'Loading\u2026';
+  if (phase === 'sharpening') return 'Sharpening\u2026';
+  return 'Full detail';
+}
+
+function _lbPaintDetailStatus(phase) {
+  var el = document.getElementById('lightboxPreviewStatus');
+  if (!el) return;
+  var text = document.getElementById('lightboxPreviewStatusText');
+  if (phase === 'off') {
+    el.style.display = 'none';
+    el.classList.remove('is-full');
+    el.classList.remove('is-fading');
+    el.removeAttribute('data-phase');
+    if (text) text.textContent = '';
+    return;
+  }
+  el.style.display = 'inline-flex';
+  el.setAttribute('data-phase', phase);
+  el.classList.toggle('is-full', phase === 'full');
+  if (phase !== 'full') el.classList.remove('is-fading');
+  if (text) text.textContent = _lbDetailStatusLabel(phase);
+}
+
+function _lbCancelDetailConfirmation() {
+  if (_lbDetailSettleTimer) { clearTimeout(_lbDetailSettleTimer); _lbDetailSettleTimer = null; }
+  if (_lbDetailFadeTimer) { clearTimeout(_lbDetailFadeTimer); _lbDetailFadeTimer = null; }
+  _lbDetailStatusSettled = false;
+}
+
+function _lbResetDetailStatus() {
+  if (_lbDetailShowTimer) { clearTimeout(_lbDetailShowTimer); _lbDetailShowTimer = null; }
+  _lbCancelDetailConfirmation();
+  _lbDetailStatusShown = false;
+  _lbPaintDetailStatus('off');
+}
+
+function _lbRenderDetailStatus() {
+  if (_lbDetailStatusHold > 0) return;
+  var phase = _lbDetailStatusPhase();
+  if (phase === 'off') {
+    _lbResetDetailStatus();
+    return;
+  }
+  if (phase === 'full') {
+    // Only confirm a load the user actually watched happen.
+    if (!_lbDetailStatusShown) { _lbResetDetailStatus(); return; }
+    _lbPaintDetailStatus('full');
+    return;
+  }
+  // A fresh load started: the previous confirmation is stale.
+  _lbCancelDetailConfirmation();
+  if (_lbDetailStatusShown) { _lbPaintDetailStatus(phase); return; }
+  if (_lbDetailShowTimer) return;  // delay already armed; do not restart it
+  _lbDetailShowTimer = setTimeout(function() {
+    _lbDetailShowTimer = null;
+    var next = _lbDetailStatusPhase();
+    if (next !== 'loading' && next !== 'sharpening') { _lbResetDetailStatus(); return; }
+    _lbDetailStatusShown = true;
+    _lbPaintDetailStatus(next);
+  }, LB_DETAIL_SHOW_DELAY_MS);
+}
+
+function _lbMarkDetailSettled() {
+  // Nothing was announced, so there is nothing to confirm.
+  if (!_lbDetailStatusShown) return;
+  _lbCancelDetailConfirmation();
+  _lbDetailStatusSettled = true;
+  _lbDetailFadeTimer = setTimeout(function() {
+    _lbDetailFadeTimer = null;
+    var el = document.getElementById('lightboxPreviewStatus');
+    if (el && _lbDetailStatusSettled) el.classList.add('is-fading');
+  }, Math.max(0, LB_DETAIL_SETTLED_MS - LB_DETAIL_FADE_MS));
+  _lbDetailSettleTimer = setTimeout(function() {
+    _lbDetailSettleTimer = null;
+    _lbDetailStatusSettled = false;
+    _lbDetailStatusShown = false;
+    _lbRenderDetailStatus();
+  }, LB_DETAIL_SETTLED_MS);
 }
 
 function _lbFullPreviewLimit() {
@@ -10913,6 +11094,7 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
   }
   if (desired === _lbCurrentSrcKey) {
     _lbProgressiveTargetKey = null;
+    _lbMarkDetailSettled();
     _lbSetPreviewLoading(false);
     _lbScheduleAdjacentPhoto(desired);
     return;
@@ -10950,6 +11132,7 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
         // `key`, so bail rather than record wrong dims or recalibrate stale state.
         if (_lbCurrentSrcKey !== key) return;
         _lbProgressiveTargetKey = null;
+        _lbMarkDetailSettled();
         _lbSetPreviewLoading(false);
         // Keep the decoded background original alive until the visible image
         // has adopted it; releasing it earlier can make some WebViews decode

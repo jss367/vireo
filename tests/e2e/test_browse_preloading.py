@@ -450,3 +450,109 @@ def test_failed_original_warmup_releases_budget_for_neighbors(live_server, page)
         }"""
     )
     page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === 12")
+
+
+def _detail_text(page):
+    return page.evaluate("document.getElementById('lightboxPreviewStatusText').textContent")
+
+
+def test_detail_status_names_each_progressive_stage(live_server, page):
+    held = []
+    sharp_ready = False
+
+    def serve_original(route):
+        if sharp_ready:
+            route.fulfill(body=_jpeg(6000, 4000), content_type="image/jpeg")
+        else:
+            held.append(route)
+
+    page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", serve_original)
+    _open_window(page, live_server)
+    status = page.locator("#lightboxPreviewStatus")
+    # A fit view served straight from /full needs no upgrade, so nothing is claimed.
+    expect(status).to_be_hidden()
+
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0; LB_DETAIL_SETTLED_MS = 30000;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Sharpening…"
+
+    page.wait_for_function("_lbDesiredSrcKey === 'original'")
+    page.wait_for_timeout(300)  # Let the debounced swap dispatch its request.
+    assert held
+    sharp_ready = True
+    for route in held:
+        route.fulfill(body=_jpeg(6000, 4000), content_type="image/jpeg")
+
+    page.wait_for_function("_lbCurrentSrcKey === 'original' && !_lbPreviewLoading")
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Full detail"
+
+    # The confirmation is transient: it clears itself rather than sitting there.
+    page.evaluate("LB_DETAIL_SETTLED_MS = 1; _lbMarkDetailSettled();")
+    expect(status).to_be_hidden()
+
+
+def test_detail_status_stays_quiet_when_the_photo_is_already_there(live_server, page):
+    page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    _open_window(page, live_server)
+    page.wait_for_function(
+        "Object.values(_lbAdjacentPreloads).some(e => e.photoId === 116 && e.status === 'decoded')"
+    )
+    page.evaluate("lightboxNav(1)")
+    page.wait_for_function("_lightboxCommittedId === 116 && !_lbVisualTransitionPending")
+    # Well past the show delay: a decoded neighbour must never flash the chip.
+    page.wait_for_timeout(600)
+    expect(page.locator("#lightboxPreviewStatus")).to_be_hidden()
+
+
+def test_detail_status_survives_a_pan_while_sharpening(live_server, page):
+    page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", lambda route: None)
+    _open_window(page, live_server)
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+    status = page.locator("#lightboxPreviewStatus")
+    expect(status).to_be_visible()
+
+    # The first drag of a pan clears _lbPreviewLoading, but the swap it cleared
+    # is still in flight -- the chip must keep saying so.
+    page.evaluate("_lbClearPendingViewportRestore()")
+    assert page.evaluate("_lbPreviewLoading") is False
+    assert page.evaluate("_lbDesiredSrcKey") == "original"
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Sharpening…"
+
+
+def test_detail_status_reports_an_incoming_photo_that_has_not_decoded(live_server, page):
+    held = []
+    serving = {"ready": True}
+
+    def serve(route):
+        if serving["ready"]:
+            route.fulfill(body=_jpeg(), content_type="image/jpeg")
+        else:
+            held.append(route)
+
+    page.route("**/photos/*/full*", serve)
+    _open_window(page, live_server)
+    page.evaluate(
+        """() => {
+          LB_DETAIL_SHOW_DELAY_MS = 0;
+          _lbClearAdjacentPreloads();
+          _lbScheduleAdjacentPhoto = function() {};
+        }"""
+    )
+    serving["ready"] = False
+    page.evaluate("lightboxNav(1)")
+    status = page.locator("#lightboxPreviewStatus")
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Loading…"
+    assert page.evaluate("_lbVisualTransitionPending") is True
+
+    page.wait_for_timeout(200)  # Let the held request reach the route handler.
+    assert held
+    for route in held:
+        route.fulfill(body=_jpeg(), content_type="image/jpeg")
+    page.wait_for_function("_lightboxCommittedId === 116 && !_lbVisualTransitionPending")
