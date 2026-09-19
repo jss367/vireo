@@ -2518,7 +2518,7 @@ def create_imports_blueprint(
         return None
 
     def _validate_after_process_move(
-        value, after_import, destination, folder_template,
+        value, after_import, destination, folder_template, file_types=None,
     ):
         """Validate an after_process_move spec; return (target_snapshot, error).
 
@@ -2529,16 +2529,25 @@ def create_imports_blueprint(
         The returned target dict is the enqueue-time snapshot: a Settings
         edit mid-chain must not redirect the move (same rationale as
         remote_target_snapshot).
+
+        ``file_types`` narrows the mount-overlap check to the folders the run
+        can actually create — a RAW-only import can't render a ``JPEG`` folder
+        even when the template contains ``{file_type}``, so a JPEG-only mount
+        must not block it. ``None`` (the recursive-call default, since the
+        recursion path has already picked a concrete category) falls back to
+        every supported category.
         """
         if value is None:
             return None, None
         if "{file_type}" in folder_template:
-            from ingest import DESTINATION_FILE_TYPES
+            from ingest import destination_file_types_for
 
             # Check every possible render against the NAS mount guard below.
             # Treating the token as a literal would miss e.g. a mount at RAW/.
+            # Derive the categories from ``file_types`` so we only check
+            # renders the import can actually produce.
             snapshot = None
-            for file_type in DESTINATION_FILE_TYPES:
+            for file_type in destination_file_types_for(file_types):
                 templates = [folder_template.replace("{file_type}", file_type)]
                 if "%" in folder_template:
                     templates.append(f"{file_type}/unsorted")
@@ -4570,6 +4579,7 @@ def create_imports_blueprint(
         else:
             move_target_snapshot, move_err = _validate_after_process_move(
                 after_process_move, after_import, destination, folder_template,
+                file_types=file_types,
             )
             if move_err is not None:
                 return move_err

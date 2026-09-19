@@ -7,7 +7,13 @@ from datetime import datetime
 
 import pytest
 from db import Database
-from ingest import build_destination_path, discover_source_files, ingest, preview_destination
+from ingest import (
+    build_destination_path,
+    destination_file_types_for,
+    discover_source_files,
+    ingest,
+    preview_destination,
+)
 from PIL import Image
 
 
@@ -48,6 +54,26 @@ def test_file_type_templates_reject_unsafe_paths_even_without_dates(template):
 def test_file_type_template_requires_source():
     with pytest.raises(ValueError, match="require a source file"):
         build_destination_path(datetime(2026, 3, 28), "{file_type}")
+
+
+def test_destination_file_types_for_raw_only():
+    assert destination_file_types_for("raw") == ("RAW",)
+
+
+def test_destination_file_types_for_jpeg_covers_all_image_categories():
+    # ``jpeg`` accepts every non-RAW image extension, so the guard must
+    # cover every category those extensions can produce, not just "JPEG".
+    result = set(destination_file_types_for("jpeg"))
+    assert "JPEG" in result and "TIFF" in result and "PNG" in result
+    assert "RAW" not in result
+
+
+def test_destination_file_types_for_both_covers_every_category():
+    assert set(destination_file_types_for("both")) >= {"RAW", "JPEG", "TIFF"}
+
+
+def test_destination_file_types_for_extension_list():
+    assert destination_file_types_for([".nef", ".jpg"]) == ("JPEG", "RAW")
 
 
 def test_build_destination_path_rejects_absolute_template():

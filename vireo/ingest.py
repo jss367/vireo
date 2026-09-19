@@ -159,6 +159,29 @@ DESTINATION_FILE_TYPES = tuple(sorted(
 ))
 
 
+def destination_file_types_for(file_types):
+    """Destination category folders an import with ``file_types`` can produce.
+
+    Mirrors the extension filter in ``selected_source_files``: a RAW-only run
+    can only ever create a ``RAW`` folder, so mount-overlap guards that iterate
+    every category (``JPEG``, ``TIFF``, …) would reject configurations the run
+    can't actually land in. ``file_types`` accepts the same values the import
+    endpoints do — ``"both"`` (any supported extension), ``"raw"``, ``"jpeg"``,
+    or an explicit list of extensions.
+    """
+    if isinstance(file_types, list):
+        allowed = {str(ext).lower() for ext in file_types}
+    elif file_types == "raw":
+        allowed = RAW_EXTENSIONS
+    elif file_types == "jpeg":
+        allowed = IMAGE_EXTENSIONS
+    else:
+        allowed = SUPPORTED_EXTENSIONS
+    return tuple(sorted(
+        {destination_file_type("photo" + ext) for ext in allowed}
+    ))
+
+
 def folder_template_samples(timestamps, templates=FOLDER_TEMPLATE_PRESETS):
     """Render each preset folder template against a real capture time.
 
