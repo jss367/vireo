@@ -10,7 +10,12 @@ import unicodedata
 import uuid
 from datetime import datetime
 
-from keyword_identity import identity_sql, resolve_import_alias
+from keyword_identity import (
+    free_sibling_name,
+    identity_sql,
+    keywords_claim_different_taxa,
+    resolve_import_alias,
+)
 from keyword_normalization import (
     keyword_match_key,
     normalize_keyword_display,
@@ -14131,14 +14136,8 @@ class Database:
         Post-migration, stored names are already normalized, so this is a
         no-op in the common case — it exists so the duplicate-cleanup and
         migration paths can canonicalize a survivor whose spelling predates
-        normalization, keeping every dependent name string (pending sidecar
-        changes, species curation snapshots) in lockstep with the row.
-
-        Retargeting of pending changes and species curation rows is scoped
-        to photos that actually carry ``keyword_id`` (and, for pending
-        changes, the workspaces those (photo, keyword) tags belong to), so
-        a separate same-spelling keyword row elsewhere in the DB is never
-        rewritten by side effect.
+        normalization. ``_rename_keyword_dependents`` then carries the new
+        spelling into every string that mirrors it.
 
         ``disambiguate_on_conflict`` — when a different-type keyword already
         occupies (cleaned, parent_id) and the UPDATE would hit
@@ -14157,22 +14156,6 @@ class Database:
         cleaned = normalize_keyword_display(old_name)
         if not cleaned or cleaned == old_name:
             return
-        # Collect (photo_id, workspace_id) for photos actually tagged with
-        # this keyword row, scoped through workspace_folders. Captured
-        # before the keywords UPDATE so a downstream _merge_keyword_into
-        # still sees the same tags via photo_keywords.
-        tag_rows = self.conn.execute(
-            """SELECT DISTINCT pk.photo_id, wf.workspace_id
-               FROM photo_keywords pk
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE pk.keyword_id = ?""",
-            (keyword_id,),
-        ).fetchall()
-        photo_workspace_pairs = [
-            (r["photo_id"], r["workspace_id"]) for r in tag_rows
-        ]
-        affected_photo_ids = sorted({r["photo_id"] for r in tag_rows})
         # A same-name row in a different dedupe boundary (another type at
         # the same parent) can still occupy the table-level
         # UNIQUE(name, parent_id) slot. The links still merge correctly;
@@ -14196,11 +14179,44 @@ class Database:
             self.conn.execute(
                 "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
             )
+        # Keep every dependent name string in lockstep with the row.
+        self._rename_keyword_dependents(keyword_id, old_name, cleaned)
+
+    def _rename_keyword_dependents(self, keyword_id, old_name, new_name):
+        """Carry a keyword row's rename into every string that mirrors its name.
+
+        Pending sidecar edits and the species curation tables store the
+        keyword's spelling rather than its id, so a row renamed without this
+        leaves an unsynced ``keyword_add`` writing the old word into XMP and
+        drops starred photos out of the highlight/life-list queries, which
+        compare those strings exact against ``keywords.name``.
+
+        Scoped to photos that actually carry ``keyword_id`` (and, for pending
+        changes, the workspaces those (photo, keyword) tags belong to), so a
+        separate same-spelling keyword row elsewhere in the DB is never
+        rewritten by side effect. Safe to call either side of the
+        ``keywords`` UPDATE: only ``photo_keywords`` is read, and a name
+        change does not touch it. Caller commits.
+        """
+        if not old_name or not new_name or old_name == new_name:
+            return
+        tag_rows = self.conn.execute(
+            """SELECT DISTINCT pk.photo_id, wf.workspace_id
+               FROM photo_keywords pk
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE pk.keyword_id = ?""",
+            (keyword_id,),
+        ).fetchall()
+        photo_workspace_pairs = [
+            (r["photo_id"], r["workspace_id"]) for r in tag_rows
+        ]
+        affected_photo_ids = sorted({r["photo_id"] for r in tag_rows})
         # Retarget pending keyword_add/keyword_remove rows queued under the
         # pre-canonical spelling so a still-unsynced sidecar write can't
         # leak the legacy variant after the DB row was rewritten. A pending
         # row that would collide with an existing (photo_id, change_type,
-        # cleaned) row is dropped rather than duplicated, matching
+        # new_name) row is dropped rather than duplicated, matching
         # queue_change's dedupe contract.
         if affected_photo_ids:
             for chunk in _chunks(affected_photo_ids):
@@ -14218,7 +14234,7 @@ class Database:
                                 AND COALESCE(pc2.workspace_id, -1)
                                     = COALESCE(pending_changes.workspace_id, -1)
                           )""",
-                    [old_name, *chunk, cleaned],
+                    [old_name, *chunk, new_name],
                 )
                 self.conn.execute(
                     f"""UPDATE pending_changes
@@ -14226,7 +14242,7 @@ class Database:
                         WHERE change_type IN ('keyword_add', 'keyword_remove')
                           AND value = ?
                           AND photo_id IN ({placeholders})""",
-                    [cleaned, old_name, *chunk],
+                    [new_name, old_name, *chunk],
                 )
         # Species curation tables key rows by the species name string, which
         # is compared exact against ``keywords.name``. Now that the UPDATE
@@ -14239,11 +14255,11 @@ class Database:
         # representatives rename isn't needed here.
         if photo_workspace_pairs:
             self.rename_species_highlights_species(
-                old_name, cleaned,
+                old_name, new_name,
                 photo_workspace_pairs=photo_workspace_pairs, _commit=False,
             )
             self.rename_photo_preferences_species(
-                old_name, cleaned,
+                old_name, new_name,
                 photo_workspace_pairs=photo_workspace_pairs, _commit=False,
             )
 
@@ -15824,24 +15840,45 @@ class Database:
                 history_curation_fixed,
             )
 
+    def _reparent_disambiguated(self, child, dst_id, new_name):
+        """Move a colliding child under ``dst_id`` under a free name.
+
+        The three collision branches in ``_merge_keyword_into`` all preserve
+        the migrating row rather than folding it away, which means they all
+        rename it -- and a rename is never just the ``keywords`` row. Pending
+        sidecar edits and the species curation tables key on the spelling, so
+        skipping the dependent migration leaves an unsynced ``keyword_add``
+        writing the retired name into XMP and drops starred photos out of the
+        highlight and life-list queries. Caller commits.
+        """
+        self.conn.execute(
+            "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
+            (dst_id, new_name, child["id"]),
+        )
+        self._rename_keyword_dependents(child["id"], child["name"], new_name)
+
     def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
 
         Moves photo associations, then reparents the source's children onto
-        the destination. A child whose exact name already exists under the
-        destination (UNIQUE(name, parent_id) clash) merges into that sibling
-        recursively only when both share the same ``type`` — "Birds > Heron"
-        and "birds > Heron" must converge on one Heron. When the existing
-        sibling has a different ``type`` (e.g. a 'general' Macro vs. a
-        'genre' Macro), the dedup boundary is (LOWER(name), parent_id, type),
-        so they are NOT duplicates; preserve both by disambiguating the
-        migrating child's name with an id suffix. Case-variant children
-        don't clash (the UNIQUE index is case-sensitive); they reparent
-        cleanly and collapse on the caller's next convergence pass. Cycles
-        are impossible: parent_id chains are acyclic by construction.
-        Non-link metadata (is_species, coordinates, taxon_id) folds into
-        the destination when it lacks its own, so deleting the source can't
-        silently drop species/location info that only the duplicate carried.
+        the destination. A child whose name matches an existing sibling
+        under the destination merges into that sibling recursively only when
+        both share the same ``type`` — "Birds > Heron" and "birds > Heron"
+        must converge on one Heron. Match uses ``keyword_match_key`` (ASCII
+        case fold on the display-normalized name), the same key every lookup
+        and dedup path uses, so a case-only variant is a collision even
+        though SQLite's UNIQUE(name, parent_id) index is BINARY — an
+        unchecked reparent would otherwise leave two semantic peers no
+        import could tell apart. When the existing sibling has a different
+        ``type`` (e.g. a 'general' Macro vs. a 'genre' Macro), the dedup
+        boundary is (LOWER(name), parent_id, type), so they are NOT
+        duplicates; preserve both by disambiguating the migrating child's
+        name with an id suffix. Cycles are impossible: parent_id chains are
+        acyclic by construction.
+        Non-link metadata (is_species, coordinates, taxon_id,
+        source_taxon_id) folds into the destination when it lacks its own,
+        so deleting the source can't silently drop species/location info
+        that only the duplicate carried.
 
         Rewrites pending_changes so an unsynced keyword_add/keyword_remove
         queued under the source spelling points at the surviving name after
@@ -15864,7 +15901,7 @@ class Database:
         )
         src = self.conn.execute(
             "SELECT name, type, is_species, latitude, longitude, taxon_id, "
-            "place_id FROM keywords WHERE id = ?",
+            "source_taxon_id, place_id FROM keywords WHERE id = ?",
             (src_id,),
         ).fetchone()
         dst = self.conn.execute(
@@ -15935,26 +15972,39 @@ class Database:
                 # 'individual'/'general' rows) or a stale taxon_id, and
                 # keeping either lets `is_species = 1 OR type = 'taxonomy'`
                 # keep matching every photo that already used the dst row.
-                # Clear both alongside the metadata fold.
+                # Clear all species claims (taxon_id AND source_taxon_id)
+                # alongside the metadata fold; a lingering iNat
+                # source_taxon_id would keep the survivor resolving to a
+                # species identity the retype was meant to drop.
                 self.conn.execute(
                     """UPDATE keywords
-                       SET is_species = 0,
-                           latitude   = COALESCE(latitude, ?),
-                           longitude  = COALESCE(longitude, ?),
-                           taxon_id   = NULL
+                       SET is_species        = 0,
+                           latitude          = COALESCE(latitude, ?),
+                           longitude         = COALESCE(longitude, ?),
+                           taxon_id          = NULL,
+                           source_taxon_id   = NULL
                        WHERE id = ?""",
                     (src["latitude"], src["longitude"], dst_id),
                 )
             else:
+                # Fold ``source_taxon_id`` alongside ``taxon_id``: a
+                # source row can carry an iNat id without a resolved local
+                # taxon (see ``_add_source_species_keyword``), and
+                # ``keywords_claim_different_taxa`` treats a bare
+                # ``source_taxon_id`` as identity. Without this COALESCE
+                # the recursive child collapse would drop the only
+                # external taxon claim and leave the survivor an unlinked
+                # species row.
                 self.conn.execute(
                     """UPDATE keywords
-                       SET is_species = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
-                           latitude   = COALESCE(latitude, ?),
-                           longitude  = COALESCE(longitude, ?),
-                           taxon_id   = COALESCE(taxon_id, ?)
+                       SET is_species        = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
+                           latitude          = COALESCE(latitude, ?),
+                           longitude         = COALESCE(longitude, ?),
+                           taxon_id          = COALESCE(taxon_id, ?),
+                           source_taxon_id   = COALESCE(source_taxon_id, ?)
                        WHERE id = ?""",
                     (src["is_species"], src["latitude"], src["longitude"],
-                     src["taxon_id"], dst_id),
+                     src["taxon_id"], src["source_taxon_id"], dst_id),
                 )
         # Retarget pending keyword_add/keyword_remove rows queued under the
         # source name onto the destination name. A pending row that would
@@ -16397,22 +16447,52 @@ class Database:
         # Reparent children onto the destination before deleting, or the
         # keywords.parent_id FK aborts the merge mid-way.
         children = self.conn.execute(
-            "SELECT id, name, type, place_id FROM keywords WHERE parent_id = ?",
+            "SELECT id, name, type, place_id, taxon_id, source_taxon_id, is_species "
+            "FROM keywords WHERE parent_id = ?",
             (src_id,),
         ).fetchall()
         for child in children:
-            try:
+            # Detect the collision explicitly: SQLite's UNIQUE(name, parent_id)
+            # is BINARY, so `foo` reparenting under a destination that already
+            # holds `Foo` would UPDATE cleanly and leave two semantic peers no
+            # keyword lookup (all folded through ``keyword_match_key``) could
+            # tell apart. Fold every sibling's name to check for either shape
+            # of collision, and only reparent when the folded slot is free.
+            siblings = self.conn.execute(
+                "SELECT id, name, type, place_id, taxon_id, source_taxon_id, is_species "
+                "FROM keywords WHERE parent_id = ? AND id != ?",
+                (dst_id, child["id"]),
+            ).fetchall()
+            child_key = keyword_match_key(child["name"])
+            existing = next(
+                (s for s in siblings if keyword_match_key(s["name"]) == child_key),
+                None,
+            )
+            if existing is None:
                 self.conn.execute(
                     "UPDATE keywords SET parent_id = ? WHERE id = ?",
                     (dst_id, child["id"]),
                 )
-            except sqlite3.IntegrityError:
-                existing = self.conn.execute(
-                    "SELECT id, type, place_id FROM keywords "
-                    "WHERE parent_id = ? AND name = ?",
-                    (dst_id, child["name"]),
-                ).fetchone()
-                if (
+            else:
+                # Every disambiguation below has to dodge the whole sibling
+                # set, not just the row it collided with: the suffixed name
+                # can itself be occupied (a user typed it, or an earlier
+                # disambiguation produced it), and a second
+                # UNIQUE(name, parent_id) violation here is uncaught.
+                taken = {row["name"] for row in siblings}
+                if keywords_claim_different_taxa(self, existing, child):
+                    # Two same-named species rows that resolve to DIFFERENT
+                    # taxa. A recursive merge keeps the destination's taxon
+                    # claim (COALESCE folds only fill missing fields), so
+                    # every photo under the migrating row would silently
+                    # come out tagged as the other species. Same reasoning
+                    # as the distinct place case below; keep both rows
+                    # instead.
+                    self._reparent_disambiguated(
+                        child, dst_id, free_sibling_name(
+                            taken, child["name"], f"id-{child['id']}"),
+                    )
+                elif (
                     existing["type"] == "location"
                     and child["type"] == "location"
                     and existing["place_id"] is not None
@@ -16427,11 +16507,9 @@ class Database:
                     # photos onto a sibling that represents a different
                     # Google place. Disambiguate the migrating child with a
                     # place-id suffix so both Google places survive.
-                    suffix = child["place_id"][-8:]
-                    disambiguated = f"{child['name']} ({suffix})"
-                    self.conn.execute(
-                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
-                        (dst_id, disambiguated, child["id"]),
+                    self._reparent_disambiguated(
+                        child, dst_id, free_sibling_name(
+                            taken, child["name"], child["place_id"][-8:]),
                     )
                 elif existing["type"] == child["type"]:
                     merged += self._merge_keyword_into(
@@ -16442,10 +16520,9 @@ class Database:
                     # (LOWER(name), parent_id, type) dedup boundary, so
                     # preserve both by renaming the migrating child rather
                     # than retagging photos across types.
-                    disambiguated = f"{child['name']} (id-{child['id']})"
-                    self.conn.execute(
-                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
-                        (dst_id, disambiguated, child["id"]),
+                    self._reparent_disambiguated(
+                        child, dst_id, free_sibling_name(
+                            taken, child["name"], f"id-{child['id']}"),
                     )
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (src_id,))
         return merged

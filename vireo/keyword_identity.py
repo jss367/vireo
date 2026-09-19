@@ -8,7 +8,7 @@ import hashlib
 import json
 from collections import defaultdict
 
-from keyword_normalization import keyword_match_key
+from keyword_normalization import keyword_match_key, normalize_keyword_display
 from xmp import (
     _parse_location_keywords_owned,
     location_keyword_entries,
@@ -381,13 +381,521 @@ def reconcile_location(db, source_id, target_id):
     return candidate
 
 
-def preview_keyword_merge(db, keyword_ids, target_id):
-    """Validate an explicit merge of leaf records and describe catalog-wide effects."""
+
+def taxon_identity(db, row):
+    """Resolve a keyword row's species identity the way ``identity_sql`` does.
+
+    ``source_taxon_id`` is the label source's own iNat id and outranks the
+    local ``taxon_id``; a ``taxon_id`` whose taxon carries an ``inat_id``
+    normalizes to the same ``inat:`` form, so a row linked by local id and a
+    row linked by iNat id resolve equal when they mean the same species.
+    Returns ``None`` for a row that claims no species at all.
+    """
+    if not (row['is_species'] or row['type'] == 'taxonomy'):
+        return None
+    inat = row['source_taxon_id']
+    if inat is None and row['taxon_id'] is not None:
+        found = db.conn.execute(
+            'SELECT inat_id FROM taxa WHERE id = ?', (row['taxon_id'],),
+        ).fetchone()
+        inat = found['inat_id'] if found else None
+    if inat is not None:
+        return f'inat:{inat}'
+    if row['taxon_id'] is not None:
+        return f'taxon:{row["taxon_id"]}'
+    return None
+
+
+def keywords_claim_different_taxa(db, first, second):
+    """Whether two same-named rows stand for two genuinely different species.
+
+    A row that claims no species, or that agrees with the other, is safe to
+    merge -- the metadata fold fills whichever side is missing. Two different
+    claims are not: the merge keeps the destination's taxon and drops the
+    source's, so the migrating row's photos would come out tagged as the
+    other species.
+    """
+    first_id = taxon_identity(db, first)
+    second_id = taxon_identity(db, second)
+    return first_id is not None and second_id is not None and first_id != second_id
+
+
+def free_sibling_name(taken, base, suffix):
+    """A ``base (suffix)`` name no existing sibling already occupies.
+
+    The disambiguation suffixes are not guaranteed unique on their own -- a
+    user can have typed the very name they produce, or renamed a row into it.
+    Appending an ordinal until the slot is free keeps the merge from hitting
+    ``UNIQUE(name, parent_id)``, which surfaced as an uncaught SQLite error.
+    Deterministic so the preview and the write path agree on the result.
+
+    Comparison uses ``keyword_match_key`` so a case-different sibling still
+    counts as occupied: SQLite's UNIQUE(name, parent_id) is BINARY, but every
+    lookup and dedup path in the app folds case, and picking `Foo (id-3)`
+    while `foo (id-3)` already sits under this parent would leave two
+    semantic peers no import could tell apart.
+    """
+    taken_keys = {keyword_match_key(name) for name in taken}
+    candidate = f'{base} ({suffix})'
+    ordinal = 2
+    while keyword_match_key(candidate) in taken_keys:
+        candidate = f'{base} ({suffix}) {ordinal}'
+        ordinal += 1
+    return candidate
+
+def _child_index(rows):
+    """parent_id -> ordered child ids, as the merge walks them."""
+    children = defaultdict(list)
+    for row in sorted(rows, key=lambda r: r['id']):
+        children[row['parent_id']].append(row['id'])
+    return children
+
+
+def _subtree_ids(children, root_id):
+    found, pending = set(), [root_id]
+    while pending:
+        for kid in children.get(pending.pop(), ()):
+            if kid not in found:
+                found.add(kid)
+                pending.append(kid)
+    return found
+
+
+def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
+    """Mirror ``Database._merge_keyword_into``'s child handling in memory.
+
+    The preview has to state what happens to every descendant, and
+    ``merge_keywords`` needs each survivor's new path to queue the sidecar
+    rewrite -- both require replaying the same collision rules the write
+    path applies, so the resolution lives here once and is asserted against
+    the real merge in the tests.
+    """
+    plan['removed'].add(src_id)
+    for child_id in list(children.get(src_id, ())):
+        child = nodes[child_id]
+        siblings = [nodes[k] for k in children.get(dst_id, ()) if k not in plan['removed']]
+        # SQLite's UNIQUE(name, parent_id) is BINARY, so `foo` beside `Foo`
+        # slips past the write path's IntegrityError guard. Every lookup and
+        # dedup path uses ``keyword_match_key``, so a case-only sibling is a
+        # semantic collision that has to travel the same collapse-or-rename
+        # branch the exact-name case does; ``_merge_keyword_into`` mirrors
+        # the same fold.
+        child_key = keyword_match_key(child['name'])
+        existing = next(
+            (n for n in siblings if keyword_match_key(n['name']) == child_key),
+            None)
+        taken = {n['name'] for n in siblings}
+        if existing is None:
+            outcome = 'move'
+        elif keywords_claim_different_taxa(db, existing, child):
+            # Distinct species that collide on (name, parent): merging would
+            # retag the incoming row's photos as the other species, so the
+            # write path keeps both under an id suffix.
+            outcome = 'rename'
+            plan['renames'][child_id] = free_sibling_name(
+                taken, child['name'], f'id-{child_id}')
+        elif (existing['type'] == 'location' and child['type'] == 'location'
+              and existing['place_id'] is not None and child['place_id'] is not None
+              and existing['place_id'] != child['place_id']):
+            # Distinct Google places that collide on (name, parent): the write
+            # path keeps both by suffixing the incoming row.
+            outcome = 'rename'
+            plan['renames'][child_id] = free_sibling_name(
+                taken, child['name'], child['place_id'][-8:])
+        elif existing['type'] == child['type']:
+            outcome = 'merge'
+        else:
+            outcome = 'rename'
+            plan['renames'][child_id] = free_sibling_name(
+                taken, child['name'], f'id-{child_id}')
+        plan['children'].append({
+            'id': child_id, 'name': child['name'], 'type': child['type'],
+            'outcome': outcome,
+            'into_id': existing['id'] if outcome == 'merge' else None,
+            'new_name': plan['renames'].get(child_id, child['name']),
+        })
+        if outcome == 'merge':
+            # ``_merge_keyword_into`` folds the absorbed row's identity into
+            # the survivor. With three or more branches the NEXT same-named
+            # child is compared against that folded row, so a simulation that
+            # skips the fold predicts a collapse where the write path
+            # disambiguates -- and the aliases and hierarchy rewrites queued
+            # from the prediction would point those photos at the wrong
+            # sibling.
+            #
+            # Track whether the fold gives the retained location child a
+            # place_id or coordinates it did not have before: photos tagged
+            # solely with that survivor keep the fold's new place/coords in
+            # the catalog but the old (or missing) location metadata in their
+            # sidecars until a ``location`` resync is queued for them.
+            before = {f: nodes[existing['id']][f]
+                      for f in ('place_id', 'latitude', 'longitude')}
+            _fold_merged_identity(nodes[existing['id']], child)
+            if nodes[existing['id']]['type'] == 'location' and any(
+                    before[f] is None and nodes[existing['id']][f] is not None
+                    for f in before):
+                plan['metadata_folded'].add(existing['id'])
+            _plan_subtree_merge(db, nodes, children, child_id, existing['id'], plan)
+        else:
+            children[src_id].remove(child_id)
+            children[dst_id].append(child_id)
+            nodes[child_id]['parent_id'] = dst_id
+            nodes[child_id]['name'] = plan['renames'].get(child_id, child['name'])
+
+
+
+def _fold_merged_identity(destination, absorbed):
+    """Apply ``_merge_keyword_into``'s metadata fold to a simulated row.
+
+    Mirrors the COALESCE semantics of the same-type merge: the destination
+    keeps whatever it already claims and inherits only what it is missing.
+    The recursive-child path is always same-type, so the retype branch that
+    clears species claims cannot apply here.
+    """
+    for field in ('place_id', 'taxon_id', 'source_taxon_id', 'latitude', 'longitude'):
+        if destination[field] is None:
+            destination[field] = absorbed[field]
+    if absorbed['is_species']:
+        destination['is_species'] = 1
+
+
+def _resolve_landing(keyword_id, landing):
+    """Follow a row to the surviving row its photos end up on."""
+    seen = set()
+    while keyword_id in landing and keyword_id not in seen:
+        seen.add(keyword_id)
+        keyword_id = landing[keyword_id]
+    return keyword_id
+
+
+
+def _exported_location_chain(kid, parent_of, types, names):
+    """The contiguous location path a row actually exports, or None.
+
+    ``get_photo_location_paths`` walks up from the tagged leaf and stops at
+    the first non-location ancestor, so a location under a general keyword
+    exports only itself. Moving such a row changes its textual path without
+    changing one byte of what the sidecar records.
+    """
+    if types.get(kid) != 'location':
+        return None
+    chain, node, seen = [], kid, set()
+    while node is not None and node not in seen:
+        seen.add(node)
+        chain.append(names.get(node))
+        parent = parent_of.get(node)
+        if parent is None or types.get(parent) != 'location':
+            break
+        node = parent
+    return tuple(reversed(chain))
+
+def _is_one_place_chain(ids, parent_of, post_types):
+    """Whether every id sits on a single EXPORTED location line.
+
+    Mirrors ``Database.get_photo_location_paths``, which walks up from the
+    tagged leaf and stops at the first non-location ancestor. A location
+    sitting above a general keyword is therefore a separate exported
+    location, not this one's parent, so a walk that crossed the gap would
+    call two independently exported places a single hierarchy.
+    """
+    if len(ids) <= 1:
+        return True
+
+    def ancestry(start):
+        chain, node, seen = [], start, set()
+        while node is not None and node not in seen:
+            seen.add(node)
+            chain.append(node)
+            parent = parent_of.get(node)
+            if parent is None or post_types.get(parent) != 'location':
+                break
+            node = parent
+        return chain
+
+    deepest = max(ids, key=lambda i: len(ancestry(i)))
+    return set(ids) <= set(ancestry(deepest))
+
+
+def _photos_left_with_rival_places(db, location_change_ids, landing,
+                                   parent_of, post_types):
+    """Photos getting a location change that would then hold rival places.
+
+    ``location_change_ids`` are the rows whose photos this merge will queue a
+    ``location`` resync for. Photos outside that set keep whatever locations
+    they had, so their pre-existing state is not this merge's business.
+
+    Evaluated against the POST-merge tree: a row can gain a place from the
+    metadata fold, and a collapsing row hands its photos to its destination,
+    so the pre-merge ids on ``photo_keywords`` are not the ones that matter.
+    """
+    if not location_change_ids:
+        return []
+    placeholders = ','.join('?' for _ in location_change_ids)
+    rows = db.conn.execute(
+        f"""WITH touched AS (
+                SELECT DISTINCT photo_id FROM photo_keywords
+                WHERE keyword_id IN ({placeholders})
+            )
+            SELECT pk.photo_id, pk.keyword_id FROM photo_keywords pk
+            JOIN touched t ON t.photo_id = pk.photo_id
+            JOIN keywords k ON k.id = pk.keyword_id
+            WHERE k.type = 'location' OR pk.keyword_id IN ({placeholders})""",
+        [*location_change_ids, *location_change_ids],
+    ).fetchall()
+    by_photo = defaultdict(set)
+    for row in rows:
+        landed = _resolve_landing(row['keyword_id'], landing)
+        # Every surviving LOCATION row counts, linked or not: an unlinked one
+        # still contributes its own hierarchy to the sidecar, so two of them
+        # off the same line are two competing locations even when only one
+        # carries coordinates.
+        if post_types.get(landed) == 'location':
+            by_photo[row['photo_id']].add(landed)
+    return [photo_id for photo_id, landed in by_photo.items()
+            if not _is_one_place_chain(landed, parent_of, post_types)]
+
+def _coordinate_pair(row):
+    if row['latitude'] is None or row['longitude'] is None:
+        return None
+    return (row['latitude'], row['longitude'])
+
+
+def _distinct(values):
+    """Preserve first-seen order while grouping the ids that carry each value."""
+    ordered = {}
+    for key, source_id, payload in values:
+        entry = ordered.setdefault(key, {**payload, 'from': []})
+        entry['from'].append(source_id)
+    return list(ordered.values())
+
+
+def _fold_species(values):
+    """Like ``_distinct`` but coalesce complementary taxon fields per group.
+
+    Two rows can name the same species through different columns -- one via a
+    local ``taxon_id``, the other via an iNat ``source_taxon_id``. They share
+    the same resolved ``taxon_identity`` so they collapse to one option, but
+    keeping only the first row's raw payload discards the other row's
+    complementary link; ``_apply_merge_overrides`` then writes the missing
+    field back as ``None``.
+    """
+    ordered = {}
+    for key, source_id, payload in values:
+        entry = ordered.setdefault(key, {**payload, 'from': []})
+        for field in ('taxon_id', 'source_taxon_id'):
+            if entry.get(field) is None and payload.get(field) is not None:
+                entry[field] = payload[field]
+        entry['from'].append(source_id)
+    return list(ordered.values())
+
+
+def _merge_options(db, records, paths, valid_parents):
+    """Every value each editable attribute can take, tagged with its source rows."""
+    return {
+        'name': _distinct([(r['name'], r['id'], {'value': r['name']}) for r in records]),
+        'parent': _distinct([
+            (r['parent_id'], r['id'],
+             {'parent_id': r['parent_id'], 'path': paths[r['id']][:-1]})
+            for r in records if r['parent_id'] in valid_parents
+        ]),
+        'type': _distinct([(r['type'], r['id'], {'value': r['type']}) for r in records]),
+        'place': _distinct([
+            (r['place_id'], r['id'],
+             {'place_id': r['place_id'], 'name': r['name'], 'path': paths[r['id']],
+              'latitude': r['latitude'], 'longitude': r['longitude']})
+            for r in records if r['place_id'] is not None
+        ]),
+        # Keyed by RESOLVED identity, not the raw columns: a row linked by
+        # local ``taxon_id`` and one linked by the matching iNat
+        # ``source_taxon_id`` name one species, and offering them as two
+        # indistinguishable choices would demand a decision with no answer.
+        # Fold the non-null taxon fields within each group so a survivor that
+        # picks that option keeps BOTH links -- ``_apply_merge_overrides``
+        # otherwise writes the missing side back as ``None`` and drops either
+        # the local taxon link or the source provenance depending on which
+        # row is retained.
+        'species': _fold_species([
+            (taxon_identity(db, r), r['id'],
+             {'taxon_id': r['taxon_id'], 'source_taxon_id': r['source_taxon_id'],
+              'name': r['name']})
+            for r in records if taxon_identity(db, r) is not None
+        ]),
+        'coordinates': _distinct([
+            (_coordinate_pair(r), r['id'],
+             {'latitude': r['latitude'], 'longitude': r['longitude'], 'name': r['name']})
+            for r in records if _coordinate_pair(r) is not None
+        ]),
+    }
+
+
+
+def _label_species_options(db, species_options):
+    """Name the taxon behind each species link.
+
+    The chooser asks which species the combined keyword keeps, so it has to
+    show the species. A bare ``taxon_id`` is a row number the user has never
+    seen and cannot answer the question with.
+    """
+    for option in species_options:
+        # ``source_taxon_id`` is the label source's own identity and outranks
+        # the common-name lookup (see identity_sql). When it names a taxon the
+        # local taxonomy does not have, falling back to ``taxon_id``'s name
+        # would print the OTHER option's species and make the two choices
+        # indistinguishable in the dialog.
+        if option['source_taxon_id'] is not None:
+            row = db.conn.execute(
+                'SELECT name, common_name FROM taxa WHERE inat_id = ?',
+                (option['source_taxon_id'],),
+            ).fetchone()
+        elif option['taxon_id'] is not None:
+            row = db.conn.execute(
+                'SELECT name, common_name FROM taxa WHERE id = ?',
+                (option['taxon_id'],),
+            ).fetchone()
+        else:
+            row = None
+        option['taxon_name'] = row['name'] if row else None
+        option['taxon_common_name'] = row['common_name'] if row else None
+
+def _coerce_coordinate(value, limit, label):
+    if type(value) is bool or not isinstance(value, (int, float)):
+        raise ValueError(f'Enter a numeric {label}.')
+    if not -limit <= float(value) <= limit:
+        raise ValueError(f'{label.capitalize()} must be between -{limit:g} and {limit:g}.')
+    return float(value)
+
+
+def _resolve_merge_fields(records, options, overrides):
+    """Fold the chooser's picks over the defaults, or report what must be asked.
+
+    Defaults reproduce the pre-chooser behavior: the retained row's own
+    identity wins and a value it lacks is filled from another selected row.
+    A field where two rows each carry a DIFFERENT real value has no honest
+    default -- ``requires_choice`` names it so the dialog asks instead of
+    picking one silently.
+    """
+    target = records[0]
+    resolved, requires_choice = {}, []
+
+    name = overrides.get('name', None)
+    if name is None:
+        resolved['name'] = target['name']
+    else:
+        if not isinstance(name, str):
+            raise ValueError('Enter a name for the combined keyword.')
+        resolved['name'] = normalize_keyword_display(name)
+        if not resolved['name']:
+            raise ValueError('Enter a name for the combined keyword.')
+
+    if 'parent_id' in overrides:
+        chosen = overrides['parent_id']
+        if chosen is not None and type(chosen) is not int:
+            raise ValueError('Choose one of the offered parent paths.')
+        if chosen not in {option['parent_id'] for option in options['parent']}:
+            raise ValueError('Choose one of the offered parent paths.')
+        resolved['parent_id'] = chosen
+    else:
+        resolved['parent_id'] = target['parent_id']
+
+    if 'type' in overrides:
+        chosen = overrides['type']
+        # Reject non-string values before the membership test — ``value in set``
+        # raises ``TypeError`` on an unhashable dict or list, and the route
+        # catches only ``ValueError``, so a malformed payload would otherwise
+        # come out as a 500 instead of the intended 400.
+        if not isinstance(chosen, str):
+            raise ValueError('Choose one of the selected keywords’ types.')
+        if chosen not in {option['value'] for option in options['type']}:
+            raise ValueError('Choose one of the selected keywords’ types.')
+        resolved['type'] = chosen
+    else:
+        resolved['type'] = target['type']
+
+    if 'place_id' in overrides:
+        chosen = overrides['place_id']
+        # Same guard: an unhashable dict or list would raise ``TypeError`` in
+        # the membership test and bypass the ``ValueError`` -> 400 handler.
+        if chosen is not None and not isinstance(chosen, str):
+            raise ValueError('Choose one of the selected keywords’ linked places, or no link.')
+        if chosen is not None and chosen not in {o['place_id'] for o in options['place']}:
+            raise ValueError('Choose one of the selected keywords’ linked places, or no link.')
+        resolved['place_id'] = chosen
+    elif len(options['place']) > 1:
+        resolved['place_id'] = None
+        requires_choice.append('place')
+    else:
+        resolved['place_id'] = options['place'][0]['place_id'] if options['place'] else None
+
+    if 'species' in overrides:
+        chosen = overrides['species']
+        if chosen is None:
+            resolved['taxon_id'] = resolved['source_taxon_id'] = None
+        else:
+            match = next((o for o in options['species']
+                          if o['taxon_id'] == chosen.get('taxon_id')
+                          and o['source_taxon_id'] == chosen.get('source_taxon_id')),
+                         None) if isinstance(chosen, dict) else None
+            if match is None:
+                raise ValueError('Choose one of the selected keywords’ species links, or no link.')
+            resolved['taxon_id'] = match['taxon_id']
+            resolved['source_taxon_id'] = match['source_taxon_id']
+    elif len(options['species']) > 1:
+        resolved['taxon_id'] = resolved['source_taxon_id'] = None
+        requires_choice.append('species')
+    elif options['species']:
+        resolved['taxon_id'] = options['species'][0]['taxon_id']
+        resolved['source_taxon_id'] = options['species'][0]['source_taxon_id']
+    else:
+        resolved['taxon_id'] = resolved['source_taxon_id'] = None
+
+    if 'coordinates' in overrides:
+        chosen = overrides['coordinates']
+        if chosen is None:
+            resolved['latitude'] = resolved['longitude'] = None
+        elif isinstance(chosen, dict):
+            resolved['latitude'] = _coerce_coordinate(chosen.get('latitude'), 90.0, 'latitude')
+            resolved['longitude'] = _coerce_coordinate(chosen.get('longitude'), 180.0, 'longitude')
+        else:
+            raise ValueError('Enter both a latitude and a longitude, or clear the coordinates.')
+    else:
+        # Coordinates travel as a pair, and a retained place owns its own
+        # point. Borrowing another row's coordinates for a chosen place would
+        # put that Google place somewhere it isn't -- and the merge exports
+        # the result as GPS to every tagged photo. A place with no
+        # coordinates of its own therefore resolves to none, not to a
+        # neighbour's; only an unlinked result falls back.
+        if resolved['place_id'] is not None:
+            picked = next((o for o in options['place']
+                           if o['place_id'] == resolved['place_id']
+                           and o['latitude'] is not None and o['longitude'] is not None), None)
+        else:
+            picked = next((o for o in options['coordinates']), None)
+        resolved['latitude'] = picked['latitude'] if picked else None
+        resolved['longitude'] = picked['longitude'] if picked else None
+
+    return resolved, requires_choice
+
+
+def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
+    """Validate an explicit merge and describe its catalog-wide effects.
+
+    The retained row's attributes are defaults, not fixed points: ``overrides``
+    carries the dialog's per-field picks (name, parent path, type, linked
+    place, species link, coordinates) so a user can keep one row's spelling
+    alongside another row's place. Selections whose subtrees overlap are the
+    one arrangement still refused outright -- merging an ancestor into its own
+    descendant would leave the survivor parented to itself.
+    """
     if (not isinstance(keyword_ids, list) or not 2 <= len(keyword_ids) <= 100
             or any(type(k) is not int or k <= 0 for k in keyword_ids)
             or len(set(keyword_ids)) != len(keyword_ids)
             or type(target_id) is not int or target_id not in keyword_ids):
         raise ValueError('Select between 2 and 100 different keywords and choose one to keep.')
+    if overrides is None:
+        overrides = {}
+    if not isinstance(overrides, dict) or not set(overrides) <= {
+            'name', 'parent_id', 'type', 'place_id', 'species', 'coordinates'}:
+        raise ValueError('Unrecognized merge settings. Refresh the dialog and try again.')
     selected = set(keyword_ids)
     visible = {r['id'] for r in db.get_keyword_tree()}
     if not selected <= visible:
@@ -397,19 +905,69 @@ def preview_keyword_merge(db, keyword_ids, target_id):
     paths = keyword_paths(rows)
     target = by_id[target_id]
     sources = [by_id[k] for k in sorted(selected - {target_id})]
-    parents = {r['parent_id'] for r in rows}
-    if any(r['id'] in parents for r in sources):
-        raise ValueError('A keyword being merged has child keywords. Select individual leaf keywords instead.')
+    records = [target, *sources]
+    children = _child_index(rows)
+
+    if any(selected & _subtree_ids(children, source['id']) for source in sources):
+        # A merged-away row hands its children to the survivor. When one of
+        # those children is the survivor itself, that writes the survivor as
+        # its own parent; when it is another selected row, the child is
+        # absorbed before its own turn comes and its photos land somewhere
+        # the preview never promised. Keeping the outermost row is safe --
+        # the target may contain sources, only the reverse is refused.
+        raise ValueError('A keyword you are merging contains another selected keyword. '
+                         'Keep the outermost one, or merge the inner branch first.')
+
+    species_bearing = {bool(r['is_species'] or r['type'] == 'taxonomy') for r in records}
+    if len(species_bearing) > 1:
+        raise ValueError('Species keywords cannot be merged with other keyword types.')
+    is_species_keyword = species_bearing.pop()
+
+    valid_parents = ({r['parent_id'] for r in records}
+                     - selected - _subtree_ids(children, target_id))
+    options = _merge_options(db, records, paths, valid_parents)
+    _label_species_options(db, options['species'])
+    resolved, requires_choice = _resolve_merge_fields(records, options, overrides)
+
+    # Every selected row agreed on this above, so the merge cannot change it.
+    # Carrying it explicitly keeps a legacy ``general, is_species=1`` survivor
+    # matched by species queries even when a retype cleared the flag mid-merge.
+    resolved['is_species'] = 1 if is_species_keyword else 0
+
+    notes = []
+    if resolved['type'] != 'location' and resolved['place_id'] is not None:
+        resolved['place_id'] = None
+        notes.append('A Google place link only applies to location keywords, '
+                     'so the combined keyword will keep no linked place.')
+    if resolved['type'] == 'location' and '|' in resolved['name']:
+        raise ValueError('A location name may not contain "|" — XMP keyword '
+                         'hierarchies reserve it as the level delimiter.')
+
+    # Replay the write path's reparenting so the preview can name each
+    # descendant's fate and the merge can queue its sidecar path rewrite.
+    nodes = {r['id']: dict(r) for r in rows}
+    plan = {'removed': set(), 'renames': {}, 'children': [], 'metadata_folded': set()}
     for source in sources:
-        if (source['type'] != target['type']
-                and not (source['type'] == 'general' and target['type'] == 'location')):
-            raise ValueError('Choose keywords of the same type, or merge general keywords into a location.')
-        if bool(source['is_species'] or source['type'] == 'taxonomy') != bool(
-                target['is_species'] or target['type'] == 'taxonomy'):
-            raise ValueError('Species keywords cannot be merged with other keyword types.')
-        for field in ('taxon_id', 'source_taxon_id', 'place_id'):
-            if source[field] is not None and source[field] != target[field]:
-                raise ValueError('Linked places or species must match. Choose the linked keyword to keep; different links cannot be combined.')
+        _plan_subtree_merge(db, nodes, children, source['id'], target_id, plan)
+    nodes[target_id]['name'] = resolved['name']
+    nodes[target_id]['parent_id'] = resolved['parent_id']
+    surviving = [node for node in nodes.values() if node['id'] not in plan['removed']]
+    # SQLite's UNIQUE(name, parent_id) is BINARY, so it would happily store
+    # `foo` beside an unselected `Foo` — that permissiveness is the bug, not
+    # the guard. Every dedup and lookup path in the app matches on the folded
+    # key, so the pair would read as a duplicate forever after and imports
+    # could not tell them apart. Compare on the same key those paths use.
+    resolved_key = keyword_match_key(resolved['name'])
+    clash = next((n for n in surviving
+                  if n['id'] != target_id
+                  and keyword_match_key(n['name']) == resolved_key
+                  and n['parent_id'] == resolved['parent_id']), None)
+    if clash is not None:
+        raise ValueError('Another keyword already sits at that name and parent path. '
+                         'Choose a different name, a different parent, or select that keyword too.')
+    new_paths = keyword_paths(surviving)
+    path_changes = {n['id']: (paths[n['id']], new_paths[n['id']])
+                    for n in surviving if new_paths[n['id']] != paths[n['id']]}
 
     placeholders = ','.join('?' for _ in keyword_ids)
     tags = [dict(r) for r in db.conn.execute(
@@ -422,61 +980,194 @@ def preview_keyword_merge(db, keyword_ids, target_id):
             WHERE keyword_id IN (SELECT id FROM descendants)
             ORDER BY photo_id, keyword_id''', keyword_ids,
     )]
-    if target['type'] == 'location' and target['place_id']:
-        # Ancestors/descendants of the retained place are compatible; a second
-        # independent linked place on any affected photo is not.
-        compatible = set(selected)
-        parent_id = target['parent_id']
-        while parent_id is not None and parent_id not in compatible:
-            compatible.add(parent_id)
-            parent_id = by_id[parent_id]['parent_id']
-        children = defaultdict(list)
-        for row in rows:
-            children[row['parent_id']].append(row['id'])
-        pending = list(children[target_id])
-        while pending:
-            kid = pending.pop()
-            if kid not in compatible:
-                compatible.add(kid)
-                pending.extend(children[kid])
-        others = db.conn.execute(
-            f"""SELECT DISTINCT k.id FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id
-                WHERE k.type = 'location' AND k.place_id IS NOT NULL
-                AND pk.photo_id IN (SELECT photo_id FROM photo_keywords
-                                   WHERE keyword_id IN ({placeholders}))""", keyword_ids,
-        )
-        if any(r['id'] not in compatible for r in others):
-            raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
-    for source in sources:
-        alias = db.conn.execute('SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
-                                (path_key(paths[source['id']]),)).fetchone()
-        if alias and alias['keyword_id'] not in selected:
-            raise ValueError('An imported path already resolves to a different keyword.')
+    # After the merge, every photo this merge touches gets a ``location``
+    # resync, and that resync exports ONE place. Two linked places on a photo
+    # are fine when one contains the other -- a trail inside a park inside a
+    # county is a single chain, and that is what a place hierarchy looks like.
+    # Two SIBLING places are two different locations, and the export would
+    # pick between them arbitrarily. A membership set keyed on "somewhere
+    # under the retained root" cannot tell those apart, so the check walks
+    # each affected photo's own post-merge places instead.
+    # ...but only when this merge touches a location at all. A merge of
+    # general keywords changes no location row and queues no resync, so a
+    # photo that already carried two unrelated location tags is in a state
+    # this operation neither created nor disturbs -- refusing it would block
+    # unrelated work over pre-existing data.
+    # ...and only for the photos that will actually receive one. A row whose
+    # own type is not location gets a hierarchy rewrite and nothing else, so
+    # a photo carrying only such a row keeps whatever locations it already
+    # had, untouched by this merge. Checking every photo under the selected
+    # roots refused merges over exactly that pre-existing state.
+    def _is_location(kid):
+        return kid in by_id and by_id[kid]['type'] == 'location'
 
-    # Keep coordinate pairs together; never synthesize a point from two rows.
-    coordinate_record = next((r for r in [target, *sources]
-                              if r['latitude'] is not None and r['longitude'] is not None), None)
+    before = ({r['id']: r['parent_id'] for r in rows},
+              {r['id']: r['type'] for r in rows},
+              {r['id']: r['name'] for r in rows})
+    after_parents = {n['id']: n['parent_id'] for n in surviving}
+    after_types = {n['id']: n['type'] for n in surviving}
+    after_types[target_id] = resolved['type']
+    after_names = {n['id']: n['name'] for n in surviving}
+
+    def _chain_changed(kid):
+        return (_exported_location_chain(kid, *before)
+                != _exported_location_chain(kid, after_parents, after_types, after_names))
+
+    # A moved row only needs the location treatment when the path it
+    # EXPORTS changes. Relocating a location that sits under a general
+    # ancestor rewrites its textual path while leaving its exported chain
+    # identical, so neither a resync nor a rival-place check is warranted.
+    location_change_ids = {kid for kid in
+                           ({entry['id'] for entry in plan['children']}
+                            | set(path_changes))
+                           if _is_location(kid) and _chain_changed(kid)}
+    location_change_ids |= {kid for kid in
+                            ({source['id'] for source in sources}
+                             | set(plan['metadata_folded']))
+                            if _is_location(kid)}
+    if resolved['type'] == 'location' or _is_location(target_id) or any(
+            source['type'] == 'location' for source in sources):
+        # Every source-tagged photo becomes a target-tagged photo, and the
+        # resync loop runs after the merge, so those photos get the retained
+        # row's location change even when the source itself was general.
+        location_change_ids.add(target_id)
+        location_change_ids |= {source['id'] for source in sources}
+    if (_is_location(target_id)) != (resolved['type'] == 'location'):
+        # Crossing the boundary restrands every location descendant, which
+        # is what merge_keywords walks the retained subtree for.
+        location_change_ids |= {
+            kid for kid in _subtree_ids(_child_index(surviving), target_id)
+            if _is_location(kid)}
+    touches_location = bool(location_change_ids)
+    landing = {source['id']: target_id for source in sources}
+    landing.update({entry['id']: entry['into_id'] for entry in plan['children']
+                    if entry['outcome'] == 'merge'})
+    # A source may sit under the target, which the overlap guard allows. A
+    # child of an earlier source can therefore collapse into a LATER source,
+    # which is itself removed when its turn comes -- so the recorded
+    # ``into_id`` names a row that will not exist. Follow the chain to the
+    # row that actually survives, or the alias write hits the keywords
+    # foreign key and the queued rewrite carries a null target path.
+    for entry in plan['children']:
+        if entry['outcome'] == 'merge':
+            entry['into_id'] = _resolve_landing(entry['id'], landing)
+    parent_of = {node['id']: node['parent_id'] for node in surviving}
+    post_types = {node['id']: node['type'] for node in surviving}
+    post_types[target_id] = resolved['type']
+    conflicted = touches_location and _photos_left_with_rival_places(
+        db, sorted(location_change_ids), landing, parent_of, post_types)
+    if conflicted:
+        raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
+    # Every path this merge retires gets aliased to wherever its photos land,
+    # so every one of them can steal a durable alias an unrelated keyword
+    # already owns. Check them all, not just the directly selected sources:
+    # the survivor's old path and each moved or collapsed descendant path is
+    # written with INSERT OR REPLACE further down.
+    # Sources are recorded against the TARGET, which is where their photos
+    # actually land. Recording each against its own id made two case-variant
+    # source paths look like one key wanting two destinations, so both
+    # aliases were suppressed even though they agree.
+    retiring = [(paths[source['id']], target_id) for source in sources]
+    retiring += [(old_path, int(kid))
+                 for kid, (old_path, _) in path_changes.items()]
+    retiring += [(paths[entry['id']], entry['into_id'])
+                 for entry in plan['children'] if entry['outcome'] == 'merge']
+    # ``path_key`` folds case, so two retired paths that differ only in case
+    # share one key while landing on different rows -- `Trip A > Bird` and
+    # `trip a > Bird` each disambiguated under the survivor. INSERT OR
+    # REPLACE would let one silently win and send imports of the other
+    # hierarchy to the wrong row, so neither is written.
+    planned = defaultdict(set)
+    for retired_path, destination_id in retiring:
+        planned[path_key(retired_path)].add(destination_id)
+    ambiguous_alias_keys = {key for key, dests in planned.items() if len(dests) > 1}
+    survivors = {n['id'] for n in surviving}
+    for retired_path, destination_id in retiring:
+        alias = db.conn.execute('SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
+                                (path_key(retired_path),)).fetchone()
+        if alias is None or alias['keyword_id'] in selected:
+            continue
+        # An alias already pointing at the row this path will resolve to is
+        # the state we are about to write, not a conflict.
+        if alias['keyword_id'] == destination_id or alias['keyword_id'] not in survivors:
+            continue
+        raise ValueError('An imported path already resolves to a different keyword.')
+
+    subtree_counts = {}
+    for entry in plan['children']:
+        kid = entry['id']
+        subtree = [kid, *_subtree_ids(_child_index(rows), kid)]
+        subtree_counts[kid] = db.conn.execute(
+            'SELECT COUNT(DISTINCT photo_id) FROM photo_keywords WHERE keyword_id IN '
+            f'({",".join("?" for _ in subtree)})', subtree,
+        ).fetchone()[0]
+    for entry in plan['children']:
+        entry['photo_count'] = subtree_counts[entry['id']]
+        entry['from_path'] = paths[entry['id']]
+        # A child that collapses into an existing sibling has no path of its
+        # own afterwards; the honest destination is the sibling it lands in.
+        entry['to_path'] = (new_paths.get(entry['id'])
+                            or new_paths.get(entry['into_id']))
+
     result = {
         'target': {**target, 'path': paths[target_id]},
         'sources': [{**r, 'path': paths[r['id']]} for r in sources],
         'combined_count': len({t['photo_id'] for t in tags}),
-        'latitude': coordinate_record['latitude'] if coordinate_record else None,
-        'longitude': coordinate_record['longitude'] if coordinate_record else None,
+        'latitude': resolved['latitude'],
+        'longitude': resolved['longitude'],
+        'resolved': {**resolved,
+                     'path': new_paths[target_id],
+                     'parent_path': new_paths[target_id][:-1]},
+        'options': options,
+        'requires_choice': requires_choice,
+        'children': plan['children'],
+        'path_changes': {str(k): v for k, v in path_changes.items()},
+        # Where every surviving row actually lives after the merge, so the
+        # alias writes can tell a retired path from a live one.
+        'live_paths': {n['id']: new_paths[n['id']] for n in surviving},
+        'ambiguous_alias_keys': sorted(ambiguous_alias_keys),
+        'removed_count': len(plan['removed']),
+        # Location keywords that will absorb a collapsing sibling's place_id
+        # or coordinates. Their photos need a ``location`` resync even though
+        # the row itself does not move -- the catalog gains new location
+        # metadata their sidecars still lack.
+        'metadata_folded_ids': sorted(plan['metadata_folded']),
+        # The rows whose EXPORTED location actually moves, so the preview's
+        # guard and the merge's resync agree on which photos are affected.
+        'location_change_ids': sorted(location_change_ids),
+        'notes': notes,
     }
-    result['preview_token'] = hashlib.sha256(
-        json.dumps([result, tags], sort_keys=True).encode()
-    ).hexdigest()
+    if not requires_choice:
+        result['preview_token'] = hashlib.sha256(
+            json.dumps([result, tags], sort_keys=True).encode()
+        ).hexdigest()
     return result
 
 
-def merge_keywords(db, keyword_ids, target_id, preview_token):
+def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
     """Merge a reviewed selection atomically, including pending sidecar edits."""
     with db.conn:
         db.conn.execute('UPDATE db_meta SET value = value WHERE 0')
-        preview = preview_keyword_merge(db, keyword_ids, target_id)
+        preview = preview_keyword_merge(db, keyword_ids, target_id, overrides)
+        if preview['requires_choice']:
+            raise ValueError('Choose which linked place or species the combined keyword keeps.')
         if preview_token != preview['preview_token']:
             raise ValueError('The selected keywords changed. Review the updated preview before merging.')
         target = preview['target']
+        resolved = preview['resolved']
+        # A child that collapses into an existing sibling loses its
+        # photo_keywords rows to that sibling, so the photos carrying it have
+        # to be read before the merge runs.
+        ambiguous_keys = set(preview['ambiguous_alias_keys'])
+        # Same ownership rule the moved-descendant aliases use: a path some
+        # surviving row still lives at belongs to that row. Case folding
+        # makes this reachable for direct sources too -- a source `Trip A`
+        # and an unselected `trip a` share one key.
+        live_owner = {path_key(p): kid for kid, p in preview['live_paths'].items()}
+        collapsed = _collapsing_child_tags(db, preview)
+        # Same reason: a child kept under a disambiguated name still has its
+        # OLD spelling in the sidecars of the photos carrying it.
+        renamed_tags = _renamed_child_tags(db, preview)
         affected = []
         for source in preview['sources']:
             affected.extend((dict(r), source) for r in db.conn.execute(
@@ -488,20 +1179,24 @@ def merge_keywords(db, keyword_ids, target_id, preview_token):
             # Remember every merged path, including same-name leaves under
             # different parents. Existing sidecars/catalogs can retain that
             # hierarchy even after a flat keyword_add has been synchronized.
-            db.conn.execute(
-                'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
-                (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
-            )
+            source_key = path_key(source['path'])
+            owner = live_owner.get(source_key)
+            if source_key not in ambiguous_keys and owner in (None, target_id):
+                db.conn.execute(
+                    'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
+                    (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
+                )
             db._merge_keyword_into(source['id'], target_id, pending_source_only=True)
-        db.conn.execute('UPDATE keywords SET latitude = ?, longitude = ? WHERE id = ?',
-                        (preview['latitude'], preview['longitude'], target_id))
+        _apply_merge_overrides(db, target_id, resolved)
+        _queue_survivor_rename(db, target_id, target['name'], resolved['name'])
         for row, source in affected:
             pid, ws = row['photo_id'], row['workspace_id']
             old_name = source['name']
             db.queue_change(pid, 'keyword_merge', json.dumps({
-                'source_path': source['path'], 'target_id': target_id, 'target_path': target['path'],
+                'source_path': source['path'], 'target_id': target_id,
+                'target_path': resolved['path'],
             }, sort_keys=True), workspace_id=ws, _commit=False)
-            if old_name != target['name']:
+            if old_name != resolved['name']:
                 # Only remove the old flat name if another surviving keyword
                 # on this photo does not still need it.
                 still_used = db.conn.execute(
@@ -510,14 +1205,40 @@ def merge_keywords(db, keyword_ids, target_id, preview_token):
                 )
                 if not any(keyword_match_key(r['name']) == keyword_match_key(old_name) for r in still_used):
                     db.queue_change(pid, 'keyword_remove_flat', old_name, workspace_id=ws, _commit=False)
-            db.remove_pending_changes(pid, 'keyword_remove', target['name'], workspace_id=ws, _commit=False)
+            db.remove_pending_changes(pid, 'keyword_remove', resolved['name'], workspace_id=ws, _commit=False)
             db.clear_equivalent_flat_removals(
-                [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': target['name']}], _commit=False,
+                [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}], _commit=False,
             )
-            db.queue_change(pid, 'keyword_add', target['name'], workspace_id=ws, _commit=False)
-        if target['type'] == 'location':
-            # Filling previously missing coordinates also affects photos that
-            # already had the retained keyword before the merge.
+            db.queue_change(pid, 'keyword_add', resolved['name'], workspace_id=ws, _commit=False)
+        _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
+                                     set(preview['location_change_ids']))
+        _queue_disambiguated_child_renames(db, preview, renamed_tags)
+        # A retained location child that gained place_id/coords via
+        # ``_merge_keyword_into``'s COALESCE fold has photos whose sidecars
+        # still hold the old (or empty) location. ``_queue_moved_subtree_changes``
+        # only touches path-changed survivors and the collapsed child's
+        # photos, so a photo tagged solely with the retained sibling would
+        # otherwise keep stale GPS and location metadata in its sidecar.
+        for folded_id in preview.get('metadata_folded_ids', []):
+            for row in db.conn.execute(
+                'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
+                'JOIN photos p ON p.id = pk.photo_id '
+                'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+                'WHERE pk.keyword_id = ?', (folded_id,),
+            ).fetchall():
+                db.remove_pending_changes(row['photo_id'], 'location',
+                                          workspace_id=row['workspace_id'], _commit=False)
+                db.queue_change(row['photo_id'], 'location', 'effective',
+                                workspace_id=row['workspace_id'], _commit=False)
+        if (resolved['type'] == 'location' or target['type'] == 'location'
+                or any(s['type'] == 'location' for s in preview['sources'])):
+            # Filling previously missing coordinates, or moving the retained
+            # place in the hierarchy, also affects photos that already had the
+            # retained keyword before the merge. A merged-away LOCATION source
+            # counts even when the result is general: its photos (now on the
+            # survivor) still carry that source's vireo location marker,
+            # hierarchy and coordinates in their sidecars, and only a
+            # ``location`` resync clears them.
             for row in db.conn.execute(
                 'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
                 'JOIN photos p ON p.id = pk.photo_id '
@@ -526,4 +1247,251 @@ def merge_keywords(db, keyword_ids, target_id, preview_token):
             ).fetchall():
                 db.remove_pending_changes(row['photo_id'], 'location', workspace_id=row['workspace_id'], _commit=False)
                 db.queue_change(row['photo_id'], 'location', 'effective', workspace_id=row['workspace_id'], _commit=False)
+        if (target['type'] == 'location' and resolved['type'] != 'location'
+                and target['name'] == resolved['name']):
+            # Demoting the retained row out of `location` without renaming
+            # it: `_queue_survivor_rename` returns early on an unchanged
+            # name, so nothing queues the term, while the resync above lets
+            # `remove_vireo_location_keywords` strip the marker-owned flat
+            # keyword. The sidecar would lose a word the database still
+            # assigns. Same case `api_update_keyword` handles for a plain
+            # location->non-location retype.
+            for row in db.conn.execute(
+                'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
+                'JOIN photos p ON p.id = pk.photo_id '
+                'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+                'WHERE pk.keyword_id = ?', (target_id,),
+            ).fetchall():
+                db.queue_change(row['photo_id'], 'keyword_add', resolved['name'],
+                                workspace_id=row['workspace_id'], _commit=False)
+        if (target['type'] == 'location') != (resolved['type'] == 'location'):
+            # ``get_photo_location_paths`` stops walking at the first
+            # non-location ancestor, so retyping the retained parent across
+            # the location boundary shifts the effective exported chain of
+            # every location descendant under it -- even though those
+            # descendants' textual paths are unchanged and
+            # ``_queue_moved_subtree_changes`` therefore skipped them. Cover
+            # photos tagged directly with any location row in the retained
+            # subtree here; the block above already handled ``target_id``.
+            for row in db.conn.execute(
+                '''WITH RECURSIVE subtree(id) AS (
+                       SELECT id FROM keywords WHERE parent_id = ?
+                       UNION
+                       SELECT k.id FROM keywords k
+                       JOIN subtree s ON k.parent_id = s.id
+                   )
+                   SELECT DISTINCT pk.photo_id, wf.workspace_id
+                   FROM photo_keywords pk
+                   JOIN keywords k ON k.id = pk.keyword_id
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE pk.keyword_id IN (SELECT id FROM subtree)
+                     AND k.type = 'location' ''',
+                (target_id,),
+            ).fetchall():
+                db.remove_pending_changes(row['photo_id'], 'location',
+                                          workspace_id=row['workspace_id'], _commit=False)
+                db.queue_change(row['photo_id'], 'location', 'effective',
+                                workspace_id=row['workspace_id'], _commit=False)
     return preview
+
+
+def _apply_merge_overrides(db, target_id, resolved):
+    """Write the chooser's resolved identity onto the survivor.
+
+    Runs after every ``_merge_keyword_into`` so the sources are already gone:
+    the partial ``UNIQUE(place_id) WHERE place_id IS NOT NULL`` index would
+    otherwise reject moving a link that a still-present source row holds.
+
+    Diffed against the survivor's CURRENT row rather than its pre-merge
+    snapshot, because the merges just mutated it -- folding in coordinates, a
+    place link, a taxon, and (when the types differed) clearing ``is_species``
+    to stop a retyped row leaking into species queries. Comparing against the
+    snapshot would call those fields unchanged and leave the intermediate
+    state on disk: a row with a taxon link that ``is_species = 1 OR type =
+    'taxonomy'`` no longer matches.
+    """
+    current = db.conn.execute(
+        'SELECT name, parent_id, type, place_id, taxon_id, source_taxon_id, '
+        'latitude, longitude, is_species FROM keywords WHERE id = ?', (target_id,),
+    ).fetchone()
+    changed = {field: resolved[field] for field in
+               ('name', 'parent_id', 'type', 'place_id', 'taxon_id',
+                'source_taxon_id', 'latitude', 'longitude', 'is_species')
+               if resolved[field] != current[field]}
+    if not changed:
+        return
+    if 'name' in changed:
+        # Keep every dependent name string (pending sidecar edits, species
+        # curation) in lockstep with the row, exactly as a rename would.
+        db._rename_keyword_dependents(target_id, current['name'], changed['name'])
+    assignments = ', '.join(f'{field} = ?' for field in changed)
+    db.conn.execute(f'UPDATE keywords SET {assignments} WHERE id = ?',
+                    [*changed.values(), target_id])
+
+
+
+def _queue_survivor_rename(db, target_id, old_name, new_name):
+    """Re-export photos that already carried the survivor under a new spelling.
+
+    The source loop only covers photos tagged with a row the merge deleted.
+    When the chooser renames the retained row, photos that were already on it
+    keep their tag but their sidecar still holds the retired word, so they
+    need the same flat remove/add a plain rename would queue.
+    """
+    if old_name == new_name:
+        return
+    rows = db.conn.execute(
+        'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
+        'JOIN photos p ON p.id = pk.photo_id '
+        'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+        'WHERE pk.keyword_id = ?', (target_id,),
+    ).fetchall()
+    for row in rows:
+        pid, ws = row['photo_id'], row['workspace_id']
+        still_used = db.conn.execute(
+            'SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id '
+            'WHERE pk.photo_id = ? AND pk.keyword_id != ?', (pid, target_id),
+        )
+        if not any(keyword_match_key(r['name']) == keyword_match_key(old_name)
+                   for r in still_used):
+            db.queue_change(pid, 'keyword_remove_flat', old_name,
+                            workspace_id=ws, _commit=False)
+        db.queue_change(pid, 'keyword_add', new_name, workspace_id=ws, _commit=False)
+
+def _collapsing_child_tags(db, preview):
+    """Photos carrying a child that is about to collapse into a sibling.
+
+    Read before the merge, because ``_merge_keyword_into`` moves these
+    ``photo_keywords`` rows onto the surviving sibling and deletes the child.
+    """
+    collapsing = {child['id']: child for child in preview['children']
+                  if child['outcome'] == 'merge'}
+    if not collapsing:
+        return []
+    placeholders = ','.join('?' for _ in collapsing)
+    rows = db.conn.execute(
+        'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id, k.type '
+        'FROM photo_keywords pk '
+        'JOIN keywords k ON k.id = pk.keyword_id '
+        'JOIN photos p ON p.id = pk.photo_id '
+        'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+        f'WHERE pk.keyword_id IN ({placeholders})', list(collapsing),
+    ).fetchall()
+    return [(dict(row), collapsing[row['keyword_id']]) for row in rows]
+
+
+
+def _renamed_child_tags(db, preview):
+    """Photos carrying a child the merge will keep under a new name."""
+    renamed = {child['id']: child for child in preview['children']
+               if child['outcome'] == 'rename'}
+    if not renamed:
+        return []
+    placeholders = ','.join('?' for _ in renamed)
+    rows = db.conn.execute(
+        'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id FROM photo_keywords pk '
+        'JOIN photos p ON p.id = pk.photo_id '
+        'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+        f'WHERE pk.keyword_id IN ({placeholders})', list(renamed),
+    ).fetchall()
+    return [(dict(row), renamed[row['keyword_id']]) for row in rows]
+
+
+def _queue_disambiguated_child_renames(db, preview, renamed_tags):
+    """Carry a collision rename out to the flat ``dc:subject`` keyword.
+
+    A child kept under a suffixed name is renamed as far as the user is
+    concerned, so its photos need the same flat remove/add an ordinary rename
+    queues. ``_queue_moved_subtree_changes`` already rewrote the hierarchy for
+    these rows; without this the flat leaf keeps the retired spelling and a
+    rescan reads the row back under a name the database no longer has.
+    """
+    for row, child in renamed_tags:
+        pid, ws = row['photo_id'], row['workspace_id']
+        # Another surviving keyword on the photo -- the twin this row was
+        # renamed to avoid, typically -- may still need the old flat word.
+        still_used = db.conn.execute(
+            'SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id '
+            'WHERE pk.photo_id = ? AND pk.keyword_id != ?', (pid, child['id']),
+        )
+        if not any(keyword_match_key(r['name']) == keyword_match_key(child['name'])
+                   for r in still_used):
+            db.queue_change(pid, 'keyword_remove_flat', child['name'],
+                            workspace_id=ws, _commit=False)
+        db.queue_change(pid, 'keyword_add', child['new_name'],
+                        workspace_id=ws, _commit=False)
+
+def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
+                                 location_change_ids):
+    """Rewrite sidecar hierarchies for every descendant the merge relocated.
+
+    Reparenting a descendant leaves its flat ``dc:subject`` leaf alone but
+    invalidates the ``lr:hierarchicalSubject`` path (and, for locations, the
+    ``vireo:locationKeywords`` marker) that names its old ancestors. A
+    ``keyword_merge`` change carries the old path to ``sync_to_xmp``, which
+    replaces it with the current one.
+
+    Two kinds of descendant need this. A row that survived under a new parent
+    points the change at itself. A row that collapsed into a same-named
+    sibling no longer exists, so its photos -- now the sibling's -- point at
+    the sibling instead; without this their sidecars keep the retired
+    hierarchy and a later rescan recreates the branch just merged away.
+    """
+    # The retained row counts as relocated too. When the chooser renames or
+    # reparents it, ``_queue_survivor_rename`` only rewrites the flat
+    # dc:subject word -- a photo tagged directly with it would keep the old
+    # lr:hierarchicalSubject path, which a later scan can rebuild from.
+    rewrites = {int(kid): (old_path, new_path, int(kid))
+                for kid, (old_path, new_path) in preview['path_changes'].items()}
+    for _, child in collapsed:
+        rewrites[child['id']] = (child['from_path'], child['to_path'], child['into_id'])
+    if not rewrites:
+        return
+    # A retired path can be some OTHER surviving row's live path -- rename the
+    # survivor into the slot a source just vacated and the moved-and-
+    # disambiguated child's old path is exactly where its twin now lives.
+    # ``resolve_import_path`` consults aliases before the live tree, so
+    # recording one here would send every future import of that twin's real
+    # hierarchy to the wrong row. The live row owns its own path; skip it.
+    live_paths = {path_key(p): kid for kid, p in preview['live_paths'].items()}
+    for old_path, _, destination_id in rewrites.values():
+        key = path_key(old_path)
+        owner = live_paths.get(key)
+        if owner is not None and owner != destination_id:
+            continue
+        if key in ambiguous_keys:
+            continue
+        db.conn.execute(
+            'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) '
+            'VALUES (?, ?, ?)',
+            (key, json.dumps(old_path, ensure_ascii=False), destination_id),
+        )
+    surviving = [kid for kid in rewrites if kid not in {c['id'] for _, c in collapsed}]
+    rows = []
+    if surviving:
+        placeholders = ','.join('?' for _ in surviving)
+        rows = [(dict(r), r['keyword_id']) for r in db.conn.execute(
+            'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id, k.type '
+            'FROM photo_keywords pk '
+            'JOIN keywords k ON k.id = pk.keyword_id '
+            'JOIN photos p ON p.id = pk.photo_id '
+            'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+            f'WHERE pk.keyword_id IN ({placeholders})', surviving,
+        ).fetchall()]
+    rows.extend((row, child['id']) for row, child in collapsed)
+    for row, kid in rows:
+        old_path, new_path, destination_id = rewrites[kid]
+        db.queue_change(row['photo_id'], 'keyword_merge', json.dumps({
+            'source_path': old_path, 'target_id': destination_id,
+            'target_path': new_path,
+        }, sort_keys=True), workspace_id=row['workspace_id'], _commit=False)
+        # Same set the preview's rival-place guard used, so the two agree on
+        # which rows really move their exported location. A location under a
+        # general ancestor keeps its exported chain through a reparent and
+        # needs the hierarchy rewrite above but no resync.
+        if kid in location_change_ids:
+            db.remove_pending_changes(row['photo_id'], 'location',
+                                      workspace_id=row['workspace_id'], _commit=False)
+            db.queue_change(row['photo_id'], 'location', 'effective',
+                            workspace_id=row['workspace_id'], _commit=False)

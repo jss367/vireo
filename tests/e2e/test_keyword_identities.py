@@ -109,7 +109,84 @@ def test_merge_toolbar_stays_visible_when_scrolled_and_preserves_coordinates(liv
     assert errors == []
 
 
-def test_merge_context_menu_linked_place_and_target_validation(live_server, page):
+
+def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(live_server, page):
+    """Two frontend hazards in the merge dialog's map and coordinate fields.
+
+    Keyword names arrive from imported XMP, and Leaflet renders a *string*
+    tooltip as HTML — so a name carrying markup would execute in the app's
+    origin on hover. And switching to a linked place that has no point must
+    clear the previous place's numbers: leaving them on screen means the next
+    keystroke in either box submits them as an override and pins the newly
+    chosen place to the old one's location.
+    """
+    db = live_server['db']
+    photos = live_server['data']['photos']
+    hostile = db.add_keyword('<img src=x onerror="window.__xssRan=1">', kw_type='location')
+    # A quote breaks out of an attribute value; escapeHtml serializes a text
+    # node and does not encode quotes, so only escapeAttr stops this one.
+    quoted = db.add_keyword('q" onfocus="window.__attrXss=1" autofocus x="',
+                            kw_type='location')
+    located = db.add_keyword('Overlook Point', kw_type='location')
+    coordless = db.add_keyword('Overlook Unmapped', kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'place-hostile', latitude = 48.10, "
+                    "longitude = 11.50 WHERE id = ?", (hostile,))
+    db.conn.execute("UPDATE keywords SET place_id = 'place-located', latitude = 48.20, "
+                    "longitude = 11.60 WHERE id = ?", (located,))
+    db.conn.execute("UPDATE keywords SET place_id = 'place-coordless' WHERE id = ?", (coordless,))
+    db.conn.commit()
+    for index, keyword in enumerate((hostile, located, coordless, quoted)):
+        db.tag_photo(photos[index % len(photos)], keyword)
+
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_server['url'] + '/keywords')
+    for keyword in (hostile, located, coordless, quoted):
+        page.locator(f'.kw-cb[data-id="{keyword}"]').check()
+    page.locator('#kwBulkMerge').click()
+    expect(page.locator('#kwMergeMap')).to_be_visible()
+
+    # The hostile name reaches the tooltip as text, never as markup.
+    page.wait_for_selector('#kwMergeMap .leaflet-marker-icon')
+    page.locator('#kwMergeMap .leaflet-marker-icon').first.hover()
+    expect(page.locator('.leaflet-tooltip')).to_be_visible()
+    assert page.evaluate("document.querySelectorAll('.leaflet-tooltip img').length") == 0
+    assert page.evaluate('window.__xssRan') is None
+
+    # ...and a quote in a keyword name must not escape an attribute value.
+    # The name chips and the radio values both interpolate into attributes.
+    page.wait_for_selector('.kw-merge-chip[data-name]')
+    assert page.evaluate('window.__attrXss') is None
+    assert page.evaluate(
+        "document.querySelectorAll('#kwMergeFields [onfocus],"
+        " #kwMergeFields [autofocus]').length") == 0
+
+    # The coordinate boxes must always show what the merge will really use.
+    # A chosen place owns its own point; a coordless one leaves none behind.
+    page.locator('input[name="kwMergePlace"][value="place-located"]').check()
+    expect(page.locator('#kwMergeLat')).to_have_value('48.2')
+    page.locator('input[name="kwMergePlace"][value="place-coordless"]').check()
+    expect(page.locator('#kwMergeLat')).to_have_value('')
+    expect(page.locator('#kwMergeLng')).to_have_value('')
+
+    # Unlinking is the case where the server DOES keep a fallback pair, so
+    # blank boxes would be a lie about what gets exported.
+    page.locator('input[name="kwMergePlace"][value=""]').check()
+    expect(page.locator('#kwMergePreview')).to_contain_text('Coordinates')
+    expect(page.locator('#kwMergeLat')).not_to_have_value('')
+    shown = page.locator('#kwMergeLat').input_value()
+    assert shown in ('48.1', '48.2'), shown
+    expect(page.locator('#kwMergePreview')).to_contain_text(shown)
+    assert errors == []
+
+def test_merge_context_menu_keeps_one_rows_name_and_the_others_place(live_server, page):
+    """Keeping the unlinked row used to be refused outright ("choose the
+    linked keyword to keep"). The chooser turns that into a decision: pick
+    the plain row to survive, say the result is a location, and it keeps its
+    own spelling and path with the other row's Google place. Retyping it back
+    to `general` drops the link, and the dialog says so rather than dropping
+    it quietly.
+    """
     db = live_server['db']
     photos = live_server['data']['photos']
     source = db.add_keyword('Whatcom Falls Park', kw_type='general')
@@ -119,6 +196,8 @@ def test_merge_context_menu_linked_place_and_target_validation(live_server, page
     })
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_server['url'] + '/keywords')
     page.locator('#kwSearch').fill('Whatcom')
     page.locator(f'.kw-cb[data-id="{source}"]').check()
@@ -127,12 +206,27 @@ def test_merge_context_menu_linked_place_and_target_validation(live_server, page
     page.locator('.vireo-ctx-item', has_text='Merge selected…').click()
     expect(page.locator('#kwMergeTarget')).to_have_value(str(target))
     expect(page.locator('#kwMergePreview')).to_contain_text('Bellingham → Whatcom Falls Park')
+
+    # Keeping the plain row is now allowed, and the dialog is explicit that a
+    # `general` result cannot carry the Google place.
     page.locator('#kwMergeTarget').select_option(str(source))
-    expect(page.locator('#kwMergeError')).to_be_visible()
-    expect(page.locator('#kwMergeConfirm')).to_be_disabled()
-    page.locator('#kwMergeTarget').select_option(str(target))
+    expect(page.locator('#kwMergeError')).to_be_hidden()
+    expect(page.locator('#kwMergePreview')).to_contain_text('keep no linked place')
+    expect(page.locator('#kwMergeConfirm')).to_be_enabled()
+
+    # Say it is a location and the link comes along with the chosen spelling.
+    page.locator('#kwMergeType').select_option('location')
+    expect(page.locator('#kwMergePreview')).to_contain_text('Keeps the Google place link')
+    expect(page.locator('#kwMergePreview')).not_to_contain_text('keep no linked place')
     expect(page.locator('#kwMergeConfirm')).to_be_enabled()
     page.locator('#kwMergeConfirm').click()
-    expect(page.locator('#kwBody tr')).to_have_count(1)
-    expect(page.locator('#kwBody tr .kw-linked-badge')).to_be_visible()
+
+    expect(page.locator(f'tr[data-id="{target}"]')).to_have_count(0)
+    expect(page.locator(f'tr[data-id="{source}"] .kw-linked-badge')).to_be_visible()
     assert db.get_assigned_photo_location(photos[0])['place_id'] == 'whatcom-falls'
+    survivor = db.conn.execute(
+        'SELECT name, type, place_id, parent_id FROM keywords WHERE id = ?', (source,)).fetchone()
+    assert (survivor['name'], survivor['type'], survivor['place_id']) == (
+        'Whatcom Falls Park', 'location', 'whatcom-falls')
+    assert survivor['parent_id'] is None
+    assert errors == []

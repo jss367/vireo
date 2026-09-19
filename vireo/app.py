@@ -8170,12 +8170,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return json_error('Expected a keyword selection and a keyword to keep.', 400)
+        overrides = body.get('overrides')
+        if overrides is not None and not isinstance(overrides, dict):
+            return json_error('Expected the merge settings as an object.', 400)
         try:
             args = (_get_db(), body.get('keyword_ids'), body.get('target_id'))
             if request.path.endswith('/merge-preview'):
-                result = preview_keyword_merge(*args)
+                result = preview_keyword_merge(*args, overrides)
             else:
-                result = merge_keywords(*args, body.get('preview_token'))
+                result = merge_keywords(*args, body.get('preview_token'), overrides)
         except ValueError as error:
             return json_error(str(error), 400)
         return jsonify(result)
