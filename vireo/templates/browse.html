@@ -6477,6 +6477,7 @@ var NUMERIC_OPS = ['is', 'is not', '>=', '<=', '>', '<', 'between'];
    silently produce zero matches. */
 var FIELD_OPS = {
   all:         ['equals'],
+  metadata:    ['contains', 'not_contains'],
   keyword:     ['is', 'is not', 'contains', 'not_contains'],
   species_count: NUMERIC_OPS,
   rating:      NUMERIC_OPS,
@@ -6506,6 +6507,7 @@ var FIELD_OPS = {
 };
 var FIELD_LABELS = {
   all: 'All Photos',
+  metadata: 'All metadata',
   keyword: 'Keyword',
   species_count: 'Species Count',
   rating: 'Rating',

@@ -28408,7 +28408,7 @@ def test_registry_declares_mutation_impact_for_every_field():
 
     assert moved_by(MUTATION_KEYWORD) == {
         "keyword", "species", "keyword_count", "species_count",
-        "life_list_uncounted", "has_species", "has_subject",
+        "life_list_uncounted", "has_species", "has_subject", "metadata",
         "has_location_keyword", "has_coord_location_keyword",
     }
     # Accepting a prediction writes a species keyword, but the accept path
@@ -28433,7 +28433,7 @@ def test_registry_declares_mutation_impact_for_every_field():
     # ``EXISTS`` predicate cannot change when a runner-up joins (Codex
     # review r4013497441, revising r4013378150).
     assert moved_by(MUTATION_PREDICTION) == {
-        "prediction_status", "prediction_confidence"
+        "prediction_status", "prediction_confidence", "metadata"
     }
     assert moved_by(MUTATION_WILDLIFE) == {"wildlife_excluded"}
 
