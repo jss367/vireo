@@ -1048,3 +1048,59 @@ def test_sort_change_keeps_a_huge_stack_inside_the_lookup_limit(
         burst_ids
     ), "the selection was dropped"
     assert _ids_on_screen(page, burst_ids), "the stack is off screen"
+
+
+def test_expression_reload_asks_past_the_first_lookup_of_candidates(
+    live_server, page,
+):
+    """Frames past the first lookup are asked about, not dropped.
+
+    One lookup takes a bounded number of candidates, but a burst can be
+    longer than that, and an expression can keep exactly its tail — the few
+    frames of a long burst the user rated. Trimming to the bound would
+    discard the only frames that still match and clear a selection that
+    survived (Codex P2 on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:106]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    # Stand in for a burst longer than one lookup: three candidates a time.
+    page.evaluate("() => { BROWSE_MAX_FOCUS_CANDIDATES = 3; }")
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    picked = page.evaluate("() => Array.from(selectedPhotos)")
+    assert len(picked) == 6, picked
+
+    # The expression keeps only the tail: everything in the first lookup is
+    # gone, so the first request can place nothing.
+    dropped, survivors = picked[:3], picked[3:]
+    with db.conn:
+        db.conn.execute(
+            "DELETE FROM photos WHERE id IN (?, ?, ?)", dropped,
+        )
+
+    calls = _capture_queries(page)
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        survivors
+    ), "the frames past the first lookup were never asked about"
+    assert _ids_on_screen(page, survivors), (
+        "the surviving frames are selected but off screen"
+    )
+    for call in calls:
+        candidates = call["request"].get("focus_photo_ids") or []
+        assert len(candidates) <= 2, (
+            f"{len(candidates)} fallback ids sent past the lookup limit"
+        )

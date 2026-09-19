@@ -7298,6 +7298,29 @@ function browseFilterReloadOptions(info) {
   if (reason === 'expressionRefreshed') return { preserveScroll: true };
 }
 
+/* The photos a focused reload may be placed by, in lookup-sized chunks.
+
+   The card the user is holding comes first; for a stack the other frames
+   they picked follow, because any of them places the same card. Chunked to
+   what one lookup accepts, and never emptied by that bound — the frames
+   past the first chunk are asked about in a further lookup, not discarded
+   (Codex P2 on PR #1695). Empty when the reload has no anchor to place or
+   is not a focused one. */
+function browseFocusCandidateChunks(anchor, focusAnchor) {
+  if (!anchor || !focusAnchor) return [];
+  var candidates = [anchor.photoId];
+  if (anchor.stackSelection && anchor.stackIds) {
+    anchor.stackIds.forEach(function(id) {
+      if (id != null && id !== anchor.photoId) candidates.push(id);
+    });
+  }
+  var chunks = [];
+  for (var at = 0; at < candidates.length; at += BROWSE_MAX_FOCUS_CANDIDATES) {
+    chunks.push(candidates.slice(at, at + BROWSE_MAX_FOCUS_CANDIDATES));
+  }
+  return chunks;
+}
+
 /* Drop the loaded window — the pages, their stack caches, and the paging
    cursors — so the next load starts a fresh contiguous window. Selection,
    collection scope and anchors are the caller's business. */
@@ -7435,16 +7458,33 @@ async function resetAndLoad(options) {
 
   if (anchor || scrollAnchor) anchorScanDepth++;
   try {
-    var initialLoadStatus = await loadPhotos(
-      (anchor && focusAnchor)
-        // A stack anchor offers every frame the user picked, so the reload
-        // can be placed by one it kept even when the frame we aimed at is
-        // gone (Codex P2 on PR #1695).
-        ? { focusPhotoId: anchor.photoId, focusPhotoIds: anchor.stackIds }
-        : undefined
-    );
-    if (initialLoadStatus !== true) return initialLoadStatus;
-    if (!resetRequestIsCurrent()) return null;
+    // A stack anchor offers every frame the user picked, so the reload can
+    // be placed by one it kept even when the frame we aimed at is gone
+    // (Codex P2 on PR #1695). One lookup takes a bounded number of
+    // candidates — they become bound parameters in one ``IN`` clause — and
+    // nothing bounds how many frames a burst holds, so the frames past that
+    // are asked about in a further lookup rather than dropped: a saved
+    // expression can keep exactly the tail of a long burst (the few frames
+    // the user rated, say) and that is still the selection it should
+    // restore. Only a chunk that places nothing costs another request, so
+    // every stack short enough to ask about at once — which is all of them,
+    // in practice — is one request, as before.
+    var focusChunks = browseFocusCandidateChunks(anchor, focusAnchor);
+    var initialLoadStatus;
+    for (var chunkAt = 0; chunkAt < Math.max(1, focusChunks.length); chunkAt++) {
+      var chunk = focusChunks[chunkAt];
+      if (chunkAt > 0) {
+        // Start the replacement window clean, exactly as this reset did.
+        clearBrowseLoadedWindow();
+        document.getElementById('grid').innerHTML = '';
+      }
+      initialLoadStatus = await loadPhotos(
+        chunk ? { focusPhotoId: chunk[0], focusPhotoIds: chunk.slice(1) } : undefined
+      );
+      if (initialLoadStatus !== true) return initialLoadStatus;
+      if (!resetRequestIsCurrent()) return null;
+      if (!chunk || browseResolvedFocusPhotoId != null) break;
+    }
     // The frame the server placed the page by becomes the anchor: it is the
     // card the restore selects around and the one the scroll holds onto.
     // Resolved to the top-level card it is part of, because the anchor is a
@@ -7680,14 +7720,13 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
   // be placed by one it kept — in the same request, rather than one retry
   // per frame (Codex P2 on PR #1695).
   //
-  // Truncated to what the lookup accepts. Nothing caps how many frames a
-  // burst can hold, and every candidate becomes a bound parameter in one
-  // ``IN`` clause, so an enormous stack would otherwise turn a re-sort into
-  // a 400 — and this request runs after the window has been cleared, which
+  // Trimmed to what one lookup accepts. Every candidate becomes a bound
+  // parameter in one ``IN`` clause, so an over-long list would come back a
+  // 400 — and this request runs after the window has been cleared, which
   // would leave the grid empty and the selection gone (Codex P2 on
-  // PR #1695). Dropping the tail degrades nothing the user can see: the
-  // frame this asks about first is the card itself, and the fallbacks only
-  // matter when the reload dropped it.
+  // PR #1695). Callers that have more frames than this send the rest in a
+  // further lookup (``browseFocusCandidateChunks``); the trim here is what
+  // makes *this request* valid, not where the extra frames go.
   var focusPhotoIds = (requestOptions && requestOptions.focusPhotoIds
       ? requestOptions.focusPhotoIds
           .filter(function(id) { return id != null && id !== focusPhotoId; })
