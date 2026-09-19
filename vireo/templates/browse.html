@@ -7281,6 +7281,38 @@ function browseFilterReloadOptions(info) {
   if (reason === 'expressionRefreshed') return { preserveScroll: true };
 }
 
+/* Where a photo sits in the dataset the current query describes.
+
+   One deliberately tiny page request (``per_page: 1``) for one number: the
+   server resolves ``focus_photo_id`` against the ordered result — stacks
+   included, where the index counts cards — and reports ``focus_index``.
+
+   Three answers, all meaningful:
+     <int>      the photo is in this result set, at that position
+     null       the query does not contain it
+     undefined  the question could not be asked: the collection endpoint has
+                no focused lookup, or the request failed
+
+   Never toasts. The reload's own page requests report a real outage; a
+   position probe that failed only costs the caller its precision. */
+async function browseAnchorPosition(photoId) {
+  var request = buildBrowsePageRequest(1, 1, { focusPhotoId: photoId });
+  if (request.focusPhotoId == null) return undefined;
+  var data;
+  try {
+    data = await safeFetch(request.url, request.options, { toast: false });
+  } catch (e) {
+    return undefined;
+  }
+  // A response that never answered the question (the degraded visual-filter
+  // path serves metadata-only results without resolving a focus) is unknown,
+  // not "absent" — reading it as absent would clear the selection outright.
+  if (!data || !('focus_index' in data)) return undefined;
+  return Number.isInteger(data.focus_index) && data.focus_index >= 0
+    ? data.focus_index
+    : null;
+}
+
 async function resetAndLoad(options) {
   // Membership edits keep the current window on screen until its replacement
   // is complete. A reset followed by anchor restoration still paints page 1
@@ -7436,23 +7468,47 @@ async function resetAndLoad(options) {
     // nothing about where to look next. Budget 0 confines the lookup to the
     // pages already loaded — still enough to expand a stack tray around a
     // hidden member — instead of walking the catalog a page at a time.
-    // A ``preserveAnchor``-only reload — loading a saved expression or
-    // collection (``expressionLoaded``), or a folder-health refresh — is not
-    // told where the photo went either, and the dataset it comes back with
-    // may not contain it at all. An unbounded scan there walks the whole
-    // replacement result set a page at a time: ~1,200 sequential requests
-    // for a 60k-photo collection that simply excludes the anchor. Bound it
-    // the same way (Codex P1 on PR #1695); the fallbacks below take over
-    // when the budget runs out.
     var anchorScanBudget = focusAnchor
       ? 0
-      : Math.max(anchor.index || 0, 0) + perPage;
+      : (preserveScroll ? Math.max(anchor.index || 0, 0) + perPage : 0);
     var card = await loadUntilPhotoRendered(
       anchor.photoId,
       anchorScanShouldContinue,
       { resolveStackMember: true, budget: anchorScanBudget }
     );
     if (!resetRequestIsCurrent()) return null;
+
+    // A ``preserveAnchor``-only reload — loading a saved expression or
+    // collection (``expressionLoaded``), or a folder-health refresh — is
+    // told neither where the photo went nor whether the dataset it came back
+    // with contains it at all, and the photo is not on the page already
+    // loaded. Guessing is wrong in both directions: an unbounded scan walks
+    // the whole replacement result set a page at a time to discover a photo
+    // that was never in it (~1,200 requests for a 60k-photo collection,
+    // Codex P1), while a budget from the *previous* result set's index
+    // truncates before a photo that is in it and clears the selection this
+    // reload exists to keep (Codex P2). Ask instead, then page to the answer.
+    if (!card && !focusAnchor && !preserveScroll && anchorScanShouldContinue()) {
+      var anchorPosition = await browseAnchorPosition(anchor.photoId);
+      if (!resetRequestIsCurrent()) return null;
+      if (anchorPosition !== null) {
+        card = await loadUntilPhotoRendered(
+          anchor.photoId,
+          anchorScanShouldContinue,
+          {
+            resolveStackMember: true,
+            // ``undefined`` means the question could not be asked — the
+            // collection endpoint has no focused lookup, or the probe
+            // failed. Fall back to the old position plus a page, which is a
+            // sound bound for the reloads that re-run the same query.
+            budget: anchorPosition === undefined
+              ? Math.max(anchor.index || 0, 0) + perPage
+              : anchorPosition + perPage,
+          }
+        );
+        if (!resetRequestIsCurrent()) return null;
+      }
+    }
     if (!anchorRestoreIsPending(anchor, restoreEpoch)) return true;
     if (!card) {
       clearActiveSelectionAndDetail();

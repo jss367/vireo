@@ -799,3 +799,52 @@ def test_expression_reload_bounds_its_search_for_a_missing_stack(
     assert page.evaluate("selectedPhotos.size") == 0, (
         "the stack is gone from this expression — nothing should stay selected"
     )
+
+
+def test_expression_reload_finds_a_stack_that_moved(live_server, page):
+    """Bounding the scan must not truncate before a photo that *is* there.
+
+    An ``expressionLoaded`` reload gets no focused load, so the scan has to
+    find the anchor by paging. A budget guessed from the previous result
+    set's index stops short whenever the reload moves the stack more than a
+    page — and the ``!card`` branch then clears the selection the reload
+    exists to keep (Codex P2 on PR #1695). Browse asks for the position
+    instead of guessing it.
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0], count=400)
+    burst_ids = ids[:2]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    page.locator(f"#grid .grid-card[data-id='{cover_id}']").click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    # The reload moves the stack from the first page to the last.
+    with db.conn:
+        for offset, photo_id in enumerate(burst_ids):
+            db.conn.execute(
+                "UPDATE photos SET timestamp = ? WHERE id = ?",
+                (f"2024-05-02T00:00:0{offset}", photo_id),
+            )
+
+    calls = _capture_queries(page)
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    ), "the reload gave up before reaching the stack and dropped it"
+    assert _ids_on_screen(page, burst_ids), (
+        "the stack was found but the grid is not showing it"
+    )
+    # Paging to a photo at the end of 400 is eight pages plus the position
+    # probe — bounded by where the stack actually is, not by the catalog.
+    assert len(calls) <= 12, f"{len(calls)} queries to reach the stack"
