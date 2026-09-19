@@ -3802,3 +3802,21 @@ def test_export_keeps_metadata_subprocess_polling_cancel_only(export_env, monkey
     )
     assert result["exported"] == 1
     assert polls == ["cancel", "cancel"]
+
+
+def test_export_applies_point_curves_and_sampled_color(export_env):
+    env = export_env
+    Image.new('RGB', (80, 60), (180, 40, 40)).save(env['src'] / 'bird1.jpg', quality=100)
+    env['db'].set_photo_edit_recipe(env['p1'], {'adjustments': {
+        'point_curves': {'red': [[0, 0], [100, 75]]},
+        'point_color': [{'sample': [0, 55, 35], 'hue_range': 60, 'hue': 120}],
+    }})
+    result = export_photos(db=env['db'], vireo_dir=env['vireo_dir'],
+                           photo_ids=[env['p1']], destination=env['dest'],
+                           options={'naming_template': '{original}'})
+    assert result['exported'] == 1
+    assert result['errors'] == []
+    with Image.open(os.path.join(env['dest'], 'bird1.jpg')) as rendered:
+        r, g, b = rendered.getpixel((40, 30))
+        assert g > r + 30 and g > b + 30, (r, g, b)
+        assert g < 160, 'the red-channel curve must reduce brightness before the hue shift'

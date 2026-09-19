@@ -131,6 +131,73 @@ def _normalize_tone_curve(value):
     return out or None
 
 
+def _normalize_point_curves(value):
+    """Optional display-space composite and channel curves, in percent."""
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict) or set(value) - {"rgb", "red", "green", "blue"}:
+        raise RecipeError("point_curves must contain only rgb, red, green, or blue curves")
+    out = {}
+    for channel, points in value.items():
+        if not isinstance(points, list) or not 2 <= len(points) <= 32:
+            raise RecipeError("point_curves require 2 to 32 points per channel")
+        normalized = []
+        for point in points:
+            if not isinstance(point, list) or len(point) != 2:
+                raise RecipeError("point_curves points must be [input, output] pairs")
+            normalized.append([
+                _number(point[0], "curve input", 0, 100),
+                _number(point[1], "curve output", 0, 100),
+            ])
+        if normalized[0][0] != 0 or normalized[-1][0] != 100:
+            raise RecipeError("point_curves must start at input 0 and end at input 100")
+        if any(b[0] - a[0] < 0.01 - 1e-9 for a, b in zip(normalized, normalized[1:], strict=False)):
+            raise RecipeError("point_curves inputs must increase by at least 0.01")
+        if any(abs(x - y) > 1e-6 for x, y in normalized):
+            out[channel] = normalized
+    return out or None
+
+
+_POINT_COLOR_RANGES = {
+    "hue_range": (1.0, 180.0, 30.0),
+    "saturation_range": (1.0, 100.0, 100.0),
+    "luminance_range": (1.0, 100.0, 100.0),
+    "hue": (-180.0, 180.0, 0.0),
+    "saturation": (-100.0, 100.0, 0.0),
+    "luminance": (-100.0, 100.0, 0.0),
+}
+
+
+def _normalize_point_color(value):
+    """Keep unadjusted color samples, but reject the renderer's zero-weight range."""
+    if value is None or value == []:
+        return None
+    if not isinstance(value, list) or len(value) > 8:
+        raise RecipeError("point_color must be a list of up to 8 samples")
+    out = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) - ({"sample"} | set(_POINT_COLOR_RANGES)):
+            raise RecipeError("unsupported point_color sample controls")
+        sample = item.get("sample")
+        if not isinstance(sample, list) or len(sample) != 3:
+            raise RecipeError("point_color sample must be [hue, saturation, luminance]")
+        normalized = {"sample": [
+            _number(sample[0], "sample hue", 0, 360) % 360,
+            _number(sample[1], "sample saturation", 0, 100),
+            _number(sample[2], "sample luminance", 0, 100),
+        ]}
+        if normalized["sample"][1] <= 1.0:
+            raise RecipeError("point_color sample saturation must be greater than 1%")
+        if not 0.0 < normalized["sample"][2] < 100.0:
+            raise RecipeError("point_color sample luminance must be between 0% and 100%, exclusive")
+        for key, (lo, hi, default) in _POINT_COLOR_RANGES.items():
+            amount = _number(item.get(key, default), f"point_color.{key}", lo, hi)
+            if abs(amount - default) > 1e-6:
+                normalized[key] = amount
+        out.append(normalized)
+    return out or None
+
+
 def _normalize_hsl(value):
     if value in (None, "", {}):
         return None
@@ -369,6 +436,12 @@ def normalize_recipe(recipe):
     tone_curve = _normalize_tone_curve(adjustments.get("tone_curve"))
     if tone_curve:
         normalized_adjustments["tone_curve"] = tone_curve
+    point_curves = _normalize_point_curves(adjustments.get("point_curves"))
+    if point_curves:
+        normalized_adjustments["point_curves"] = point_curves
+    point_color = _normalize_point_color(adjustments.get("point_color"))
+    if point_color:
+        normalized_adjustments["point_color"] = point_color
     hsl = _normalize_hsl(adjustments.get("hsl"))
     if hsl:
         normalized_adjustments["hsl"] = hsl
@@ -533,6 +606,8 @@ def _apply_adjustments(
     vibrance = adjustments.get("vibrance", 0.0)
     saturation = adjustments.get("saturation", 0.0)
     tone_curve = adjustments.get("tone_curve")
+    point_curves = adjustments.get("point_curves")
+    point_color = adjustments.get("point_color")
     hsl = adjustments.get("hsl")
     color_grading = adjustments.get("color_grading")
 
@@ -546,7 +621,7 @@ def _apply_adjustments(
     # is numerically identical to a single whole-frame pass. ~4M pixels per tile
     # keeps the transient float arrays to a few hundred MB.
     tile_budget = _ADJUST_TILE_PIXELS
-    if tone_curve or hsl or color_grading:
+    if tone_curve or point_curves or point_color or hsl or color_grading:
         # HSL conversion and curve indexing keep several additional float
         # planes alive. Smaller tiles bound peak memory on 45MP+ exports while
         # preserving byte-identical output because every operation is per-pixel.
@@ -567,6 +642,8 @@ def _apply_adjustments(
             vibrance=vibrance,
             saturation=saturation,
             tone_curve=tone_curve,
+            point_curves=point_curves,
+            point_color=point_color,
             hsl=hsl,
             color_grading=color_grading,
             local_weight=(

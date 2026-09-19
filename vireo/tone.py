@@ -409,6 +409,61 @@ def apply_hsl_mixer(rgb, mixer):
     return np.clip(_hsl_to_rgb(hue, saturation, light), 0.0, 1.0)
 
 
+def apply_point_curves(rgb, curves):
+    """Piecewise linear interpolation; composite first, then RGB channels."""
+    out = np.asarray(rgb, dtype=np.float32).copy()
+    for channel in ("rgb", "red", "green", "blue"):
+        points = curves.get(channel)
+        if not points:
+            continue
+        points = np.asarray(points, dtype=np.float32) / 100.0
+        if channel == "rgb":
+            out = np.interp(out, points[:, 0], points[:, 1]).astype(np.float32)
+        else:
+            index = ("red", "green", "blue").index(channel)
+            out[..., index] = np.interp(out[..., index], points[:, 0], points[:, 1])
+    return out
+
+
+def apply_point_color(rgb, samples):
+    """Select input HSL ranges with soft edges, then combine sample deltas.
+
+    Selection is evaluated before any Point Color changes, making overlapping
+    samples independent of their order. Hue wraps around red; achromatic pixels
+    are protected because their hue is undefined. Range values are half-widths.
+    """
+    active = [item for item in samples if any(item.get(k, 0) for k in ("hue", "saturation", "luminance"))]
+    if not active:
+        return rgb
+    hue, saturation, light = _rgb_to_hsl(rgb)
+    hue_delta = np.zeros_like(hue)
+    sat_delta = np.zeros_like(hue)
+    lum_delta = np.zeros_like(hue)
+    weight_sum = np.zeros_like(hue)
+    for item in active:
+        center_h, center_s, center_l = item["sample"]
+        distance = np.abs(np.mod(hue * 360.0 - center_h + 180.0, 360.0) - 180.0)
+        weight = 1.0 - smoothstep(0.0, item.get("hue_range", 30), distance)
+        weight *= 1.0 - smoothstep(0.0, item.get("saturation_range", 100), np.abs(saturation * 100.0 - center_s))
+        weight *= 1.0 - smoothstep(0.0, item.get("luminance_range", 100), np.abs(light * 100.0 - center_l))
+        weight *= smoothstep(0.01, 0.08, saturation)
+        weight_sum += weight
+        hue_delta += weight * item.get("hue", 0)
+        sat_delta += weight * item.get("saturation", 0)
+        lum_delta += weight * item.get("luminance", 0)
+    divisor = np.maximum(weight_sum, 1.0)
+    hue = np.mod(hue + hue_delta / divisor / 360.0, 1.0)
+    sat_amount = sat_delta / divisor / 100.0
+    lum_amount = lum_delta / divisor / 100.0
+    saturation = np.where(sat_amount >= 0, saturation + (1.0 - saturation) * sat_amount,
+                          saturation * (1.0 + sat_amount))
+    light = np.where(lum_amount >= 0, light + (1.0 - light) * lum_amount,
+                     light * (1.0 + lum_amount))
+    changed = _hsl_to_rgb(hue, saturation, light)
+    # Preserve out-of-range pixels exactly, including RGB/HSL roundoff.
+    return np.where((weight_sum > 0)[..., None], changed, rgb)
+
+
 def apply_color_grading(rgb, grading):
     """Tint shadows, midtones, and highlights while preserving luminance."""
     if not grading:
@@ -451,6 +506,8 @@ def apply_adjustments(
     vibrance=0.0,
     saturation=0.0,
     tone_curve=None,
+    point_curves=None,
+    point_color=None,
     hsl=None,
     color_grading=None,
     local_weight=None,
@@ -472,6 +529,8 @@ def apply_adjustments(
         saturation: [-100, 100]; luma-preserving saturation in display space.
         tone_curve: five composite RGB output points at fixed input levels.
         hsl: per-colour hue, saturation, and luminance adjustments.
+        point_curves: composite and RGB channel [input, output] control points.
+        point_color: sampled HSL colors with selection ranges and adjustments.
         color_grading: shadow/midtone/highlight hue and saturation tints.
 
     Returns:
@@ -508,6 +567,8 @@ def apply_adjustments(
             vibrance=vibrance,
             saturation=saturation,
             tone_curve=tone_curve,
+            point_curves=point_curves,
+            point_color=point_color,
             hsl=hsl,
             color_grading=color_grading,
         )
@@ -557,6 +618,8 @@ def apply_adjustments(
         disp = (disp - 0.5) * c + 0.5
     if tone_curve:
         disp = apply_tone_curve(disp, tone_curve)
+    if point_curves:
+        disp = apply_point_curves(disp, point_curves)
     if hsl:
         disp = apply_hsl_mixer(disp, hsl)
     if color_grading:
@@ -568,6 +631,11 @@ def apply_adjustments(
         luma = _luma(disp)
         disp = luma + (disp - luma) * s
 
+    # Point Color samples this fully adjusted color, before spatial detail.
+    # Keeping it last lets the picker render its exact input by omitting only
+    # point_color and the detail controls from the current recipe.
+    if point_color:
+        disp = apply_point_color(disp, point_color)
     return np.clip(disp, 0.0, 1.0)
 
 
@@ -585,7 +653,7 @@ _LOCAL_CLAMPS = {
 def _apply_adjustments_weighted(
     rgb, *, weight, subject, background, exposure, white_balance,
     highlights, shadows, whites, blacks, contrast, vibrance, saturation,
-    tone_curve, hsl, color_grading,
+    tone_curve, point_curves, point_color, hsl, color_grading,
 ):
     """Local (mask-weighted) variant of :func:`apply_adjustments`.
 
@@ -656,6 +724,8 @@ def _apply_adjustments_weighted(
         disp = (disp - 0.5) * c + 0.5
     if tone_curve:
         disp = apply_tone_curve(disp, tone_curve)
+    if point_curves:
+        disp = apply_point_curves(disp, point_curves)
     if hsl:
         disp = apply_hsl_mixer(disp, hsl)
     if color_grading:
@@ -672,4 +742,9 @@ def _apply_adjustments_weighted(
         luma = _luma(disp)
         disp = luma + (disp - luma) * s
 
+    # Point Color samples this fully adjusted color, before spatial detail.
+    # Keeping it last lets the picker render its exact input by omitting only
+    # point_color and the detail controls from the current recipe.
+    if point_color:
+        disp = apply_point_color(disp, point_color)
     return np.clip(disp, 0.0, 1.0)

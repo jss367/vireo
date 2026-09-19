@@ -14446,3 +14446,64 @@ def test_interactive_render_routes_decode_outside_the_eviction_guard(
         "other interactive image read would queue behind this decode: "
         f"{lock_held_when_decoded!r}"
     )
+
+
+def test_point_color_preview_matches_saved_render_and_rejects_invalid_recipe(client_with_photo):
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    recipe = {'adjustments': {
+        'point_curves': {'red': [[0, 20], [40, 65], [100, 90]]},
+        'point_color': [{'sample': [0, 100, 50], 'hue_range': 60, 'hue': 90}],
+    }}
+    preview = client.get(f'/photos/{photo_id}/edit-preview', query_string={
+        'size': 1920, 'apply_crop': 1, 'recipe': json.dumps(recipe),
+    })
+    assert preview.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id) is None
+    response = client.put(f'/api/photos/{photo_id}/edit-recipe', json={'recipe': recipe})
+    assert response.status_code == 200
+    saved = client.get(f'/photos/{photo_id}/preview?size=1920')
+    assert saved.status_code == 200
+    with Image.open(io.BytesIO(preview.data)) as before, Image.open(io.BytesIO(saved.data)) as after:
+        np.testing.assert_array_equal(np.asarray(before), np.asarray(after))
+    invalid = client.put(f'/api/photos/{photo_id}/edit-recipe', json={'recipe': {
+        'adjustments': {'point_curves': {'red': [[0, 0], [50, 20], [50, 30], [100, 100]]}},
+    }})
+    assert invalid.status_code == 400
+    assert db.get_photo_edit_recipe(photo_id)['adjustments'] == recipe['adjustments']
+
+
+@pytest.mark.parametrize('saturation', [0, .5, 1, 1.0000004])
+def test_point_color_api_rejects_achromatic_recipes_and_presets(client_with_photo, saturation):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    recipe = {'adjustments': {'point_color': [{'sample': [0, saturation, 50]}]}}
+    saved = client.put(f'/api/photos/{photo_id}/edit-recipe', json={'recipe': recipe})
+    preset = client.post('/api/edit-presets', json={'name': 'Neutral sample', 'recipe': recipe})
+    assert saved.status_code == 400
+    assert preset.status_code == 400
+    assert 'greater than 1%' in saved.get_json()['error']
+    assert 'greater than 1%' in preset.get_json()['error']
+    assert db.get_photo_edit_recipe(photo_id) is None
+    assert client.get('/api/edit-presets').get_json()['presets'] == []
+
+
+@pytest.mark.parametrize('luminance', [0, .0000004, 99.9999996, 100])
+def test_point_color_api_rejects_black_and_white_samples(client_with_photo, luminance):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    recipe = {'adjustments': {'point_color': [{'sample': [0, 100, luminance]}]}}
+    saved = client.put(f'/api/photos/{photo_id}/edit-recipe', json={'recipe': recipe})
+    preset = client.post('/api/edit-presets', json={'name': 'Endpoint sample', 'recipe': recipe})
+    assert saved.status_code == 400
+    assert preset.status_code == 400
+    assert 'luminance' in saved.get_json()['error']
+    assert 'luminance' in preset.get_json()['error']
+    assert db.get_photo_edit_recipe(photo_id) is None
+    assert client.get('/api/edit-presets').get_json()['presets'] == []
