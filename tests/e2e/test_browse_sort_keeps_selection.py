@@ -13,6 +13,7 @@ straight to the page holding it, rather than paging forward until it appears.
 
 import contextlib
 import json
+import re
 
 from playwright.sync_api import expect
 
@@ -658,4 +659,143 @@ def test_sort_change_keeps_a_stack_selected_from_a_collapsed_tray(
     ), "re-sorting dropped a stack selected through the tray"
     assert _ids_on_screen(page, burst_ids), (
         "the selected stack is off screen after the re-sort"
+    )
+
+
+def _seed_two_adjacent_stacks(db, ids):
+    """Four consecutive frames that group as two stacks, not one.
+
+    A burst is a run of consecutive frames with the same species/location
+    keywords inside the time gap, so a species keyword on the first pair and
+    nothing on the second splits the run in two. Giving the second pair that
+    same keyword later merges all four — the membership change this test
+    needs.
+    """
+    import datetime
+
+    base = datetime.datetime.fromisoformat("2024-05-01T01:40:00")
+    with db.conn:
+        for offset, photo_id in enumerate(ids):
+            db.conn.execute(
+                "UPDATE photos SET timestamp = ? WHERE id = ?",
+                ((base + datetime.timedelta(seconds=offset)).isoformat(), photo_id),
+            )
+    keyword_id = db.add_keyword("Merlin", is_species=True)
+    for photo_id in ids[:2]:
+        db.tag_photo(photo_id, keyword_id)
+    return keyword_id
+
+
+def test_history_reload_restores_the_frames_the_user_picked(live_server, page):
+    """A frame that joined the stack must not join the selection with it.
+
+    ``afterHistoryChange`` re-runs the query and folds the pre-action ids
+    back in, trusting ``resetAndLoad`` to restore nothing else. If the stack
+    restore adopted the reloaded group's membership, an edit that merged a
+    neighbouring frame into the burst would hand a later batch export or
+    delete a photo the user never selected (Codex P2 on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    quartet = ids[100:104]
+    keyword_id = _seed_two_adjacent_stacks(db, quartet)
+    picked = quartet[2:]
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = page.evaluate(
+        """ids => {
+             const cover = photos.find(
+               p => p.browse_stack && p.browse_stack.count > 1
+                 && ids.includes(p.id)
+             );
+             return cover ? cover.id : null;
+           }""",
+        picked,
+    )
+    assert cover_id in picked, "the unkeyworded pair must be its own stack"
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        """ids => selectedPhotos.size === ids.length
+             && ids.every(id => selectedPhotos.has(id))""",
+        arg=picked,
+    )
+
+    # The edit an undo/redo would replay: the picked pair gains the keyword
+    # that was keeping it apart from its neighbours, so all four merge.
+    for photo_id in picked:
+        db.tag_photo(photo_id, keyword_id)
+    page.evaluate("() => afterHistoryChange()")
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        picked
+    ), "the merged-in frames were selected without the user picking them"
+    merged_cover = page.evaluate(
+        """ids => {
+             const cover = photos.find(
+               p => p.browse_stack && ids.some(id => p.browse_stack.photo_ids.includes(id))
+             );
+             return cover ? {id: cover.id, count: cover.browse_stack.count} : null;
+           }""",
+        picked,
+    )
+    assert merged_cover["count"] == 4, (
+        f"the four frames should have merged into one stack, got {merged_cover}"
+    )
+    # Two of four frames selected is exactly what the partial mark says.
+    expect(
+        page.locator(f"#grid .grid-card[data-id='{merged_cover['id']}']")
+    ).to_have_class(re.compile(r"\bstack-partial\b"))
+
+
+def test_expression_reload_bounds_its_search_for_a_missing_stack(
+    live_server, page,
+):
+    """Loading a saved expression must not page the whole result set.
+
+    ``expressionLoaded`` asks to keep the user's place without a focused
+    lookup, and the expression it loads can exclude the anchored stack
+    entirely. Scanning to ``allLoaded`` to find out would issue one request
+    per page — ~1,200 of them for a 60k-photo collection (Codex P1 on
+    PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0], count=400)
+    # Near the top, so a bounded scan is visibly shorter than a full one.
+    burst_ids = ids[:2]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    page.locator(f"#grid .grid-card[data-id='{cover_id}']").click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    # The expression the user just loaded does not contain the stack.
+    with db.conn:
+        db.conn.execute(
+            "DELETE FROM photos WHERE id IN (?, ?)", tuple(burst_ids)
+        )
+
+    calls = _capture_queries(page)
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    # 400 photos is 8 pages; the bounded scan stops one page past the
+    # anchor's old position, so a handful of requests is the whole budget.
+    assert len(calls) <= 4, (
+        f"the reload paged through the result set: {len(calls)} queries"
+    )
+    assert page.evaluate("selectedPhotos.size") == 0, (
+        "the stack is gone from this expression — nothing should stay selected"
     )

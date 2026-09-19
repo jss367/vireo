@@ -4681,6 +4681,9 @@ function captureSelectedPhotoAnchor() {
       && document.getElementById('detailContent').classList.contains('visible'),
     index: index,
     stackSelection: stackCoverId != null,
+    // The frames the user actually picked. The restore intersects these with
+    // the reloaded group rather than adopting its membership wholesale.
+    stackIds: stackCoverId == null ? null : Array.from(selectedPhotos),
   };
 }
 
@@ -7433,9 +7436,17 @@ async function resetAndLoad(options) {
     // nothing about where to look next. Budget 0 confines the lookup to the
     // pages already loaded — still enough to expand a stack tray around a
     // hidden member — instead of walking the catalog a page at a time.
+    // A ``preserveAnchor``-only reload — loading a saved expression or
+    // collection (``expressionLoaded``), or a folder-health refresh — is not
+    // told where the photo went either, and the dataset it comes back with
+    // may not contain it at all. An unbounded scan there walks the whole
+    // replacement result set a page at a time: ~1,200 sequential requests
+    // for a 60k-photo collection that simply excludes the anchor. Bound it
+    // the same way (Codex P1 on PR #1695); the fallbacks below take over
+    // when the budget runs out.
     var anchorScanBudget = focusAnchor
       ? 0
-      : (preserveScroll ? Math.max(anchor.index || 0, 0) + perPage : null);
+      : Math.max(anchor.index || 0, 0) + perPage;
     var card = await loadUntilPhotoRendered(
       anchor.photoId,
       anchorScanShouldContinue,
@@ -7480,14 +7491,26 @@ async function resetAndLoad(options) {
       return true;
     }
 
-    // A selected stack comes back as a selected stack. Read the membership
-    // off the reloaded grid instead of replaying the captured ids: a re-sort
-    // can hand the group a different cover, and a membership-change reload
-    // can have added or dropped frames — restoring the old list would select
-    // photos this view no longer contains.
-    var restoredStackIds = anchor.stackSelection
+    // A selected stack comes back as a selected stack — as the frames the
+    // user actually picked, intersected with the group the reload came back
+    // with. Adopting the reloaded group's membership wholesale would widen
+    // the selection whenever an edit merged a neighbouring frame into the
+    // burst: undo/redo re-runs the query and ``afterHistoryChange`` folds the
+    // pre-action ids back in on top, so a later batch export or delete would
+    // act on a frame the user never selected (Codex P2 on PR #1695). The
+    // intersection is also why the ids cannot simply be replayed: a frame
+    // this reload dropped from the group is no longer part of the card the
+    // user is looking at, and a stack with only some of its frames selected
+    // paints the partial mark that says exactly that.
+    var currentStackIds = anchor.stackSelection
       ? browseStackMemberIds(anchorGridId)
       : null;
+    var restoredStackIds = currentStackIds
+      ? currentStackIds.filter(function(id) {
+          return anchor.stackIds.indexOf(id) !== -1;
+        })
+      : null;
+    if (restoredStackIds && !restoredStackIds.length) restoredStackIds = null;
     if (anchor.stackSelection && !restoredStackIds) {
       // The group did not survive the reload — Stacks switched off
       // mid-flight, or the frames no longer group. Hold the position
