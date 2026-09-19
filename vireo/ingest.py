@@ -496,7 +496,9 @@ def ingest(
             (filename, size, EXIF capture time) — with a content-hash
             fallback for files whose metadata is missing or placeholder;
             see import_dedup for the exact rules and failure modes.
-        progress_callback: optional callable(current, total, filename)
+        progress_callback: optional callable(current, total, filename), invoked
+            once per completed source file (copied, skipped, or failed).
+            Callback exceptions propagate to the caller.
         extra_known_hashes: optional set of content hashes to treat as
             known in addition to the catalog. Kept for callers that only
             have hashes; note it disables the size shortcut on the hash
@@ -677,6 +679,12 @@ def ingest(
     duplicate_folders: set[str] = set()
     emitted = 0
 
+    def report_completed(source_file):
+        nonlocal emitted
+        emitted += 1
+        if progress_callback:
+            progress_callback(emitted, total, source_file.name)
+
     # Pass 1: partition into duplicates vs. survivors. The checker's EXIF
     # prepass batches header reads across the whole card; only files with
     # missing/placeholder metadata (and a plausible size twin) get their
@@ -688,33 +696,27 @@ def ingest(
     for source_file in files:
         if pause_callback:
             pause_callback()
-        if checker is not None:
-            try:
-                token = checker.match(source_file)
-            except Exception as e:
-                log.warning("Failed to ingest %s: %s", source_file, e)
-                failed += 1
-                emitted += 1
-                if progress_callback:
-                    progress_callback(emitted, total, source_file.name)
+        try:
+            token = checker.match(source_file) if checker is not None else None
+        except Exception as e:
+            log.warning("Failed to ingest %s: %s", source_file, e)
+            failed += 1
+        else:
+            if token is None:
+                to_copy.append(source_file)
                 continue
 
-            if token is not None:
-                skipped_duplicate += 1
-                # Record every destination folder that holds a copy of
-                # this file, not just one. The pipeline uses this set
-                # verbatim as restrict_dirs, so if we only report one
-                # folder the others never get linked to the active
-                # workspace.
-                duplicate_folders.update(
-                    dup_token_folders.get(token, ())
-                )
-                emitted += 1
-                if progress_callback:
-                    progress_callback(emitted, total, source_file.name)
-                continue
+            skipped_duplicate += 1
+            # Record every destination folder that holds a copy of
+            # this file, not just one. The pipeline uses this set
+            # verbatim as restrict_dirs, so if we only report one
+            # folder the others never get linked to the active
+            # workspace.
+            duplicate_folders.update(
+                dup_token_folders.get(token, ())
+            )
 
-        to_copy.append(source_file)
+        report_completed(source_file)
 
     # Pass 2: resolve folder-planning timestamps for survivors and copy.
     # In the default metadata mode the checker already resolved every
@@ -757,9 +759,6 @@ def ingest(
                     dest = batch_dest_folders.get(token)
                     if dest is not None:
                         duplicate_folders.add(dest)
-                    emitted += 1
-                    if progress_callback:
-                        progress_callback(emitted, total, source_file.name)
                     continue
 
             rel_folder = build_destination_path(
@@ -789,9 +788,6 @@ def ingest(
                 if src_size == 0 and dest_size == 0:
                     skipped_duplicate += 1
                     duplicate_folders.add(str(dest_folder))
-                    emitted += 1
-                    if progress_callback:
-                        progress_callback(emitted, total, source_file.name)
                     continue
                 # Same size could be the same bytes — settle it by exact
                 # content, never by metadata (a wrong skip here would
@@ -811,9 +807,6 @@ def ingest(
                             for token in checker.record(source_file):
                                 batch_dest_folders[token] = str(dest_folder)
                         duplicate_folders.add(str(dest_folder))
-                        emitted += 1
-                        if progress_callback:
-                            progress_callback(emitted, total, source_file.name)
                         continue
                 # Different file, same name — add numeric suffix
                 stem = dest_file.stem
@@ -834,9 +827,10 @@ def ingest(
             log.warning("Failed to ingest %s: %s", source_file, e)
             failed += 1
 
-        emitted += 1
-        if progress_callback:
-            progress_callback(emitted, total, source_file.name)
+        finally:
+            # Includes duplicate skips, while callback failures stay outside
+            # the file-operation handler and cannot trigger a second event.
+            report_completed(source_file)
 
     return {
         "copied": copied,
