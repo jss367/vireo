@@ -2085,7 +2085,9 @@ def test_clearing_keyword_search_keeps_selected_photo_in_place(live_server, page
     page.evaluate("updateThumbSize(400)")
 
     page.evaluate("VireoFilter.quickSearch('American Robin')")
-    page.wait_for_function("() => photos.length === 1")
+    # Metadata search includes predictions: both robins match, even though
+    # only the first has an explicit American Robin keyword.
+    expect(page.locator(".grid-card")).to_have_count(2)
     selected = page.locator(f'.grid-card[data-id="{selected_id}"]')
     selected.wait_for(state="visible")
     selected.click()
