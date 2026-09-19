@@ -618,6 +618,7 @@ body {
   }
 }
 </style>
+<link rel="stylesheet" href="{{ url_for('static', filename='photo_editor_color.css') }}">
 </head>
 <body>
 {% include '_navbar.html' %}
@@ -803,6 +804,23 @@ body {
 
     <div class="panel-band">
       <div class="panel-title">Tone Curve</div>
+      <select id="curveChannel" class="advanced-select" aria-label="Curve channel" onchange="colorEditor.curveIndex = 0; syncPointControls()">
+        <option value="rgb">Composite RGB</option><option value="red">Red</option>
+        <option value="green">Green</option><option value="blue">Blue</option>
+      </select>
+      <svg id="pointCurveGraph" viewBox="0 0 240 240" tabindex="0" role="group" aria-label="Tone curve. Click to add a point, drag to move, or use the controls below." aria-describedby="curveHelp"></svg>
+      <p class="color-help" id="curveHelp">Click to add a point; drag to shape the curve. Arrow keys move the selected point. Delete removes it.</p>
+      <select id="curvePointSelect" class="advanced-select" aria-label="Selected curve point" onchange="colorEditor.curveIndex = Number(this.value); syncPointControls()"></select>
+      <div class="curve-coordinates">
+        <label>Input <input id="curveInput" type="number" min="0" max="100" step="0.1" onchange="setCurveCoordinate(0, this.value)"></label>
+        <label>Output <input id="curveOutput" type="number" min="0" max="100" step="0.1" onchange="setCurveCoordinate(1, this.value)"></label>
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" id="curveAddPoint" onclick="addCurvePoint()">Add Point</button>
+        <button class="editor-btn" type="button" id="curveDeletePoint" onclick="deleteCurvePoint()">Delete Point</button>
+        <button class="editor-btn" type="button" onclick="resetCurveChannel()">Reset Channel</button>
+      </div>
+      <details id="legacyCurveControls"><summary>Five-point controls</summary>
       <div class="control-row">
         <label for="curve_blackRange">Black</label>
         <input id="curve_blackRange" type="range" min="0" max="100" step="1" value="0" oninput="setToneCurvePoint('black', this.value)">
@@ -828,8 +846,9 @@ body {
         <input id="curve_whiteRange" type="range" min="0" max="100" step="1" value="100" oninput="setToneCurvePoint('white', this.value)">
         <span class="control-value" id="curve_whiteValue">100</span>
       </div>
+      </details>
       <div class="button-row">
-        <button class="editor-btn" type="button" onclick="resetToneCurve()">Reset Curve</button>
+        <button class="editor-btn" type="button" onclick="resetToneCurve()">Reset All Curves</button>
       </div>
     </div>
 
@@ -859,6 +878,54 @@ body {
       <div class="button-row">
         <button class="editor-btn" type="button" onclick="resetHslColor()">Reset Selected</button>
         <button class="editor-btn" type="button" onclick="resetHslMixer()">Reset Mixer</button>
+      </div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Point Color</div>
+      <p class="color-help">Pick a color in the photo, then adjust its hue, saturation, or luminance. Ranges control how far the selection extends from the sampled color, with soft edges.</p>
+      <div class="button-row">
+        <button class="editor-btn" type="button" id="pointColorPick" aria-pressed="false" onclick="togglePointColorPicker()">Pick from Photo</button>
+        <label class="color-swatch-label">Add color <input id="pointColorCustom" type="color" value="#c08040" aria-label="Add a custom Point Color sample" onchange="addPointColorHex(this.value)"></label>
+      </div>
+      <p id="pointColorStatus" class="color-help" role="status" aria-live="polite"></p>
+      <select id="pointColorSelect" class="advanced-select" aria-label="Point Color sample" onchange="colorEditor.sampleIndex = Number(this.value); syncPointControls()"></select>
+      <div id="pointColorSwatch" aria-hidden="true"></div>
+      <fieldset id="pointColorFields" disabled>
+      <div class="control-row">
+        <label for="pointColor_hue_range">Hue range</label>
+        <input id="pointColor_hue_range" type="range" min="1" max="180" step="1" value="30" oninput="setPointColorControl('hue_range', this.value)">
+        <span class="control-value" id="pointColor_hue_rangeValue">30</span>
+      </div>
+      <div class="control-row">
+        <label for="pointColor_saturation_range">Saturation range</label>
+        <input id="pointColor_saturation_range" type="range" min="1" max="100" step="1" value="100" oninput="setPointColorControl('saturation_range', this.value)">
+        <span class="control-value" id="pointColor_saturation_rangeValue">100</span>
+      </div>
+      <div class="control-row">
+        <label for="pointColor_luminance_range">Luminance range</label>
+        <input id="pointColor_luminance_range" type="range" min="1" max="100" step="1" value="100" oninput="setPointColorControl('luminance_range', this.value)">
+        <span class="control-value" id="pointColor_luminance_rangeValue">100</span>
+      </div>
+      <div class="control-row">
+        <label for="pointColor_hue">Hue shift</label>
+        <input id="pointColor_hue" type="range" min="-180" max="180" step="1" value="0" oninput="setPointColorControl('hue', this.value)">
+        <span class="control-value" id="pointColor_hueValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="pointColor_saturation">Saturation</label>
+        <input id="pointColor_saturation" type="range" min="-100" max="100" step="1" value="0" oninput="setPointColorControl('saturation', this.value)">
+        <span class="control-value" id="pointColor_saturationValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="pointColor_luminance">Luminance</label>
+        <input id="pointColor_luminance" type="range" min="-100" max="100" step="1" value="0" oninput="setPointColorControl('luminance', this.value)">
+        <span class="control-value" id="pointColor_luminanceValue">0</span>
+      </div>
+      </fieldset>
+      <div class="button-row">
+        <button class="editor-btn" type="button" id="pointColorRemove" onclick="removePointColor()">Remove Sample</button>
+        <button class="editor-btn" type="button" onclick="resetPointColor()">Reset Point Color</button>
       </div>
     </div>
 
@@ -1775,6 +1842,7 @@ function recipeForSave(recipe) {
     if (Math.abs(balance) > 0.000001) grading.balance = balance;
     adj.color_grading = grading;
   }
+  canonicalPointControls(out.adjustments || {}, adj);
   if (Object.keys(adj).length) out.adjustments = adj;
   else delete out.adjustments;
   return out;
@@ -1805,7 +1873,8 @@ function updateRecipeSummary() {
       if (key === 'white_balance') parts.push('white balance');
       else if (key === 'sharpen_radius') return; // folded into "sharpen"
       else if (key === 'noise_reduction') parts.push('noise reduction');
-      else if (key === 'tone_curve') parts.push('tone curve');
+      else if (key === 'tone_curve' || key === 'point_curves') parts.push('tone curve');
+      else if (key === 'point_color') parts.push('point color');
       else if (key === 'hsl') parts.push('color mixer');
       else if (key === 'color_grading') parts.push('color grading');
       else parts.push(key);
@@ -2372,7 +2441,7 @@ function resetAdjustments() {
   var kept = {};
   [
     'sharpen', 'sharpen_radius', 'noise_reduction',
-    'tone_curve', 'hsl', 'color_grading',
+    'tone_curve', 'point_curves', 'point_color', 'hsl', 'color_grading',
   ].forEach(function(key) {
     if (adj[key]) kept[key] = adj[key];
   });
@@ -2393,6 +2462,7 @@ function _setAdjustmentSection(name, value) {
 }
 
 function syncAdvancedColorControls() {
+  syncPointControls();
   var values = advancedColorValues(editorState.recipe);
   Object.keys(TONE_CURVE_DEFAULTS).forEach(function(key) {
     var input = document.getElementById('curve_' + key + 'Range');
@@ -2441,10 +2511,12 @@ function setToneCurvePoint(key, raw) {
     if (Math.abs(values[name] - TONE_CURVE_DEFAULTS[name]) > 0.000001) section[name] = values[name];
   });
   _setAdjustmentSection('tone_curve', section);
+  syncPointControls();
   markChanged(true);
 }
 
 function resetToneCurve() {
+  _setAdjustmentSection('point_curves', null);
   _setAdjustmentSection('tone_curve', null);
   syncAdvancedColorControls();
   markChanged(true);
@@ -3151,7 +3223,7 @@ async function autoTone() {
     if (Math.abs(vals.temperature) > 0.000001) wb.temperature = vals.temperature;
     if (Math.abs(vals.tint) > 0.000001) wb.tint = vals.tint;
     if (Object.keys(wb).length) adj.white_balance = wb;
-    ['tone_curve', 'hsl', 'color_grading'].forEach(function(key) {
+    ['tone_curve', 'point_curves', 'point_color', 'hsl', 'color_grading'].forEach(function(key) {
       if (existingAdj[key]) adj[key] = cloneRecipe(existingAdj[key]);
     });
     if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
@@ -3175,6 +3247,7 @@ async function autoTone() {
 }
 
 function resetAllEdits() {
+  cancelPointColorPicker();
   editorState.recipe = {};
   ensureCrop(editorState.recipe);
   editorState.cropAspect = null;
@@ -3600,6 +3673,7 @@ async function restoreRecipe(recipe) {
   // here too so a programmatic restore (or any escape from the CSS gate) can't
   // copy a previous photo's checkpoint onto the photoId currently loading.
   if (editorState.loading) return;
+  cancelPointColorPicker();
   editorState.recipe = cloneRecipe(recipe || {});
   ensureCrop(editorState.recipe);
   // The restored checkpoint's crop needn't match the locked ratio.
@@ -4031,6 +4105,7 @@ function revertUnsavedEdits() {
   // A mask update may still be awaiting its snapshot POST. Its result belongs
   // to the discarded working state and must not make the restored recipe dirty.
   editorState.localMaskUpdateSeq++;
+  cancelPointColorPicker();
   editorState.recipe = cloneRecipe(editorState.savedRecipe);
   editorState.localStale = editorState.savedLocalStale;
   ensureCrop(editorState.recipe);
@@ -4242,6 +4317,7 @@ function applyLoadedLocalStaleness(photoId, loadSeq, savedRecipeSeq, data) {
 }
 
 async function loadPhoto(photoId, opts) {
+  cancelPointColorPicker();
   opts = opts || {};
   photoId = Number(photoId);
   if (!Number.isFinite(photoId) || photoId <= 0) return;
@@ -4428,5 +4504,6 @@ async function initEditor() {
 
 document.addEventListener('DOMContentLoaded', initEditor);
 </script>
+<script src="{{ url_for('static', filename='photo_editor_color.js') }}"></script>
 </body>
 </html>

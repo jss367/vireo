@@ -1,3 +1,5 @@
+import pytest
+from PIL import Image
 from playwright.sync_api import expect
 
 
@@ -266,3 +268,151 @@ def test_editor_history_failure_releases_request_freeze_but_keeps_failed_load_fr
     expect(page.locator('#editorFilename')).to_have_text('Photo unavailable')
     assert page.evaluate('editorState.loading') is True
     assert page.evaluate('saveRecipe()') is False
+
+
+@pytest.fixture
+def color_photo(live_server, tmp_path):
+    folder = tmp_path / 'color-photos'
+    folder.mkdir()
+    path = folder / 'color-study.png'
+    Image.new('RGB', (600, 400), (0, 128, 0)).save(path)
+    db = live_server['db']
+    folder_id = db.add_folder(str(folder))
+    return db.add_photo(folder_id=folder_id, filename=path.name, extension='.png',
+                        file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
+                        width=600, height=400)
+
+
+def _wait_color_preview(page):
+    page.wait_for_function("""() => {
+      const img = document.getElementById('editorImg');
+      return img.complete && img.naturalWidth && editorImageMatchesZoomRecipe(img);
+    }""")
+
+
+def test_interactive_curve_and_point_color_persist_with_history(live_server, page, color_photo):
+    photo_id = color_photo
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator('#editorFilename')).to_have_text('color-study.png')
+    page.locator('#curveChannel').select_option('red')
+    page.locator('#curveAddPoint').click()
+    page.locator('#curveOutput').fill('65')
+    page.locator('#curveOutput').press('Tab')
+    assert page.evaluate('editorState.recipe.adjustments.point_curves.red') == [[0, 0], [50, 65], [100, 100]]
+    page.locator('#pointColorCustom').evaluate("el => {el.value='#008000'; el.dispatchEvent(new Event('change'));}")
+    _set_range(page, '#pointColor_hue_range', 45)
+    _set_range(page, '#pointColor_saturation_range', 30)
+    _set_range(page, '#pointColor_luminance_range', 25)
+    _set_range(page, '#pointColor_hue', 60)
+    _set_range(page, '#pointColor_saturation', -20)
+    _set_range(page, '#pointColor_luminance', 10)
+    assert page.evaluate('saveRecipe()') is True
+    saved = live_server['db'].get_photo_edit_recipe(photo_id)
+    assert saved['adjustments']['point_curves']['red'] == [[0, 0], [50, 65], [100, 100]]
+    sample = saved['adjustments']['point_color'][0]
+    assert sample['hue'] == 60 and sample['saturation_range'] == 30 and sample['luminance_range'] == 25
+    page.reload()
+    expect(page.locator('#editorFilename')).to_have_text('color-study.png')
+    expect(page.locator('#saveBtn')).to_be_disabled()
+    page.locator('#curveChannel').select_option('red')
+    page.locator('#curvePointSelect').select_option('1')
+    expect(page.locator('#curveOutput')).to_have_value('65')
+    expect(page.locator('#pointColor_hue')).to_have_value('60')
+    _set_range(page, '#pointColor_hue', 90)
+    assert page.evaluate('saveRecipe()') is True
+    assert page.evaluate('doUndo()') is True
+    expect(page.locator('#pointColor_hue')).to_have_value('60')
+    assert page.evaluate('doRedo()') is True
+    expect(page.locator('#pointColor_hue')).to_have_value('90')
+    page.locator('button[onclick="resetAdjustments()"]').click()
+    assert page.evaluate('recipeForSave(editorState.recipe).adjustments.point_color[0].hue') == 90
+    page.locator('button[onclick="resetCurveChannel()"]').click()
+    assert page.evaluate('(recipeForSave(editorState.recipe).adjustments || {}).point_curves || null') is None
+    page.locator('button[onclick="resetPointColor()"]').click()
+    assert page.evaluate('recipeForSave(editorState.recipe)') == {}
+    assert not errors
+
+
+def test_curve_mouse_keyboard_and_legacy_promotion(live_server, page, color_photo):
+    photo_id = color_photo
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator('#editorFilename')).to_have_text('color-study.png')
+    _set_range(page, '#curve_midtonesRange', 60)
+    assert page.evaluate('currentCurvePoints()')[2] == [50, 60]
+    graph = page.locator('#pointCurveGraph')
+    graph.scroll_into_view_if_needed()
+    box = graph.bounding_box()
+    def graph_xy(x, y):
+        return (box['x'] + (12 + x * 2.16) * box['width'] / 240,
+                box['y'] + (228 - y * 2.16) * box['height'] / 240)
+    page.mouse.move(*graph_xy(50, 60))
+    page.mouse.down()
+    page.mouse.move(*graph_xy(58, 70), steps=6)
+    page.mouse.up()
+    recipe = page.evaluate('recipeForSave(editorState.recipe)')
+    assert 'tone_curve' not in recipe['adjustments']
+    points = recipe['adjustments']['point_curves']['rgb']
+    assert abs(points[2][0] - 58) < 1 and abs(points[2][1] - 70) < 1
+    graph.press('ArrowUp')
+    moved = page.evaluate('currentCurvePoints()')[2]
+    assert moved[1] == points[2][1] + 1
+    graph.press('Delete')
+    assert len(page.evaluate('currentCurvePoints()')) == 4
+    page.locator('#curvePointSelect').select_option('0')
+    expect(page.locator('#curveInput')).to_be_disabled()
+    expect(page.locator('#curveDeletePoint')).to_be_disabled()
+    page.locator('#curveOutput').fill('10')
+    page.locator('#curveOutput').press('Tab')
+    assert page.evaluate('currentCurvePoints()')[0] == [0, 10]
+    assert page.evaluate('saveRecipe()') is True
+
+
+def test_photo_color_picker_samples_before_point_color_and_cancels(live_server, page, color_photo):
+    photo_id = color_photo
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator('#editorFilename')).to_have_text('color-study.png')
+    _set_range(page, '#saturationRange', -30)
+    _set_range(page, '#vibranceRange', 10)
+    _wait_color_preview(page)
+    page.locator('#pointColorPick').click()
+    page.keyboard.press('Escape')
+    expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'false')
+    page.locator('#pointColorPick').click()
+    page.locator('#editorImg').click(force=True)
+    expect(page.locator('#pointColorStatus')).to_contain_text('Color sampled')
+    original = page.evaluate('pointColorSamples()[0].sample')
+    assert abs(original[0] - 120) < 2
+    _set_range(page, '#pointColor_hue', 90)
+    _wait_color_preview(page)
+    page.locator('#pointColorPick').click()
+    page.locator('#editorImg').click(force=True)
+    expect(page.locator('#pointColorSelect option')).to_have_count(2)
+    assert page.evaluate('pointColorSamples()[1].sample') == original
+    page.locator('#pointColorRemove').click()
+    expect(page.locator('#pointColorSelect option')).to_have_count(1)
+
+
+def test_new_color_controls_survive_presets_and_copy(live_server, page, color_photo):
+    photo_id = color_photo
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator('#editorFilename')).to_have_text('color-study.png')
+    page.locator('#curveChannel').select_option('blue')
+    page.locator('#curveOutput').fill('8')
+    page.locator('#curveOutput').press('Tab')
+    page.locator('#pointColorCustom').evaluate("el => {el.value='#c08040'; el.dispatchEvent(new Event('change'));}")
+    _set_range(page, '#pointColor_hue', -25)
+    expected = page.evaluate('recipeForSave(editorState.recipe).adjustments')
+    page.locator('#presetNameInput').fill('Warm wildlife colors')
+    page.locator('#savePresetBtn').click()
+    expect(page.locator('#presetSelect')).not_to_have_value('')
+    page.locator('button[onclick="resetToneCurve()"]').click()
+    page.locator('button[onclick="resetPointColor()"]').click()
+    page.locator('#applyPresetBtn').click()
+    assert page.evaluate('recipeForSave(editorState.recipe).adjustments') == expected
+    # Clipboard settings use the canonical recipe, including both new sections.
+    page.evaluate('copyEditSettings()')
+    assert page.evaluate('vireoEditNav.getCopiedRecipe().recipe.adjustments') == expected
+    assert page.evaluate('saveRecipe()') is True
+    assert live_server['db'].get_photo_edit_recipe(photo_id)['adjustments'] == expected
