@@ -18,7 +18,7 @@ from keyword_identity import (
     resolve_merge_target,
     validate_import_locations,
 )
-from keyword_normalization import keyword_match_key
+from keyword_normalization import keyword_match_key, normalize_keyword_display
 from xmp import SidecarEditor, read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
@@ -240,14 +240,28 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations,
       fix would not requeue anything.
     """
     plan = _PhotoSyncPlan()
+    keyword_adds = {}
+    keyword_removes = {}
+    flat_removes = {}
     for c in photo_changes:
         kind = c["change_type"]
         if kind == "keyword_add":
-            plan.keywords_to_add.add(c["value"])
+            key = keyword_match_key(c["value"])
+            keyword_adds[key] = c["value"]
+            keyword_removes.pop(key, None)
+            flat_removes.pop(key, None)
         elif kind == "keyword_remove":
-            plan.keywords_to_remove.add(c["value"])
+            key = keyword_match_key(c["value"])
+            keyword_removes[key] = c["value"]
+            # Legacy normalization renames can put add(clean) before
+            # remove(quoted/imported spelling). Keep that pair together;
+            # current edits are display-normalized before they are queued.
+            if c["value"] == normalize_keyword_display(c["value"]):
+                keyword_adds.pop(key, None)
         elif kind == "keyword_remove_flat":
-            plan.keywords_to_remove_flat.add(c["value"])
+            key = keyword_match_key(c["value"])
+            flat_removes[key] = c["value"]
+            keyword_adds.pop(key, None)
         elif kind == "keyword_merge":
             plan.keyword_merges.append(json.loads(c['value']))
         elif kind == "rating":
@@ -278,6 +292,9 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations,
         else:
             continue
         plan.supported_changes.append((c["id"], c["change_token"]))
+    plan.keywords_to_add = set(keyword_adds.values())
+    plan.keywords_to_remove = set(keyword_removes.values())
+    plan.keywords_to_remove_flat = set(flat_removes.values())
     return plan
 
 
@@ -354,6 +371,11 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None, location_path=None
     ``SidecarEditor.set_rating``.
     """
     editor = SidecarEditor(xmp_path)
+    if plan.sync_location_keywords and plan.keyword_merges:
+        # Remove the old marker-owned entries before merge rewrites create
+        # the new hierarchy. Otherwise that hierarchy appears pre-existing
+        # to set_location_keywords and loses its cleanup ownership.
+        editor.remove_vireo_location_keywords()
     if plan.hierarchy_replacements:
         editor.replace_keyword_hierarchies(plan.hierarchy_replacements)
     _remove_planned_keywords(editor, plan)
@@ -486,6 +508,9 @@ def _plan_merged_keyword_hierarchies(db, plans):
         return
     rows = db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall()
     paths = keyword_paths(rows)
+    location_leaves = db.get_photo_location_keyword_ids([
+        pid for pid, plan in plans.items() if plan.sync_location_keywords
+    ])
     for photo_id, plan in plans.items():
         if not plan.keyword_merges:
             continue
@@ -500,9 +525,10 @@ def _plan_merged_keyword_hierarchies(db, plans):
             old_hierarchy = '|'.join(source_path)
             if target_id in tagged_ids:
                 plan.hierarchy_replacements[old_hierarchy] = '|'.join(target_path)
-                plan.keywords_to_add.add(target_path[-1])
-                if len(target_path) > 1:
-                    plan.hierarchies_to_add.add('|'.join(target_path))
+                if target_id != location_leaves.get(photo_id):
+                    plan.keywords_to_add.add(target_path[-1])
+                    if len(target_path) > 1:
+                        plan.hierarchies_to_add.add('|'.join(target_path))
             else:
                 if path_key(source_path) not in tagged_paths:
                     plan.hierarchy_replacements[old_hierarchy] = None
@@ -764,7 +790,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 path = futures[future]
                 try:
                     resolved_paths[path] = future.result()
-                except OSError as error:
+                except (OSError, ValueError) as error:
                     resolve_errors[path] = error
     # Keep conservative aliases on one worker, including preparation failures.
     # Their identity may only become clear after a sibling creates its sidecar.

@@ -3040,3 +3040,368 @@ def test_sync_missing_case_alias_removal_survives_failed_add(tmp_path, db, monke
     assert sync.sync_to_xmp(db)["ok"]
     assert "Osprey" not in read_keywords(path)
     assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize("initially_present", [False, True])
+@pytest.mark.parametrize("revert_again", [False, True])
+def test_keyword_edit_during_sync_keeps_corrective_intent(
+    tmp_path, db, monkeypatch, initially_present, revert_again,
+):
+    """A second connection edits after the writer captured its snapshot."""
+    import sync
+    from db import Database
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, path = _setup_photo_with_xmp(
+        tmp_path, db, keywords={'Osprey'} if initially_present else set(),
+    )
+    keyword = db.add_keyword('Osprey')
+    initial_op = 'keyword_remove' if initially_present else 'keyword_add'
+    inverse_op = 'keyword_add' if initially_present else 'keyword_remove'
+    db.queue_change(pid, initial_op, 'Osprey')
+    fired = False
+
+    def edit_after_snapshot(_status):
+        nonlocal fired
+        if fired:
+            return
+        fired = True
+        with Database(db._db_path, initialize_schema=False) as editor:
+            editor.set_active_workspace(db._ws_id())
+            editor._flip_pending_keyword_change(pid, 'Osprey', initial_op, inverse_op)
+            if revert_again:
+                editor._flip_pending_keyword_change(pid, 'Osprey', inverse_op, initial_op)
+
+    sync.sync_to_xmp(db, status_callback=edit_after_snapshot)
+    sync.sync_to_xmp(db)
+    expected_present = not initially_present if revert_again else initially_present
+    assert read_keywords(path) == ({'Osprey'} if expected_present else set())
+    assert not db.get_pending_changes()
+    assert not db.conn.execute('SELECT * FROM pending_changes WHERE sync_started = 1').fetchall()
+
+
+def test_interrupted_sync_claim_survives_restart(tmp_path, db, monkeypatch):
+    import sync
+    from db import Database
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, path = _setup_photo_with_xmp(tmp_path, db)
+    db.queue_change(pid, 'keyword_add', 'Osprey')
+    original_write = sync._write_photo_sync
+
+    def write_then_fail(*args, **kwargs):
+        original_write(*args, **kwargs)
+        raise OSError('Lost acknowledgement after publishing')
+
+    monkeypatch.setattr(sync, '_write_photo_sync', write_then_fail)
+    assert sync.sync_to_xmp(db)['failed'] == 1
+    with Database(db._db_path, initialize_schema=False) as restarted:
+        restarted.set_active_workspace(db._ws_id())
+        restarted._flip_pending_keyword_change(pid, 'Osprey', 'keyword_add', 'keyword_remove')
+        assert [(c["change_type"], c["sync_started"]) for c in restarted.get_pending_changes()] == [("keyword_remove", 1)]
+        monkeypatch.setattr(sync, '_write_photo_sync', original_write)
+        assert sync.sync_to_xmp(restarted)['synced'] == 1
+        assert not restarted.get_pending_changes()
+    assert read_keywords(path) == set()
+
+
+@pytest.mark.parametrize('kind, values', [
+    ('rating', ['1', '2', '3']),
+    ('rating', ['1', '2', '1']),
+    ('keyword', ['keyword_add', 'keyword_remove', 'keyword_add']),
+])
+@pytest.mark.parametrize('sidecar_alias', [False, True])
+def test_shared_sidecar_preserves_interleaved_intents(tmp_path, db, kind, values, sidecar_alias):
+    import sync
+    from xmp import read_keywords, read_sync_preview_metadata
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(tmp_path, db)
+    filename = 'alias.nef' if sidecar_alias else 'bird.nef'
+    second = db.add_photo(folder_id=db.get_photo(first)['folder_id'], filename=filename,
+                          extension='.nef', file_size=100, file_mtime=1)
+    if sidecar_alias:
+        try:
+            os.symlink(path, os.path.join(os.path.dirname(path), 'alias.xmp'))
+        except OSError:
+            pytest.skip('symlink creation unavailable')
+    for pid, value in zip((first, second, first), values, strict=True):
+        db.queue_change(pid, value if kind == 'keyword' else kind,
+                        'Osprey' if kind == 'keyword' else value)
+    result = sync.sync_to_xmp(db)
+    assert result['synced'] == 2
+    assert not db.get_pending_changes()
+    if kind == 'rating':
+        assert read_sync_preview_metadata(path)['rating'] == values[-1]
+    else:
+        assert read_keywords(path) == {'Osprey'}
+
+
+def test_shared_sidecar_failure_retries_the_whole_sequence(tmp_path, db, monkeypatch):
+    import sync
+    from xmp import read_sync_preview_metadata
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(tmp_path, db)
+    second = db.add_photo(folder_id=db.get_photo(first)['folder_id'], filename='bird.nef',
+                          extension='.nef', file_size=100, file_mtime=1)
+    for pid, value in ((first, '1'), (second, '2'), (first, '3')):
+        db.queue_change(pid, 'rating', value)
+    original_write = sync._write_photo_sync
+
+    def fail_second(path, plan, *args, **kwargs):
+        if plan.rating == 2:
+            raise OSError('Disconnected')
+        return original_write(path, plan, *args, **kwargs)
+
+    monkeypatch.setattr(sync, '_write_photo_sync', fail_second)
+    assert sync.sync_to_xmp(db)['failed'] == 2
+    assert len(db.get_pending_changes()) == 3
+    monkeypatch.setattr(sync, '_write_photo_sync', original_write)
+    assert sync.sync_to_xmp(db)['synced'] == 2
+    assert read_sync_preview_metadata(path)['rating'] == '3'
+    assert not db.get_pending_changes()
+
+
+def test_sidecar_resolution_failure_does_not_abort_other_photos(tmp_path, db, monkeypatch):
+    import sync
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    bad, bad_path = _setup_photo_with_xmp(tmp_path / 'bad', db)
+    good, good_path = _setup_photo_with_xmp(tmp_path / 'good', db)
+    for pid in (bad, good):
+        db.queue_change(pid, 'keyword_add', 'Osprey')
+    realpath = os.path.realpath
+
+    def fail_one(path, *args, **kwargs):
+        if str(path) == bad_path:
+            raise OSError('Cannot resolve this sidecar')
+        return realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, 'realpath', fail_one)
+    result = sync.sync_to_xmp(db)
+    assert result['synced'] == 1
+    assert result['failed'] == 1
+    assert read_keywords(good_path) == {'Osprey'}
+    assert [c['photo_id'] for c in db.get_pending_changes()] == [bad]
+
+
+@pytest.mark.parametrize('alias', ['raw_jpeg', 'sidecar_symlink', 'folder_symlink'])
+@pytest.mark.parametrize('initially_present', [False, True])
+def test_keyword_cancellation_does_not_hide_latest_shared_sidecar_intent(
+    tmp_path, db, alias, initially_present,
+):
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(
+        tmp_path, db, keywords={'Osprey'} if initially_present else set(),
+    )
+    folder_id = db.get_photo(first)['folder_id']
+    filename = 'bird.nef'
+    if alias != 'raw_jpeg':
+        try:
+            if alias == 'sidecar_symlink':
+                filename = 'alias.nef'
+                os.symlink(path, os.path.join(os.path.dirname(path), 'alias.xmp'))
+            else:
+                folder_alias = tmp_path / 'alias-folder'
+                os.symlink(os.path.dirname(path), folder_alias, target_is_directory=True)
+                folder_id = db.add_folder(str(folder_alias), name='Alias folder')
+        except OSError:
+            pytest.skip('symlink creation unavailable')
+    second = db.add_photo(folder_id=folder_id, filename=filename,
+                          extension='.nef', file_size=100, file_mtime=1)
+    initial = 'keyword_remove' if initially_present else 'keyword_add'
+    inverse = 'keyword_add' if initially_present else 'keyword_remove'
+    db.queue_change(first, initial, 'Osprey')
+    db.queue_change(second, initial, 'Osprey')
+    # Cancelling the first edit must preserve its inverse after the sibling
+    # write, even when the sidecars have different stored paths/basenames.
+    db._flip_pending_keyword_change(first, 'Osprey', initial, inverse)
+    assert sync_to_xmp(db)['synced'] == 2
+    assert read_keywords(path) == ({'Osprey'} if initially_present else set())
+    assert not db.get_pending_changes()
+
+
+def test_keyword_cancellation_distinguishes_case_sensitive_sidecars(tmp_path, db):
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(tmp_path, db, keywords={'Osprey'})
+    other_path = os.path.join(os.path.dirname(path), 'BIRD.xmp')
+    write_sidecar(other_path, flat_keywords={'Osprey'}, hierarchical_keywords={'People|Osprey'})
+    if os.path.samefile(path, other_path):
+        pytest.skip('requires case-sensitive filenames')
+    second = db.add_photo(folder_id=db.get_photo(first)['folder_id'], filename='BIRD.nef',
+                          extension='.nef', file_size=100, file_mtime=1)
+    db.queue_change(first, 'keyword_add', 'Osprey')
+    db.queue_change(second, 'keyword_add', 'Osprey')
+    db._flip_pending_keyword_change(second, 'Osprey', 'keyword_add', 'keyword_remove')
+    assert not [c for c in db.get_pending_changes() if c['photo_id'] == second]
+    assert sync_to_xmp(db)['synced'] == 1
+    assert read_keywords(other_path) == {'Osprey'}
+    assert set(read_hierarchical_keywords(other_path)) == {'People|Osprey'}
+
+
+@pytest.mark.parametrize('first_sync', ['offline', 'lost_ack', 'success'])
+@pytest.mark.parametrize('redo', [False, True])
+def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sync, redo):
+    import sync
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, path = _setup_photo_with_xmp(tmp_path, db)
+    keyword = db.add_keyword('Osprey')
+    db.tag_photo(pid, keyword, source='manual')
+    db.queue_change(pid, 'keyword_add', 'Osprey')
+    db.record_edit('keyword_add', 'Added Osprey', str(keyword),
+                   [{'photo_id': pid, 'old_value': '', 'new_value': str(keyword)}])
+    with monkeypatch.context() as patch:
+        if first_sync == 'offline':
+            patch.setattr(sync.os.path, 'isdir', lambda _path: False)
+        elif first_sync == 'lost_ack':
+            write = sync._write_photo_sync
+
+            def lost_ack(*args, **kwargs):
+                write(*args, **kwargs)
+                raise OSError('Lost write acknowledgement')
+
+            patch.setattr(sync, '_write_photo_sync', lost_ack)
+        result = sync.sync_to_xmp(db)
+        assert result['failed'] == (0 if first_sync == 'success' else 1)
+    db.undo_last_edit()
+    assert not db.get_photo_keywords(pid)
+    if redo:
+        db.redo_last_undo()
+        assert [k['id'] for k in db.get_photo_keywords(pid)] == [keyword]
+    assert sync.sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(path) == ({'Osprey'} if redo else set())
+    assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize('failed_index', [0, 1])
+def test_casefold_collision_write_failure_leaves_other_sidecar_successful(tmp_path, db, monkeypatch, failed_index):
+    import sync
+    from xmp import read_sync_preview_metadata, write_sidecar
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    folder = tmp_path / 'photos'
+    folder.mkdir()
+    folder_id = db.add_folder(str(folder), name='Photos')
+    photos, paths = [], []
+    for name in ('first', 'second'):
+        path = str(folder / (name + '.xmp'))
+        write_sidecar(path, flat_keywords={'Osprey'}, hierarchical_keywords=set())
+        paths.append(path)
+        photos.append(db.add_photo(folder_id=folder_id, filename=name + '.jpg',
+                                   extension='.jpg', file_size=100, file_mtime=1))
+    # Force the scheduling collision without depending on the host volume's
+    # case sensitivity; the two real files and their write outcomes stay distinct.
+    normcase = os.path.normcase
+
+    class SameFold(str):
+        def casefold(self):
+            return 'same-scheduling-key'
+
+    def collision_key(path):
+        result = normcase(path)
+        return SameFold(result) if result in paths else result
+
+    monkeypatch.setattr(sync.os.path, 'normcase', collision_key)
+    for pid, rating in ((photos[0], '1'), (photos[1], '2'), (photos[0], '3')):
+        db.queue_change(pid, 'rating', rating)
+    original_write = sync._write_photo_sync
+
+    def fail_one(path, *args, **kwargs):
+        if path == paths[failed_index]:
+            raise OSError('One sidecar is unwritable')
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(sync, '_write_photo_sync', fail_one)
+    for _ in range(2):
+        result = sync.sync_to_xmp(db)
+        assert result['failed'] == 1
+        assert {c['photo_id'] for c in db.get_pending_changes()} == {photos[failed_index]}
+    assert read_sync_preview_metadata(paths[1 - failed_index])['rating'] == ('3' if failed_index else '2')
+
+
+def test_failed_case_alias_is_retained_when_other_write_creates_sidecar(tmp_path, db, monkeypatch):
+    import sync
+    from xmp import read_sync_preview_metadata
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    folder = tmp_path / 'photos'
+    folder.mkdir()
+    folder_id = db.add_folder(str(folder), name='Photos')
+    photos = [db.add_photo(folder_id=folder_id, filename=name + '.jpg',
+                           extension='.jpg', file_size=100, file_mtime=1)
+              for name in ('bird', 'BIRD')]
+    paths = [str(folder / (name + '.xmp')) for name in ('bird', 'BIRD')]
+    for pid, rating in zip(photos, ('1', '2'), strict=True):
+        db.queue_change(pid, 'rating', rating)
+    write = sync._write_photo_sync
+
+    def fail_first(path, *args, **kwargs):
+        if path == paths[0]:
+            raise OSError('First write failed before creating a file')
+        return write(path, *args, **kwargs)
+
+    monkeypatch.setattr(sync, '_write_photo_sync', fail_first)
+    result = sync.sync_to_xmp(db, create_missing_sidecars=True)
+    shared = os.path.exists(paths[0]) and os.path.samefile(*paths)
+    assert result['failed'] == (2 if shared else 1)
+    assert {c['photo_id'] for c in db.get_pending_changes()} == (set(photos) if shared else {photos[0]})
+    monkeypatch.setattr(sync, '_write_photo_sync', write)
+    assert sync.sync_to_xmp(db, create_missing_sidecars=True)['failed'] == 0
+    assert read_sync_preview_metadata(paths[1])['rating'] == '2'
+    assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize('initial, inverse, expected', [
+    ('keyword_add', 'keyword_remove', set()),
+    ('keyword_add', 'keyword_remove_flat', set()),
+    ('keyword_remove', 'keyword_add', {'osprey'}),
+    ('keyword_remove_flat', 'keyword_add', {'osprey'}),
+])
+def test_opposing_keyword_intents_use_normalized_identity(tmp_path, db, monkeypatch, initial, inverse, expected):
+    import sync
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, path = _setup_photo_with_xmp(tmp_path, db, keywords={'Osprey'})
+    db.queue_change(pid, initial, 'Osprey')
+    write = sync._write_photo_sync
+
+    def interrupted(*args, **kwargs):
+        write(*args, **kwargs)
+        raise OSError('Lost acknowledgement')
+
+    monkeypatch.setattr(sync, '_write_photo_sync', interrupted)
+    assert sync.sync_to_xmp(db)['failed'] == 1
+    db.queue_change(pid, inverse, 'osprey')
+    monkeypatch.setattr(sync, '_write_photo_sync', write)
+    assert sync.sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(path) == expected
+    assert not db.get_pending_changes()
+
+
+def test_shared_sidecar_repeated_add_after_case_variant_removal(tmp_path, db):
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(tmp_path, db)
+    second = db.add_photo(folder_id=db.get_photo(first)['folder_id'], filename='bird.nef',
+                          extension='.nef', file_size=100, file_mtime=1)
+    db.queue_change(first, 'keyword_add', 'Osprey')
+    db.queue_change(second, 'keyword_remove', 'osprey')
+    db.queue_change(first, 'keyword_add', 'Osprey')
+    assert sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(path) == {'Osprey'}
+    assert not db.get_pending_changes()

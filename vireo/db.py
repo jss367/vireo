@@ -10645,26 +10645,8 @@ class Database:
             "place_id": row["place_id"],
         }
 
-    def get_photo_location_paths(self, photo_ids):
-        """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
-
-        The leaf is chosen exactly as :meth:`get_assigned_photo_location`
-        chooses it -- coordinate-bearing first, then deepest in the chain,
-        then most recent id as the tie-break -- so the keywords written to
-        a sidecar always describe the same place as the GPS written beside
-        them. When a photo carries both a coordinate-bearing location and
-        a coordinate-less one (the generic keyword-add endpoint attaches
-        another ``type='location'`` keyword without replacing the
-        current), the coord-bearing row wins here just as it does in
-        :meth:`get_assigned_photo_location`. Unlike that method this one
-        does not *require* coordinates: a free-text location the user
-        typed still has a name worth writing when there is no coord-bearing
-        alternative.
-
-        Photos with no linked location are absent from the result, which is
-        how the sync engine tells "write these keywords" from "remove the ones
-        we wrote".
-        """
+    def _get_photo_location_leaves(self, photo_ids):
+        """Choose the effective exported location row for each photo."""
         if not photo_ids:
             return {}
 
@@ -10689,6 +10671,34 @@ class Database:
             ).fetchall()
             for row in rows:
                 leaves[row["photo_id"]] = row
+
+        return leaves
+
+    def get_photo_location_keyword_ids(self, photo_ids):
+        """Return the keyword IDs owning each photo's exported location."""
+        return {pid: row["id"] for pid, row in self._get_photo_location_leaves(photo_ids).items()}
+
+    def get_photo_location_paths(self, photo_ids):
+        """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
+
+        The leaf is chosen exactly as :meth:`get_assigned_photo_location`
+        chooses it -- coordinate-bearing first, then deepest in the chain,
+        then most recent id as the tie-break -- so the keywords written to
+        a sidecar always describe the same place as the GPS written beside
+        them. When a photo carries both a coordinate-bearing location and
+        a coordinate-less one (the generic keyword-add endpoint attaches
+        another ``type='location'`` keyword without replacing the
+        current), the coord-bearing row wins here just as it does in
+        :meth:`get_assigned_photo_location`. Unlike that method this one
+        does not *require* coordinates: a free-text location the user
+        typed still has a name worth writing when there is no coord-bearing
+        alternative.
+
+        Photos with no linked location are absent from the result, which is
+        how the sync engine tells "write these keywords" from "remove the ones
+        we wrote".
+        """
+        leaves = self._get_photo_location_leaves(photo_ids)
 
         # One cache for the whole batch: a shoot shares a place, so thousands
         # of photos resolve the same handful of chains.
@@ -22872,7 +22882,7 @@ class Database:
     # -- Pending Changes --
 
     def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
-        """Add a change to the sync queue (skips if already queued).
+        """Add a change to the sync queue, skipping redundant intents.
 
         Returns the inserted pending change token, or None if already queued.
         A rating only deduplicates against its latest queued value: 1 -> 2 -> 1
@@ -22896,11 +22906,36 @@ class Database:
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         if change_type == "rating":
             latest = self.conn.execute(
-                "SELECT value FROM pending_changes WHERE photo_id = ? "
+                "SELECT id, value FROM pending_changes WHERE photo_id = ? "
                 "AND change_type = 'rating' AND workspace_id = ? ORDER BY id DESC LIMIT 1",
                 (photo_id, ws_id),
             ).fetchone()
             existing = latest is not None and latest["value"] == value
+            if existing:
+                existing = self.conn.execute(
+                    "SELECT 1 FROM pending_changes WHERE workspace_id = ? "
+                    "AND id > ? AND photo_id != ? AND change_type = 'rating' LIMIT 1",
+                    (ws_id, latest["id"], photo_id),
+                ).fetchone() is None
+        elif change_type in ("keyword_add", "keyword_remove", "keyword_remove_flat"):
+            latest = self.conn.execute(
+                "SELECT id, change_type, value FROM pending_changes WHERE photo_id = ? "
+                "AND workspace_id = ? AND value = ? COLLATE NOCASE AND change_type IN "
+                "('keyword_add', 'keyword_remove', 'keyword_remove_flat') "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (photo_id, ws_id, value),
+            ).fetchone()
+            existing = (latest is not None and latest["change_type"] == change_type
+                        and latest["value"] == value)
+            if existing:
+                # Another photo can share this sidecar. Do not discard a
+                # repeated intent after an intervening edit on that photo.
+                existing = self.conn.execute(
+                    "SELECT 1 FROM pending_changes WHERE workspace_id = ? AND id > ? "
+                    "AND photo_id != ? AND value = ? COLLATE NOCASE AND change_type IN "
+                    "('keyword_add', 'keyword_remove', 'keyword_remove_flat') LIMIT 1",
+                    (ws_id, latest["id"], photo_id, value),
+                ).fetchone() is None
         else:
             existing = self.conn.execute(
                 "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
@@ -22977,8 +23012,49 @@ class Database:
             if (key := keyword_match_key(row["value"]))
         }
 
+    def _pending_keyword_sidecar_alias(self, photo_id, workspace_id, value):
+        """Return whether another queued keyword edit reaches this sidecar."""
+        needs_inverse = False
+        # Resolve all candidate sidecars, as sync does: differing
+        # basenames or folder spellings may still alias one file.
+        # Do not conservatively treat unrelated homonyms as shared;
+        # that would turn a cancelled add into a destructive removal.
+        candidates = self.conn.execute(
+            "SELECT DISTINCT f.path, p.filename FROM photos p "
+            "JOIN folders f ON f.id = p.folder_id "
+            "JOIN pending_changes pc ON pc.photo_id = p.id "
+            "WHERE p.id != ? AND pc.workspace_id = ? AND pc.value = ? COLLATE NOCASE "
+            "AND pc.change_type IN ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
+            (photo_id, workspace_id, value),
+        ).fetchall()
+        if candidates:
+            own = self.conn.execute(
+                "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id = p.folder_id "
+                "WHERE p.id = ?", (photo_id,),
+            ).fetchone()
+            if own is not None:
+                def sidecar_path(row):
+                    return os.path.join(row["path"], os.path.splitext(row["filename"])[0] + ".xmp")
+
+                own_path = os.path.normcase(os.path.realpath(sidecar_path(own)))
+                for path in {sidecar_path(row) for row in candidates}:
+                    other_path = os.path.normcase(os.path.realpath(path))
+                    if own_path == other_path:
+                        needs_inverse = True
+                        break
+                    if own_path.casefold() == other_path.casefold():
+                        # Scheduling may over-group case variants;
+                        # cancellation must confirm they are aliases.
+                        with contextlib.suppress(OSError):
+                            needs_inverse = os.path.samefile(own_path, other_path)
+                        if needs_inverse:
+                            break
+        return needs_inverse
+
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
-        """Delete matching pending changes. Returns rows removed.
+        """Delete matching pending changes, preserving captured keyword intents.
+
+        Return the number of rows removed.
 
         If a keyword may already have reached a writer, cancelling it queues
         its inverse in the same transaction. The inverse is also marked as
@@ -23005,7 +23081,9 @@ class Database:
         ).fetchall()
         inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
         for row in removed:
-            if row["sync_started"] and row["change_type"] in inverse:
+            if row["change_type"] in inverse and (
+                row["sync_started"] or self._pending_keyword_sidecar_alias(photo_id, ws_id, row["value"])
+            ):
                 kind = inverse[row["change_type"]]
                 self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id, _commit=False)
                 self.conn.execute(
@@ -23611,9 +23689,9 @@ class Database:
                             workspace_id=removal['workspace_id'],
                         )
             else:
-                self.untag_photo(pid, kid)
-                if kw_name:
-                    self.remove_pending_changes(pid, 'keyword_add', kw_name)
+                # A captured or completed add needs a corrective removal;
+                # simply deleting a pending row cannot undo its sidecar write.
+                self._untag_for_edit(pid, kid)
         if action == 'keyword_add':
             self._restore_edit_prediction_status(old_meta)
             if kw_name:
@@ -23643,9 +23721,7 @@ class Database:
                         workspace_id=removal['workspace_id'],
                     )
             else:
-                self.tag_photo(pid, kid, source='manual')
-                if kw_name:
-                    self.queue_change(pid, 'keyword_add', kw_name)
+                self._retag_for_edit(pid, kid)
         if action == 'keyword_add':
             self._reject_edit_prediction(old_meta)
             if kw_name:
