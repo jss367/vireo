@@ -877,24 +877,12 @@
     if (!mergeFieldOptions) return;
     if (input.name === 'kwMergePlace') {
       mergeOverrides.place_id = input.value === '' ? null : input.value;
-      // A newly chosen place brings its own point unless the user has
-      // already typed one; a marker left on the old row's coordinates
-      // would put the retained place somewhere it isn't.
-      if (mergeOverrides.coordinates === undefined) {
-        const picked = mergeFieldOptions.place.find(o => o.place_id === input.value);
-        const latInput = document.getElementById('kwMergeLat');
-        const lngInput = document.getElementById('kwMergeLng');
-        if (picked && picked.latitude != null && picked.longitude != null) {
-          latInput.value = picked.latitude;
-          lngInput.value = picked.longitude;
-        } else {
-          // The chosen place has no point; leaving the old row's numbers
-          // visible invites editing one and submitting the other place's
-          // coordinates for this one.
-          latInput.value = '';
-          lngInput.value = '';
-        }
-      }
+      // The boxes are not updated here. Predicting the point a place change
+      // lands on means reimplementing the server's resolution rule in the
+      // browser, and the two drifted twice: once showing the previous
+      // place's point, once showing blank while the merge kept coordinates.
+      // syncCoordinateInputs() copies the answer off the next preview
+      // instead, so the fields always show what the merge will actually do.
       scheduleMergePreview(true);
     } else if (input.name === 'kwMergeSpecies') {
       mergeOverrides.species = input.value === ''
@@ -906,6 +894,18 @@
       scheduleMergePreview(true);
     }
   });
+
+  /* Show the coordinates the merge will really use. Skipped once the user
+     types their own, because from then on the boxes ARE the override and
+     overwriting them would fight the typing. */
+  function syncCoordinateInputs(data) {
+    if (mergeOverrides.coordinates !== undefined) return;
+    const latInput = document.getElementById('kwMergeLat');
+    const lngInput = document.getElementById('kwMergeLng');
+    if (!latInput || !lngInput) return;
+    latInput.value = data.resolved.latitude == null ? '' : data.resolved.latitude;
+    lngInput.value = data.resolved.longitude == null ? '' : data.resolved.longitude;
+  }
 
   function renderMergeSummary(data) {
     const resolved = data.resolved;
@@ -1036,6 +1036,7 @@
         renderMergeFields(data);
         mergeFieldsFor = targetId;
       }
+      syncCoordinateInputs(data);
       renderMergeSummary(data);
       renderMergeMap(data);
       mergeToken = data.preview_token || null;

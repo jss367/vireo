@@ -149,12 +149,22 @@ def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(liv
     assert page.evaluate("document.querySelectorAll('.leaflet-tooltip img').length") == 0
     assert page.evaluate('window.__xssRan') is None
 
+    # The coordinate boxes must always show what the merge will really use.
     # A chosen place owns its own point; a coordless one leaves none behind.
     page.locator('input[name="kwMergePlace"][value="place-located"]').check()
     expect(page.locator('#kwMergeLat')).to_have_value('48.2')
     page.locator('input[name="kwMergePlace"][value="place-coordless"]').check()
     expect(page.locator('#kwMergeLat')).to_have_value('')
     expect(page.locator('#kwMergeLng')).to_have_value('')
+
+    # Unlinking is the case where the server DOES keep a fallback pair, so
+    # blank boxes would be a lie about what gets exported.
+    page.locator('input[name="kwMergePlace"][value=""]').check()
+    expect(page.locator('#kwMergePreview')).to_contain_text('Coordinates')
+    expect(page.locator('#kwMergeLat')).not_to_have_value('')
+    shown = page.locator('#kwMergeLat').input_value()
+    assert shown in ('48.1', '48.2'), shown
+    expect(page.locator('#kwMergePreview')).to_contain_text(shown)
     assert errors == []
 
 def test_merge_context_menu_keeps_one_rows_name_and_the_others_place(live_server, page):
