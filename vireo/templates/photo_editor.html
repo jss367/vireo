@@ -1055,6 +1055,7 @@ body {
 </div>
 
 {% include '_folder_browser.html' %}
+{% include '_export_preset_dialog.html' %}
 
 <script src="/static/vireo-folder-browser.js"></script>
 <script src="/static/vireo-export-presets.js"></script>
@@ -4342,6 +4343,9 @@ function initEditorKeyboard() {
     // Let the folder browser's own Escape handler dismiss only the picker,
     // preserving the export modal and the options already entered there.
     if (document.querySelector('.folder-browser-overlay.open')) return;
+    // Same split for the export-preset save/delete dialog: its own Escape
+    // handler dismisses just that dialog and leaves the export modal open.
+    if (document.querySelector('.export-preset-dialog-overlay.open')) return;
     var exportOverlay = document.getElementById('exportOverlay');
     if (exportOverlay && exportOverlay.classList.contains('open')) {
       if (e.key === 'Escape') closeExportModal();
