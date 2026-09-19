@@ -3,6 +3,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from PIL import Image
 from playwright.sync_api import expect
 
 LEAFLET_STUB = """
@@ -1759,7 +1760,21 @@ def test_location_review_color_codes_place_types(live_server, page):
         )
 
 
-def test_location_review_photo_marker_opens_the_photo_preview(live_server, page):
+@pytest.fixture
+def full_photo_preview(page, tmp_path):
+    # The shared seed creates thumbnails, but no originals at /photos/park.
+    # Serve a decodable image so preview checks cannot race a failed load.
+    image_path = tmp_path / "preview.jpg"
+    Image.new("RGB", (100, 100), color="green").save(image_path)
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(path=str(image_path), content_type="image/jpeg"),
+    )
+
+
+def test_location_review_photo_marker_opens_the_photo_preview(
+    live_server, page, full_photo_preview,
+):
     """A photo dot opens its photo with the whole location group available."""
     photo_ids = live_server["data"]["photos"][:2]
     with live_server["db"].conn:
@@ -1793,6 +1808,7 @@ def test_location_review_photo_marker_opens_the_photo_preview(live_server, page)
     expect(page.locator("#lightboxImg")).to_have_attribute(
         "src", f"/photos/{photo_ids[0]}/full"
     )
+    page.wait_for_function("lightboxImg.complete && lightboxImg.naturalWidth > 0")
     expect(page.locator("#lightboxCounter")).to_contain_text("1 / 2")
 
     page.evaluate("lightboxDelete()")
@@ -1945,7 +1961,9 @@ def test_location_review_lightbox_retains_photo_after_trash_failure(
     assert stored == {"photo_ids": photo_ids}
 
 
-def test_location_review_thumbnail_opens_the_photo_preview(live_server, page):
+def test_location_review_thumbnail_opens_the_photo_preview(
+    live_server, page, full_photo_preview,
+):
     """The thumbnail strip offers the same preview affordance as map dots."""
     photo_id = live_server["data"]["photos"][0]
     with live_server["db"].conn:
@@ -1971,6 +1989,7 @@ def test_location_review_thumbnail_opens_the_photo_preview(live_server, page):
     expect(page.locator("#lightboxImg")).to_have_attribute(
         "src", f"/photos/{photo_id}/full"
     )
+    page.wait_for_function("lightboxImg.complete && lightboxImg.naturalWidth > 0")
 
 
 def test_browse_review_on_map_opens_the_selected_photos(live_server, page):
