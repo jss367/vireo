@@ -634,3 +634,44 @@ def test_detail_status_does_not_confirm_a_cancelled_upgrade(live_server, page):
     page.evaluate("setLightboxZoomToFit()")
     expect(status).to_be_hidden()
     assert page.evaluate("_lbCurrentSrcKey") == "full"
+
+
+def test_detail_status_reports_the_very_first_open(live_server, page):
+    held = []
+
+    page.route(
+        re.compile(r"/api/photos/\d+$"),
+        lambda route: route.fulfill(json={
+            "id": int(route.request.url.rsplit("/", 1)[1]),
+            "width": 6000, "height": 4000, "full_uses_original": False,
+            "full_preview_max_size": 1920,
+            "edit_recipe": None, "flag": "none",
+        }),
+    )
+    page.route("**/photos/*/full*", lambda r: held.append(r))
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate(
+        """() => {
+          _lbScheduleOriginalPreload = function() {};
+          LB_DETAIL_SHOW_DELAY_MS = 0;
+          LB_DETAIL_SETTLED_MS = 30000;
+          openLightbox(100, 'photo-0.jpg', [
+            {id: 100, filename: 'photo-0.jpg', width: 6000, height: 4000, edit_recipe: null}
+          ]);
+        }"""
+    )
+    status = page.locator("#lightboxPreviewStatus")
+    # Opening from closed is the emptiest overlay there is, and _lbVisualTransitionPending
+    # stays false because nothing is being navigated away from.
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Loading…"
+    assert page.evaluate("_lbVisualTransitionPending") is False
+
+    page.wait_for_timeout(200)
+    assert held
+    for r in held:
+        r.fulfill(body=_jpeg(), content_type="image/jpeg")
+    page.wait_for_function("_lightboxCommittedId === 100 && !_lbInitialDecodePending")
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Full detail"

@@ -8273,6 +8273,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoW = img.naturalWidth;
       _lbPhotoH = img.naturalHeight;
     }
+    _lbInitialDecodePending = false;
     _lbVisualTransitionPending = false;
     _lbSetPhotoTransitionPending(false);
     _lbRecomputeNativeZoom();
@@ -8339,6 +8340,7 @@ function openLightbox(photoId, filename, photoList, options) {
       // so the layout reflects the incoming photo instead of the frozen
       // outgoing bitmap.
       commitVisiblePhotoIdentity();
+      _lbInitialDecodePending = false;
       _lbVisualTransitionPending = false;
       _lbSetPhotoTransitionPending(false);
       _lbRecomputeNativeZoom();
@@ -8360,6 +8362,8 @@ function openLightbox(photoId, filename, photoList, options) {
   }
   img.onload = handleInitialImageLoad;
   img.onerror = handleInitialImageError;
+  _lbInitialDecodePending = true;
+  _lbRenderDetailStatus();
   img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
   if (!_lbVisualTransitionPending) commitVisiblePhotoIdentity();
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
@@ -8830,6 +8834,7 @@ function closeLightbox(e) {
   _lbEyeTrackScreenAnchor = null;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
+  _lbInitialDecodePending = false;
   _lbResetDetailStatus();
   _lbCancelOriginalPreload();
   _lbClearAdjacentPreloads();
@@ -10576,6 +10581,7 @@ function _lbSetPreviewLoading(loading) {
 var LB_DETAIL_SHOW_DELAY_MS = 250;
 var LB_DETAIL_SETTLED_MS = 900;
 var LB_DETAIL_FADE_MS = 250;
+var _lbInitialDecodePending = false; // this photo's first bitmap has not decoded
 var _lbDetailStatusShown = false;    // chip is on screen (past the show delay)
 var _lbDetailStatusSettled = false;  // showing the Full detail confirmation
 var _lbDetailStatusHold = 0;         // >0 suppresses paints mid-transition
@@ -10597,7 +10603,10 @@ function _lbDetailSharpeningPending() {
 }
 
 function _lbDetailStatusPhase() {
-  if (_lbVisualTransitionPending) return 'loading';
+  // _lbVisualTransitionPending is navigation-only -- it stays false when the
+  // lightbox opens from closed, which is the case with the emptiest overlay and
+  // the most need for a signal. _lbInitialDecodePending covers both.
+  if (_lbVisualTransitionPending || _lbInitialDecodePending) return 'loading';
   if (_lbPreviewLoading || _lbDetailSharpeningPending()) return 'sharpening';
   if (_lbDetailStatusSettled) return 'full';
   return 'off';
