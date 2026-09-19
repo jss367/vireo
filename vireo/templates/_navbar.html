@@ -11163,10 +11163,15 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
       if (_lbOpenSeq !== swapOpenSeq) return;
       if (_lbDesiredSrcKey !== key) return;
       _lbProgressiveTargetKey = null;
-      _lbSetPreviewLoading(false);
+      // Record the failure BEFORE clearing the loading flag. The chip's
+      // sharpening state is derived from the desired/current tiers, so a tier
+      // that is never going to arrive has to stop counting as in flight first
+      // -- clearing the flag while _lbDesiredSrcKey still names the failed tier
+      // leaves the spinner up with no request behind it.
       if (key === 'original') {
         var had1To1Pending = _lbPending1To1;
         _lbOriginalUnavailable = true;
+        _lbSetPreviewLoading(false);
         _lbRecomputeNativeZoom();
         if (had1To1Pending) {
           _lbDeferPendingOneToOneToPreviewFallback();
@@ -11181,6 +11186,7 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
         // The failed request is no longer pending. Keep the usable bitmap
         // and resume its neighbors without automatically retrying this tier.
         _lbDesiredSrcKey = _lbCurrentSrcKey;
+        _lbSetPreviewLoading(false);
         if (_lbPending1To1) {
           _lbPending1To1 = false;
           _lbPending1To1Anchor = null;

@@ -556,3 +556,42 @@ def test_detail_status_reports_an_incoming_photo_that_has_not_decoded(live_serve
     for route in held:
         route.fulfill(body=_jpeg(), content_type="image/jpeg")
     page.wait_for_function("_lightboxCommittedId === 116 && !_lbVisualTransitionPending")
+
+
+def _zoom_needing(page, pixels):
+    page.evaluate(
+        """pixels => {
+          const wrap = document.getElementById('lightboxWrap');
+          const fit = Math.min(1, wrap.clientWidth / 6000, wrap.clientHeight / 4000);
+          _lbSetZoom(pixels / (6000 * fit * devicePixelRatio));
+        }""", pixels,
+    )
+
+
+@pytest.mark.parametrize("failing,route", [("2560", "**/photos/*/preview?*"), ("original", "**/photos/*/original*")])
+def test_detail_status_clears_when_the_sharper_tier_never_arrives(live_server, page, failing, route):
+    held = []
+
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route(route, lambda r: held.append(r))
+    _open_window(page, live_server)
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+
+    if failing == "original":
+        page.evaluate("setLightboxZoomToOneToOne()")
+    else:
+        _zoom_needing(page, 2300)
+    page.wait_for_function("key => _lbDesiredSrcKey === key", arg=failing)
+    status = page.locator("#lightboxPreviewStatus")
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Sharpening…"
+
+    page.wait_for_timeout(300)  # Let the debounced swap dispatch its request.
+    assert held
+    for r in held:
+        r.abort()
+
+    # No request is left behind it, so the chip must not keep spinning -- and it
+    # must not claim Full detail either, because the pixels never got sharper.
+    expect(status).to_be_hidden()
+    assert page.evaluate("_lbCurrentSrcKey") == "full"
