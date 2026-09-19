@@ -6151,7 +6151,12 @@ function refreshActiveCollectionAfterMembershipChange(mutations) {
   var predictionEdit = !mutations ||
     mutations.indexOf(MUTATION_PREDICTION) !== -1;
   if (predictionEdit && sortSelectRanksOnPredictionConfidence()) {
-    reloadBrowseResults({ preserveAnchor: true, focusAnchor: true });
+    // A batch spanning several cards has no single-photo anchor. Keep its
+    // grid window and surviving selection so accepting a species can be
+    // followed by another edit on those same photos.
+    reloadBrowseResults(selectedPhotos.size > 0
+      ? { preserveScroll: true }
+      : { preserveAnchor: true, focusAnchor: true });
     return;
   }
   // Collections open into the filter bar now (Phase 5): when a membership
@@ -7167,6 +7172,7 @@ async function refreshBrowseWindowInPlace() {
       return ids;
     }
     var nextMembers = {};
+    var matchingIds = null;
     while (true) {
       if (await stageNeededPages() !== true || !windowIsCurrent()) return null;
       // Recheck after each request so opening another stack while waiting
@@ -7176,7 +7182,31 @@ async function refreshBrowseWindowInPlace() {
         return candidate.browse_stack && !nextMembers[candidate.id]
           && candidate.browse_stack.photo_ids.some(function(id) { return expandedIds.has(id); });
       });
-      if (!photo) break;
+      if (!photo) {
+        // Selected IDs outside this page may still match: Select all includes
+        // unloaded photos, and a confidence change can move a selected photo
+        // to another page. Check membership without loading the whole grid.
+        var stagedIds = new Set();
+        nextPhotos.forEach(function(candidate) {
+          if (!browsePhotoIsAvailable(candidate)) return;
+          stagedIds.add(candidate.id);
+          if (candidate.browse_stack) candidate.browse_stack.photo_ids.forEach(function(id) {
+            stagedIds.add(id);
+          });
+        });
+        if (matchingIds === null && data.total > 0 && Array.from(selectedPhotos).some(function(id) {
+          return !stagedIds.has(id);
+        })) {
+          var idsRequest = buildBrowseIdsRequest();
+          var idsData = await safeFetch(idsRequest.url, idsRequest.options);
+          if (!windowIsCurrent()) return null;
+          matchingIds = new Set(idsData.photo_ids || idsData.ids || []);
+          // Scrolling, selection, or stack expansion may have changed while
+          // waiting. Stage any newly needed pages before the atomic paint.
+          continue;
+        }
+        break;
+      }
       var memberIds = photo.browse_stack.photo_ids;
       var members = [];
       for (var offset = 0; offset < memberIds.length; offset += 500) {
@@ -7224,8 +7254,8 @@ async function refreshBrowseWindowInPlace() {
     allLoaded = loadedWindowOffset() + photos.length >= totalPhotos;
     syncBrowseAvailableLightboxPhotos();
 
-    var availableIds = new Set();
-    photos.forEach(function(photo) {
+    var availableIds = matchingIds || new Set();
+    if (matchingIds === null) photos.forEach(function(photo) {
       if (!browsePhotoIsAvailable(photo)) return;
       availableIds.add(photo.id);
       if (photo.browse_stack) photo.browse_stack.photo_ids.forEach(function(id) {
@@ -9171,14 +9201,8 @@ function getActiveSelection() {
   return [];
 }
 
-async function selectAllMatchingPhotos() {
-  anchorRestoreEpoch++;
-  selectedPhotoId = null;
-  selectedIndex = -1;
-  var requestSeq = ++selectAllRequestSeq;
-  var windowIsCurrent = observeBrowseWindow();
-
-
+// Use the same membership query for Select all and selection reconciliation.
+function buildBrowseIdsRequest() {
   var url;
   var fetchOpts = {};
   if (activeCollectionId && !dashboardCollectionScope) {
@@ -9217,10 +9241,20 @@ async function selectAllMatchingPhotos() {
       body: JSON.stringify(idsBody),
     };
   }
+  return {url: url, options: fetchOpts};
+}
+
+async function selectAllMatchingPhotos() {
+  anchorRestoreEpoch++;
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  var requestSeq = ++selectAllRequestSeq;
+  var windowIsCurrent = observeBrowseWindow();
+  var request = buildBrowseIdsRequest();
 
   showToast('Selecting all matching photos...', 'info');
   try {
-    var data = await safeFetch(url, fetchOpts, { toast: false });
+    var data = await safeFetch(request.url, request.options, { toast: false });
     if (requestSeq !== selectAllRequestSeq || !windowIsCurrent()) return;
     selectedPhotos.clear();
     (data.photo_ids || data.ids || []).forEach(function(id) { selectedPhotos.add(id); });
