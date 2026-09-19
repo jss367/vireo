@@ -534,6 +534,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   border-color: var(--success);
   background: var(--success);
 }
+.lightbox-detail-status.is-degraded .lb-detail-spinner {
+  animation: none;
+  border-color: var(--warning);
+  background: var(--warning);
+}
 @keyframes lb-detail-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .lb-detail-spinner { animation: none; border-top-color: rgba(255,255,255,0.26); }
@@ -10694,12 +10699,32 @@ function _lbDetailSharpeningPending() {
   return _lbSrcRank(_lbDesiredSrcKey) > _lbSrcRank(_lbCurrentSrcKey);
 }
 
+function _lbDetailIsDegraded() {
+  // /original is gone, the surviving preview holds fewer pixels than the file
+  // does, and the user has zoomed in past fit to look at them. _lbLayoutDims
+  // rebases onto the fallback in this state, so nothing is literally upscaled --
+  // 1:1 becomes 1:1 of the preview. That is the problem: the zoom badge reads
+  // 100% while showing preview pixels, and the detail in the file is not
+  // reachable at any zoom. Confirming Full detail there is a lie at exactly the
+  // moment a photographer is pixel-peeping to judge sharpness.
+  //
+  // Stays quiet at fit on purpose: the preview is everything that view could
+  // resolve anyway, so the missing original costs the user nothing to see.
+  if (!_lbOriginalUnavailable) return false;
+  if (_lbZoom <= 1.001) return false;
+  var img = document.getElementById('lightboxImg');
+  var have = img ? Math.max(img.naturalWidth, img.naturalHeight) : 0;
+  var fileLongEdge = Math.max(Number(_lbPhotoW) || 0, Number(_lbPhotoH) || 0);
+  return have > 0 && fileLongEdge > have * 1.01;
+}
+
 function _lbDetailStatusPhase() {
   // _lbVisualTransitionPending is navigation-only -- it stays false when the
   // lightbox opens from closed, which is the case with the emptiest overlay and
   // the most need for a signal. _lbInitialDecodePending covers both.
   if (_lbVisualTransitionPending || _lbInitialDecodePending) return 'loading';
   if (_lbPreviewLoading || _lbDetailSharpeningPending()) return 'sharpening';
+  if (_lbDetailIsDegraded()) return 'degraded';
   if (_lbDetailStatusSettled) return 'full';
   return 'off';
 }
@@ -10707,6 +10732,7 @@ function _lbDetailStatusPhase() {
 function _lbDetailStatusLabel(phase) {
   if (phase === 'loading') return 'Loading\u2026';
   if (phase === 'sharpening') return 'Sharpening\u2026';
+  if (phase === 'degraded') return 'Preview only';
   return 'Full detail';
 }
 
@@ -10725,7 +10751,14 @@ function _lbPaintDetailStatus(phase) {
   el.style.display = 'inline-flex';
   el.setAttribute('data-phase', phase);
   el.classList.toggle('is-full', phase === 'full');
+  el.classList.toggle('is-degraded', phase === 'degraded');
   if (phase !== 'full') el.classList.remove('is-fading');
+  if (phase === 'degraded') {
+    el.title = 'The original file could not be loaded. This is the sharpest preview available, '
+      + 'so the finest detail in the file is not shown.';
+  } else {
+    el.removeAttribute('title');
+  }
   if (text) text.textContent = _lbDetailStatusLabel(phase);
 }
 
@@ -10747,6 +10780,16 @@ function _lbRenderDetailStatus() {
   var phase = _lbDetailStatusPhase();
   if (phase === 'off') {
     _lbResetDetailStatus();
+    return;
+  }
+  if (phase === 'degraded') {
+    // A standing condition rather than an event, so it skips the show delay and
+    // never fades: the user needs it while the upscaled view is on screen, not
+    // for 900ms after some load happened to finish.
+    if (_lbDetailShowTimer) { clearTimeout(_lbDetailShowTimer); _lbDetailShowTimer = null; }
+    _lbCancelDetailConfirmation();
+    _lbDetailStatusShown = true;
+    _lbPaintDetailStatus('degraded');
     return;
   }
   if (phase === 'full') {

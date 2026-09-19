@@ -931,3 +931,28 @@ def test_initial_load_does_not_settle_while_a_sharper_tier_is_still_pending(live
     assert page.evaluate(
         "document.getElementById('lightboxPreviewStatus').classList.contains('is-fading')"
     ) is False
+
+
+def test_detail_status_does_not_call_an_upscaled_fallback_full_detail(live_server, page):
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    # /original is gone, so 1:1 on a 6000px photo rebases onto the 3840 preview:
+    # the zoom badge reads 100% while the file's finest detail is unreachable.
+    page.route("**/photos/*/original*", lambda r: r.abort())
+    page.route("**/photos/*/preview?*", lambda r: r.fulfill(body=_jpeg(3840, 2560), content_type="image/jpeg"))
+    _open_window(page, live_server)
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+
+    page.wait_for_function("_lbOriginalUnavailable && !_lbPreviewLoading")
+    status = page.locator("#lightboxPreviewStatus")
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Preview only"
+    assert page.evaluate("_lbDetailIsDegraded()") is True
+    assert "sharpest preview available" in page.evaluate(
+        "document.getElementById('lightboxPreviewStatus').title"
+    )
+
+    # Back at fit the surviving tier really is everything the view can show.
+    page.evaluate("setLightboxZoomToFit()")
+    page.wait_for_function("!_lbDetailIsDegraded()")
+    assert _detail_text(page) != "Preview only"
