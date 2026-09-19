@@ -595,29 +595,31 @@ def _is_one_place_chain(ids, parent_of, post_types):
     return set(ids) <= set(ancestry(deepest))
 
 
-def _photos_left_with_rival_places(db, keyword_ids, placeholders, landing,
+def _photos_left_with_rival_places(db, location_change_ids, landing,
                                    parent_of, post_types):
-    """Affected photos that would end up holding two unrelated linked places.
+    """Photos getting a location change that would then hold rival places.
+
+    ``location_change_ids`` are the rows whose photos this merge will queue a
+    ``location`` resync for. Photos outside that set keep whatever locations
+    they had, so their pre-existing state is not this merge's business.
 
     Evaluated against the POST-merge tree: a row can gain a place from the
     metadata fold, and a collapsing row hands its photos to its destination,
     so the pre-merge ids on ``photo_keywords`` are not the ones that matter.
     """
+    if not location_change_ids:
+        return []
+    placeholders = ','.join('?' for _ in location_change_ids)
     rows = db.conn.execute(
-        f"""WITH RECURSIVE descendants(id) AS (
-                SELECT id FROM keywords WHERE id IN ({placeholders})
-                UNION
-                SELECT k.id FROM keywords k JOIN descendants d ON k.parent_id = d.id
-            ),
-            touched AS (
+        f"""WITH touched AS (
                 SELECT DISTINCT photo_id FROM photo_keywords
-                WHERE keyword_id IN (SELECT id FROM descendants)
+                WHERE keyword_id IN ({placeholders})
             )
             SELECT pk.photo_id, pk.keyword_id FROM photo_keywords pk
             JOIN touched t ON t.photo_id = pk.photo_id
             JOIN keywords k ON k.id = pk.keyword_id
             WHERE k.type = 'location' OR pk.keyword_id IN ({placeholders})""",
-        [*keyword_ids, *keyword_ids],
+        [*location_change_ids, *location_change_ids],
     ).fetchall()
     by_photo = defaultdict(set)
     for row in rows:
@@ -970,11 +972,33 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     # photo that already carried two unrelated location tags is in a state
     # this operation neither created nor disturbs -- refusing it would block
     # unrelated work over pre-existing data.
-    touched_ids = ({target_id} | {source['id'] for source in sources}
-                   | {entry['id'] for entry in plan['children']}
-                   | set(path_changes))
-    touches_location = resolved['type'] == 'location' or any(
-        by_id[kid]['type'] == 'location' for kid in touched_ids if kid in by_id)
+    # ...and only for the photos that will actually receive one. A row whose
+    # own type is not location gets a hierarchy rewrite and nothing else, so
+    # a photo carrying only such a row keeps whatever locations it already
+    # had, untouched by this merge. Checking every photo under the selected
+    # roots refused merges over exactly that pre-existing state.
+    def _is_location(kid):
+        return kid in by_id and by_id[kid]['type'] == 'location'
+
+    location_change_ids = {kid for kid in
+                           ({source['id'] for source in sources}
+                            | {entry['id'] for entry in plan['children']}
+                            | set(path_changes) | set(plan['metadata_folded']))
+                           if _is_location(kid)}
+    if resolved['type'] == 'location' or _is_location(target_id) or any(
+            source['type'] == 'location' for source in sources):
+        # Every source-tagged photo becomes a target-tagged photo, and the
+        # resync loop runs after the merge, so those photos get the retained
+        # row's location change even when the source itself was general.
+        location_change_ids.add(target_id)
+        location_change_ids |= {source['id'] for source in sources}
+    if (_is_location(target_id)) != (resolved['type'] == 'location'):
+        # Crossing the boundary restrands every location descendant, which
+        # is what merge_keywords walks the retained subtree for.
+        location_change_ids |= {
+            kid for kid in _subtree_ids(_child_index(surviving), target_id)
+            if _is_location(kid)}
+    touches_location = bool(location_change_ids)
     landing = {source['id']: target_id for source in sources}
     landing.update({entry['id']: entry['into_id'] for entry in plan['children']
                     if entry['outcome'] == 'merge'})
@@ -982,7 +1006,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     post_types = {node['id']: node['type'] for node in surviving}
     post_types[target_id] = resolved['type']
     conflicted = touches_location and _photos_left_with_rival_places(
-        db, keyword_ids, placeholders, landing, parent_of, post_types)
+        db, sorted(location_change_ids), landing, parent_of, post_types)
     if conflicted:
         raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
     # Every path this merge retires gets aliased to wherever its photos land,
@@ -1170,6 +1194,23 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             ).fetchall():
                 db.remove_pending_changes(row['photo_id'], 'location', workspace_id=row['workspace_id'], _commit=False)
                 db.queue_change(row['photo_id'], 'location', 'effective', workspace_id=row['workspace_id'], _commit=False)
+        if (target['type'] == 'location' and resolved['type'] != 'location'
+                and target['name'] == resolved['name']):
+            # Demoting the retained row out of `location` without renaming
+            # it: `_queue_survivor_rename` returns early on an unchanged
+            # name, so nothing queues the term, while the resync above lets
+            # `remove_vireo_location_keywords` strip the marker-owned flat
+            # keyword. The sidecar would lose a word the database still
+            # assigns. Same case `api_update_keyword` handles for a plain
+            # location->non-location retype.
+            for row in db.conn.execute(
+                'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
+                'JOIN photos p ON p.id = pk.photo_id '
+                'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+                'WHERE pk.keyword_id = ?', (target_id,),
+            ).fetchall():
+                db.queue_change(row['photo_id'], 'keyword_add', resolved['name'],
+                                workspace_id=row['workspace_id'], _commit=False)
         if (target['type'] == 'location') != (resolved['type'] == 'location'):
             # ``get_photo_location_paths`` stops walking at the first
             # non-location ancestor, so retyping the retained parent across

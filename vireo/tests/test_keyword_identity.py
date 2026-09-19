@@ -1452,6 +1452,59 @@ def test_case_variant_sources_still_alias_to_their_shared_target(catalog):
         'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
         (path_key(['Trip A']),)).fetchone()['keyword_id'] == kept
 
+
+def test_demoting_the_survivor_out_of_location_keeps_its_flat_keyword(catalog):
+    """Retyping the retained row out of `location` without renaming it:
+    `_queue_survivor_rename` returns early on an unchanged name, so nothing
+    queues the term, while the resync lets `remove_vireo_location_keywords`
+    strip the marker-owned flat keyword. The sidecar would lose a word the
+    database still assigns -- the case `api_update_keyword` handles for a
+    plain location->non-location retype."""
+    db, photos = catalog
+    source = db.add_keyword('Wing Canyon Alt', kw_type='general')
+    kept = db.add_keyword('Wing Canyon', kw_type='location')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], kept)      # carries ONLY the survivor
+
+    overrides = {'type': 'general'}
+    preview = preview_keyword_merge(db, [source, kept], kept, overrides)
+    assert preview['resolved']['type'] == 'general'
+    assert preview['resolved']['name'] == preview['target']['name']
+    merge_keywords(db, [source, kept], kept, preview['preview_token'], overrides)
+
+    pending = {(r['change_type'], r['value']) for r in db.conn.execute(
+        'SELECT change_type, value FROM pending_changes WHERE photo_id = ?', (photos[1],))}
+    assert ('location', 'effective') in pending
+    assert ('keyword_add', 'Wing Canyon') in pending
+
+
+def test_conflict_guard_ignores_photos_that_get_no_location_change(catalog):
+    """A merge can contain locations and still leave a given photo's
+    locations alone. One tagged only with a moved GENERAL descendant gets a
+    hierarchy rewrite and nothing else, so its pre-existing places are not
+    this merge's business -- checking every photo under the selected roots
+    refused merges over exactly that."""
+    db, photos = catalog
+    stray = db.add_keyword('Trip A', kw_type='location')
+    kept = db.add_keyword('Trip B', kw_type='location')
+    notes = db.add_keyword('Notes', parent_id=stray, kw_type='general')
+    for index, place in enumerate(('p1', 'p2')):
+        db.tag_photo(photos[0], db.upsert_place_chain({
+            'place_id': place, 'name': f'Park {index}', 'lat': index + 1,
+            'lng': index + 1, 'address_components': []}))
+    db.conn.commit()
+    db.tag_photo(photos[0], notes)
+    db.tag_photo(photos[1], kept)
+
+    preview = preview_keyword_merge(db, [stray, kept], kept)
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'])
+    assert db.conn.execute(
+        'SELECT parent_id FROM keywords WHERE id = ?', (notes,)).fetchone()[0] == kept
+    # ...but a photo that DOES receive the location change is still checked.
+    assert db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location'",
+        (photos[1],)).fetchone()
+
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
     default, so the preview names the field and withholds its token rather
