@@ -29,13 +29,14 @@ def _luma(rgb):
     return LUMA_R * rgb[..., 0] + LUMA_G * rgb[..., 1] + LUMA_B * rgb[..., 2]
 
 
-def _airlight(img):
+def _airlight(src):
     # Estimate once for the whole render, never separately for each tile.
     # The brightest dark-channel samples favor veiled regions over isolated
     # saturated highlights. Bound both sampling memory and correction gain.
-    sample = img.copy()
-    sample.thumbnail((256, 256), Image.Resampling.BOX)
-    rgb = np.asarray(sample)[..., :3].reshape(-1, 3).astype(np.float32) / 255.0
+    # Slice the existing source buffer before allocating a float sample.
+    # Resizing RGBA with Pillow would first copy the full frame to RGBa.
+    step = max(1, math.ceil(max(src.shape[:2]) / 256))
+    rgb = src[::step, ::step, :3].reshape(-1, 3).astype(np.float32) / 255.0
     dark = rgb.min(axis=1)
     count = max(1, len(dark) // 100)
     indices = np.argpartition(dark, len(dark) - count)[-count:]
@@ -56,7 +57,10 @@ def apply_presence(img, *, texture=0.0, clarity=0.0, dehaze=0.0, scale=1.0):
     if not math.isfinite(scale) or scale <= 0:
         scale = 1.0
     has_alpha = "A" in img.getbands() or "transparency" in img.info
-    img = img.convert("RGBA" if has_alpha else "RGB")
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA" if has_alpha else "RGB")
+    elif img.mode == "RGB" and "transparency" in img.info:
+        img = img.convert("RGBA")
     texture_sigma = max(0.3, 3.0 * scale)
     fine_sigma = max(0.3, 0.7 * scale)
     clarity_sigma = max(0.3, 12.0 * scale)
@@ -70,9 +74,8 @@ def apply_presence(img, *, texture=0.0, clarity=0.0, dehaze=0.0, scale=1.0):
         halo += math.ceil(3 * texture_sigma)
     if clarity:
         halo += math.ceil(3 * clarity_sigma)
-    airlight = _airlight(img) if dehaze else None
-
     src = np.asarray(img)
+    airlight = _airlight(src) if dehaze else None
     height, width = src.shape[:2]
     out = np.empty_like(src)
     rows = max(1, _TILE_PIXELS // max(1, width))

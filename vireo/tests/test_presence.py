@@ -33,6 +33,30 @@ def test_zero_is_byte_exact():
     assert apply_presence(img) is img
 
 
+@pytest.mark.parametrize('mode', ['RGB', 'RGBA'])
+def test_presence_does_not_duplicate_full_resolution_input(monkeypatch, mode):
+    img = _pattern(width=512, height=384).convert(mode)
+
+    def unexpected_copy(*args, **kwargs):
+        pytest.fail('Presence must not copy or convert an already usable full-size image')
+
+    monkeypatch.setattr(img, 'copy', unexpected_copy)
+    monkeypatch.setattr(img, 'convert', unexpected_copy)
+    result = apply_presence(img, texture=40, clarity=30, dehaze=50)
+    assert result.size == img.size
+    assert result.mode == mode
+
+
+def test_presence_preserves_rgb_transparency():
+    img = Image.new('RGB', (8, 8), (100, 130, 150))
+    img.putpixel((0, 0), (1, 2, 3))
+    img.info['transparency'] = (1, 2, 3)
+    result = apply_presence(img, dehaze=50)
+    assert result.mode == 'RGBA'
+    assert result.getpixel((0, 0))[3] == 0
+    assert result.getpixel((1, 1))[3] == 255
+
+
 @pytest.mark.parametrize(('key', 'period'), [('texture', 12), ('clarity', 64)])
 def test_signed_detail_controls_change_contrast_in_both_directions(key, period):
     img = _pattern(period=period)
