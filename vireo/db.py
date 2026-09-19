@@ -23615,9 +23615,9 @@ class Database:
                             workspace_id=removal['workspace_id'],
                         )
             else:
-                self.untag_photo(pid, kid)
-                if kw_name:
-                    self.remove_pending_changes(pid, 'keyword_add', kw_name)
+                # A captured or completed add needs a corrective removal;
+                # simply deleting a pending row cannot undo its sidecar write.
+                self._untag_for_edit(pid, kid)
         if action == 'keyword_add':
             self._restore_edit_prediction_status(old_meta)
             if kw_name:
@@ -23647,9 +23647,7 @@ class Database:
                         workspace_id=removal['workspace_id'],
                     )
             else:
-                self.tag_photo(pid, kid, source='manual')
-                if kw_name:
-                    self.queue_change(pid, 'keyword_add', kw_name)
+                self._retag_for_edit(pid, kid)
         if action == 'keyword_add':
             self._reject_edit_prediction(old_meta)
             if kw_name:

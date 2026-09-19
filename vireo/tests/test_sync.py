@@ -2761,3 +2761,39 @@ def test_keyword_cancellation_distinguishes_case_sensitive_sidecars(tmp_path, db
     assert sync_to_xmp(db)['synced'] == 1
     assert read_keywords(other_path) == {'Osprey'}
     assert set(read_hierarchical_keywords(other_path)) == {'People|Osprey'}
+
+
+@pytest.mark.parametrize('first_sync', ['offline', 'lost_ack', 'success'])
+@pytest.mark.parametrize('redo', [False, True])
+def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sync, redo):
+    import sync
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, path = _setup_photo_with_xmp(tmp_path, db)
+    keyword = db.add_keyword('Osprey')
+    db.tag_photo(pid, keyword, source='manual')
+    db.queue_change(pid, 'keyword_add', 'Osprey')
+    db.record_edit('keyword_add', 'Added Osprey', str(keyword),
+                   [{'photo_id': pid, 'old_value': '', 'new_value': str(keyword)}])
+    with monkeypatch.context() as patch:
+        if first_sync == 'offline':
+            patch.setattr(sync.os.path, 'isdir', lambda _path: False)
+        elif first_sync == 'lost_ack':
+            write = sync._write_photo_sync
+
+            def lost_ack(*args, **kwargs):
+                write(*args, **kwargs)
+                raise OSError('Lost write acknowledgement')
+
+            patch.setattr(sync, '_write_photo_sync', lost_ack)
+        result = sync.sync_to_xmp(db)
+        assert result['failed'] == (0 if first_sync == 'success' else 1)
+    db.undo_last_edit()
+    assert not db.get_photo_keywords(pid)
+    if redo:
+        db.redo_last_undo()
+        assert [k['id'] for k in db.get_photo_keywords(pid)] == [keyword]
+    assert sync.sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(path) == ({'Osprey'} if redo else set())
+    assert not db.get_pending_changes()
