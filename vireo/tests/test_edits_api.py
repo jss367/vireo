@@ -2629,3 +2629,26 @@ def test_disabling_location_keywords_via_full_workspace_put_queues_cleanup(
     assert resp.status_code == 200
 
     assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
+
+
+def test_sync_review_waits_for_active_workspace_job(app_and_db, monkeypatch):
+    app, db = app_and_db
+    job = {"id": "sync-test", "type": "sync", "status": "running",
+           "workspace_id": db._ws_id(),
+           "progress": {"current": 20, "total": 100, "synced": 19, "failed": 1, "checkpoint": 2}}
+    monkeypatch.setattr(app._job_runner, "list_jobs", lambda: [job])
+    client = app.test_client()
+    status = client.get('/api/sync/status').get_json()
+    assert status["active_job"]["progress"] == job["progress"]
+    response = client.get('/api/sync/preview?limit=25')
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "sync_in_progress"
+
+    # Another workspace's sync must not hide this workspace's review.
+    job["workspace_id"] += 1000
+    assert client.get('/api/sync/status').get_json()["active_job"] is None
+    assert client.get('/api/sync/preview?limit=25').status_code == 200
+    job["workspace_id"] = db._ws_id()
+    job["status"] = "completed"
+    assert client.get('/api/sync/status').get_json()["active_job"] is None
+    assert client.get('/api/sync/preview?limit=25').status_code == 200

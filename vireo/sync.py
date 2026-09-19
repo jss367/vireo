@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -29,6 +30,12 @@ log = logging.getLogger(__name__)
 # connection's request queue, and the GIL is released for every one of those
 # syscalls.
 _SYNC_MAX_WORKERS = 8
+
+# Bound replay after interruption without a SQLite commit for every sidecar.
+# Check elapsed time at completed group boundaries, so a stalled write never
+# gets acknowledged. The row limit also bounds batches on fast local storage.
+_SYNC_CHECKPOINT_SECONDS = 5.0
+_SYNC_CHECKPOINT_CHANGES = 500
 
 
 def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
@@ -514,12 +521,17 @@ def _plan_merged_keyword_hierarchies(db, plans):
 
 
 def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
-                folder_paths=None, require_workspace_membership=True):
+                folder_paths=None, require_workspace_membership=True, status_callback=None):
     """Write pending changes to XMP sidecars.
 
     Args:
         db: Database instance
         progress_callback: optional callable(current, total)
+        status_callback: optional callable(dict) with processed (current), total,
+            synced and failed photo counts and a monotonic checkpoint count.
+            Called on the caller's thread; a checkpoint means successful queue
+            cleanup committed. A photo with supported and unsupported changes
+            can count as both synced and failed.
         change_ids: optional pending_changes ids to sync. When provided, any
             other queued changes are left pending.
         create_missing_sidecars: write a sidecar for a rating-only photo
@@ -741,12 +753,44 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
 
     results = {}
     total = len(by_photo)
-    # Photos that failed preparation are finished work: an offline NAS
-    # otherwise leaves the panel reading "0 of 2,240" while the run walks
-    # through every one of them.
     completed = len(prepare_failures)
-    if progress_callback and completed:
-        progress_callback(completed, total)
+    synced = 0
+    failed = len(prepare_failures)
+    synced_tokens = []
+    synced_legacy_ids = []
+    checkpoint = 0
+    last_checkpoint = time.monotonic()
+
+    def flush_completed():
+        nonlocal checkpoint, last_checkpoint
+        if not synced_tokens and not synced_legacy_ids:
+            return
+        # Immutable tokens protect edits replaced while the write was in flight.
+        if synced_tokens:
+            db.clear_pending_by_token(
+                synced_tokens, clear_equivalent_flat_removals=True,
+            )
+            synced_tokens.clear()
+        if synced_legacy_ids:
+            # A legacy rowid may now name a newly queued, tokened edit.
+            db.clear_pending(
+                synced_legacy_ids, expected_tokens=[None] * len(synced_legacy_ids),
+                clear_equivalent_flat_removals=True,
+            )
+            synced_legacy_ids.clear()
+        checkpoint += 1
+        last_checkpoint = time.monotonic()
+
+    def report_progress():
+        if status_callback:
+            status_callback({
+                "current": completed, "total": total, "synced": synced,
+                "failed": failed, "checkpoint": checkpoint,
+            })
+        if progress_callback:
+            progress_callback(completed, total)
+
+    report_progress()
     if by_sidecar:
         workers = min(_SYNC_MAX_WORKERS, len(by_sidecar))
         with ThreadPoolExecutor(
@@ -757,18 +801,31 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 outcomes = future.result()
                 results.update(outcomes)
                 completed += len(outcomes)
-                if progress_callback:
-                    progress_callback(completed, total)
+                for photo_id, error in outcomes.items():
+                    plan = plans[photo_id]
+                    if error is not None:
+                        failed += 1
+                        continue
+                    if plan.unsupported_changes:
+                        failed += 1
+                    if plan.supported_changes:
+                        synced += 1
+                        for change_id, token in plan.supported_changes:
+                            if token:
+                                synced_tokens.append(token)
+                            else:
+                                synced_legacy_ids.append(change_id)
+                # Never checkpoint a partially completed sidecar group.
+                if (len(synced_tokens) + len(synced_legacy_ids) >= _SYNC_CHECKPOINT_CHANGES
+                        or time.monotonic() - last_checkpoint >= _SYNC_CHECKPOINT_SECONDS):
+                    flush_completed()
+                report_progress()
 
-    # Report in queue order regardless of the order the pool finished in.
-    synced = 0
+    flush_completed()
+    report_progress()
+
+    # Report failures in queue order regardless of worker completion order.
     failures = []
-    synced_tokens = []
-    # Rows predating the change_token column carry NULL, and `IN (NULL)`
-    # matches nothing -- clearing those by token would leave them queued
-    # forever, rewritten by every later sync. They keep the id-based clear,
-    # which is exactly the behaviour they have always had.
-    synced_legacy_ids = []
     for photo_id in by_photo:
         if photo_id in prepare_failures:
             failures.append(prepare_failures[photo_id])
@@ -784,35 +841,12 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             })
             log.warning("Failed to sync photo %d: %s", photo_id, error)
             continue
-        if plan.supported_changes:
-            synced += 1
-            for change_id, token in plan.supported_changes:
-                if token:
-                    synced_tokens.append(token)
-                else:
-                    synced_legacy_ids.append(change_id)
         for c in plan.unsupported_changes:
             failures.append({
                 "photo_id": photo_id,
                 "change_id": c["id"],
                 "error": f"unsupported change type: {c['change_type']}",
             })
-
-    # Clear by token, not by row id. ``pending_changes.id`` is a bare
-    # ``INTEGER PRIMARY KEY``, so SQLite re-issues a deleted row's rowid to the
-    # next insert -- and ``queue_flag_change_if_enabled`` deletes the old flag
-    # row before inserting the new value. A flag changed while the sidecar
-    # write was in flight (as long as the storage takes) could therefore land
-    # on the id this run selected, and clearing by id would delete the user's
-    # newest edit without ever having written it.
-    if synced_tokens:
-        db.clear_pending_by_token(
-            synced_tokens, clear_equivalent_flat_removals=True,
-        )
-    if synced_legacy_ids:
-        db.clear_pending(
-            synced_legacy_ids, clear_equivalent_flat_removals=True,
-        )
 
     log.info("Sync complete: %d synced, %d failed", synced, len(failures))
     return _sync_result(synced, failures)

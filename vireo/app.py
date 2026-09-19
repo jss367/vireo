@@ -12818,25 +12818,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             },
         })
 
+    def _active_workspace_sync(db):
+        for job in app._job_runner.list_jobs():
+            if (job.get("type") == "sync"
+                    and job.get("workspace_id") == db._ws_id()
+                    and job.get("status") in ("queued", "running", "pausing", "paused")):
+                return {key: job[key] for key in ("id", "status", "progress")}
+        return None
+
     @app.route("/api/sync/status")
     def api_sync_status():
         db = _get_db()
-        changes = db.get_pending_changes()
-        change_type_counts = {}
-        photo_ids = set()
-        for change in changes:
-            photo_ids.add(change["photo_id"])
-            change_type = change["change_type"]
-            change_type_counts[change_type] = (
-                change_type_counts.get(change_type, 0) + 1
-            )
-        return jsonify(
-            {
-                "pending_count": len(changes),
-                "pending_photo_count": len(photo_ids),
-                "change_type_counts": change_type_counts,
-            }
-        )
+        # One statement keeps totals and per-type counts in the same snapshot,
+        # without loading every queued row into Python on each progress poll.
+        counts = db.conn.execute(
+            """SELECT NULL AS change_type, COUNT(*) AS changes,
+                      COUNT(DISTINCT photo_id) AS photos
+               FROM pending_changes WHERE workspace_id = ?
+               UNION ALL
+               SELECT change_type, COUNT(*), 0
+               FROM pending_changes WHERE workspace_id = ? GROUP BY change_type""",
+            (db._ws_id(), db._ws_id()),
+        ).fetchall()
+        return jsonify({
+            "pending_count": counts[0]["changes"],
+            "pending_photo_count": counts[0]["photos"],
+            "change_type_counts": {row["change_type"]: row["changes"] for row in counts[1:]},
+            "active_job": _active_workspace_sync(db),
+        })
 
     @app.route("/api/sync/location-writes")
     def api_sync_location_writes_status():
@@ -12896,6 +12905,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         existing API callers.
         """
         db = _get_db()
+        if _active_workspace_sync(db):
+            return json_error(
+                "XMP sync is in progress. Review will load after it finishes.",
+                409, code="sync_in_progress",
+            )
         raw_limit = request.args.get("limit")
         raw_offset = request.args.get("offset", "0")
         if raw_limit is None:
@@ -26404,18 +26418,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             thread_db = ctx.thread_db()
 
-            def progress_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
+            def status_cb(progress):
                 ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": total,
-                        "current_file": "Writing XMP metadata...",
-                        "phase": "Writing XMP metadata",
-                    },
+                    job["id"], "progress",
+                    {**progress, "current_file": "Writing XMP metadata...",
+                     "phase": "Writing XMP metadata"},
                 )
 
             lock_acquired = app._sync_job_lock.acquire(blocking=False)
@@ -26452,7 +26459,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return sync_to_xmp(
                     thread_db,
-                    progress_callback=progress_cb,
+                    status_callback=status_cb,
                     change_ids=change_ids,
                 )
             finally:

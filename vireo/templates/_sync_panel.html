@@ -162,12 +162,81 @@ var _syncPreviewAbortController = null;
 var _syncPreviewStartedAt = 0;
 var _syncPreviewElapsedTimer = null;
 var _syncPreviewDisplayLimit = 300;
+var _syncActiveJob = null;
+var _syncReviewWaiting = false;
+var _syncStatusTimer = null;
+var _syncStatusRequest = null;
+
+function _syncProgressText(p) {
+  if (!p || !p.total) return (p && (p.current_file || p.phase)) || 'Preparing XMP sync...';
+  var text = 'Processed ' + p.current.toLocaleString() + ' of ' + p.total.toLocaleString() + ' photos';
+  if (typeof p.synced === 'number' && typeof p.failed === 'number') {
+    text += ' · ' + p.synced.toLocaleString() + ' synced · ' + p.failed.toLocaleString() + ' with errors';
+  }
+  return text;
+}
+
+function _syncScheduleStatus() {
+  if (_syncStatusTimer !== null) return;
+  _syncStatusTimer = setTimeout(function() {
+    _syncStatusTimer = null;
+    void checkPendingSync();
+  }, 2000);
+}
+
+function _syncShowActiveJob(job) {
+  _syncActiveJob = job;
+  _syncScheduleStatus();
+  if (!_syncModalOpen) return;
+  if (!_syncReviewWaiting) {
+    _syncStopPreviewLoad();
+    _syncPreviewData = null;
+    _syncReviewWaiting = true;
+    _syncSetPreviewActionsEnabled(false);
+    document.getElementById('syncPreviewContent').textContent =
+      'Sync is running. The remaining changes will be ready to review when it finishes.';
+  }
+  var p = job.progress || {};
+  var pct = p.total > 0 ? Math.min(100, Math.round(p.current * 100 / p.total)) : 0;
+  document.getElementById('syncPreviewProgress').style.display = 'block';
+  var text = document.getElementById('syncPreviewProgressText');
+  text.textContent = _syncProgressText(p);
+  text.style.color = 'var(--text-primary)';
+  document.getElementById('syncPreviewProgressPercent').textContent = p.total ? pct + '%' : '';
+  var track = document.getElementById('syncPreviewProgressTrack');
+  track.setAttribute('aria-label', 'XMP sync progress');
+  track.setAttribute('aria-valuemax', String(p.total || 100));
+  track.setAttribute('aria-valuenow', String(p.current || 0));
+  var bar = document.getElementById('syncPreviewProgressBar');
+  bar.classList.toggle('is-preparing', !p.total);
+  bar.style.width = p.total ? pct + '%' : '32%';
+  document.getElementById('syncPreviewProgressDetail').textContent =
+    'Progress is saved periodically. Changes with errors stay pending.';
+}
 
 async function checkPendingSync() {
+  if (_syncStatusRequest) return _syncStatusRequest;
+  _syncStatusRequest = _syncRefreshStatus();
+  try { return await _syncStatusRequest; }
+  finally { _syncStatusRequest = null; }
+}
+
+async function _syncRefreshStatus() {
   try {
     var data = await safeFetch('/api/sync/status', {}, { toast: false });
     var banner = document.getElementById('syncBanner');
-    if (data.pending_count > 0) {
+    _syncActiveJob = data.active_job || null;
+    if (_syncActiveJob) {
+      _syncShowActiveJob(_syncActiveJob);
+      var activeStatus = document.getElementById('syncStatus');
+      activeStatus.textContent = _syncProgressText(_syncActiveJob.progress);
+      activeStatus.dataset.syncState = 'running';
+      activeStatus.style.color = 'var(--text-dim)';
+    } else if (_syncReviewWaiting && _syncModalOpen) {
+      _syncReviewWaiting = false;
+      void _syncStartPreviewLoad(0);
+    }
+    if (data.pending_count > 0 || _syncActiveJob) {
       var status = document.getElementById('syncStatus');
       // A stale success message ("Synced!", "Synced N photos!" from a
       // partial run that left the unchecked change types queued, or
@@ -183,12 +252,21 @@ async function checkPendingSync() {
       document.getElementById('syncBannerText').textContent =
         data.pending_count.toLocaleString() + ' change' + (data.pending_count !== 1 ? 's' : '') +
         ' across ' + data.pending_photo_count.toLocaleString() + ' photo' + (data.pending_photo_count !== 1 ? 's' : '') +
-        ' \u2014 metadata changes have been saved in Vireo but not written to XMP sidecar files yet.';
+        (data.active_job
+          ? ' — awaiting sync confirmation; counts update periodically during sync.'
+          : ' — metadata changes have been saved in Vireo but not written to XMP sidecar files yet.');
       banner.style.display = 'flex';
     } else {
       banner.style.display = 'none';
     }
-  } catch(e) {}
+    if (!_syncActiveJob && document.getElementById('syncStatus').dataset.syncState === 'running') {
+      document.getElementById('syncStatus').textContent = 'Sync finished. Review remaining changes for any errors.';
+      document.getElementById('syncStatus').dataset.syncState = '';
+    }
+    return data;
+  } catch(e) {
+    if (_syncActiveJob || _syncReviewWaiting) _syncScheduleStatus();
+  }
 }
 
 async function runSync(changeIds) {
@@ -209,13 +287,20 @@ async function runSync(changeIds) {
       requestOptions.body = JSON.stringify({change_ids: changeIds});
     }
     var data = await safeFetch('/api/jobs/sync', requestOptions, { toast: false });
+    void checkPendingSync();
+    var lastCheckpoint = 0;
 
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onProgress: function(p) {
-        if (p.total > 0) {
-          status.textContent = 'Syncing photos: ' + p.current.toLocaleString() + '/' + p.total.toLocaleString();
-        } else if (p.current_file || p.phase) {
-          status.textContent = p.current_file || p.phase;
+        status.textContent = _syncProgressText(p);
+        status.dataset.syncState = 'running';
+        if (_syncActiveJob && _syncActiveJob.id === data.job_id) {
+          _syncActiveJob.progress = p;
+          _syncShowActiveJob(_syncActiveJob);
+        }
+        if (p.checkpoint > lastCheckpoint) {
+          lastCheckpoint = p.checkpoint;
+          void checkPendingSync();
         }
       },
       onComplete: function(event) {
@@ -400,6 +485,8 @@ function _syncStopPreviewLoad() {
 async function _syncStartPreviewLoad(restartCount) {
   restartCount = restartCount || 0;
   _syncStopPreviewLoad();
+  _syncReviewWaiting = false;
+  document.getElementById('syncPreviewProgressTrack').setAttribute('aria-label', 'Preparing pending-change review');
   var loadToken = _syncPreviewLoadToken;
   _syncPreviewAbortController = new AbortController();
   _syncPreviewStartedAt = Date.now();
@@ -424,6 +511,10 @@ async function _syncStartPreviewLoad(restartCount) {
       signal: _syncPreviewAbortController.signal,
     }, { toast: false });
     if (loadToken !== _syncPreviewLoadToken || !_syncModalOpen) return;
+    if (summary.active_job) {
+      _syncShowActiveJob(summary.active_job);
+      return;
+    }
     _syncPreviewData = {
       photos: [],
       total_changes: summary.pending_count || 0,
@@ -479,6 +570,12 @@ async function _syncStartPreviewLoad(restartCount) {
     }
   } catch(e) {
     if (loadToken !== _syncPreviewLoadToken || (e && e.name === 'AbortError')) return;
+    if (e && e.code === 'sync_in_progress') {
+      var status = await checkPendingSync();
+      if (loadToken !== _syncPreviewLoadToken || !_syncModalOpen) return;
+      if (status && status.active_job) return;
+      if (status && restartCount < 1) return _syncStartPreviewLoad(restartCount + 1);
+    }
     if (e && e.code === 'sync_preview_changed' && restartCount < 1) {
       document.getElementById('syncPreviewProgressDetail').textContent =
         'Pending changes were updated; restarting with a fresh snapshot...';
@@ -747,6 +844,7 @@ document.getElementById('syncPreviewContent').addEventListener('click', function
 
 function closeSyncPreview() {
   var wasOpen = _syncModalOpen;
+  _syncReviewWaiting = false;
   _syncStopPreviewLoad();
   if (_syncEscToken !== null) {
     Keymap.popEsc(_syncEscToken);
