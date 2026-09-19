@@ -988,3 +988,38 @@ def test_degraded_detail_measures_the_cropped_render_not_the_catalog_size(live_s
     # every pixel the render has, so there is no missing detail to warn about.
     page.evaluate("_lbCurrentEditRecipe = {crop: {x: 0, y: 0, w: 0.5, h: 0.5}};")
     assert page.evaluate("_lbDetailIsDegraded()") is False
+
+
+def test_degraded_detail_covers_a_fit_view_the_fallback_cannot_resolve(live_server, page):
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", lambda r: r.abort())
+    page.route("**/photos/*/preview?*", lambda r: r.abort())
+    _open_window(page, live_server)
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+    page.wait_for_function("_lbOriginalUnavailable")
+    page.evaluate("setLightboxZoomToFit()")
+    page.wait_for_function("_lbZoom <= 1.001 && _lbCurrentSrcKey === 'full' && !_lbPreviewLoading")
+
+    # At DPR 1 this viewport is resolved fully by the 1920 preview, so the
+    # missing original costs nothing to see.
+    assert page.evaluate("_lbDetailIsDegraded()") is False
+
+    # A bigger or denser display needs more device pixels for the same CSS size.
+    # Derive the DPR that puts the fit view past what the fallback holds, rather
+    # than hardcoding one that happens to work at this viewport -- the real
+    # trigger is viewport x DPR, and CI viewports differ.
+    dpr = page.evaluate(
+        """() => {
+          const img = document.getElementById('lightboxImg');
+          const dims = _lbLayoutDims();
+          const have = Math.max(img.naturalWidth, img.naturalHeight);
+          const perDpr = Math.max(dims.w, dims.h) * _lbFitScale * _lbZoom;
+          return (have * 1.2) / perDpr;
+        }"""
+    )
+    page.evaluate(
+        "d => Object.defineProperty(window, 'devicePixelRatio', {value: d, configurable: true})",
+        dpr,
+    )
+    assert page.evaluate("_lbDetailIsDegraded()") is True

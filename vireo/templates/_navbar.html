@@ -10715,18 +10715,32 @@ function _lbDetailIsDegraded() {
   // Stays quiet at fit on purpose: the preview is everything that view could
   // resolve anyway, so the missing original costs the user nothing to see.
   if (!_lbOriginalUnavailable) return false;
-  if (_lbZoom <= 1.001) return false;
   var img = document.getElementById('lightboxImg');
   var have = img ? Math.max(img.naturalWidth, img.naturalHeight) : 0;
   if (!have) return false;
-  // Compare against what this photo actually renders as, not its catalog
-  // dimensions: a 6000px source cropped to a 3000px render is fully carried by
-  // the fallback, and warning about missing detail there would be false.
+
+  // What this photo actually renders as, not its catalog dimensions: a 6000px
+  // source cropped to a 3000px render is fully carried by the fallback, and
+  // warning about missing detail there would be false. Same helpers as
+  // _lbLayoutDims, so the warning and the on-screen geometry cannot disagree.
   var oriented = _lbOrientedPhotoDims(img);
   if (!oriented) return false;
   var rendered = _lbDisplayDimsForRecipe(oriented.w, oriented.h, _lbCurrentEditRecipe);
   var renderLongEdge = Math.max(Number(rendered.w) || 0, Number(rendered.h) || 0);
-  return renderLongEdge > have * 1.01;
+  if (renderLongEdge <= have * 1.01) return false;  // the fallback holds it all
+
+  // The file holds more than the fallback. Whether that costs the user anything
+  // depends on the view. Zoomed in, it always does -- _lbLayoutDims rebases onto
+  // the fallback when the original is gone, so 1:1 silently becomes 1:1 of the
+  // preview and the file's detail is unreachable at any zoom. At fit it usually
+  // does not, but not always: a large or high-DPI viewport can need more device
+  // pixels than the fallback has, and then the fit view is visibly undersampled.
+  if (_lbZoom > 1.001) return true;
+  var dims = _lbLayoutDims();
+  if (!dims || !_lbFitScale) return false;
+  var dpr = window.devicePixelRatio || 1;
+  var needed = Math.max(dims.w, dims.h) * _lbFitScale * _lbZoom * dpr;
+  return needed > have * 1.01;
 }
 
 function _lbDetailStatusPhase() {
