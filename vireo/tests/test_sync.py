@@ -2875,3 +2875,31 @@ def test_failed_case_alias_is_retained_when_other_write_creates_sidecar(tmp_path
     assert sync.sync_to_xmp(db, create_missing_sidecars=True)['failed'] == 0
     assert read_sync_preview_metadata(paths[1])['rating'] == '2'
     assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize('initial, inverse, expected', [
+    ('keyword_add', 'keyword_remove', set()),
+    ('keyword_add', 'keyword_remove_flat', set()),
+    ('keyword_remove', 'keyword_add', {'osprey'}),
+    ('keyword_remove_flat', 'keyword_add', {'osprey'}),
+])
+def test_opposing_keyword_intents_use_normalized_identity(tmp_path, db, monkeypatch, initial, inverse, expected):
+    import sync
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, path = _setup_photo_with_xmp(tmp_path, db, keywords={'Osprey'})
+    db.queue_change(pid, initial, 'Osprey')
+    write = sync._write_photo_sync
+
+    def interrupted(*args, **kwargs):
+        write(*args, **kwargs)
+        raise OSError('Lost acknowledgement')
+
+    monkeypatch.setattr(sync, '_write_photo_sync', interrupted)
+    assert sync.sync_to_xmp(db)['failed'] == 1
+    db.queue_change(pid, inverse, 'osprey')
+    monkeypatch.setattr(sync, '_write_photo_sync', write)
+    assert sync.sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(path) == expected
+    assert not db.get_pending_changes()

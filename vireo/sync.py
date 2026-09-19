@@ -240,18 +240,24 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations,
       fix would not requeue anything.
     """
     plan = _PhotoSyncPlan()
+    keyword_adds = {}
+    keyword_removes = {}
+    flat_removes = {}
     for c in photo_changes:
         kind = c["change_type"]
         if kind == "keyword_add":
-            plan.keywords_to_add.add(c["value"])
-            plan.keywords_to_remove.discard(c["value"])
-            plan.keywords_to_remove_flat.discard(c["value"])
+            key = keyword_match_key(c["value"])
+            keyword_adds[key] = c["value"]
+            keyword_removes.pop(key, None)
+            flat_removes.pop(key, None)
         elif kind == "keyword_remove":
-            plan.keywords_to_remove.add(c["value"])
-            plan.keywords_to_add.discard(c["value"])
+            key = keyword_match_key(c["value"])
+            keyword_removes[key] = c["value"]
+            keyword_adds.pop(key, None)
         elif kind == "keyword_remove_flat":
-            plan.keywords_to_remove_flat.add(c["value"])
-            plan.keywords_to_add.discard(c["value"])
+            key = keyword_match_key(c["value"])
+            flat_removes[key] = c["value"]
+            keyword_adds.pop(key, None)
         elif kind == "keyword_merge":
             plan.keyword_merges.append(json.loads(c['value']))
         elif kind == "rating":
@@ -282,6 +288,9 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations,
         else:
             continue
         plan.supported_changes.append((c["id"], c["change_token"]))
+    plan.keywords_to_add = set(keyword_adds.values())
+    plan.keywords_to_remove = set(keyword_removes.values())
+    plan.keywords_to_remove_flat = set(flat_removes.values())
     return plan
 
 
