@@ -7,7 +7,7 @@ import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import mkdtemp
+from tempfile import TemporaryFile, mkdtemp
 
 from export import _DevelopedDirIndex, _get_photo_exif_data, load_export_image
 from site_publish import _write_json, slugify
@@ -65,24 +65,9 @@ def _caption_fields(exif_data):
     return fields
 
 
-def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
-                options=None, progress_cb=None, checkpoint=None, begin_commit=None):
-    """Export the active workspace into a new child folder of destination.
-
-    Photo queries are batched; decoded images are released after each file.
-    A failed photo or collection produces a usable but explicitly incomplete
-    export. Fatal errors and cancellation remove only this run's new folder.
-    """
-    options = options or {}
-    include_locations = options.get("include_locations", False)
-
-    def progress(current, total, name, phase):
-        if checkpoint:
-            checkpoint()
-        if progress_cb:
-            progress_cb(current, total, name, phase)
-
-    progress(0, 0, "", "Preparing site export")
+def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
+                      snapshot, progress):
+    """Materialize all database reads while the caller holds one read snapshot."""
     photo_ids = sorted(db.query_photo_ids([], include_offline_folders=True))
     eligible = set(photo_ids)
     total = len(photo_ids)
@@ -122,6 +107,85 @@ def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
         "JOIN workspace_folders wf ON wf.folder_id = f.id WHERE wf.workspace_id = ?",
         (db._ws_id(),),
     )}
+    for offset in range(0, total, 200):
+        progress(offset, total, "", "Reading photo metadata")
+        batch = photo_ids[offset:offset + 200]
+        photos = db.get_photos_by_ids(batch)
+        recipes = db.get_photo_edit_recipes(batch)
+        exif = _get_photo_exif_data(db, batch)
+        keywords = db.get_keywords_for_photos(batch)
+        species = db.get_species_keywords_for_photos(batch, include_identities=True)
+        locations = db.get_effective_photo_locations(
+            batch, verify_workspace=False,
+        ) if include_locations else {}
+        for pid in batch:
+            photo = dict(photos[pid])
+            record = {key: photo.get(key) for key in (
+                "id", "filename", "timestamp", "rating", "flag",
+            )}
+            record.update(_caption_fields(exif.get(pid)))
+            record.update(
+                album_ids=memberships.get(pid, []),
+                species=species.get(pid, []),
+                keywords=[k for k in keywords.get(pid, [])
+                          if include_locations or k.get("type") != "location"],
+                edits=recipes.get(pid), image=None,
+            )
+            if include_locations:
+                location = locations.get(pid) or {}
+                record.update(latitude=location.get("latitude"), longitude=location.get("longitude"))
+            json.dump({"photo": photo, "record": record, "exif": exif.get(pid)}, snapshot)
+            snapshot.write('\n')
+    snapshot.seek(0)
+    return total, albums, errors, life_list, folders
+
+
+def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
+                options=None, progress_cb=None, checkpoint=None, begin_commit=None,
+                cancel_check=None):
+    """Export one metadata snapshot, releasing its transaction before rendering.
+
+    Photo metadata is staged in a temporary file in bounded batches. The
+    source database is never read during rendering. A failed photo or album
+    produces an explicitly incomplete export; cancellation and fatal errors
+    remove only this run's new folder.
+    """
+    options = options or {}
+    include_locations = options.get("include_locations", False)
+
+    def progress(current, total, name, phase, *, reading_snapshot=False):
+        if reading_snapshot:
+            # Never wait through a pause with the catalog transaction open.
+            if cancel_check and cancel_check():
+                from web.background_jobs import JobCancelled
+                raise JobCancelled("Site export cancelled")
+        elif checkpoint:
+            checkpoint()
+        if progress_cb:
+            progress_cb(current, total, name, phase)
+
+    progress(0, 0, "", "Preparing site export")
+    workspace_id = db._ws_id()
+    with TemporaryFile(mode="w+t", encoding="utf-8") as snapshot:
+        db.conn.execute("BEGIN")
+        try:
+            captured = _capture_metadata(
+                db, build_life_list, resolve_visual, include_locations, snapshot,
+                lambda *args: progress(*args, reading_snapshot=True),
+            )
+        finally:
+            db.conn.rollback()
+        return _render_snapshot(
+            snapshot, captured, workspace_id, vireo_dir, destination, options,
+            progress, begin_commit,
+        )
+
+
+def _render_snapshot(snapshot, captured, workspace_id, vireo_dir, destination,
+                     options, progress, begin_commit):
+    total, albums, errors, life_list, folders = captured
+    include_locations = options.get("include_locations", False)
+    progress(0, total, "", "Preparing exported photos")
     index = _DevelopedDirIndex()
     parent = Path(destination)
     parent.mkdir(parents=True, exist_ok=True)
@@ -133,67 +197,41 @@ def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
         (output / "photos").mkdir()
         with (output / "photos.json").open("w", encoding="utf-8") as stream:
             stream.write('[\n')
-            current = 0
-            for offset in range(0, total, 200):
-                batch = photo_ids[offset:offset + 200]
-                photos = db.get_photos_by_ids(batch)
-                recipes = db.get_photo_edit_recipes(batch)
-                exif = _get_photo_exif_data(db, batch)
-                keywords = db.get_keywords_for_photos(batch)
-                species = db.get_species_keywords_for_photos(batch, include_identities=True)
-                locations = db.get_effective_photo_locations(
-                    batch, verify_workspace=False,
-                ) if include_locations else {}
-                for pid in batch:
-                    photo = dict(photos[pid]) if pid in photos else {"id": pid}
-                    filename = photo.get("filename") or f"photo-{pid}"
-                    progress(current, total, filename, "Exporting photos")
-                    record = {key: photo.get(key) for key in (
-                        "id", "filename", "timestamp", "rating", "flag",
-                    )}
-                    record.update(_caption_fields(exif.get(pid)))
-                    record.update(
-                        album_ids=memberships.get(pid, []),
-                        species=species.get(pid, []),
-                        keywords=[k for k in keywords.get(pid, [])
-                                  if include_locations or k.get("type") != "location"],
-                        edits=recipes.get(pid), image=None,
+            for current, line in enumerate(snapshot):
+                entry = json.loads(line)
+                photo, record = entry["photo"], entry["record"]
+                pid = photo["id"]
+                filename = photo.get("filename") or f"photo-{pid}"
+                progress(current, total, filename, "Exporting photos")
+                path = f"photos/{pid}-{slugify(Path(filename).stem)[:80]}.jpg"
+                try:
+                    img = load_export_image(
+                        photo, vireo_dir, folders, recipe=record["edits"],
+                        exif_data=entry["exif"], max_size=None,
+                        wc_max=options.get("working_copy_max_size", 4096),
+                        developed_dir=options.get("developed_dir", ""),
+                        developed_index=index,
                     )
-                    if include_locations:
-                        location = locations.get(pid) or {}
-                        record.update(latitude=location.get("latitude"), longitude=location.get("longitude"))
-                    path = f"photos/{pid}-{slugify(Path(filename).stem)[:80]}.jpg"
                     try:
-                        if pid not in photos:
-                            raise ValueError("Photo was removed during export")
-                        img = load_export_image(
-                            photo, vireo_dir, folders, recipe=recipes.get(pid),
-                            exif_data=exif.get(pid), max_size=None,
-                            wc_max=options.get("working_copy_max_size", 4096),
-                            developed_dir=options.get("developed_dir", ""),
-                            developed_index=index,
-                        )
+                        save_img = img if img.mode in ("RGB", "L") else img.convert("RGB")
                         try:
-                            save_img = img if img.mode in ("RGB", "L") else img.convert("RGB")
-                            try:
-                                save_img.save(output / path, "JPEG", quality=95)
-                            finally:
-                                if save_img is not img:
-                                    save_img.close()
+                            save_img.save(output / path, "JPEG", quality=95)
                         finally:
-                            img.close()
-                        record["image"] = path
-                        images[pid] = path
-                        exported += 1
-                    except Exception as exc:
-                        (output / path).unlink(missing_ok=True)
-                        record["error"] = str(exc)
-                        errors.append(f"Photo {pid} ({filename}): {exc}")
-                    if current:
-                        stream.write(',\n')
-                    json.dump(record, stream, ensure_ascii=False)
-                    current += 1
-                    progress(current, total, filename, "Exporting photos")
+                            if save_img is not img:
+                                save_img.close()
+                    finally:
+                        img.close()
+                    record["image"] = path
+                    images[pid] = path
+                    exported += 1
+                except Exception as exc:
+                    (output / path).unlink(missing_ok=True)
+                    record["error"] = str(exc)
+                    errors.append(f"Photo {pid} ({filename}): {exc}")
+                if current:
+                    stream.write(',\n')
+                json.dump(record, stream, ensure_ascii=False)
+                progress(current + 1, total, filename, "Exporting photos")
             stream.write('\n]\n')
 
         progress(total, total, "", "Writing export manifests")
@@ -213,7 +251,7 @@ def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
         _write_json(output / "site.json", {
             "schema_version": 1,
             "generated_at": datetime.now(UTC).isoformat(),
-            "workspace_id": db._ws_id(),
+            "workspace_id": workspace_id,
             "status": "incomplete" if errors else "complete",
             "include_locations": include_locations,
             "photo_count": total,

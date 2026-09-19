@@ -1,7 +1,9 @@
 """Complete site exports: scope, portable references, and failure handling."""
 
 import json
+import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -95,7 +97,7 @@ def test_export_has_no_species_limit_and_disambiguates_filenames(tmp_path, monke
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     keyword = db.add_keyword('Northern Cardinal', is_species=True)
     folder = db.add_folder(str(meta['photos_dir']), name='photos')
-    for i in range(101):
+    for i in range(201):
         name = f'extra-{i}.jpg'
         Image.new('RGB', (8, 8)).save(meta['photos_dir'] / name)
         pid = db.add_photo(folder_id=folder, filename=name, extension='.jpg',
@@ -109,15 +111,15 @@ def test_export_has_no_species_limit_and_disambiguates_filenames(tmp_path, monke
                              file_size=1, file_mtime=1)
     job = _run_export(app, tmp_path / 'export')
     assert job['status'] == 'completed', job
-    assert job['result']['exported_images'] == 105
+    assert job['result']['exported_images'] == 205
     output = Path(job['result']['destination'])
     life = _read(output, 'life-list.json')
     cardinal = next(s for s in life['species'] if s['species'] == 'Northern Cardinal')
-    assert len(cardinal['photos']) == 102
+    assert len(cardinal['photos']) == 202
     assert cardinal['has_more'] is False
     photos = {p['id']: p for p in _read(output, 'photos.json')}
     assert photos[duplicate]['image'] != photos[meta['p1']]['image']
-    assert len(list((output / 'photos').iterdir())) == 105
+    assert len(list((output / 'photos').iterdir())) == 205
     db.close()
 
 
@@ -148,6 +150,91 @@ def test_site_export_applies_saved_crop(tmp_path, monkeypatch):
     assert photo['edits']['crop']['w'] == 0.5
     with Image.open(output / photo['image']) as rendered:
         assert rendered.size == (600, 800)
+    db.close()
+
+
+def test_export_metadata_is_consistent_when_workspace_changes_during_capture(tmp_path, monkeypatch):
+    import site_export
+    from db import Database
+
+    app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
+    pid = meta['p1']
+    album_id = db.add_collection('Original album', json.dumps([
+        {'field': 'photo_ids', 'value': [pid]},
+    ]))
+    db.set_photo_edit_recipe(pid, {'crop': {'x': 0, 'y': 0, 'w': 0.5, 'h': 1}})
+    db.conn.execute('UPDATE photos SET latitude = 10, longitude = 20, exif_data = ? WHERE id = ?',
+                    (json.dumps({'XMP': {'Title': 'Original title'}}), pid))
+    db.conn.commit()
+    original_collections = Database.get_collections
+    original_load = site_export.load_export_image
+    readers = []
+
+    def edit_after_ids_are_captured(reader):
+        rows = original_collections(reader)
+        if readers:
+            return rows
+        readers.append(reader)
+        assert reader.conn.in_transaction
+        # A separate connection can commit while the snapshot is being read.
+        with closing(sqlite3.connect(meta['vireo_dir'] / 'vireo.db', timeout=2)) as writer:
+            with writer:
+                writer.execute("UPDATE keywords SET name = 'Changed species' WHERE name = 'Northern Cardinal'")
+                writer.execute('UPDATE photos SET latitude = 30, longitude = 40, exif_data = ? WHERE id = ?',
+                               (json.dumps({'XMP': {'Title': 'Changed title'}}), pid))
+                writer.execute('DELETE FROM photo_edit_recipes WHERE photo_id = ?', (pid,))
+                writer.execute("UPDATE collections SET name = 'Changed album', rules = '[]' WHERE id = ?", (album_id,))
+                writer.execute('DELETE FROM workspace_folders WHERE workspace_id = ?', (reader._ws_id(),))
+        return rows
+
+    def render_after_transaction_is_released(*args, **kwargs):
+        assert readers and not readers[0].conn.in_transaction
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(Database, 'get_collections', edit_after_ids_are_captured)
+    monkeypatch.setattr(site_export, 'load_export_image', render_after_transaction_is_released)
+    job = _run_export(app, tmp_path / 'export', include_locations=True)
+    assert job['status'] == 'completed', job
+    assert job['result']['photo_count'] == 3
+    root = Path(job['result']['destination'])
+    record = next(p for p in _read(root, 'photos.json') if p['id'] == pid)
+    assert record['title'] == 'Original title'
+    assert (record['latitude'], record['longitude']) == (10, 20)
+    assert record['edits']['crop']['w'] == 0.5
+    assert any(k['name'] == 'Northern Cardinal' for k in record['keywords'])
+    life = _read(root, 'life-list.json')
+    assert any(s['species'] == 'Northern Cardinal' for s in life['species'])
+    album = next(a for a in _read(root, 'site.json')['albums'] if a['id'] == album_id)
+    assert album['name'] == 'Original album'
+    assert _read(root, album['manifest'])['photo_ids'] == [pid]
+    with Image.open(root / record['image']) as image:
+        assert image.size == (600, 800)
+    assert db.get_photo_ids() == []
+    assert db.get_photo_edit_recipe(pid) is None
+    db.close()
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_snapshot_transaction_released_on_capture_error(tmp_path, monkeypatch, cancelled):
+    from site_export import export_site
+    from web.background_jobs import JobCancelled
+
+    _, db, meta = _seed_publish_app(tmp_path, monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise OSError('Metadata unavailable')
+
+    def checkpoint():
+        assert not db.conn.in_transaction, 'Pause checkpoint held the catalog snapshot'
+
+    with pytest.raises(JobCancelled if cancelled else OSError):
+        export_site(
+            db, str(meta['vireo_dir']), str(tmp_path / 'export'),
+            build_life_list=fail, resolve_visual=None,
+            checkpoint=checkpoint, cancel_check=lambda: cancelled,
+        )
+    assert not db.conn.in_transaction
+    assert not (tmp_path / 'export').exists()
     db.close()
 
 

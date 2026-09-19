@@ -638,6 +638,7 @@ def create_export_blueprint(
                     },
                     progress_cb=progress,
                     checkpoint=lambda: ctx.checkpoint(job),
+                    cancel_check=lambda: ctx.runner.cancellation_requested(job["id"]),
                     begin_commit=lambda: ctx.runner.begin_uncancellable(job["id"]),
                 )
             finally:
