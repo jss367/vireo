@@ -568,8 +568,15 @@ def _resolve_landing(keyword_id, landing):
     return keyword_id
 
 
-def _is_one_place_chain(ids, parent_of):
-    """Whether every id sits on a single ancestor line (a place hierarchy)."""
+def _is_one_place_chain(ids, parent_of, post_types):
+    """Whether every id sits on a single EXPORTED location line.
+
+    Mirrors ``Database.get_photo_location_paths``, which walks up from the
+    tagged leaf and stops at the first non-location ancestor. A location
+    sitting above a general keyword is therefore a separate exported
+    location, not this one's parent, so a walk that crossed the gap would
+    call two independently exported places a single hierarchy.
+    """
     if len(ids) <= 1:
         return True
 
@@ -578,7 +585,10 @@ def _is_one_place_chain(ids, parent_of):
         while node is not None and node not in seen:
             seen.add(node)
             chain.append(node)
-            node = parent_of.get(node)
+            parent = parent_of.get(node)
+            if parent is None or post_types.get(parent) != 'location':
+                break
+            node = parent
         return chain
 
     deepest = max(ids, key=lambda i: len(ancestry(i)))
@@ -619,7 +629,7 @@ def _photos_left_with_rival_places(db, keyword_ids, placeholders, landing,
         if post_types.get(landed) == 'location':
             by_photo[row['photo_id']].add(landed)
     return [photo_id for photo_id, landed in by_photo.items()
-            if not _is_one_place_chain(landed, parent_of)]
+            if not _is_one_place_chain(landed, parent_of, post_types)]
 
 def _coordinate_pair(row):
     if row['latitude'] is None or row['longitude'] is None:
@@ -980,7 +990,11 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     # already owns. Check them all, not just the directly selected sources:
     # the survivor's old path and each moved or collapsed descendant path is
     # written with INSERT OR REPLACE further down.
-    retiring = [(paths[source['id']], source['id']) for source in sources]
+    # Sources are recorded against the TARGET, which is where their photos
+    # actually land. Recording each against its own id made two case-variant
+    # source paths look like one key wanting two destinations, so both
+    # aliases were suppressed even though they agree.
+    retiring = [(paths[source['id']], target_id) for source in sources]
     retiring += [(old_path, int(kid))
                  for kid, (old_path, _) in path_changes.items()]
     retiring += [(paths[entry['id']], entry['into_id'])
@@ -1069,6 +1083,11 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
         # photo_keywords rows to that sibling, so the photos carrying it have
         # to be read before the merge runs.
         ambiguous_keys = set(preview['ambiguous_alias_keys'])
+        # Same ownership rule the moved-descendant aliases use: a path some
+        # surviving row still lives at belongs to that row. Case folding
+        # makes this reachable for direct sources too -- a source `Trip A`
+        # and an unselected `trip a` share one key.
+        live_owner = {path_key(p): kid for kid, p in preview['live_paths'].items()}
         collapsed = _collapsing_child_tags(db, preview)
         # Same reason: a child kept under a disambiguated name still has its
         # OLD spelling in the sidecars of the photos carrying it.
@@ -1084,7 +1103,9 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             # Remember every merged path, including same-name leaves under
             # different parents. Existing sidecars/catalogs can retain that
             # hierarchy even after a flat keyword_add has been synchronized.
-            if path_key(source['path']) not in ambiguous_keys:
+            source_key = path_key(source['path'])
+            owner = live_owner.get(source_key)
+            if source_key not in ambiguous_keys and owner in (None, target_id):
                 db.conn.execute(
                     'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
                     (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),

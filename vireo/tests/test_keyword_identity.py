@@ -1376,6 +1376,82 @@ def test_merge_writes_no_alias_when_two_retired_paths_share_one_key(catalog):
     for child in children[:2]:
         assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (child,)).fetchone()
 
+
+def test_conflict_guard_stops_a_place_chain_at_a_non_location_ancestor(catalog):
+    """``get_photo_location_paths`` walks up from the tagged leaf and stops at
+    the first non-location ancestor, so a location sitting above a general
+    keyword is a SEPARATE exported location. A chain walk that crossed that
+    gap called two independently exported places one hierarchy and let the
+    merge queue a resync that picks between them."""
+    db, photos = catalog
+    country = db.add_keyword('Country', kw_type='location')
+    collection = db.add_keyword('Collection', parent_id=country, kw_type='general')
+    park = db.add_keyword('Park', parent_id=collection, kw_type='location')
+    stray = db.add_keyword('Stray', parent_id=park, kw_type='location')
+    kept = db.add_keyword('Keep', parent_id=park, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'place-c' WHERE id = ?", (country,))
+    db.conn.execute("UPDATE keywords SET place_id = 'place-p' WHERE id = ?", (park,))
+    db.conn.commit()
+    db.tag_photo(photos[0], stray)
+    db.tag_photo(photos[0], country)
+    db.tag_photo(photos[0], park)
+    db.tag_photo(photos[1], kept)
+    # The app's own walk cuts off at Collection, so Country is not part of
+    # this photo's exported chain even though it is an ancestor in the tree.
+    exported = db.get_photo_location_paths([photos[0]])[photos[0]]
+    assert exported[0] == 'Park' and 'Country' not in exported
+
+    with pytest.raises(ValueError, match='different linked place'):
+        preview_keyword_merge(db, [stray, kept], kept)
+
+
+def test_source_alias_yields_to_an_unrelated_live_path(catalog):
+    """The live-owner rule applies to directly selected sources too: case
+    folding means a source `Trip A` and an unselected `trip a` share one
+    alias key, and writing it would send imports of the unrelated keyword's
+    own hierarchy to the merge target."""
+    db, photos = catalog
+    source = db.conn.execute(
+        "INSERT INTO keywords(name, type) VALUES ('Trip A', 'general')").lastrowid
+    unrelated = db.conn.execute(
+        "INSERT INTO keywords(name, type) VALUES ('trip a', 'general')").lastrowid
+    kept = db.add_keyword('Keep')
+    db.conn.commit()
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], kept)
+    db.tag_photo(photos[2], unrelated)
+
+    preview = preview_keyword_merge(db, [source, kept], kept)
+    merge_keywords(db, [source, kept], kept, preview['preview_token'])
+
+    assert db.conn.execute(
+        'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
+        (path_key(['trip a']),)).fetchone() is None
+    assert resolve_import_path(db, ['trip a']) != kept
+
+
+def test_case_variant_sources_still_alias_to_their_shared_target(catalog):
+    """Counterpart to the ambiguity veto: two case-variant sources fold to one
+    key but land on the SAME target, so the alias is not ambiguous and must
+    still be written -- otherwise a later scan recreates the retired keyword
+    instead of resolving it to the survivor."""
+    db, photos = catalog
+    first = db.conn.execute(
+        "INSERT INTO keywords(name, type) VALUES ('Trip A', 'general')").lastrowid
+    second = db.conn.execute(
+        "INSERT INTO keywords(name, type) VALUES ('trip a', 'general')").lastrowid
+    kept = db.add_keyword('Keep')
+    db.conn.commit()
+    for photo, keyword in zip(photos, (first, second, kept), strict=True):
+        db.tag_photo(photo, keyword)
+
+    preview = preview_keyword_merge(db, [first, second, kept], kept)
+    assert preview['ambiguous_alias_keys'] == []
+    merge_keywords(db, [first, second, kept], kept, preview['preview_token'])
+    assert db.conn.execute(
+        'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
+        (path_key(['Trip A']),)).fetchone()['keyword_id'] == kept
+
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
     default, so the preview names the field and withholds its token rather
