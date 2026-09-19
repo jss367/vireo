@@ -958,6 +958,7 @@ body { padding-bottom: 48px; }
   </div>
 </div>
 
+<script src="/static/vireo-rsync-help.js"></script>
 <script>
 /* ---------- State ---------- */
 var allFolders = [];
@@ -1416,8 +1417,7 @@ function updateQuickMovePreview() {
     preview.appendChild(line);
 
     if (!quickRsyncAvailable) {
-      preview.appendChild(_destWarn('⚠ No GNU rsync found — remote moves need '
-        + 'it. Install GNU rsync or set its path under Settings → Paths.'));
+      preview.appendChild(_destWarn('⚠ No GNU rsync found. ' + rsyncInstallHint()));
     }
     if (!t.mount_path) {
       preview.appendChild(_destWarn('⚠ This target has no local mount path, so '
@@ -1727,8 +1727,7 @@ async function startQuickMove() {
   var destBody;
   if (remoteId) {
     if (!quickRsyncAvailable) {
-      showToast('No GNU rsync found for remote moves. Install it or set its '
-        + 'path under Settings → Paths.', 'error');
+      showToast('No GNU rsync found for remote moves. ' + rsyncInstallHint(), 'error');
       return;
     }
     // Normalize once, here, so the path the user is about to confirm matches

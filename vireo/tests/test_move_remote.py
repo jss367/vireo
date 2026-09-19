@@ -926,6 +926,31 @@ def test_remote_dir_exists_tri_state(monkeypatch):
     assert move_mod._remote_dir_exists(remote, "/p") is None
 
 
+@pytest.mark.parametrize("server_platform,commands", [
+    ("darwin", ["brew install rsync"]),
+    ("linux", ["sudo apt install rsync", "sudo dnf install rsync"]),
+    ("win32", []),
+])
+def test_missing_local_rsync_offers_server_install_commands(monkeypatch, server_platform, commands):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(move_mod.sys, "platform", server_platform)
+    monkeypatch.setattr(move_mod.subprocess, "run", lambda *a, **kw:
+                        SimpleNamespace(returncode=0, stdout="vireo_ok\nWRITABLE\n", stderr=""))
+    result = move_mod.test_remote_connection(
+        {"host": "nas", "user": "me", "remote_path": "/photos", "ssh_bin": "ssh"}, "")
+    assert result["ok"] is False
+    assert result["ssh"] is True
+    assert result["rsync_install_commands"] == commands
+    for command in commands:
+        assert command in result["message"]
+    if server_platform == "darwin":
+        assert "bundled with macOS" in result["message"]
+        assert "automatically" in result["message"]
+    else:
+        assert "brew" not in result["message"]
+
+
 def test_test_remote_connection_probes_remote_rsync(monkeypatch):
     """test_remote_connection must verify rsync is available on the REMOTE
     side, not just locally. SSH + writable remote_path + a local rsync_bin
@@ -1022,5 +1047,3 @@ def test_remote_free_bytes_returns_none_on_failure(monkeypatch):
         raise OSError("ssh: not found")
     monkeypatch.setattr(move_mod.subprocess, "run", boom)
     assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/p") is None
-
-
