@@ -777,6 +777,21 @@ body {
         <span class="control-value" id="contrastValue">0</span>
       </div>
       <div class="control-row">
+        <label for="textureRange" title="Enhance or soften fine detail">Texture</label>
+        <input id="textureRange" data-adjustment="texture" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('texture', this.value)">
+        <span class="control-value" id="textureValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="clarityRange" title="Increase or soften local contrast">Clarity</label>
+        <input id="clarityRange" data-adjustment="clarity" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('clarity', this.value)">
+        <span class="control-value" id="clarityValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="dehazeRange" title="Reduce haze or add a misty effect">Dehaze</label>
+        <input id="dehazeRange" data-adjustment="dehaze" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('dehaze', this.value)">
+        <span class="control-value" id="dehazeValue">0</span>
+      </div>
+      <div class="control-row">
         <label for="temperatureRange">Temp</label>
         <input id="temperatureRange" data-adjustment="temperature" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('temperature', this.value)">
         <span class="control-value" id="temperatureValue">0</span>
@@ -1670,6 +1685,9 @@ function adjustmentValues(recipe) {
     whites: Number(adj.whites || 0),
     blacks: Number(adj.blacks || 0),
     contrast: Number(adj.contrast || 0),
+    texture: Number(adj.texture || 0),
+    clarity: Number(adj.clarity || 0),
+    dehaze: Number(adj.dehaze || 0),
     temperature: Number(wb.temperature || adj.temperature || 0),
     tint: Number(wb.tint || adj.tint || 0),
     vibrance: Number(adj.vibrance || 0),
@@ -1726,7 +1744,7 @@ function recipeForSave(recipe) {
 
   var vals = adjustmentValues(out);
   var adj = {};
-  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'sharpen', 'noise_reduction'].forEach(function(key) {
+  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction'].forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) adj[key] = Number(vals[key]);
   });
   // Radius only rides along with active sharpening, and its 1.0 default is
@@ -1834,6 +1852,9 @@ function syncControls() {
   set('whites', vals.whites, false);
   set('blacks', vals.blacks, false);
   set('contrast', vals.contrast, false);
+  set('texture', vals.texture, false);
+  set('clarity', vals.clarity, false);
+  set('dehaze', vals.dehaze, false);
   set('temperature', vals.temperature, false);
   set('tint', vals.tint, false);
   set('vibrance', vals.vibrance, false);
@@ -2348,7 +2369,7 @@ function setAdjustment(key, value) {
   if (key === 'exposure' || key === 'sharpen_radius') document.getElementById(key + 'Value').textContent = vals[key].toFixed(1);
   else document.getElementById(key + 'Value').textContent = String(Math.round(vals[key]));
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
-  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'sharpen', 'noise_reduction'].forEach(function(name) {
+  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction'].forEach(function(name) {
     if (Math.abs(vals[name]) > 0.000001) adj[name] = vals[name];
     else delete adj[name];
   });
@@ -2367,7 +2388,7 @@ function setAdjustment(key, value) {
 function resetAdjustments() {
   // Detail, tone curve, color mixer, and color grading each live in their
   // own panel band with a dedicated reset button; only clear the basic
-  // tone/white-balance keys owned by this panel.
+  // tone, presence, and white-balance keys owned by this panel.
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   var kept = {};
   [
@@ -3141,7 +3162,7 @@ async function autoTone() {
     ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast'].forEach(function(k) {
       if (Math.abs(auto[k]) > 0.000001) adj[k] = auto[k];
     });
-    ['vibrance', 'saturation', 'sharpen', 'noise_reduction'].forEach(function(k) {
+    ['vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction'].forEach(function(k) {
       if (Math.abs(vals[k]) > 0.000001) adj[k] = vals[k];
     });
     if (adj.sharpen && Math.abs(vals.sharpen_radius - 1) > 0.000001) {
