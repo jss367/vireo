@@ -254,7 +254,9 @@ def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
 
 def _commit_site(destination_path, staging_path, paths, cancel_check=None, begin_commit=None):
     """Serialize commits to one destination, with rollback on write failure."""
-    key = os.path.normcase(os.path.realpath(destination_path))
+    # POSIX normcase preserves spelling even on case-insensitive macOS
+    # volumes. Over-serializing distinct case-sensitive paths is harmless.
+    key = os.path.normcase(os.path.realpath(destination_path)).casefold()
     with _PUBLISH_LOCKS_GUARD:
         lock = _PUBLISH_LOCKS.setdefault(key, threading.Lock())
     while not lock.acquire(timeout=0.1):

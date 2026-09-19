@@ -730,7 +730,8 @@ def test_failed_rollback_retains_recoverable_backups(tmp_path, monkeypatch):
     db.close()
 
 
-def test_publish_waiting_for_same_destination_can_be_cancelled(tmp_path, monkeypatch):
+@pytest.mark.parametrize('case_alias', [False, True])
+def test_publish_waiting_for_same_destination_can_be_cancelled(tmp_path, monkeypatch, case_alias):
     import site_publish
 
     entered = threading.Event()
@@ -740,6 +741,8 @@ def test_publish_waiting_for_same_destination_can_be_cancelled(tmp_path, monkeyp
 
     def held_commit(destination, staging, paths, cancel_check, begin_commit):
         calls.append(staging)
+        if len(calls) > 1:
+            return True
         entered.set()
         assert release.wait(5), 'commit was not released'
         return True
@@ -750,7 +753,8 @@ def test_publish_waiting_for_same_destination_can_be_cancelled(tmp_path, monkeyp
     first.start()
     try:
         assert entered.wait(5), 'first commit never started'
-        assert not site_publish._commit_site(tmp_path, tmp_path / 'second', [], lambda: True)
+        destination = tmp_path.with_name(tmp_path.name.upper()) if case_alias else tmp_path
+        assert not site_publish._commit_site(destination, tmp_path / 'second', [], lambda: True)
         assert calls == [tmp_path / 'first']
     finally:
         release.set()
