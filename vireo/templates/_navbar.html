@@ -5447,6 +5447,10 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
   }
   _lbDesiredSrcKey = null;
   _lbProgressiveTargetKey = null;
+  // Cancelling _lbSwapTimer and clearing the desired key makes the old
+  // preloader callbacks return as stale, so nothing else will ever turn this
+  // off. Left set, the phase stays 'sharpening' with no request behind it.
+  _lbSetPreviewLoading(false);
   if (wrap) wrap.classList.remove('zoomed');
   _lbApplyTransform();
   // Replacing img.onload/onerror orphans handleInitialImageLoad when the
@@ -10714,8 +10718,15 @@ function _lbDetailIsDegraded() {
   if (_lbZoom <= 1.001) return false;
   var img = document.getElementById('lightboxImg');
   var have = img ? Math.max(img.naturalWidth, img.naturalHeight) : 0;
-  var fileLongEdge = Math.max(Number(_lbPhotoW) || 0, Number(_lbPhotoH) || 0);
-  return have > 0 && fileLongEdge > have * 1.01;
+  if (!have) return false;
+  // Compare against what this photo actually renders as, not its catalog
+  // dimensions: a 6000px source cropped to a 3000px render is fully carried by
+  // the fallback, and warning about missing detail there would be false.
+  var oriented = _lbOrientedPhotoDims(img);
+  if (!oriented) return false;
+  var rendered = _lbDisplayDimsForRecipe(oriented.w, oriented.h, _lbCurrentEditRecipe);
+  var renderLongEdge = Math.max(Number(rendered.w) || 0, Number(rendered.h) || 0);
+  return renderLongEdge > have * 1.01;
 }
 
 function _lbDetailStatusPhase() {

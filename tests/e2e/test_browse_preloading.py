@@ -956,3 +956,35 @@ def test_detail_status_does_not_call_an_upscaled_fallback_full_detail(live_serve
     page.evaluate("setLightboxZoomToFit()")
     page.wait_for_function("!_lbDetailIsDegraded()")
     assert _detail_text(page) != "Preview only"
+
+def test_edit_reload_clears_a_preview_upgrade_it_cancelled(live_server, page):
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", lambda r: None)
+    _open_window(page, live_server)
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+    expect(page.locator("#lightboxPreviewStatus")).to_be_visible()
+    assert _detail_text(page) == "Sharpening…"
+
+    # The reload cancels _lbSwapTimer and clears the desired key, so the old
+    # preloader callbacks return as stale and nothing else would ever turn the
+    # loading flag off.
+    page.evaluate("_lbReloadCurrentRenderAfterEdit(115)")
+    assert page.evaluate("_lbPreviewLoading") is False
+    assert page.evaluate("_lbDetailSharpeningPending()") is False
+
+
+def test_degraded_detail_measures_the_cropped_render_not_the_catalog_size(live_server, page):
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", lambda r: r.abort())
+    page.route("**/photos/*/preview?*", lambda r: r.fulfill(body=_jpeg(3840, 2560), content_type="image/jpeg"))
+    _open_window(page, live_server)
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+    page.wait_for_function("_lbOriginalUnavailable && !_lbPreviewLoading")
+    assert page.evaluate("_lbDetailIsDegraded()") is True
+
+    # Crop the 6000px source to a 3000px render: the 3840 fallback now carries
+    # every pixel the render has, so there is no missing detail to warn about.
+    page.evaluate("_lbCurrentEditRecipe = {crop: {x: 0, y: 0, w: 0.5, h: 0.5}};")
+    assert page.evaluate("_lbDetailIsDegraded()") is False
