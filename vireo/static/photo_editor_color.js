@@ -243,7 +243,7 @@ async function samplePointColorAt(e) {
   var x = (e.clientX - rect.left) / rect.width, y = (e.clientY - rect.top) / rect.height;
   if (x < 0 || y < 0 || x > 1 || y > 1) return;
   var photoId = editorState.photoId, startKey = recipeKey(editorState.recipe);
-  var applyCrop = editorPreviewAppliesCrop();
+  var sampleUrl = new URL(displayed.currentSrc || displayed.src, window.location.href);
   var recipe = previewRecipe();
   // Sample at the input of Point Color, so subsequent color changes cannot
   // move the selection away from its own original sample.
@@ -261,7 +261,10 @@ async function samplePointColorAt(e) {
   var seq = colorEditor.pickSequence;
   document.getElementById('pointColorStatus').textContent = 'Sampling color…';
   try {
-    var source = await _loadImage('/photos/' + photoId + '/edit-preview?size=1920&apply_crop=' + (applyCrop ? '1' : '0') + '&recipe=' + encodeURIComponent(JSON.stringify(recipe)));
+    // Preserve the displayed render size and geometry: downsampling here
+    // would mix neighboring colors when the user is inspecting fine detail.
+    sampleUrl.searchParams.set('recipe', JSON.stringify(recipe));
+    var source = await _loadImage(sampleUrl.href);
     if (seq !== colorEditor.pickSequence || photoId !== editorState.photoId || editorState.loading) return;
     if (startKey !== recipeKey(editorState.recipe)) {
       document.getElementById('pointColorStatus').textContent = 'Edits changed while sampling. Pick the color again.';

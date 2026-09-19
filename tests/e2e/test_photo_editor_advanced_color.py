@@ -460,3 +460,61 @@ def test_custom_point_color_rejects_neutral_samples(live_server, page, color_pho
     assert len(page.evaluate('pointColorSamples()')) == 1
     expect(page.locator('#pointColor_hue')).to_be_enabled()
     expect(page.locator('#pointColorStatus')).to_have_text('')
+
+
+def test_point_color_samples_the_displayed_native_resolution(live_server, page, tmp_path):
+    folder = tmp_path / 'fine-color-detail'
+    folder.mkdir()
+    path = folder / 'fine-color-detail.png'
+    image = Image.new('RGB', (2600, 400), (0, 128, 0))
+    image.paste((180, 40, 40), (1298, 0, 1302, 400))
+    image.save(path)
+    db = live_server['db']
+    folder_id = db.add_folder(str(folder))
+    photo_id = db.add_photo(folder_id=folder_id, filename=path.name, extension='.png',
+                            file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
+                            width=2600, height=400)
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    _wait_color_preview(page)
+    page.evaluate("setZoomMode('actual')")
+    page.wait_for_function("document.getElementById('editorImg').naturalWidth === 2600")
+    _wait_color_preview(page)
+    page.evaluate("""() => {
+      const original = _loadImage;
+      _loadImage = async url => {
+        const image = await original(url);
+        window.sampledRender = {url, width: image.naturalWidth};
+        return image;
+      };
+      window.addEventListener('pointerdown', e => {
+        if (!colorEditor.picking) return;
+        const img = document.getElementById('editorImg');
+        const r = img.getBoundingClientRect();
+        const x = Math.floor((e.clientX - r.left) / r.width * img.naturalWidth);
+        const y = Math.floor((e.clientY - r.top) / r.height * img.naturalHeight);
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 1;
+        const context = canvas.getContext('2d');
+        context.drawImage(img, x, y, 1, 1, 0, 0, 1, 1);
+        const pixel = context.getImageData(0, 0, 1, 1).data;
+        window.clickedColorSample = rgbToPointSample(...pixel.slice(0, 3)).map(colorRound);
+      }, true);
+    }""")
+    page.locator('#pointColorPick').click()
+    # At 100% the image extends beyond the canvas; click its visible portion
+    # rather than the full element's center, which may be behind the sidebar.
+    position = page.evaluate("""() => {
+      const wrap = document.getElementById('editorCanvasWrap');
+      wrap.scrollLeft = (wrap.scrollWidth - wrap.clientWidth) / 2;
+      const bounds = wrap.getBoundingClientRect();
+      const image = document.getElementById('editorImg').getBoundingClientRect();
+      return {
+        x: (Math.max(bounds.left, image.left) + Math.min(bounds.right, image.right)) / 2,
+        y: (Math.max(bounds.top, image.top) + Math.min(bounds.bottom, image.bottom)) / 2,
+      };
+    }""")
+    page.mouse.click(position['x'], position['y'])
+    expect(page.locator('#pointColorStatus')).to_contain_text('Color sampled')
+    assert page.evaluate('sampledRender.width') == 2600
+    assert page.evaluate("new URL(sampledRender.url).searchParams.get('size')") == '2600'
+    assert page.evaluate('pointColorSamples()[0].sample') == page.evaluate('clickedColorSample')
