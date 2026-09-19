@@ -8270,9 +8270,15 @@ function openLightbox(photoId, filename, photoList, options) {
   // and _lbSaveViewportState treats the incoming photo as mid-flight. The
   // identity commit comes first on purpose -- releasing the controls while the
   // filename, counter and _lightboxCommittedId still name the outgoing photo
-  // would let the user act on a photo the UI is not showing.
+  // would let the user act on a photo the UI is not showing. The outgoing
+  // bitmap is dropped for the same reason: leaving it painted under the
+  // incoming filename would let a flag or delete land on a photo the user
+  // cannot see.
   function abandonInitialLoad() {
     commitVisiblePhotoIdentity();
+    img.onload = null;
+    img.onerror = null;
+    img.removeAttribute('src');
     _lbInitialDecodePending = false;
     _lbVisualTransitionPending = false;
     _lbSetPhotoTransitionPending(false);

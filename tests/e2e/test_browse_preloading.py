@@ -813,6 +813,10 @@ def test_failed_edit_reload_commits_identity_before_freeing_controls(live_server
     assert page.evaluate(
         "document.getElementById('lightboxActions').getAttribute('aria-busy')"
     ) == "false"
+    # Committing identity while the previous photo's bitmap is still on screen
+    # would let a flag or delete land on a photo the user cannot see. The
+    # outgoing bitmap has to go with the identity handoff.
+    assert not page.evaluate("document.getElementById('lightboxImg').getAttribute('src')")
 
 
 def test_reopening_the_visible_photo_does_not_arm_a_decode_that_never_ends(live_server, page):
