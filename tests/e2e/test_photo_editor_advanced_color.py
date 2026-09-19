@@ -444,7 +444,7 @@ def test_reopening_color_picker_ignores_previous_pending_sample(live_server, pag
     assert len(page.evaluate('pointColorSamples()')) == 1
 
 
-@pytest.mark.parametrize('hex_color', ['#000000', '#808080', '#ffffff', '#808180'])
+@pytest.mark.parametrize('hex_color', ['#000000', '#808080', '#ffffff', '#808180', '#636565'])
 def test_custom_point_color_rejects_neutral_samples(live_server, page, color_photo, hex_color):
     page.goto(f"{live_server['url']}/edit/{color_photo}")
     expect(page.locator('#editorFilename')).to_have_text('color-study.png')

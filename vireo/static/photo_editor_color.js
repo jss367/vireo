@@ -158,11 +158,13 @@ function addPointColorSample(sample) {
   if (editorState.loading) return false;
   var samples = pointColorSamples();
   if (samples.length >= 8) return false;
-  if (sample[1] < 1) {
+  // Validate the value we persist; rounding must not admit the renderer’s
+  // zero-weight boundary at 1% saturation.
+  sample = sample.map(colorRound);
+  if (sample[1] <= 1) {
     document.getElementById('pointColorStatus').textContent = 'Choose a more saturated color; neutral gray has no distinct hue.';
     return false;
   }
-  sample = sample.map(colorRound);
   sample[0] %= 360;
   samples.push({sample: sample});
   colorEditor.sampleIndex = samples.length - 1;
