@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
 import re
 import shutil
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory, TemporaryFile
+from tempfile import TemporaryFile, mkdtemp
+from weakref import WeakValueDictionary
 
 from export import (
     _DevelopedDirIndex,
@@ -19,6 +22,12 @@ from export import (
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _PRIVATE_PHOTO_FIELDS = {"mask_path"}
+_PUBLISH_LOCKS = WeakValueDictionary()
+_PUBLISH_LOCKS_GUARD = threading.Lock()
+
+
+class PublishRecoveryError(RuntimeError):
+    """A failed publish whose backup files must be retained for recovery."""
 
 
 def slugify(value, fallback="item"):
@@ -122,11 +131,19 @@ def publish_site(db, vireo_dir, destination, life_list, highlights=None, options
             completion; false aborts before replacing any published files.
     """
     Path(destination).mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=".vireo-publish-", dir=destination) as staging:
+    staging = mkdtemp(prefix=".vireo-publish-", dir=destination)
+    retain_backup = False
+    try:
         return _publish_site(
             db, vireo_dir, destination, staging, life_list, highlights, options,
             progress_cb, cancel_check, begin_commit,
         )
+    except PublishRecoveryError:
+        retain_backup = True
+        raise
+    finally:
+        if not retain_backup:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
@@ -222,34 +239,10 @@ def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
     _write_json(data_dir / "highlights.json", published_highlights)
 
     data_files = ["data/site.json", "data/life-list.json", "data/highlights.json"]
-    # Check every destination before modifying any published content. Existing
-    # files may be writable even when their directories cannot be modified.
-    for rel_path in image_paths + data_files:
-        if cancel_check and cancel_check():
-            return {"destination": destination, "data_files": [],
-                    "exported_images": exported, "errors": errors}
-        out_path = destination_path / rel_path
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        if out_path.exists():
-            os.close(os.open(out_path, os.O_WRONLY))
-        else:
-            with TemporaryFile(dir=out_path.parent):
-                pass
-
-    # Keep staging cancellable, then coordinate writes with the job runner's
-    # lock so a late Stop cannot interrupt the published files.
-    can_commit = begin_commit() if begin_commit is not None else not (
-        cancel_check and cancel_check()
-    )
-    if not can_commit:
+    if not _commit_site(destination_path, staging_path, image_paths + data_files,
+                        cancel_check, begin_commit):
         return {"destination": destination, "data_files": [],
                 "exported_images": exported, "errors": errors}
-
-    for rel_path in image_paths + data_files:
-        out_path = destination_path / rel_path
-        # Retain the original writable-file behavior and its inode ownership,
-        # ACLs, and mode; directory-entry replacement would discard those.
-        shutil.copyfile(staging_path / rel_path, out_path)
 
     return {
         "destination": destination,
@@ -257,3 +250,108 @@ def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
         "exported_images": exported,
         "errors": errors,
     }
+
+
+def _commit_site(destination_path, staging_path, paths, cancel_check=None, begin_commit=None):
+    """Serialize commits to one destination, with rollback on write failure."""
+    # POSIX normcase preserves spelling even on case-insensitive macOS
+    # volumes. Over-serializing distinct case-sensitive paths is harmless.
+    key = os.path.normcase(os.path.realpath(destination_path)).casefold()
+    with _PUBLISH_LOCKS_GUARD:
+        lock = _PUBLISH_LOCKS.setdefault(key, threading.Lock())
+    while not lock.acquire(timeout=0.1):
+        if cancel_check and cancel_check():
+            return False
+    try:
+        return _commit_site_locked(destination_path, staging_path, paths,
+                                   cancel_check, begin_commit)
+    finally:
+        lock.release()
+
+
+def _commit_site_locked(destination_path, staging_path, paths, cancel_check, begin_commit):
+    # Check every destination before modifying any published content. Existing
+    # files may be writable even when their directories cannot be modified.
+    for rel_path in paths:
+        if cancel_check and cancel_check():
+            return False
+        out_path = destination_path / rel_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if out_path.is_symlink() and not out_path.exists():
+            raise ValueError(f"Publish destination is a broken symbolic link: {out_path}")
+        if out_path.exists():
+            os.close(os.open(out_path, os.O_WRONLY))
+        else:
+            with TemporaryFile(dir=out_path.parent):
+                pass
+
+    # Reserve the previous generation before touching any live bytes. Backups
+    # live under the writable staging root, so existing writable files in
+    # protected child directories remain supported. A backup failure leaves
+    # the published site unchanged.
+    originals = {}
+    backup_dir = staging_path / "rollback"
+    backup_dir.mkdir()
+    for index, rel_path in enumerate(paths):
+        if cancel_check and cancel_check():
+            return False
+        out_path = destination_path / rel_path
+        backup = None
+        if out_path.exists():
+            backup = backup_dir / str(index)
+            shutil.copyfile(out_path, backup)
+            with backup.open("rb+") as saved:
+                os.fsync(saved.fileno())
+            shutil.copystat(out_path, backup)
+        originals[rel_path] = backup
+    _write_json(staging_path / "recovery.json", {
+        rel: str(backup.relative_to(staging_path)) if backup else None
+        for rel, backup in originals.items()
+    })
+
+    # Keep staging cancellable, then coordinate writes with the job runner's
+    # lock so a late Stop cannot interrupt the published files.
+    can_commit = begin_commit() if begin_commit is not None else not (
+        cancel_check and cancel_check()
+    )
+    if not can_commit:
+        return False
+
+    modified = []
+    try:
+        for rel_path in paths:
+            # Include the current file: copyfile may truncate it before raising.
+            modified.append(rel_path)
+            # Keep the existing inode's ownership, ACLs, and mode.
+            shutil.copyfile(staging_path / rel_path, destination_path / rel_path)
+    except BaseException as error:
+        # Discard the staged NEW bytes first to make room for restoration
+        # after ENOSPC. Never discard a backup until recovery has succeeded.
+        for rel_path in paths:
+            with contextlib.suppress(OSError):
+                (staging_path / rel_path).unlink()
+        failed = []
+        for rel_path in reversed(modified):
+            out_path = destination_path / rel_path
+            backup = originals[rel_path]
+            try:
+                if backup is None:
+                    out_path.unlink(missing_ok=True)
+                else:
+                    # Restore in place, including under protected directories.
+                    # This also preserves ownership/ACLs on the original inode.
+                    with backup.open("rb") as saved, out_path.open("wb") as live:
+                        shutil.copyfileobj(saved, live)
+                        live.flush()
+                        os.fsync(live.fileno())
+                    shutil.copystat(backup, out_path)
+            except OSError:
+                failed.append(rel_path)
+        if failed:
+            raise PublishRecoveryError(
+                f"Publishing failed ({error}); could not restore {len(failed)} file(s). "
+                f"Previous site files and recovery.json are preserved in {staging_path}"
+            ) from error
+        raise
+
+    return True

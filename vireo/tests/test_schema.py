@@ -1671,3 +1671,22 @@ def test_split_grouping_history_snapshots_migration(tmp_path):
         assert db.conn.execute(
             "SELECT COUNT(*) FROM edit_history_payloads"
         ).fetchone()[0] == 0
+
+
+def test_pending_sync_started_upgrade_preserves_queue(tmp_path):
+    db_path = str(tmp_path / "vireo.db")
+    with Database(db_path) as db:
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        pid = db.add_photo(folder_id=folder_id, filename="bird.jpg", extension=".jpg",
+                           file_size=100, file_mtime=1.0)
+        token = db.queue_change(pid, "keyword_add", "Osprey")
+        db.conn.execute("ALTER TABLE pending_changes DROP COLUMN sync_started")
+        db.conn.commit()
+    # The startup boundary upgrades an existing database as well as creating
+    # a new one; an old pending edit must not be treated as already written.
+    schema.ensure_schema(db_path)
+    with Database(db_path, initialize_schema=False) as db:
+        pending = db.get_pending_changes()
+        assert len(pending) == 1
+        assert pending[0]["change_token"] == token
+        assert pending[0]["sync_started"] == 0

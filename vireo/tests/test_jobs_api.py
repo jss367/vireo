@@ -11450,6 +11450,48 @@ def test_extract_masks_route_reports_unreadable_sources(
     )
 
 
+def test_pending_archive_sync_repairs_keyword_cancelled_during_publish(app_and_db, tmp_path, monkeypatch):
+    """The NAS receives the cancellation before the local original is deleted."""
+    import move
+    import xmp
+    from db import Database
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    photo_id = imported["result"]["photo_ids"][0]
+    db.queue_change(photo_id, "keyword_add", "Osprey")
+    real_publish = xmp._write_tree_atomic
+    cancelled = []
+
+    def cancel_before_publish(tree, path):
+        if not cancelled:
+            with Database(db._db_path, initialize_schema=False) as editor_db:
+                editor_db.set_active_workspace(db._ws_id())
+                editor_db._flip_pending_keyword_change(
+                    photo_id, "Osprey", "keyword_add", "keyword_remove",
+                )
+            cancelled.append(True)
+        return real_publish(tree, path)
+
+    monkeypatch.setattr(xmp, "_write_tree_atomic", cancel_before_publish)
+    monkeypatch.setattr(move, "_run_rsync_streamed",
+                        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
+    client = app.test_client()
+    sent = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert cancelled
+    assert sent["status"] == "completed", sent
+    assert not os.path.exists(staging)
+    sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+    assert len(sidecars) == 1
+    assert "Osprey" not in xmp.read_keywords(sidecars[0])
+    assert db.count_pending_changes() == 0
+    assert sent["result"]["metadata_queued_during_transfer"] == 0
+
+
 @pytest.mark.parametrize("template", ["{file_type}/%Y", "%Y/{file_type}", "{file_type}"])
 def test_file_type_template_cannot_land_on_after_process_mount(
     app_and_db, tmp_path, stub_move, template,

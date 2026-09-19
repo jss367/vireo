@@ -807,6 +807,7 @@ class Database:
                 raise IncompatibleDatabaseError(self._db_path, str(e)) from e
             raise
         self.repair_missing_folder_parents()
+        self.repair_stale_folder_parents()
         self.ensure_default_workspace()
         # Normalize retired keyword types before seeding the built-in genres.
         # Cheap warm-path (single SELECT 1 LIMIT 1) once all legacy rows are
@@ -1156,6 +1157,7 @@ class Database:
                 change_type TEXT,
                 value       TEXT,
                 change_token TEXT,
+                sync_started INTEGER NOT NULL DEFAULT 0,
                 created_at  TEXT DEFAULT (datetime('now')),
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
             );
@@ -1736,6 +1738,9 @@ class Database:
                        OR substr(candidate.source_path, 1, length(restored_path.source_path) + 1) = restored_path.source_path || '/')
             )
         """)
+        pending_cols = {r[1] for r in cur.execute("PRAGMA table_info(pending_changes)")}
+        if "sync_started" not in pending_cols:
+            cur.execute("ALTER TABLE pending_changes ADD COLUMN sync_started INTEGER NOT NULL DEFAULT 0")
         pred_cols = {r[1] for r in cur.execute("PRAGMA table_info(predictions)")}
         if "source_taxon_id" not in pred_cols:
             cur.execute("ALTER TABLE predictions ADD COLUMN source_taxon_id INTEGER")
@@ -2660,6 +2665,45 @@ class Database:
             updates,
         )
         self.conn.commit()
+
+    def repair_stale_folder_parents(self):
+        """Repair parent links left behind by older folder moves.
+
+        Only non-NULL links that contradict the saved paths are changed.
+        Managed local copies deliberately retain their archive parentage, so
+        defer links involving those folders until their local session ends.
+        This runs on startup and is idempotent; no filesystem access or photo
+        and workspace membership changes are needed, even for offline paths.
+        """
+        with self.conn:
+            # Read and repair one snapshot: a concurrent move or local-copy
+            # activation must not change paths after we validate the links.
+            self.conn.execute("BEGIN IMMEDIATE")
+            managed_ids = {
+                row[0] for row in self.conn.execute(
+                    "SELECT folder_id FROM local_folder_mappings "
+                    "UNION SELECT folder_id FROM local_workspace_folders"
+                )
+            }
+            rows = self.conn.execute(
+                "SELECT id, path, parent_id FROM folders"
+            ).fetchall()
+            paths = {row["id"]: _path_for_subtree_match(row["path"]) for row in rows}
+            updates = []
+            for row in rows:
+                fid, parent_id = row["id"], row["parent_id"]
+                if parent_id is None or fid in managed_ids or parent_id in managed_ids:
+                    continue
+                parent_path = paths.get(parent_id)
+                if parent_path is not None and paths[fid].startswith(parent_path + "/"):
+                    continue
+                updates.append((self.nearest_ancestor_folder_id(row["path"], exclude_id=fid), fid))
+            self.conn.executemany(
+                "UPDATE folders SET parent_id = ? WHERE id = ?", updates,
+            )
+        if updates:
+            log.info("Repaired %d stale folder parent links", len(updates))
+        return len(updates)
 
     # -- Workspaces --
 
@@ -5619,6 +5663,10 @@ class Database:
                 "UPDATE folders SET path = ? WHERE id = ?", (child_new, child["id"])
             )
             rebased_paths.append((child["path"], child_new))
+        # Browse and subtree filters follow parent_id, not path. Re-link only
+        # after all paths have changed so the moved tree follows its new
+        # ancestors instead of staying nested under the source parent.
+        self._relink_parents_by_path([folder_id] + [c["id"] for c in children])
         # Cascade the rename into ``photos.last_move_source_folder_path`` too.
         # That column stores the STORED source folder path a destination photo
         # was moved from, and the same-stem developed-render collision guard
@@ -10711,26 +10759,8 @@ class Database:
             "place_id": row["place_id"],
         }
 
-    def get_photo_location_paths(self, photo_ids):
-        """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
-
-        The leaf is chosen exactly as :meth:`get_assigned_photo_location`
-        chooses it -- coordinate-bearing first, then deepest in the chain,
-        then most recent id as the tie-break -- so the keywords written to
-        a sidecar always describe the same place as the GPS written beside
-        them. When a photo carries both a coordinate-bearing location and
-        a coordinate-less one (the generic keyword-add endpoint attaches
-        another ``type='location'`` keyword without replacing the
-        current), the coord-bearing row wins here just as it does in
-        :meth:`get_assigned_photo_location`. Unlike that method this one
-        does not *require* coordinates: a free-text location the user
-        typed still has a name worth writing when there is no coord-bearing
-        alternative.
-
-        Photos with no linked location are absent from the result, which is
-        how the sync engine tells "write these keywords" from "remove the ones
-        we wrote".
-        """
+    def _get_photo_location_leaves(self, photo_ids):
+        """Choose the effective exported location row for each photo."""
         if not photo_ids:
             return {}
 
@@ -10755,6 +10785,34 @@ class Database:
             ).fetchall()
             for row in rows:
                 leaves[row["photo_id"]] = row
+
+        return leaves
+
+    def get_photo_location_keyword_ids(self, photo_ids):
+        """Return the keyword IDs owning each photo's exported location."""
+        return {pid: row["id"] for pid, row in self._get_photo_location_leaves(photo_ids).items()}
+
+    def get_photo_location_paths(self, photo_ids):
+        """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
+
+        The leaf is chosen exactly as :meth:`get_assigned_photo_location`
+        chooses it -- coordinate-bearing first, then deepest in the chain,
+        then most recent id as the tie-break -- so the keywords written to
+        a sidecar always describe the same place as the GPS written beside
+        them. When a photo carries both a coordinate-bearing location and
+        a coordinate-less one (the generic keyword-add endpoint attaches
+        another ``type='location'`` keyword without replacing the
+        current), the coord-bearing row wins here just as it does in
+        :meth:`get_assigned_photo_location`. Unlike that method this one
+        does not *require* coordinates: a free-text location the user
+        typed still has a name worth writing when there is no coord-bearing
+        alternative.
+
+        Photos with no linked location are absent from the result, which is
+        how the sync engine tells "write these keywords" from "remove the ones
+        we wrote".
+        """
+        leaves = self._get_photo_location_leaves(photo_ids)
 
         # One cache for the whole batch: a shoot shares a place, so thousands
         # of photos resolve the same handful of chains.
@@ -22938,7 +22996,7 @@ class Database:
     # -- Pending Changes --
 
     def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
-        """Add a change to the sync queue (skips if already queued).
+        """Add a change to the sync queue, skipping redundant intents.
 
         Returns the inserted pending change token, or None if already queued.
         A rating only deduplicates against its latest queued value: 1 -> 2 -> 1
@@ -22962,11 +23020,36 @@ class Database:
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         if change_type == "rating":
             latest = self.conn.execute(
-                "SELECT value FROM pending_changes WHERE photo_id = ? "
+                "SELECT id, value FROM pending_changes WHERE photo_id = ? "
                 "AND change_type = 'rating' AND workspace_id = ? ORDER BY id DESC LIMIT 1",
                 (photo_id, ws_id),
             ).fetchone()
             existing = latest is not None and latest["value"] == value
+            if existing:
+                existing = self.conn.execute(
+                    "SELECT 1 FROM pending_changes WHERE workspace_id = ? "
+                    "AND id > ? AND photo_id != ? AND change_type = 'rating' LIMIT 1",
+                    (ws_id, latest["id"], photo_id),
+                ).fetchone() is None
+        elif change_type in ("keyword_add", "keyword_remove", "keyword_remove_flat"):
+            latest = self.conn.execute(
+                "SELECT id, change_type, value FROM pending_changes WHERE photo_id = ? "
+                "AND workspace_id = ? AND value = ? COLLATE NOCASE AND change_type IN "
+                "('keyword_add', 'keyword_remove', 'keyword_remove_flat') "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (photo_id, ws_id, value),
+            ).fetchone()
+            existing = (latest is not None and latest["change_type"] == change_type
+                        and latest["value"] == value)
+            if existing:
+                # Another photo can share this sidecar. Do not discard a
+                # repeated intent after an intervening edit on that photo.
+                existing = self.conn.execute(
+                    "SELECT 1 FROM pending_changes WHERE workspace_id = ? AND id > ? "
+                    "AND photo_id != ? AND value = ? COLLATE NOCASE AND change_type IN "
+                    "('keyword_add', 'keyword_remove', 'keyword_remove_flat') LIMIT 1",
+                    (ws_id, latest["id"], photo_id, value),
+                ).fetchone() is None
         else:
             existing = self.conn.execute(
                 "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
@@ -22989,6 +23072,33 @@ class Database:
             "SELECT * FROM pending_changes WHERE workspace_id = ? ORDER BY created_at, id",
             (self._ws_id(),),
         ).fetchall()
+
+    def claim_pending_changes_for_sync(self, changes):
+        """Mark selected edits as possibly written and return surviving rows.
+
+        A cancelled keyword must leave an opposing edit once a writer can
+        have seen it. Persist that fact before any filesystem work, including
+        across failed writes or a process restart. Match immutable tokens so
+        a cancellation between selection and this claim cannot resurrect the
+        old edit or claim a replacement that reused its rowid.
+        """
+        if not changes:
+            return []
+        claimed = {}
+        with self.conn:
+            for chunk in _chunks(changes, size=400):
+                placeholders = ",".join("(?, ?)" for _ in chunk)
+                params = [part for c in chunk for part in (c["id"], c["change_token"] or "")]
+                rows = self.conn.execute(
+                    f"""UPDATE pending_changes SET sync_started = 1
+                        WHERE workspace_id = ?
+                          AND (id, COALESCE(change_token, '')) IN (VALUES {placeholders})
+                        RETURNING *""",
+                    [self._ws_id(), *params],
+                ).fetchall()
+                claimed.update({(c["id"], c["change_token"]): c for c in rows})
+        return [claimed[key] for c in changes
+                if (key := (c["id"], c["change_token"])) in claimed]
 
     def get_pending_keyword_removal_keys(self, photo_id, hierarchical=False):
         """Return normalized keyword keys awaiting removal for a photo.
@@ -23016,8 +23126,54 @@ class Database:
             if (key := keyword_match_key(row["value"]))
         }
 
+    def _pending_keyword_sidecar_alias(self, photo_id, workspace_id, value):
+        """Return whether another queued keyword edit reaches this sidecar."""
+        needs_inverse = False
+        # Resolve all candidate sidecars, as sync does: differing
+        # basenames or folder spellings may still alias one file.
+        # Do not conservatively treat unrelated homonyms as shared;
+        # that would turn a cancelled add into a destructive removal.
+        candidates = self.conn.execute(
+            "SELECT DISTINCT f.path, p.filename FROM photos p "
+            "JOIN folders f ON f.id = p.folder_id "
+            "JOIN pending_changes pc ON pc.photo_id = p.id "
+            "WHERE p.id != ? AND pc.workspace_id = ? AND pc.value = ? COLLATE NOCASE "
+            "AND pc.change_type IN ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
+            (photo_id, workspace_id, value),
+        ).fetchall()
+        if candidates:
+            own = self.conn.execute(
+                "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id = p.folder_id "
+                "WHERE p.id = ?", (photo_id,),
+            ).fetchone()
+            if own is not None:
+                def sidecar_path(row):
+                    return os.path.join(row["path"], os.path.splitext(row["filename"])[0] + ".xmp")
+
+                own_path = os.path.normcase(os.path.realpath(sidecar_path(own)))
+                for path in {sidecar_path(row) for row in candidates}:
+                    other_path = os.path.normcase(os.path.realpath(path))
+                    if own_path == other_path:
+                        needs_inverse = True
+                        break
+                    if own_path.casefold() == other_path.casefold():
+                        # Scheduling may over-group case variants;
+                        # cancellation must confirm they are aliases.
+                        with contextlib.suppress(OSError):
+                            needs_inverse = os.path.samefile(own_path, other_path)
+                        if needs_inverse:
+                            break
+        return needs_inverse
+
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
-        """Delete matching pending changes. Returns rows removed.
+        """Delete matching pending changes, preserving captured keyword intents.
+
+        Return the number of rows removed.
+
+        If a keyword may already have reached a writer, cancelling it queues
+        its inverse in the same transaction. The inverse is also marked as
+        possibly written: further toggles must keep explicit repair work
+        until a sync acknowledges it, even if the first write fails.
 
         Args:
             _commit: If False, skip the internal commit (caller is responsible
@@ -23033,13 +23189,25 @@ class Database:
             clauses.append("value = ?")
             params.append(value)
 
-        cur = self.conn.execute(
-            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)}",
+        removed = self.conn.execute(
+            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)} RETURNING *",
             params,
-        )
+        ).fetchall()
+        inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
+        for row in removed:
+            if row["change_type"] in inverse and (
+                row["sync_started"] or self._pending_keyword_sidecar_alias(photo_id, ws_id, row["value"])
+            ):
+                kind = inverse[row["change_type"]]
+                self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id, _commit=False)
+                self.conn.execute(
+                    "UPDATE pending_changes SET sync_started = 1 "
+                    "WHERE photo_id = ? AND workspace_id = ? AND change_type = ? AND value = ?",
+                    (photo_id, ws_id, kind, row["value"]),
+                )
         if _commit:
             self.conn.commit()
-        return cur.rowcount
+        return len(removed)
 
     def remove_pending_change_token(self, change_token):
         """Delete a single pending change by immutable token. Returns rows removed."""
@@ -23635,9 +23803,9 @@ class Database:
                             workspace_id=removal['workspace_id'],
                         )
             else:
-                self.untag_photo(pid, kid)
-                if kw_name:
-                    self.remove_pending_changes(pid, 'keyword_add', kw_name)
+                # A captured or completed add needs a corrective removal;
+                # simply deleting a pending row cannot undo its sidecar write.
+                self._untag_for_edit(pid, kid)
         if action == 'keyword_add':
             self._restore_edit_prediction_status(old_meta)
             if kw_name:
@@ -23667,9 +23835,7 @@ class Database:
                         workspace_id=removal['workspace_id'],
                     )
             else:
-                self.tag_photo(pid, kid, source='manual')
-                if kw_name:
-                    self.queue_change(pid, 'keyword_add', kw_name)
+                self._retag_for_edit(pid, kid)
         if action == 'keyword_add':
             self._reject_edit_prediction(old_meta)
             if kw_name:

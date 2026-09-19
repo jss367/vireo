@@ -795,7 +795,7 @@ def get_editors():
     return editors
 
 
-def _coerce_remote_target(entry):
+def _coerce_remote_target(entry, *, check_filesystem=True):
     """Validate/normalize one remote-target dict, or return None if unusable.
 
     A usable target needs at least a host, user, and an *absolute POSIX*
@@ -867,8 +867,16 @@ def _coerce_remote_target(entry):
             # the accepted chain would later fail as a source/destination
             # overlap. The same helper the move guards use is authoritative.
             try:
-                from move import _path_equal_or_descends
-                if _path_equal_or_descends(local_archive_root, mount_path):
+                if check_filesystem:
+                    from move import _path_equal_or_descends
+                    overlaps = _path_equal_or_descends(local_archive_root, mount_path)
+                else:
+                    # Reading saved settings must never stat an offline share.
+                    # Save/transfer validation still resolves filesystem aliases.
+                    archive = os.path.normcase(os.path.normpath(local_archive_root))
+                    mount = os.path.normcase(os.path.normpath(mount_path))
+                    overlaps = os.path.commonpath((archive, mount)) == mount
+                if overlaps:
                     local_archive_root = ""
             except (OSError, ValueError):
                 # Different drives on Windows / unreadable realpath: cannot
@@ -902,7 +910,7 @@ def get_remote_targets():
         return []
     targets = []
     for entry in raw:
-        coerced = _coerce_remote_target(entry)
+        coerced = _coerce_remote_target(entry, check_filesystem=False)
         if coerced is not None:
             targets.append(coerced)
     return targets

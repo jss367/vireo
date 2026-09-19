@@ -617,3 +617,147 @@ def test_republish_checks_access_before_commit(tmp_path, monkeypatch, protection
         for path in protected:
             path.chmod(0o755 if path.is_dir() else 0o644)
         db.close()
+
+
+@pytest.mark.parametrize('failure_point', ['backup', 'image', 'manifest'])
+@pytest.mark.parametrize('protected_directories', [False, True])
+def test_failed_republish_restores_previous_site(
+    tmp_path, monkeypatch, failure_point, protected_directories,
+):
+    import errno
+    from pathlib import Path
+
+    import site_publish
+
+    app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
+    client = app.test_client()
+    destination = tmp_path / 'published'
+    options = {'destination': str(destination), 'max_size': 512}
+    response = client.post('/api/jobs/publish-site', json=options)
+    assert wait_for_job_via_client(client, response.get_json()['job_id'])['status'] == 'completed'
+    previous = {p.relative_to(destination): (p.read_bytes(), p.stat())
+                for p in destination.rglob('*') if p.is_file()}
+    for path in meta['photos_dir'].glob('*.jpg'):
+        Image.new('RGB', (1200, 800), (0, 0, 255)).save(path)
+    original_copy = site_publish.shutil.copyfile
+
+    def fail_copy(source, target):
+        target = Path(target)
+        fail = (failure_point == 'backup' and target.parent.name == 'rollback'
+                or failure_point == 'image' and target.parent == destination / 'images/photos'
+                or failure_point == 'manifest' and target == destination / 'data/life-list.json')
+        if fail:
+            target.write_bytes(b'partial file')
+            raise OSError(errno.ENOSPC, 'Injected disk full')
+        return original_copy(source, target)
+
+    monkeypatch.setattr(site_publish.shutil, 'copyfile', fail_copy)
+    protected = [destination / 'data', destination / 'images/photos'] if protected_directories else []
+    try:
+        for path in protected:
+            path.chmod(0o555)
+            if os.access(path, os.W_OK):
+                pytest.skip('current user bypasses directory protection')
+        response = client.post('/api/jobs/publish-site', json=options)
+        job = wait_for_job_via_client(client, response.get_json()['job_id'])
+        assert job['status'] == 'failed'
+        for rel, (contents, stat) in previous.items():
+            path = destination / rel
+            assert path.read_bytes() == contents
+            assert path.stat().st_ino == stat.st_ino
+            assert path.stat().st_mode == stat.st_mode
+        assert not list(destination.glob('.vireo-publish-*'))
+    finally:
+        for path in protected:
+            path.chmod(0o755)
+        db.close()
+
+
+def test_failed_first_publish_removes_partial_new_files(tmp_path, monkeypatch):
+    import site_publish
+
+    app, db, _meta = _seed_publish_app(tmp_path, monkeypatch)
+    client = app.test_client()
+    destination = tmp_path / 'published'
+    original_copy = site_publish.shutil.copyfile
+
+    def fail_manifest(source, target):
+        if target == destination / 'data/life-list.json':
+            target.write_bytes(b'partial')
+            raise OSError('Disconnected during publish')
+        return original_copy(source, target)
+
+    monkeypatch.setattr(site_publish.shutil, 'copyfile', fail_manifest)
+    response = client.post('/api/jobs/publish-site', json={'destination': str(destination), 'max_size': 512})
+    assert wait_for_job_via_client(client, response.get_json()['job_id'])['status'] == 'failed'
+    assert not [p for p in destination.rglob('*') if p.is_file()]
+    db.close()
+
+
+def test_failed_rollback_retains_recoverable_backups(tmp_path, monkeypatch):
+    import site_publish
+
+    app, db, _meta = _seed_publish_app(tmp_path, monkeypatch)
+    client = app.test_client()
+    destination = tmp_path / 'published'
+    options = {'destination': str(destination), 'max_size': 512}
+    response = client.post('/api/jobs/publish-site', json=options)
+    assert wait_for_job_via_client(client, response.get_json()['job_id'])['status'] == 'completed'
+    previous = {str(p.relative_to(destination)): p.read_bytes()
+                for p in destination.rglob('*') if p.is_file()}
+    original_copy = site_publish.shutil.copyfile
+
+    def fail_manifest(source, target):
+        if target == destination / 'data/life-list.json':
+            target.write_bytes(b'partial')
+            raise OSError('Disconnected during publish')
+        return original_copy(source, target)
+
+    def fail_restore(*args, **kwargs):
+        raise OSError('Volume remains unavailable')
+
+    monkeypatch.setattr(site_publish.shutil, 'copyfile', fail_manifest)
+    monkeypatch.setattr(site_publish.shutil, 'copyfileobj', fail_restore)
+    response = client.post('/api/jobs/publish-site', json=options)
+    job = wait_for_job_via_client(client, response.get_json()['job_id'])
+    assert job['status'] == 'failed'
+    backups = list(destination.glob('.vireo-publish-*'))
+    assert len(backups) == 1
+    recovery = json.loads((backups[0] / 'recovery.json').read_text())
+    for rel, contents in previous.items():
+        assert (backups[0] / recovery[rel]).read_bytes() == contents
+    assert str(backups[0]) in job['error']
+    db.close()
+
+
+@pytest.mark.parametrize('case_alias', [False, True])
+def test_publish_waiting_for_same_destination_can_be_cancelled(tmp_path, monkeypatch, case_alias):
+    import site_publish
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    results = []
+
+    def held_commit(destination, staging, paths, cancel_check, begin_commit):
+        calls.append(staging)
+        if len(calls) > 1:
+            return True
+        entered.set()
+        assert release.wait(5), 'commit was not released'
+        return True
+
+    monkeypatch.setattr(site_publish, '_commit_site_locked', held_commit)
+    first = threading.Thread(target=lambda: results.append(
+        site_publish._commit_site(tmp_path, tmp_path / 'first', [])))
+    first.start()
+    try:
+        assert entered.wait(5), 'first commit never started'
+        destination = tmp_path.with_name(tmp_path.name.upper()) if case_alias else tmp_path
+        assert not site_publish._commit_site(destination, tmp_path / 'second', [], lambda: True)
+        assert calls == [tmp_path / 'first']
+    finally:
+        release.set()
+        first.join(5)
+    assert not first.is_alive()
+    assert results == [True]

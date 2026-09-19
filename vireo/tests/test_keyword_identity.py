@@ -2427,3 +2427,94 @@ def test_manual_merge_resyncs_descendants_when_survivor_crosses_location_boundar
     # its exported location chain shifted even though Trail itself did not
     # move.
     assert photos[0] in resynced
+
+
+@pytest.mark.parametrize('global_enabled, workspace_override', [
+    (True, None), (False, True), (True, False),
+])
+@pytest.mark.parametrize('existing_manual_term', [False, True])
+def test_location_merge_rename_preserves_sidecar_ownership(
+    catalog, tmp_path, monkeypatch, global_enabled, workspace_override, existing_manual_term,
+):
+    import config as cfg
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db, photos = catalog
+    settings = {'write_location_keywords_to_xmp': global_enabled}
+    monkeypatch.setattr(cfg, 'load', lambda: settings)
+    monkeypatch.setattr(cfg, 'load_strict', lambda: settings)
+    enabled = global_enabled if workspace_override is None else workspace_override
+    if workspace_override is not None:
+        db.update_workspace(db._ws_id(), config_overrides={
+            'write_location_keywords_to_xmp': workspace_override,
+        })
+    folder = tmp_path / 'photos'
+    folder.mkdir(exist_ok=True)
+    parent = db.add_keyword('County', kw_type='location')
+    kept = db.add_keyword('Old Lake', parent_id=parent, kw_type='location')
+    source = db.add_keyword('Alternate Lake', kw_type='location')
+    for pid, kid, old_name in ((photos[0], kept, 'Old Lake'), (photos[1], source, 'Alternate Lake')):
+        db.tag_photo(pid, kid)
+        path = folder / f'{photos.index(pid)}.xmp'
+        flat = {'New Lake'} if existing_manual_term else set()
+        if not enabled:
+            flat.add(old_name)
+        write_sidecar(str(path), flat_keywords=flat, hierarchical_keywords=set())
+        db.queue_change(pid, 'location', 'effective')
+    sync_to_xmp(db)
+    overrides = {'name': 'New Lake'}
+    preview = preview_keyword_merge(db, [kept, source], kept, overrides)
+    merge_keywords(db, [kept, source], kept, preview['preview_token'], overrides)
+    assert sync_to_xmp(db)['failed'] == 0
+    for index, pid in enumerate(photos[:2]):
+        path = folder / f'{index}.xmp'
+        assert read_keywords(str(path)) == {'New Lake'}
+        db.untag_photo(pid, kept)
+        db.queue_change(pid, 'location', 'effective')
+    assert sync_to_xmp(db)['failed'] == 0
+    for index in range(2):
+        path = folder / f'{index}.xmp'
+        assert read_keywords(str(path)) == ({'New Lake'} if existing_manual_term or not enabled else set())
+        if enabled:
+            assert not read_hierarchical_keywords(str(path))
+    assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize('tag_source', [False, True])
+def test_location_merge_preserves_directly_tagged_ancestor(catalog, tmp_path, monkeypatch, tag_source):
+    import config as cfg
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db, photos = catalog
+    settings = {'write_location_keywords_to_xmp': True}
+    monkeypatch.setattr(cfg, 'load', lambda: settings)
+    monkeypatch.setattr(cfg, 'load_strict', lambda: settings)
+    target = db.add_keyword('Old County', kw_type='location')
+    source = db.add_keyword('Alternate County', kw_type='location')
+    ancestor = source if tag_source else target
+    db.tag_photo(photos[1], target if tag_source else source)
+    leaf = db.add_keyword('Lake', parent_id=ancestor, kw_type='location')
+    photo = photos[0]
+    db.tag_photo(photo, ancestor, source='manual')
+    db.tag_photo(photo, leaf, source='manual')
+    folder = tmp_path / 'photos'
+    folder.mkdir()
+    sidecar = str(folder / '0.xmp')
+    old_name = 'Alternate County' if tag_source else 'Old County'
+    write_sidecar(sidecar, flat_keywords={old_name}, hierarchical_keywords=set())
+    db.queue_change(photo, 'location', 'effective')
+    assert sync_to_xmp(db)['failed'] == 0
+    overrides = {'name': 'New County'}
+    preview = preview_keyword_merge(db, [source, target], target, overrides)
+    merge_keywords(db, [source, target], target, preview['preview_token'], overrides)
+    assert sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(sidecar) == {'New County', 'Lake'}
+    assert 'New County|Lake' in read_hierarchical_keywords(sidecar)
+    assert {k['id'] for k in db.get_photo_keywords(photo)} == {target, leaf}
+    # Clearing the exported leaf must leave the separately assigned ancestor.
+    db.untag_photo(photo, leaf)
+    db.queue_change(photo, 'location', 'effective')
+    assert sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(sidecar) == {'New County'}

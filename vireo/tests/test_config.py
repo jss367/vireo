@@ -1798,3 +1798,25 @@ def test_load_preserves_current_corrupt_over_older_backup_with_newer_mtime(tmp_p
 
     with open(backup_path) as f:
         assert f.read() == current_body
+
+
+def test_remote_target_reads_do_not_touch_the_mounted_filesystem(tmp_path, monkeypatch):
+    import config as cfg
+    import move
+
+    monkeypatch.setattr(cfg, 'CONFIG_PATH', str(tmp_path / 'config.json'))
+    target = _base_target(mount_path=str(tmp_path / 'offline-share'),
+                          local_archive_root=str(tmp_path / 'local-archive'))
+    cfg.save({'remote_targets': [target]})
+
+    def forbidden_probe(*args, **kwargs):
+        raise AssertionError('A settings read probed a potentially unresponsive mount')
+
+    monkeypatch.setattr(move, '_path_equal_or_descends', forbidden_probe)
+    monkeypatch.setattr(os.path, 'realpath', forbidden_probe)
+    monkeypatch.setattr(os.path, 'samefile', forbidden_probe)
+    assert cfg.get_remote_targets()[0]['local_archive_root'] == target['local_archive_root']
+    assert cfg.get_remote_target(cfg.get_remote_targets()[0]['id']) is not None
+    # Save-time validation still uses the stronger filesystem-aware check.
+    with pytest.raises(AssertionError, match='settings read probed'):
+        cfg._coerce_remote_target(target)

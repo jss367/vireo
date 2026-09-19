@@ -11190,6 +11190,131 @@ def test_move_folder_path_cascade(db):
     assert os.path.normpath(grandchild["path"]) == os.path.normpath("/nas/photos/2024/march/birds")
 
 
+@pytest.mark.parametrize("destination", ["/photos/2026", "/archive", "/untracked"])
+def test_move_folder_path_relinks_parent(db, destination):
+    """Browse nesting and subtree filters follow the moved folder's path."""
+    year = db.add_folder("/photos/2026", name="2026")
+    month = db.add_folder("/photos/2026/07", name="07", parent_id=year)
+    archive = db.add_folder("/archive", name="archive")
+    date = db.add_folder("/photos/2026/07/2026-07-12", name="2026-07-12",
+                         parent_id=month)
+    child = db.add_folder("/photos/2026/07/2026-07-12/edits", name="edits",
+                          parent_id=date)
+
+    new_path = destination + "/2026-07-12"
+    db.move_folder_path(date, new_path)
+
+    expected_parent = {"/photos/2026": year, "/archive": archive}.get(destination)
+    tree = {row["id"]: row for row in db.get_folder_tree()}
+    assert tree[date]["path"] == new_path
+    assert tree[date]["parent_id"] == expected_parent
+    assert tree[child]["path"] == new_path + "/edits"
+    assert tree[child]["parent_id"] == date
+    assert date not in db.get_folder_subtree_ids(month)
+    assert child not in db.get_folder_subtree_ids(month)
+    if expected_parent is not None:
+        assert {date, child} <= set(db.get_folder_subtree_ids(expected_parent))
+
+
+@pytest.mark.parametrize("startup", ["database", "app"])
+def test_startup_repairs_stale_folder_parent(tmp_path, startup):
+    """An upgrade fixes the existing Browse/Move mismatch without moving files."""
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    with Database(db_path) as seed:
+        year = seed.add_folder("/photos/2026", name="2026")
+        month = seed.add_folder("/photos/2026/07", name="07", parent_id=year)
+        date = seed.add_folder("/photos/2026/2026-07-12", name="2026-07-12",
+                               parent_id=month)
+        child = seed.add_folder("/photos/2026/2026-07-12/edits", name="edits",
+                                parent_id=date)
+        pid = seed.add_photo(folder_id=date, filename="bird.jpg", extension=".jpg",
+                             file_size=100, file_mtime=1.0)
+        photo_before = dict(seed.get_photo(pid))
+        folders_before = {r["id"]: dict(r) for r in seed.conn.execute("SELECT * FROM folders")}
+        memberships_before = [tuple(r) for r in seed.conn.execute(
+            "SELECT * FROM workspace_folders ORDER BY workspace_id, folder_id"
+        )]
+
+    if startup == "app":
+        from app import create_app
+        app = create_app(db_path=db_path, thumb_cache_dir=str(tmp_path / "thumbs"))
+        app.config["TESTING"] = True
+        response = app.test_client().get("/api/folders")
+        assert response.status_code == 200
+        assert {r["id"]: r for r in response.json}[date]["parent_id"] == year
+
+    with Database(db_path, initialize_schema=(startup == "database")) as reopened:
+        tree = {r["id"]: r for r in reopened.get_folder_tree()}
+        assert tree[date]["parent_id"] == year
+        assert tree[child]["parent_id"] == date
+        assert date not in reopened.get_folder_subtree_ids(month)
+        folders_before[date]["parent_id"] = year
+        assert {r["id"]: dict(r) for r in reopened.conn.execute("SELECT * FROM folders")} == folders_before
+        assert dict(reopened.get_photo(pid)) == photo_before
+        assert [tuple(r) for r in reopened.conn.execute(
+            "SELECT * FROM workspace_folders ORDER BY workspace_id, folder_id"
+        )] == memberships_before
+        changes = reopened.conn.total_changes
+        assert reopened.repair_stale_folder_parents() == 0
+        assert reopened.conn.total_changes == changes
+
+
+@pytest.mark.parametrize("base", ["/photos", "C:\\photos", "//server/share/photos"])
+def test_repair_stale_folder_parents_uses_nearest_ancestor(db, base):
+    """Match path components across platforms, preserving valid sparse trees."""
+    root = db.add_folder(base, name="photos")
+    old = db.add_folder(base + "/2026/07", name="07", parent_id=root)
+    year = db.add_folder(base + "/2026", name="2026", parent_id=root)
+    # 07 is a string prefix but not an ancestor of 070's child.
+    moved = db.add_folder(base + "/2026/070/shoot", name="shoot", parent_id=old)
+    detached = db.add_folder("/elsewhere/shoot", name="shoot", parent_id=old)
+    # This valid link skips a cataloged ancestor and must remain unchanged.
+    valid = db.add_folder(base + "/2026/keep", name="keep", parent_id=root)
+    independent = db.add_folder(base + "/2026/root", name="root")
+    db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (moved,))
+    db.conn.commit()
+
+    assert db.repair_stale_folder_parents() == 2
+    assert db.get_folder(moved)["parent_id"] == year
+    assert db.get_folder(moved)["status"] == "missing"
+    assert db.get_folder(detached)["parent_id"] is None
+    assert db.get_folder(valid)["parent_id"] == root
+    assert db.get_folder(independent)["parent_id"] is None
+    assert db.repair_stale_folder_parents() == 0
+
+
+@pytest.mark.parametrize("managed_kind", ["folder", "workspace"])
+@pytest.mark.parametrize("managed_endpoint", ["child", "parent"])
+def test_repair_stale_folder_parents_preserves_managed_local_links(db, managed_kind, managed_endpoint):
+    """Temporary local paths must not detach a folder from its archive tree."""
+    parent = db.add_folder("/archive/2026", name="2026")
+    child = db.add_folder("/local/2026-07-12", name="2026-07-12", parent_id=parent)
+    managed_id = child if managed_endpoint == "child" else parent
+    if managed_kind == "folder":
+        db.conn.execute("INSERT INTO local_folders (root_folder_id, state) VALUES (?, 'active')", (managed_id,))
+        db.conn.execute(
+            "INSERT INTO local_folder_mappings (root_folder_id, folder_id, source_path, local_path) "
+            "VALUES (?, ?, ?, ?)", (managed_id, managed_id, "/archive/source", "/local/copy"),
+        )
+    else:
+        db.conn.execute(
+            "INSERT INTO local_workspace_folders (workspace_id, folder_id, source_path, local_path) "
+            "VALUES (?, ?, ?, ?)", (db._active_workspace_id, managed_id, "/archive/source", "/local/copy"),
+        )
+    db.conn.commit()
+
+    assert db.repair_stale_folder_parents() == 0
+    assert db.get_folder(child)["parent_id"] == parent
+    # Deferred links are reconsidered once the managed session is gone.
+    db.conn.execute("DELETE FROM local_folder_mappings")
+    db.conn.execute("DELETE FROM local_workspace_folders")
+    db.conn.commit()
+    assert db.repair_stale_folder_parents() == 1
+    assert db.get_folder(child)["parent_id"] is None
+
+
 def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     """Select-all on a large library produces id lists beyond
     SQLITE_MAX_VARIABLE_NUMBER (32766 on modern builds) — every bulk-id
