@@ -5443,21 +5443,31 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
   _lbDesiredSrcKey = null;
   if (wrap) wrap.classList.remove('zoomed');
   _lbApplyTransform();
+  // Replacing img.onload/onerror orphans handleInitialImageLoad when the
+  // metadata fetch beats the initial image, so this reload inherits the job of
+  // ending that photo's initial load -- otherwise nothing ever clears the
+  // pending decode and the chip stays on Loading indefinitely. The flag is
+  // cleared on completion, not here: the reload is itself a load in flight.
   img.onload = function() {
     img.onload = null;
     img.onerror = null;
     if (_lightboxCurrentId !== photoId) return;
+    _lbInitialDecodePending = false;
     if (img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
     }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
+    _lbRenderDetailStatus();
     _lbScheduleOriginalPreload(photoId);
   };
   img.onerror = function() {
     img.onload = null;
     img.onerror = null;
-    if (_lightboxCurrentId === photoId && typeof showToast === 'function') {
+    if (_lightboxCurrentId !== photoId) return;
+    _lbInitialDecodePending = false;
+    _lbRenderDetailStatus();
+    if (typeof showToast === 'function') {
       showToast('Could not reload edited photo', 'error');
     }
   };

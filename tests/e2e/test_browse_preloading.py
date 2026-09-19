@@ -675,3 +675,54 @@ def test_detail_status_reports_the_very_first_open(live_server, page):
     page.wait_for_function("_lightboxCommittedId === 100 && !_lbInitialDecodePending")
     expect(status).to_be_visible()
     assert _detail_text(page) == "Full detail"
+
+
+def test_detail_status_clears_when_an_edit_reload_takes_over_the_initial_load(live_server, page):
+    held = []
+    serving = {"ready": False}
+
+    def serve(route):
+        if serving["ready"]:
+            route.fulfill(body=_jpeg(), content_type="image/jpeg")
+        else:
+            held.append(route)
+
+    page.route(
+        re.compile(r"/api/photos/\d+$"),
+        lambda route: route.fulfill(json={
+            "id": int(route.request.url.rsplit("/", 1)[1]),
+            "width": 6000, "height": 4000, "full_uses_original": False,
+            "full_preview_max_size": 1920,
+            "edit_recipe": None, "flag": "none",
+        }),
+    )
+    page.route("**/photos/*/full*", serve)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate(
+        """() => {
+          _lbScheduleOriginalPreload = function() {};
+          LB_DETAIL_SHOW_DELAY_MS = 0;
+          openLightbox(100, 'photo-0.jpg', [
+            {id: 100, filename: 'photo-0.jpg', width: 6000, height: 4000, edit_recipe: null}
+          ]);
+        }"""
+    )
+    status = page.locator("#lightboxPreviewStatus")
+    expect(status).to_be_visible()
+    assert page.evaluate("_lbInitialDecodePending") is True
+
+    # A metadata response carrying a changed recipe swaps img.onload/onerror out
+    # from under the initial load, orphaning handleInitialImageLoad. The reload
+    # has to finish the job, or nothing ever ends the pending decode.
+    page.evaluate("_lbReloadCurrentRenderAfterEdit(100)")
+    serving["ready"] = True
+    page.wait_for_timeout(150)
+    # The reload requests the same URL, so it rides the request already in
+    # flight -- releasing that one feeds whichever handler is now attached.
+    assert held
+    for route in held:
+        route.fulfill(body=_jpeg(), content_type="image/jpeg")
+
+    page.wait_for_function("!_lbInitialDecodePending")
+    expect(status).not_to_have_text("Loading…")
