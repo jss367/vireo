@@ -1311,6 +1311,71 @@ def test_merge_does_not_alias_a_retired_path_a_survivor_still_lives_at(catalog):
     # The twin's own hierarchy must not resolve to the disambiguated row.
     assert resolve_import_path(db, live) != alpha_bird
 
+
+def test_conflict_guard_ignores_pre_existing_locations_on_a_general_merge(catalog):
+    """A merge of general keywords changes no location row and queues no
+    resync, so a photo that already carried two unrelated location tags is in
+    a state this operation neither created nor disturbs. Refusing it would
+    block unrelated work over pre-existing data."""
+    db, photos = catalog
+    first = db.add_keyword('Genre A', kw_type='general')
+    second = db.add_keyword('Genre B', kw_type='general')
+    for index, place in enumerate(('p1', 'p2')):
+        keyword = db.upsert_place_chain({
+            'place_id': place, 'name': f'Park {index}', 'lat': index + 1,
+            'lng': index + 1, 'address_components': []})
+        db.tag_photo(photos[0], keyword)
+    db.conn.commit()
+    db.tag_photo(photos[0], first)
+    db.tag_photo(photos[1], second)
+
+    preview = preview_keyword_merge(db, [first, second], second)
+    assert preview['resolved']['type'] == 'general'
+    merge_keywords(db, [first, second], second, preview['preview_token'])
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (first,)).fetchone()
+
+
+def test_merge_writes_no_alias_when_two_retired_paths_share_one_key(catalog):
+    """``path_key`` folds case, so two retired paths differing only in case
+    share one key while landing on different rows. INSERT OR REPLACE would
+    let one silently win and send imports of the other hierarchy to the wrong
+    taxon, so neither alias is written and resolution falls through to the
+    live tree.
+    """
+    db, photos = catalog
+    taxa = [db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) VALUES (?, ?, 'species', ?)",
+        (f'Genus sp{i}', f'Bird {i}', 100 + i)).lastrowid for i in range(3)]
+    # Raw SQL: add_keyword dedupes case-insensitively, but the table's own
+    # UNIQUE(name, parent_id) is BINARY, so these two roots can coexist.
+    first = db.conn.execute("INSERT INTO keywords(name) VALUES ('Trip A')").lastrowid
+    second = db.conn.execute("INSERT INTO keywords(name) VALUES ('trip a')").lastrowid
+    kept = db.add_keyword('Keep')
+    children = [db.conn.execute(
+        "INSERT INTO keywords(name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Bird', ?, 1, 'taxonomy', ?)", (parent, taxon)).lastrowid
+        for parent, taxon in zip((first, second, kept), taxa, strict=True)]
+    db.conn.commit()
+    for photo, child in zip(photos, children, strict=True):
+        db.tag_photo(photo, child)
+
+    rows = [dict(r) for r in db.conn.execute('SELECT * FROM keywords')]
+    retired = keyword_paths(rows)[children[0]]
+    assert path_key(retired) == path_key(keyword_paths(rows)[children[1]])
+
+    preview = preview_keyword_merge(db, [first, second, kept], kept)
+    assert path_key(retired) in preview['ambiguous_alias_keys']
+    merge_keywords(db, [first, second, kept], kept, preview['preview_token'])
+
+    # Both children survive under disambiguated names, and neither claims the
+    # shared key -- an import of that hierarchy stays unresolved rather than
+    # landing on whichever row happened to be written last.
+    assert db.conn.execute(
+        'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
+        (path_key(retired),)).fetchone() is None
+    for child in children[:2]:
+        assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (child,)).fetchone()
+
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
     default, so the preview names the field and withholds its token rather

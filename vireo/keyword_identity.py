@@ -955,13 +955,23 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     # pick between them arbitrarily. A membership set keyed on "somewhere
     # under the retained root" cannot tell those apart, so the check walks
     # each affected photo's own post-merge places instead.
+    # ...but only when this merge touches a location at all. A merge of
+    # general keywords changes no location row and queues no resync, so a
+    # photo that already carried two unrelated location tags is in a state
+    # this operation neither created nor disturbs -- refusing it would block
+    # unrelated work over pre-existing data.
+    touched_ids = ({target_id} | {source['id'] for source in sources}
+                   | {entry['id'] for entry in plan['children']}
+                   | set(path_changes))
+    touches_location = resolved['type'] == 'location' or any(
+        by_id[kid]['type'] == 'location' for kid in touched_ids if kid in by_id)
     landing = {source['id']: target_id for source in sources}
     landing.update({entry['id']: entry['into_id'] for entry in plan['children']
                     if entry['outcome'] == 'merge'})
     parent_of = {node['id']: node['parent_id'] for node in surviving}
     post_types = {node['id']: node['type'] for node in surviving}
     post_types[target_id] = resolved['type']
-    conflicted = _photos_left_with_rival_places(
+    conflicted = touches_location and _photos_left_with_rival_places(
         db, keyword_ids, placeholders, landing, parent_of, post_types)
     if conflicted:
         raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
@@ -975,6 +985,15 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
                  for kid, (old_path, _) in path_changes.items()]
     retiring += [(paths[entry['id']], entry['into_id'])
                  for entry in plan['children'] if entry['outcome'] == 'merge']
+    # ``path_key`` folds case, so two retired paths that differ only in case
+    # share one key while landing on different rows -- `Trip A > Bird` and
+    # `trip a > Bird` each disambiguated under the survivor. INSERT OR
+    # REPLACE would let one silently win and send imports of the other
+    # hierarchy to the wrong row, so neither is written.
+    planned = defaultdict(set)
+    for retired_path, destination_id in retiring:
+        planned[path_key(retired_path)].add(destination_id)
+    ambiguous_alias_keys = {key for key, dests in planned.items() if len(dests) > 1}
     survivors = {n['id'] for n in surviving}
     for retired_path, destination_id in retiring:
         alias = db.conn.execute('SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
@@ -1019,6 +1038,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
         # Where every surviving row actually lives after the merge, so the
         # alias writes can tell a retired path from a live one.
         'live_paths': {n['id']: new_paths[n['id']] for n in surviving},
+        'ambiguous_alias_keys': sorted(ambiguous_alias_keys),
         'removed_count': len(plan['removed']),
         # Location keywords that will absorb a collapsing sibling's place_id
         # or coordinates. Their photos need a ``location`` resync even though
@@ -1048,6 +1068,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
         # A child that collapses into an existing sibling loses its
         # photo_keywords rows to that sibling, so the photos carrying it have
         # to be read before the merge runs.
+        ambiguous_keys = set(preview['ambiguous_alias_keys'])
         collapsed = _collapsing_child_tags(db, preview)
         # Same reason: a child kept under a disambiguated name still has its
         # OLD spelling in the sidecars of the photos carrying it.
@@ -1063,10 +1084,11 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             # Remember every merged path, including same-name leaves under
             # different parents. Existing sidecars/catalogs can retain that
             # hierarchy even after a flat keyword_add has been synchronized.
-            db.conn.execute(
-                'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
-                (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
-            )
+            if path_key(source['path']) not in ambiguous_keys:
+                db.conn.execute(
+                    'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
+                    (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
+                )
             db._merge_keyword_into(source['id'], target_id, pending_source_only=True)
         _apply_merge_overrides(db, target_id, resolved)
         _queue_survivor_rename(db, target_id, target['name'], resolved['name'])
@@ -1091,7 +1113,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
                 [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}], _commit=False,
             )
             db.queue_change(pid, 'keyword_add', resolved['name'], workspace_id=ws, _commit=False)
-        _queue_moved_subtree_changes(db, preview, target_id, collapsed)
+        _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys)
         _queue_disambiguated_child_renames(db, preview, renamed_tags)
         # A retained location child that gained place_id/coords via
         # ``_merge_keyword_into``'s COALESCE fold has photos whose sidecars
@@ -1285,7 +1307,7 @@ def _queue_disambiguated_child_renames(db, preview, renamed_tags):
         db.queue_change(pid, 'keyword_add', child['new_name'],
                         workspace_id=ws, _commit=False)
 
-def _queue_moved_subtree_changes(db, preview, target_id, collapsed):
+def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys):
     """Rewrite sidecar hierarchies for every descendant the merge relocated.
 
     Reparenting a descendant leaves its flat ``dc:subject`` leaf alone but
@@ -1321,6 +1343,8 @@ def _queue_moved_subtree_changes(db, preview, target_id, collapsed):
         key = path_key(old_path)
         owner = live_paths.get(key)
         if owner is not None and owner != destination_id:
+            continue
+        if key in ambiguous_keys:
             continue
         db.conn.execute(
             'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) '
