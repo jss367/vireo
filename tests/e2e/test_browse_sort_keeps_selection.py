@@ -845,6 +845,54 @@ def test_expression_reload_finds_a_stack_that_moved(live_server, page):
     assert _ids_on_screen(page, burst_ids), (
         "the stack was found but the grid is not showing it"
     )
-    # Paging to a photo at the end of 400 is eight pages plus the position
-    # probe — bounded by where the stack actually is, not by the catalog.
-    assert len(calls) <= 12, f"{len(calls)} queries to reach the stack"
+    # The server places it: one focused query, not eight pages of paging
+    # towards it.
+    assert len(calls) <= 2, f"{len(calls)} queries to reach the stack"
+    assert page.evaluate("earliestPage") > 1, (
+        "the grid paged to the stack instead of being served its page"
+    )
+
+
+def test_expression_reload_falls_back_to_a_surviving_frame(live_server, page):
+    """The cover can be the frame the reload dropped.
+
+    A saved expression that excludes the stack's cover but keeps the rest
+    still contains most of what the user picked. Aiming only at the old
+    cover, the focused load comes back empty-handed and the ``!card`` path
+    clears the whole selection — including frames that are right there
+    (Codex P2 on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:103]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    # The expression the user loads keeps the burst but not its cover.
+    survivors = [pid for pid in burst_ids if pid != cover_id]
+    with db.conn:
+        db.conn.execute("DELETE FROM photos WHERE id = ?", (cover_id,))
+
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        survivors
+    ), "the frames that survived the reload were cleared along with the cover"
+    assert _ids_on_screen(page, survivors), (
+        "the surviving frames are selected but off screen"
+    )
