@@ -7,7 +7,13 @@ from datetime import datetime
 
 import pytest
 from db import Database
-from ingest import build_destination_path, discover_source_files, ingest, preview_destination
+from ingest import (
+    build_destination_path,
+    destination_file_types_for,
+    discover_source_files,
+    ingest,
+    preview_destination,
+)
 from PIL import Image
 
 
@@ -23,6 +29,51 @@ def test_build_destination_path_custom_template():
 
 def test_build_destination_path_none_returns_unsorted():
     assert build_destination_path(None) == "unsorted"
+
+
+@pytest.mark.parametrize("filename,folder", [
+    ("photo.JPG", "JPEG"), ("photo.jpeg", "JPEG"),
+    ("photo.NEF", "RAW"), ("photo.cr3", "RAW"),
+    ("photo.png", "PNG"), ("photo.tif", "TIFF"), ("photo.tiff", "TIFF"),
+    ("photo.webp", "WEBP"), ("photo.bmp", "BMP"),
+])
+def test_file_type_folder_templates(filename, folder):
+    dt = datetime(2026, 3, 28)
+    assert build_destination_path(dt, "{file_type}/%Y/%Y-%m-%d", filename) == f"{folder}/2026/2026-03-28"
+    assert build_destination_path(dt, "%Y/{file_type}", filename) == f"2026/{folder}"
+    assert build_destination_path(None, "{file_type}", filename) == folder
+    assert build_destination_path(None, "{file_type}/%Y", filename) == f"{folder}/unsorted"
+
+
+@pytest.mark.parametrize("template", ["../{file_type}", "/{file_type}", "C:/{file_type}", "{file_type}/..\\escape"])
+def test_file_type_templates_reject_unsafe_paths_even_without_dates(template):
+    with pytest.raises(ValueError, match="unsafe folder template"):
+        build_destination_path(None, template, "photo.jpg")
+
+
+def test_file_type_template_requires_source():
+    with pytest.raises(ValueError, match="require a source file"):
+        build_destination_path(datetime(2026, 3, 28), "{file_type}")
+
+
+def test_destination_file_types_for_raw_only():
+    assert destination_file_types_for("raw") == ("RAW",)
+
+
+def test_destination_file_types_for_jpeg_covers_all_image_categories():
+    # ``jpeg`` accepts every non-RAW image extension, so the guard must
+    # cover every category those extensions can produce, not just "JPEG".
+    result = set(destination_file_types_for("jpeg"))
+    assert "JPEG" in result and "TIFF" in result and "PNG" in result
+    assert "RAW" not in result
+
+
+def test_destination_file_types_for_both_covers_every_category():
+    assert set(destination_file_types_for("both")) >= {"RAW", "JPEG", "TIFF"}
+
+
+def test_destination_file_types_for_extension_list():
+    assert destination_file_types_for([".nef", ".jpg"]) == ("JPEG", "RAW")
 
 
 def test_build_destination_path_rejects_absolute_template():
@@ -2067,7 +2118,7 @@ def test_preview_destination_reports_template_samples_from_real_dates(tmp_path):
     to be a hardcoded ``2026-07-12`` copied from a test fixture, which
     contradicted the resulting-folders list rendered right below it.
     """
-    from ingest import FOLDER_TEMPLATE_PRESETS
+    from ingest import FOLDER_TEMPLATE_PRESETS, IMPORT_FILE_TYPE_TEMPLATES
 
     src = tmp_path / "sd_card"
     dst = tmp_path / "nas"
@@ -2088,7 +2139,8 @@ def test_preview_destination_reports_template_samples_from_real_dates(tmp_path):
     )
 
     samples = result["template_samples"]["samples"]
-    assert set(samples) == set(FOLDER_TEMPLATE_PRESETS)
+    assert set(samples) == set(FOLDER_TEMPLATE_PRESETS + IMPORT_FILE_TYPE_TEMPLATES)
+    assert samples["{file_type}/%Y/%Y-%m-%d"] == "JPEG/2026/2026-03-25"
     assert samples["%Y/%Y-%m-%d"] == "2026/2026-03-25"
     assert samples["%Y-%m-%d"] == "2026-03-25"
     assert samples["%Y/%m"] == "2026/03"
@@ -2120,7 +2172,12 @@ def test_preview_destination_template_samples_say_unsorted_when_undated(
         sources=[str(src)], destination=str(dst), folder_template="%Y-%m-%d",
     )
 
-    assert set(result["template_samples"]["samples"].values()) == {"unsorted"}
+    from ingest import FOLDER_TEMPLATE_PRESETS
+
+    samples = result["template_samples"]["samples"]
+    assert {samples[t] for t in FOLDER_TEMPLATE_PRESETS} == {"unsorted"}
+    assert samples["{file_type}/%Y/%Y-%m-%d"] == "JPEG/unsorted"
+    assert samples["{file_type}"] == "JPEG"
     assert result["template_samples"]["dated_count"] == 0
 
 
@@ -2278,3 +2335,21 @@ def test_preview_destination_multiple_sources(tmp_path):
     assert result["total_photos"] == 2
     assert result["total_folders"] == 1
     assert result["folders"][0]["count"] == 2
+
+
+def test_ingest_file_type_paths_match_preview_and_staging_checks(tmp_path):
+    from local_processing import archive_conflict_report, existing_archive_bytes
+
+    src, dst = tmp_path / "card", tmp_path / "archive"
+    _create_test_files(str(src), ["photo.jpg", "photo.nef"])
+    template = "{file_type}"
+    preview = preview_destination([str(src)], str(dst), template)
+    assert {f["path"] for f in preview["folders"]} == {"JPEG", "RAW"}
+    with Database(str(tmp_path / "test.db")) as db:
+        result = ingest(str(src), str(dst), db=db, folder_template=template, skip_duplicates=False)
+        assert result["copied"] == 2
+    files = discover_source_files(str(src))
+    assert existing_archive_bytes(str(dst), files, folder_template=template) == sum(f.stat().st_size for f in files)
+    (dst / "RAW/photo.nef").write_bytes(b"partial")
+    conflicts = archive_conflict_report(str(dst), files, folder_template=template, indexed_paths=set())
+    assert str(dst / "RAW/photo.nef") in conflicts["partial"]

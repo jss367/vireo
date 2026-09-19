@@ -135,6 +135,52 @@ FOLDER_TEMPLATE_PRESETS = (
     "%Y-%m-%d",
 )
 
+IMPORT_FILE_TYPE_TEMPLATES = (
+    "{file_type}/%Y/%Y-%m-%d",
+    "%Y/%Y-%m-%d/{file_type}",
+    "{file_type}",
+)
+
+
+def destination_file_type(source_file):
+    """Stable folder names, shared by all imports and their previews."""
+    extension = Path(source_file).suffix.lower()
+    if extension in RAW_EXTENSIONS:
+        return "RAW"
+    if extension in {".jpg", ".jpeg"}:
+        return "JPEG"
+    if extension in {".tif", ".tiff"}:
+        return "TIFF"
+    return extension[1:].upper() if extension in IMAGE_EXTENSIONS else "OTHER"
+
+
+DESTINATION_FILE_TYPES = tuple(sorted(
+    {destination_file_type("photo" + ext) for ext in SUPPORTED_EXTENSIONS} | {"OTHER"}
+))
+
+
+def destination_file_types_for(file_types):
+    """Destination category folders an import with ``file_types`` can produce.
+
+    Mirrors the extension filter in ``selected_source_files``: a RAW-only run
+    can only ever create a ``RAW`` folder, so mount-overlap guards that iterate
+    every category (``JPEG``, ``TIFF``, …) would reject configurations the run
+    can't actually land in. ``file_types`` accepts the same values the import
+    endpoints do — ``"both"`` (any supported extension), ``"raw"``, ``"jpeg"``,
+    or an explicit list of extensions.
+    """
+    if isinstance(file_types, list):
+        allowed = {str(ext).lower() for ext in file_types}
+    elif file_types == "raw":
+        allowed = RAW_EXTENSIONS
+    elif file_types == "jpeg":
+        allowed = IMAGE_EXTENSIONS
+    else:
+        allowed = SUPPORTED_EXTENSIONS
+    return tuple(sorted(
+        {destination_file_type("photo" + ext) for ext in allowed}
+    ))
+
 
 def folder_template_samples(timestamps, templates=FOLDER_TEMPLATE_PRESETS):
     """Render each preset folder template against a real capture time.
@@ -176,17 +222,28 @@ def folder_template_samples(timestamps, templates=FOLDER_TEMPLATE_PRESETS):
     }
 
 
-def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
-    """Build relative destination folder path from EXIF timestamp.
+def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d", source_file=None):
+    """Build a relative folder from capture time and optional file type.
 
     Args:
         exif_timestamp: datetime object from EXIF, or None
-        template: strftime format string for folder structure
+        template: strftime format string, optionally containing {file_type}
+        source_file: file path, required when the template uses {file_type}
 
     Returns:
-        Relative path string, or "unsorted" if no timestamp
+        Relative path string. Missing dates use "unsorted", or
+        "{file_type}/unsorted" for templates combining file type and date.
     """
     _sanitize_template(template)
+    if "{file_type}" in template:
+        if source_file is None:
+            raise ValueError("file-type folder templates require a source file")
+        file_type = destination_file_type(source_file)
+        template = template.replace("{file_type}", file_type)
+        # Keep undated files separated too. Type-only (or literal) templates
+        # need no date, so they retain their chosen structure.
+        if exif_timestamp is None:
+            return f"{file_type}/unsorted" if "%" in template else template
     if exif_timestamp is None:
         return "unsorted"
     result = exif_timestamp.strftime(template)
@@ -256,7 +313,7 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
     folder_counts = {}
     file_destinations = []
     for source_file in all_files:
-        rel_folder = build_destination_path(timestamps.get(source_file), folder_template)
+        rel_folder = build_destination_path(timestamps.get(source_file), folder_template, source_file)
         if not rel_folder:
             rel_folder = "."
         folder_counts[rel_folder] = folder_counts.get(rel_folder, 0) + 1
@@ -284,6 +341,13 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
     new_count = sum(1 for f in folders if not f["exists"])
     existing_count = sum(1 for f in folders if f["exists"])
 
+    template_samples = folder_template_samples(timestamps.values())
+    # Use a folder an actual source file would produce, including its type.
+    for template in IMPORT_FILE_TYPE_TEMPLATES:
+        examples = [build_destination_path(timestamps.get(f), template, f) for f in all_files]
+        if examples:
+            template_samples["samples"][template] = min(examples)
+
     return {
         "folders": folders,
         "total_photos": len(all_files),
@@ -294,7 +358,7 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
         # Real example folder names for the template dropdown, resolved from
         # the very timestamps grouped above so the labels and the folder list
         # can never disagree.
-        "template_samples": folder_template_samples(timestamps.values()),
+        "template_samples": template_samples,
     }
 
 
@@ -762,7 +826,7 @@ def ingest(
                     continue
 
             rel_folder = build_destination_path(
-                timestamps.get(source_file), folder_template
+                timestamps.get(source_file), folder_template, source_file
             )
             dest_folder = Path(destination_dir) / rel_folder
             dest_folder.mkdir(parents=True, exist_ok=True)

@@ -945,7 +945,8 @@ def test_move_folder_by_date_lists_developed_dir_once_per_source(
     )
 
 
-def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
+@pytest.mark.parametrize("template,expected", [("%Y-%m-%d", "unsorted"), ("{file_type}/%Y", "JPEG/unsorted")])
+def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path, template, expected):
     from move import plan_folder_date_moves
 
     db = Database(str(tmp_path / "test.db"))
@@ -960,10 +961,10 @@ def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
         file_size=1, file_mtime=None,
     )
 
-    plan = plan_folder_date_moves(db, fid, str(tmp_path / "archive"), "%Y-%m-%d")
+    plan = plan_folder_date_moves(db, fid, str(tmp_path / "archive"), template)
 
     assert len(plan) == 1
-    assert plan[0]["relative_path"] == "unsorted"
+    assert plan[0]["relative_path"] == expected
 
 
 def test_folder_subtree_photos_reads_only_date_columns(tmp_path):
@@ -990,7 +991,7 @@ def test_folder_subtree_photos_reads_only_date_columns(tmp_path):
     rows = _folder_subtree_photos(db, fid)
 
     assert len(rows) == 1
-    assert set(rows[0].keys()) == {"id", "exif_data", "timestamp", "file_mtime"}
+    assert set(rows[0].keys()) == {"id", "filename", "exif_data", "timestamp", "file_mtime"}
 
 
 def test_plan_folder_date_moves_normalizes_dot_components(tmp_path):
