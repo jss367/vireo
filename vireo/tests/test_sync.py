@@ -3006,3 +3006,37 @@ def test_sync_missing_case_alias_preparation_failure_keeps_shared_queue(tmp_path
     assert sync.sync_to_xmp(db)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "3"
     assert not db.get_pending_changes()
+
+
+def test_sync_missing_case_alias_removal_survives_failed_add(tmp_path, db, monkeypatch):
+    """A successful no-op removal must still guard an older failed addition."""
+    import sync
+    from xmp import read_keywords
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(tmp_path, db)
+    alias = os.path.join(os.path.dirname(path), "BIRD.xmp")
+    if not os.path.exists(alias) or not os.path.samefile(path, alias):
+        pytest.skip("needs a case-insensitive filesystem")
+    os.unlink(path)
+    second = db.add_photo(folder_id=db.get_photo(first)["folder_id"], filename="BIRD.nef",
+                          extension=".nef", file_size=100, file_mtime=1.0)
+    db.queue_change(first, "keyword_add", "Osprey")
+    db.queue_change(second, "keyword_remove", "Osprey")
+    real_write = sync._write_photo_sync
+
+    def fail_add(path, plan, *args, **kwargs):
+        if plan.keywords_to_add:
+            raise OSError("injected addition failure")
+        return real_write(path, plan, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync, "_write_photo_sync", fail_add)
+        result = sync.sync_to_xmp(db)
+    assert result["synced"] == 0
+    assert result["failed"] == 2
+    assert not os.path.exists(path)
+    assert len(db.get_pending_changes()) == 2
+    assert sync.sync_to_xmp(db)["ok"]
+    assert "Osprey" not in read_keywords(path)
+    assert not db.get_pending_changes()

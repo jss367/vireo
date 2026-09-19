@@ -579,6 +579,9 @@ def _sidecar_target_identities(resolved_paths):
             try:
                 stat = os.stat(path)
             except FileNotFoundError:
+                # Absence cannot prove that two spellings are distinct. A
+                # successful no-op removal must survive beside a failed add:
+                # clearing it here could resurrect the keyword on retry.
                 group[path] = ("missing", canonical)
             except OSError:
                 break
