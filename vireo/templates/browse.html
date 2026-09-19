@@ -2202,6 +2202,7 @@ body.sidebar-resizing {
     </div>
 
     {% include '_folder_browser.html' %}
+    {% include '_export_preset_dialog.html' %}
 
     <!-- Grid -->
     <div class="grid-container" id="gridContainer">
@@ -13903,6 +13904,9 @@ document.addEventListener('keydown', function(e) {
   // Leave the underlying export modal alone so that handler can dismiss only
   // the topmost picker and preserve the user's export settings.
   if (document.querySelector('.folder-browser-overlay.open')) return;
+  // Same split for the export-preset save/delete dialog: its own Escape
+  // handler dismisses just that dialog and leaves the export modal open.
+  if (document.querySelector('.export-preset-dialog-overlay.open')) return;
 
   if (isBrowseCompareOpen()) {
     if (e.key === 'Escape') {

@@ -7,6 +7,12 @@
  * preset-shaped: listing, applying, saving, deleting, and re-applying the
  * last-used preset when the modal opens. Controls that only exist on one
  * page (e.g. the reveal-after-export checkbox) are feature-detected.
+ *
+ * Naming and confirming go through the in-page dialog both pages include
+ * from _export_preset_dialog.html, never through window.prompt/confirm/alert:
+ * the desktop webview has no native JavaScript dialogs, so a prompt returns
+ * null immediately (Save… appeared dead) and a confirm returns a truthy
+ * promise (Delete skipped the question and deleted anyway).
  */
 var VireoExportPresets = (function() {
   var SAVED_PREFIX = 'saved:';
@@ -25,6 +31,16 @@ var VireoExportPresets = (function() {
   var mutatingNames = Object.create(null);
   var presetActionsDisabled = false;
   var restorationControlStates = null;
+  // In-page save/delete dialog state (see _export_preset_dialog.html).
+  var dialogMode = null;
+  var dialogBusy = false;
+  var dialogDeleteName = null;
+  // Set when the server rejects a save because the name was created
+  // elsewhere after our last listing: the next submit of that same name is
+  // an explicit replace.
+  var dialogReplaceName = null;
+  var dialogKeyHandler = null;
+  var dialogRestoreFocus = null;
 
   function $(id) { return document.getElementById(id); }
   function overlay() { return $('exportOverlay'); }
@@ -299,32 +315,259 @@ var VireoExportPresets = (function() {
     updateButtons();
   }
 
-  async function saveCurrent() {
-    var name = window.prompt('Save current export settings as preset:',
-      selectedSavedName() || '');
-    if (name === null) return;
-    name = name.trim();
-    if (!name) return;
-    if (mutatingNames[name]) {
-      if (typeof showToast === 'function') {
-        showToast('That export preset is already being changed', 'info');
+  function dialogError() { return $('exportPresetDialogError'); }
+
+  function showDialogError(message) {
+    var error = dialogError();
+    if (!error) return;
+    error.textContent = message || '';
+    error.style.display = message ? 'block' : 'none';
+  }
+
+  function setDialogBusy(busy) {
+    dialogBusy = busy;
+    ['exportPresetDialogName', 'exportPresetDialogCancelBtn',
+     'exportPresetDialogSubmitBtn'].forEach(function(id) {
+      var control = $(id);
+      if (control) control.disabled = busy;
+    });
+  }
+
+  /* Spell out what submitting will do. A name that already exists replaces
+   * that preset, so the button and the blurb have to say "replace" before
+   * the click, not after (CORE_PHILOSOPHY.md: no black boxes). */
+  function syncSaveDialogIntent() {
+    if (dialogMode !== 'save') return;
+    var input = $('exportPresetDialogName');
+    var description = $('exportPresetDialogDescription');
+    var submit = $('exportPresetDialogSubmitBtn');
+    if (!input || !description || !submit) return;
+    var name = (input.value || '').trim();
+    var replaces = !!name &&
+      (!!findPreset(name) || dialogReplaceName === name);
+    description.textContent = replaces
+      ? 'Replaces the saved preset “' + name + '” with every setting ' +
+        'currently in the export dialog.'
+      : 'Saves every setting currently in the export dialog under a name ' +
+        'you can pick again later.';
+    submit.textContent = replaces ? 'Replace preset' : 'Save preset';
+  }
+
+  function openDialog(mode, name) {
+    // The overlay covers the export modal, but focus is not trapped, so the
+    // Save… / Delete buttons behind it stay keyboard-reachable. Refuse to
+    // re-open over a dialog that is already up — a save opened on top of an
+    // in-flight delete would clear the busy flag the delete still owns.
+    if (dialogMode) return;
+    var modal = $('exportPresetDialog');
+    var title = $('exportPresetDialogTitle');
+    var description = $('exportPresetDialogDescription');
+    var nameField = $('exportPresetDialogNameField');
+    var input = $('exportPresetDialogName');
+    var submit = $('exportPresetDialogSubmitBtn');
+    if (!modal || !title || !description || !nameField || !input || !submit) {
+      return;
+    }
+    dialogMode = mode;
+    dialogDeleteName = mode === 'delete' ? name : null;
+    dialogReplaceName = null;
+    dialogRestoreFocus = document.activeElement;
+    showDialogError('');
+    setDialogBusy(false);
+
+    if (mode === 'save') {
+      title.textContent = 'Save export preset';
+      nameField.style.display = '';
+      input.value = name || '';
+      submit.style.background = '';
+      syncSaveDialogIntent();
+    } else {
+      title.textContent = 'Delete export preset';
+      description.textContent = 'Delete the saved preset “' + name + '”? ' +
+        'The export settings currently in the dialog are left as they are.';
+      nameField.style.display = 'none';
+      input.value = '';
+      submit.textContent = 'Delete preset';
+      submit.style.background = 'var(--danger)';
+    }
+
+    modal.classList.add('open');
+    var panel = modal.querySelector('.export-preset-dialog-panel');
+    dialogKeyHandler = function(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeDialog();
+        return;
       }
+      if (event.key !== 'Tab' || !panel) return;
+      // The export modal behind this dialog stays enabled, so an untrapped
+      // Shift+Tab out of the name field reaches its Cancel — which closes
+      // #exportOverlay and leaves this dialog orphaned — or Export, which
+      // would start an export mid-save. Keep Tab inside the dialog.
+      var focusable = Array.prototype.filter.call(
+        panel.querySelectorAll('input, button'),
+        function(el) { return !el.disabled && el.offsetParent !== null; }
+      );
+      if (!focusable.length) {
+        // Everything is disabled because a save or delete is in flight.
+        event.preventDefault();
+        return;
+      }
+      var firstControl = focusable[0];
+      var lastControl = focusable[focusable.length - 1];
+      var active = document.activeElement;
+      var inside = panel.contains(active);
+      if (event.shiftKey ? (!inside || active === firstControl)
+                         : (!inside || active === lastControl)) {
+        event.preventDefault();
+        (event.shiftKey ? lastControl : firstControl).focus();
+      }
+    };
+    document.addEventListener('keydown', dialogKeyHandler);
+    setTimeout(function() {
+      if (mode === 'save') {
+        input.focus();
+        input.select();
+      } else {
+        submit.focus();
+      }
+    }, 0);
+  }
+
+  function closeDialog() {
+    if (dialogBusy) return;
+    var modal = $('exportPresetDialog');
+    if (modal) modal.classList.remove('open');
+    if (dialogKeyHandler) {
+      document.removeEventListener('keydown', dialogKeyHandler);
+      dialogKeyHandler = null;
+    }
+    dialogMode = null;
+    dialogDeleteName = null;
+    dialogReplaceName = null;
+    var restore = dialogRestoreFocus;
+    dialogRestoreFocus = null;
+    if (restore && typeof restore.focus === 'function') restore.focus();
+  }
+
+  function saveCurrent() {
+    openDialog('save', selectedSavedName() || '');
+  }
+
+  function deleteSelected() {
+    var name = selectedSavedName();
+    if (!name) return;
+    openDialog('delete', name);
+  }
+
+  async function submitDialog(event) {
+    if (event) event.preventDefault();
+    if (dialogBusy || !dialogMode) return;
+    if (dialogMode === 'delete') return runDialogDelete();
+    return runDialogSave();
+  }
+
+  async function runDialogSave() {
+    var input = $('exportPresetDialogName');
+    var name = input ? (input.value || '').trim() : '';
+    if (!name) {
+      showDialogError('Enter a preset name.');
+      if (input) input.focus();
+      return;
+    }
+    if (mutatingNames[name]) {
+      showDialogError('That export preset is already being changed.');
       return;
     }
     mutatingNames[name] = true;
+    setDialogBusy(true);
+    var result;
     try {
-      await saveNamedPreset(name);
+      result = await saveNamedPreset(
+        name, !!findPreset(name) || dialogReplaceName === name
+      );
+    } catch (err) {
+      // Never leave the dialog stuck busy: Cancel is disabled while it is.
+      result = {error: (err && err.message) || String(err)};
     } finally {
       delete mutatingNames[name];
+      setDialogBusy(false);
+    }
+    if (result.conflict) {
+      // Created elsewhere since our last listing. Keep the dialog open and
+      // make the second click the explicit replace.
+      dialogReplaceName = name;
+      syncSaveDialogIntent();
+      showDialogError('A preset named “' + name + '” already exists. ' +
+        'Save again to replace it.');
+      return;
+    }
+    if (result.error) {
+      showDialogError('Could not save preset: ' + result.error);
+      return;
+    }
+    closeDialog();
+    if (typeof showToast === 'function') {
+      showToast(result.keptCurrent
+        ? 'Saved export preset “' + name + '” (kept current selection)'
+        : 'Saved export preset “' + name + '”', 'info');
     }
   }
 
-  async function saveNamedPreset(name) {
-    var replace = !!findPreset(name);
-    if (replace &&
-        !window.confirm('Replace the existing preset “' + name + '”?')) {
+  async function runDialogDelete() {
+    var name = dialogDeleteName;
+    if (!name) {
+      closeDialog();
       return;
     }
+    if (mutatingNames[name]) {
+      showDialogError('That export preset is already being changed.');
+      return;
+    }
+    mutatingNames[name] = true;
+    setDialogBusy(true);
+    try {
+      var editGeneration = modalEditGeneration;
+      var openGeneration = modalOpenGeneration;
+      try {
+        var data = await safeFetch(
+          '/api/export/presets/' + encodeURIComponent(name),
+          {method: 'DELETE'}, {toast: false}
+        );
+        if (data.error) throw new Error(data.error);
+      } catch (err) {
+        showDialogError('Could not delete preset: ' + err.message);
+        return;
+      }
+      if (VireoViewPreferences.read(LAST_USED_KEY) === SAVED_PREFIX + name) {
+        VireoViewPreferences.write(LAST_USED_KEY, 'custom');
+      }
+      var refreshResult = await refresh();
+      var edited = editGeneration !== modalEditGeneration;
+      var reopened = openGeneration !== modalOpenGeneration;
+      if (refreshResult.current && !edited && !reopened) {
+        presetSelect().value = 'custom';
+        updateButtons();
+      }
+      setDialogBusy(false);
+      closeDialog();
+      if (typeof showToast === 'function') {
+        showToast('Deleted export preset “' + name + '”', 'info');
+      }
+    } catch (err) {
+      showDialogError('Could not delete preset: ' + ((err && err.message) || err));
+    } finally {
+      // Never leave the dialog stuck busy: Cancel is disabled while it is.
+      delete mutatingNames[name];
+      setDialogBusy(false);
+    }
+  }
+
+  /* Returns what happened instead of raising native dialogs: `{conflict}`
+   * when the name already exists server-side, `{error}` when the save
+   * failed, `{keptCurrent}` on success. The caller renders all three in the
+   * in-page dialog. */
+  async function saveNamedPreset(name, replace) {
     // Snapshot the modal edit AND open generations before the network round
     // trip. If the user tweaks any control while the POST + refresh are in
     // flight, the controls no longer match what got saved; if they close and
@@ -348,18 +591,8 @@ var VireoExportPresets = (function() {
     try {
       await postPreset(replace);
     } catch (err) {
-      if (err.code === 'export_preset_exists') {
-        if (!window.confirm('Replace the existing preset “' + name + '”?')) return;
-        try {
-          await postPreset(true);
-        } catch (replaceErr) {
-          alert('Could not save preset: ' + replaceErr.message);
-          return;
-        }
-      } else {
-        alert('Could not save preset: ' + err.message);
-        return;
-      }
+      if (err.code === 'export_preset_exists') return {conflict: true};
+      return {error: err.message};
     }
     var refreshResult = await refresh();
     var edited = editGeneration !== modalEditGeneration;
@@ -377,53 +610,7 @@ var VireoExportPresets = (function() {
       VireoViewPreferences.write(LAST_USED_KEY, SAVED_PREFIX + name);
     }
     updateButtons();
-    if (typeof showToast === 'function') {
-      var msg = keptCurrent
-        ? 'Saved export preset “' + name + '” (kept current selection)'
-        : 'Saved export preset “' + name + '”';
-      showToast(msg, 'info');
-    }
-  }
-
-  async function deleteSelected() {
-    var name = selectedSavedName();
-    if (!name) return;
-    if (mutatingNames[name]) {
-      if (typeof showToast === 'function') {
-        showToast('That export preset is already being changed', 'info');
-      }
-      return;
-    }
-    if (!window.confirm('Delete the export preset “' + name + '”?')) return;
-    mutatingNames[name] = true;
-    try {
-      var editGeneration = modalEditGeneration;
-      var openGeneration = modalOpenGeneration;
-      try {
-        var data = await safeFetch('/api/export/presets/' + encodeURIComponent(name), {
-          method: 'DELETE',
-        }, {toast: false});
-        if (data.error) throw new Error(data.error);
-      } catch (err) {
-        alert('Could not delete preset: ' + err.message);
-        return;
-      }
-      if (VireoViewPreferences.read(LAST_USED_KEY) === SAVED_PREFIX + name) {
-        VireoViewPreferences.write(LAST_USED_KEY, 'custom');
-      }
-      var refreshResult = await refresh();
-      var edited = editGeneration !== modalEditGeneration;
-      var reopened = openGeneration !== modalOpenGeneration;
-      if (refreshResult.current && !edited && !reopened) {
-        presetSelect().value = 'custom';
-        updateButtons();
-      }
-      if (typeof showToast === 'function') {
-        showToast('Deleted export preset “' + name + '”', 'info');
-      }
-    } finally {
-      delete mutatingNames[name];
-    }
+    return {keptCurrent: keptCurrent};
   }
 
   /* Called by the host page after it resets the modal to defaults and
@@ -538,6 +725,18 @@ var VireoExportPresets = (function() {
     if (saveBtn) saveBtn.addEventListener('click', saveCurrent);
     var deleteBtn = $('exportPresetDeleteBtn');
     if (deleteBtn) deleteBtn.addEventListener('click', deleteSelected);
+    var dialog = $('exportPresetDialog');
+    if (dialog) {
+      dialog.addEventListener('click', function(event) {
+        if (event.target === dialog) closeDialog();
+      });
+      $('exportPresetDialogForm').addEventListener('submit', submitDialog);
+      $('exportPresetDialogCancelBtn').addEventListener('click', closeDialog);
+      $('exportPresetDialogName').addEventListener('input', function() {
+        showDialogError('');
+        syncSaveDialogIntent();
+      });
+    }
     // Any manual tweak flips the dropdown to "Custom": it must never keep
     // displaying a preset name once the fields below no longer match it.
     ['input', 'change'].forEach(function(type) {

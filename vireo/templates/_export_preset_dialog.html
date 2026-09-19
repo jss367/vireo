@@ -1,0 +1,68 @@
+<!-- Save/delete dialog for named export presets, shared by Browse and the
+     Photo Editor and driven by vireo-export-presets.js.
+
+     This replaces window.prompt()/window.confirm()/window.alert(). The
+     desktop app's webview has no native JavaScript dialogs: wry installs a
+     WKUIDelegate that implements no JS panel methods, so window.prompt()
+     returns null the instant it is called, and tauri-plugin-dialog replaces
+     window.confirm() with an async shim whose promise is always truthy. A
+     native prompt therefore made "Save…" do nothing, and a native confirm
+     made "Delete" skip the question and delete anyway.
+
+     Kept outside #exportOverlay on purpose: the export modal disables every
+     input/select/button it contains while presets load, and would disable
+     this dialog's controls with them. It also uses its own overlay class
+     rather than .modal-overlay so the host pages' Escape handling (which
+     acts on the first open .modal-overlay) keeps treating the export modal
+     as the open modal while this dialog stacks above it — the same split the
+     folder browser uses. -->
+<div class="export-preset-dialog-overlay" id="exportPresetDialog"
+     data-testid="export-preset-dialog">
+  <div class="export-preset-dialog-panel" role="dialog" aria-modal="true"
+       aria-labelledby="exportPresetDialogTitle"
+       aria-describedby="exportPresetDialogDescription">
+    <form id="exportPresetDialogForm">
+      <h3 id="exportPresetDialogTitle">Save export preset</h3>
+      <p id="exportPresetDialogDescription"
+         class="export-preset-dialog-description"></p>
+      <div id="exportPresetDialogNameField">
+        <label class="modal-label" for="exportPresetDialogName">Preset name</label>
+        <!-- Matches MAX_EXPORT_PRESET_NAME_LEN in vireo/export.py: a longer
+             name the field accepted would only fail at the API. -->
+        <input type="text" id="exportPresetDialogName" class="modal-input"
+               maxlength="80" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="modal-error" id="exportPresetDialogError" role="alert"></div>
+      <div class="modal-actions">
+        <button type="button" class="modal-btn modal-btn-cancel"
+                id="exportPresetDialogCancelBtn">Cancel</button>
+        <button type="submit" class="modal-btn modal-btn-primary"
+                id="exportPresetDialogSubmitBtn">Save preset</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<style>
+/* Above the export modal (.modal-overlay, z-index 500) and the folder
+   browser (1001), both of which this dialog can open on top of. */
+.export-preset-dialog-overlay {
+  display: none; position: fixed; inset: 0; z-index: 1002;
+  background: rgba(0, 0, 0, 0.45); align-items: center; justify-content: center;
+}
+.export-preset-dialog-overlay.open { display: flex; }
+.export-preset-dialog-panel {
+  width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  background: var(--bg-secondary); border: 1px solid var(--border-primary);
+  border-radius: 8px; box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+  padding: 24px;
+}
+.export-preset-dialog-panel h3 {
+  font-size: 16px; margin: 0 0 8px; color: var(--text-primary);
+}
+.export-preset-dialog-description {
+  font-size: 13px; color: var(--text-dim); line-height: 1.5; margin: 0 0 14px;
+}
+.export-preset-dialog-description:empty { display: none; }
+</style>

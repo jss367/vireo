@@ -778,6 +778,128 @@ def test_export_presets_keep_submit_gated_when_saved_preset_load_fails(
     expect(page.locator("#exportSubmitBtn")).to_be_disabled()
 
 
+def test_export_preset_save_uses_in_page_dialog(live_server, page):
+    """Desktop webviews suppress window.prompt(), so naming a preset has to
+    happen in a visible in-page dialog and persist through the API."""
+    page.goto(f"{live_server['url']}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+    page.get_by_role("button", name="Export", exact=True).click()
+    expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
+    # A native prompt returns null instantly in the desktop webview, which is
+    # what made Save… look dead. Fail loudly if the module reaches for one.
+    page.evaluate(
+        "() => { window.prompt = function() {"
+        " throw new Error('native prompt is unavailable in the desktop app');"
+        " }; }"
+    )
+
+    page.locator("#exportTemplate").fill("{original}_web")
+    page.locator("#exportPresetSaveBtn").click()
+
+    dialog = page.locator("#exportPresetDialog")
+    expect(dialog).to_have_class(re.compile(r"\bopen\b"))
+    expect(dialog.get_by_role("heading", name="Save export preset")).to_be_visible()
+
+    # An empty name is refused in the dialog rather than silently discarded.
+    page.locator("#exportPresetDialogSubmitBtn").click()
+    expect(page.locator("#exportPresetDialogError")).to_have_text(
+        "Enter a preset name."
+    )
+    expect(dialog).to_have_class(re.compile(r"\bopen\b"))
+
+    page.locator("#exportPresetDialogName").fill("Web sized")
+    page.locator("#exportPresetDialogSubmitBtn").click()
+
+    expect(dialog).not_to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#exportPreset")).to_have_value("saved:Web sized")
+    presets = page.evaluate(
+        "async () => (await (await fetch('/api/export/presets')).json()).presets"
+    )
+    assert [preset["name"] for preset in presets] == ["Web sized"]
+    assert presets[0]["settings"]["naming_template"] == "{original}_web"
+
+
+def test_export_preset_dialog_keeps_keyboard_focus_inside(live_server, page):
+    """Tab and Shift+Tab cycle within the dialog.
+
+    The export modal underneath stays enabled, so an untrapped Shift+Tab
+    reached its Cancel — closing ``#exportOverlay`` and orphaning this
+    dialog — or its Export, starting an export mid-save.
+    """
+    page.goto(f"{live_server['url']}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+    page.get_by_role("button", name="Export", exact=True).click()
+    expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
+
+    page.locator("#exportPresetSaveBtn").click()
+    name = page.locator("#exportPresetDialogName")
+    expect(name).to_be_focused()
+    # The API rejects anything longer (MAX_EXPORT_PRESET_NAME_LEN in
+    # vireo/export.py), so the field must not accept it either.
+    assert name.get_attribute("maxlength") == "80"
+
+    # Backwards off the first control wraps to the last, not into the export
+    # modal; forwards off the last wraps back to the first.
+    page.keyboard.press("Shift+Tab")
+    expect(page.locator("#exportPresetDialogSubmitBtn")).to_be_focused()
+    page.keyboard.press("Tab")
+    expect(name).to_be_focused()
+
+    for _ in range(6):
+        page.keyboard.press("Tab")
+        assert page.evaluate(
+            "() => document.getElementById('exportPresetDialog')"
+            ".contains(document.activeElement)"
+        )
+    expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
+
+
+def test_export_preset_save_dialog_names_the_preset_it_replaces(live_server, page):
+    """Reusing a saved name says so before the click, not after."""
+    page.goto(f"{live_server['url']}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+    page.get_by_role("button", name="Export", exact=True).click()
+    expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
+    page.evaluate(
+        """async () => {
+          const realSafeFetch = window.safeFetch;
+          window.safeFetch = function(url, options, config) {
+            if (url === '/api/export/presets' && (!options || !options.method)) {
+              return Promise.resolve({presets: [{
+                name: 'Web sized', settings: {destination: '/web'}
+              }]});
+            }
+            return realSafeFetch(url, options, config);
+          };
+          await VireoExportPresets.modalOpened();
+        }"""
+    )
+
+    page.locator("#exportPresetSaveBtn").click()
+    submit = page.locator("#exportPresetDialogSubmitBtn")
+    description = page.locator("#exportPresetDialogDescription")
+    page.locator("#exportPresetDialogName").fill("Something new")
+    expect(submit).to_have_text("Save preset")
+    expect(description).not_to_contain_text("Replaces")
+
+    page.locator("#exportPresetDialogName").fill("Web sized")
+    expect(submit).to_have_text("Replace preset")
+    expect(description).to_contain_text("Replaces the saved preset “Web sized”")
+
+    # Escape backs out and leaves the export modal and its settings alone.
+    page.keyboard.press("Escape")
+    expect(page.locator("#exportPresetDialog")).not_to_have_class(
+        re.compile(r"\bopen\b")
+    )
+    expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
+
+
 def test_export_preset_delete_preserves_newer_selection(live_server, page):
     """A delayed delete completion cannot relabel a newer preset as Custom."""
     page.goto(f"{live_server['url']}/browse")
@@ -791,7 +913,6 @@ def test_export_preset_delete_preserves_newer_selection(live_server, page):
         """async () => {
           const realSafeFetch = window.safeFetch;
           window.__deletedExportPreset = false;
-          window.confirm = function() { return true; };
           window.safeFetch = function(url, options, config) {
             if (url === '/api/export/presets' && (!options || !options.method)) {
               var presets = [{
@@ -820,11 +941,20 @@ def test_export_preset_delete_preserves_newer_selection(live_server, page):
     )
     page.locator("#exportPreset").select_option("saved:Delete me")
     page.locator("#exportPresetDeleteBtn").click()
+    dialog = page.locator("#exportPresetDialog")
+    expect(dialog).to_have_class(re.compile(r"\bopen\b"))
+    expect(dialog.get_by_role("heading", name="Delete export preset")).to_be_visible()
+    expect(page.locator("#exportPresetDialogDescription")).to_contain_text("Delete me")
+    page.locator("#exportPresetDialogSubmitBtn").click()
     page.wait_for_function(
         "() => typeof window.__resolveExportPresetDelete === 'function'"
     )
-    page.locator("#exportPreset").select_option("saved:Keep me")
+    # The dialog covers the export modal while the delete is in flight, so a
+    # user cannot move the dropdown underneath it any more. Force the change
+    # anyway: the generation guard exists for programmatic mutations.
+    page.locator("#exportPreset").select_option("saved:Keep me", force=True)
     page.evaluate("() => window.__resolveExportPresetDelete()")
+    expect(dialog).not_to_have_class(re.compile(r"\bopen\b"))
 
     expect(page.locator("#exportPreset")).to_have_value("saved:Keep me")
     expect(page.locator("#exportDest")).to_have_value("/keep")
@@ -834,7 +964,7 @@ def test_export_preset_delete_preserves_newer_selection(live_server, page):
 
 
 def test_export_preset_uncached_replace_requires_confirmation(live_server, page):
-    """A server-side name conflict is confirmed before a replacement retry."""
+    """A server-side name conflict is confirmed in-dialog before replacing."""
     page.goto(f"{live_server['url']}/browse")
     first = page.locator(".grid-card").first
     first.wait_for(state="visible")
@@ -847,12 +977,6 @@ def test_export_preset_uncached_replace_requires_confirmation(live_server, page)
           const realSafeFetch = window.safeFetch;
           window.__presetSaveBodies = [];
           window.__presetSaveSucceeded = false;
-          window.__presetReplaceConfirmations = 0;
-          window.prompt = function() { return 'Existing elsewhere'; };
-          window.confirm = function() {
-            window.__presetReplaceConfirmations++;
-            return true;
-          };
           window.safeFetch = function(url, options, config) {
             if (url === '/api/export/presets' && options &&
                 options.method === 'POST') {
@@ -880,11 +1004,28 @@ def test_export_preset_uncached_replace_requires_confirmation(live_server, page)
     )
     page.locator("#exportTemplate").fill("  {original}_web  ")
     page.locator("#exportPresetSaveBtn").click()
+    dialog = page.locator("#exportPresetDialog")
+    expect(dialog).to_have_class(re.compile(r"\bopen\b"))
+    page.locator("#exportPresetDialogName").fill("Existing elsewhere")
+    # Nothing local knows the name is taken yet, so the dialog offers a save.
+    expect(page.locator("#exportPresetDialogSubmitBtn")).to_have_text("Save preset")
+    page.locator("#exportPresetDialogSubmitBtn").click()
 
+    # The server rejects it: the dialog stays open and the next click is an
+    # explicit replace rather than a silently overwritten preset.
+    expect(page.locator("#exportPresetDialogError")).to_contain_text(
+        "already exists"
+    )
+    expect(page.locator("#exportPresetDialogSubmitBtn")).to_have_text(
+        "Replace preset"
+    )
+    expect(dialog).to_have_class(re.compile(r"\bopen\b"))
+    page.locator("#exportPresetDialogSubmitBtn").click()
+
+    expect(dialog).not_to_have_class(re.compile(r"\bopen\b"))
     expect(page.locator("#exportPreset")).to_have_value(
         "saved:Existing elsewhere"
     )
-    assert page.evaluate("() => window.__presetReplaceConfirmations") == 1
     assert page.evaluate(
         "() => window.__presetSaveBodies.map(body => body.replace)"
     ) == [False, True]
@@ -892,7 +1033,11 @@ def test_export_preset_uncached_replace_requires_confirmation(live_server, page)
 
 
 def test_export_preset_serializes_saves_to_same_name(live_server, page):
-    """A second same-name save cannot overtake the first request."""
+    """A second same-name save cannot overtake the first request.
+
+    The dialog enforces it structurally: every control is disabled until the
+    in-flight save settles, so there is no way to submit a second one.
+    """
     page.goto(f"{live_server['url']}/browse")
     first = page.locator(".grid-card").first
     first.wait_for(state="visible")
@@ -906,8 +1051,6 @@ def test_export_preset_serializes_saves_to_same_name(live_server, page):
           window.__serializedSaveBodies = [];
           window.__serializedSaveResolvers = [];
           window.__serializedPresetGets = 0;
-          window.prompt = function() { return 'Shared name'; };
-          window.confirm = function() { return true; };
           window.safeFetch = function(url, options, config) {
             if (url === '/api/export/presets' && options &&
                 options.method === 'POST') {
@@ -929,17 +1072,30 @@ def test_export_preset_serializes_saves_to_same_name(live_server, page):
           await VireoExportPresets.modalOpened();
         }"""
     )
+    dialog = page.locator("#exportPresetDialog")
+    submit = page.locator("#exportPresetDialogSubmitBtn")
+
     page.locator("#exportDest").fill("/first")
     page.locator("#exportPresetSaveBtn").click()
+    page.locator("#exportPresetDialogName").fill("Shared name")
+    submit.click()
     page.wait_for_function("() => window.__serializedSaveBodies.length === 1")
 
-    page.locator("#exportDest").fill("/second")
-    page.locator("#exportPresetSaveBtn").click()
+    expect(submit).to_be_disabled()
+    expect(page.locator("#exportPresetDialogCancelBtn")).to_be_disabled()
+    expect(page.locator("#exportPresetDialogName")).to_be_disabled()
+    submit.click(force=True)
     assert page.evaluate("() => window.__serializedSaveBodies.length") == 1
 
     page.evaluate("() => window.__serializedSaveResolvers[0]({ok: true})")
     page.wait_for_function("() => window.__serializedPresetGets === 2")
+    expect(dialog).not_to_have_class(re.compile(r"\bopen\b"))
+
+    page.locator("#exportDest").fill("/second")
     page.locator("#exportPresetSaveBtn").click()
+    page.locator("#exportPresetDialogName").fill("Shared name")
+    expect(submit).to_have_text("Replace preset")
+    submit.click()
     page.wait_for_function("() => window.__serializedSaveBodies.length === 2")
     assert page.evaluate(
         "() => window.__serializedSaveBodies.map(body => body.settings.destination)"
@@ -960,8 +1116,6 @@ def test_export_preset_serializes_save_against_same_name_delete(live_server, pag
           const realSafeFetch = window.safeFetch;
           window.__deleteRequests = 0;
           window.__saveRequestsDuringDelete = 0;
-          window.prompt = function() { return 'Shared name'; };
-          window.confirm = function() { return true; };
           window.safeFetch = function(url, options, config) {
             if (url === '/api/export/presets/Shared%20name' && options &&
                 options.method === 'DELETE') {
@@ -987,12 +1141,20 @@ def test_export_preset_serializes_save_against_same_name_delete(live_server, pag
     )
     page.locator("#exportPreset").select_option("saved:Shared name")
     page.locator("#exportPresetDeleteBtn").click()
+    dialog = page.locator("#exportPresetDialog")
+    page.locator("#exportPresetDialogSubmitBtn").click()
     page.wait_for_function("() => window.__deleteRequests === 1")
 
-    page.locator("#exportPresetSaveBtn").click()
+    # Save… sits behind the dialog overlay, so a user cannot reach it while
+    # the delete is in flight. Force the click: the module must still refuse
+    # to recreate the preset it is deleting.
+    expect(page.locator("#exportPresetDialogSubmitBtn")).to_be_disabled()
+    page.locator("#exportPresetSaveBtn").click(force=True)
+    expect(dialog.get_by_role("heading", name="Delete export preset")).to_be_visible()
     assert page.evaluate("() => window.__saveRequestsDuringDelete") == 0
 
     page.evaluate("() => window.__resolveSharedPresetDelete({ok: true})")
+    expect(dialog).not_to_have_class(re.compile(r"\bopen\b"))
     expect(page.locator("#exportPreset")).to_have_value("custom")
 
 
