@@ -609,3 +609,53 @@ def test_sort_change_holds_the_place_of_a_batch_selection(live_server, page):
     assert _ids_on_screen(page, [anchored_id]) == [anchored_id], (
         "the re-sort threw away the place the batch was working in"
     )
+
+
+def test_sort_change_keeps_a_stack_selected_from_a_collapsed_tray(
+    live_server, page,
+):
+    """"Select all" in a tray, then collapse it: still a whole-stack selection.
+
+    Collapsing pins the focus to the visible cover and keeps every member in
+    ``selectedPhotos`` (``batchHasHiddenMembers`` in toggleBrowseStack),
+    because a collapsed tray cannot hold a focus on a hidden frame. Reading
+    a focused photo as "this must be a hand-built batch" dropped that
+    selection on the next re-sort (Codex P2 on PR #1695).
+    """
+    ids = _seed_sortable_library(
+        live_server["db"], live_server["data"]["folders"][0]
+    )
+    burst_ids = ids[100:103]
+    seed_browse_stack(live_server["db"], burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    badge = page.locator(
+        f"#grid .grid-card[data-id='{cover_id}'] .browse-stack-badge"
+    )
+    badge.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    badge.click()
+    tray = page.locator(f".browse-stack-tray[data-stack-cover-id='{cover_id}']")
+    expect(tray).to_be_visible()
+    tray.get_by_role("button", name="Select all").click()
+    badge.click()
+    expect(tray).to_be_hidden()
+    page.wait_for_function(
+        """args => selectedPhotoId === args.cover
+             && args.ids.every(id => selectedPhotos.has(id))
+             && selectedPhotos.size === args.ids.length""",
+        arg={"cover": cover_id, "ids": burst_ids},
+    )
+
+    _change_sort(page, "name_desc")
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    ), "re-sorting dropped a stack selected through the tray"
+    assert _ids_on_screen(page, burst_ids), (
+        "the selected stack is off screen after the re-sort"
+    )

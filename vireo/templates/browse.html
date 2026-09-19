@@ -4616,9 +4616,16 @@ function loadedBrowseStackCoverForPhoto(photoId) {
    the card the user is looking at. Resolve it back to that card so it can
    anchor a reload like any other selected card. */
 function browseSelectedStackCoverId() {
-  if (selectedPhotoId != null || selectedPhotos.size < 2) return null;
+  if (selectedPhotos.size < 2) return null;
   var isTheSelection = function(photo) {
     if (!photo || !photo.browse_stack) return false;
+    // A focused photo alongside the set usually means a batch the user built
+    // by hand around one card. One case is still a whole stack: collapsing a
+    // tray that "Select all" filled pins the focus to the visible cover
+    // (``batchHasHiddenMembers`` in toggleBrowseStack) because a collapsed
+    // tray cannot hold a focus on a hidden frame. Accept a focus that *is*
+    // this cover, reject any other (Codex P2 on PR #1695).
+    if (selectedPhotoId != null && photo.id !== selectedPhotoId) return false;
     var ids = browseStackMemberIdsFor(photo);
     return !!ids && ids.length === selectedPhotos.size
       && ids.every(function(id) { return selectedPhotos.has(id); });
