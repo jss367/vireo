@@ -117,7 +117,9 @@ def test_reader_is_read_only_and_hides_labels_before_feature_preparation(library
     assert "confirmed_species" not in bundle["photos"][0]
     assert "flag" not in bundle["photos"][0]
     assert "answers" not in bundle["photos"][0]
-    assert bundle["photos"][0]["evidence"][0]["sources"][0]["predictions"][0]["taxon"] == "name:spotted redshank"
+    # "Spotted Redshank" is carried by exactly one taxon in this catalog, so
+    # the preferred-name fallback resolves it even unstamped (see #1694).
+    assert bundle["photos"][0]["evidence"][0]["sources"][0]["predictions"][0]["taxon"] == "inat:101"
 
 
 def test_new_run_picks_up_label_change_but_retained_inputs_remain_consistent(library, tmp_path):
@@ -335,14 +337,28 @@ def test_raw_predictions_share_production_identity_policy(library, tmp_path, mod
 
 @pytest.mark.parametrize("ambiguous", [False, True])
 def test_keyword_alias_cannot_resolve_untrusted_prediction_name(library, tmp_path, ambiguous):
+    """A `keywords` row naming a taxon must never make an untrusted
+    prediction name resolve to it.
+
+    Both parametrizations put the name beyond the resolver's own reach and
+    then check the keyword alias does not sneak it back in. `ambiguous=True`
+    uses a stamped index that recorded the collision; `ambiguous=False` uses
+    an unstamped catalog where a second taxon carries the same preferred
+    name, which is the case #1694's fallback deliberately still refuses.
+    Without that second taxon the unstamped half would resolve on the
+    preferred name alone and stop testing the alias at all.
+    """
     from taxonomy import COMMON_NAME_IDENTITY_VERSION
 
+    conn = sqlite3.connect(library)
     if ambiguous:
-        conn = sqlite3.connect(library)
         conn.execute("INSERT INTO db_meta VALUES('common_name_identity_version', ?)", (str(COMMON_NAME_IDENTITY_VERSION),))
         conn.execute("INSERT INTO db_meta VALUES('ambiguous_common_names', ?)", (json.dumps(["spotted redshank", "glossy ibis"]),))
-        conn.commit()
-        conn.close()
+    else:
+        conn.execute("INSERT INTO taxa VALUES(3,103,'Tringa totanus','Spotted Redshank','species')")
+        conn.execute("INSERT INTO taxa VALUES(4,104,'Plegadis chihi','Glossy Ibis','species')")
+    conn.commit()
+    conn.close()
     output = tmp_path / "run"
     manifest = prepare(library, output)
     bundle = read_bundle(output, manifest["sessions"][0])
