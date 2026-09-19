@@ -1697,32 +1697,15 @@ class Database:
         cur = self.conn.cursor()
         removal_cols = {r[1] for r in cur.execute("PRAGMA table_info(workspace_folder_removals)")}
         if "recursive" not in removal_cols:
+            # The old table only recorded exact folder IDs. A single-folder
+            # unlink and a subtree removal followed by an explicit child
+            # restore can leave identical rows, so recursion cannot safely
+            # be inferred from current membership. Preserve the stored
+            # exact scope; future tree removals record recursion explicitly.
             cur.execute(
                 "ALTER TABLE workspace_folder_removals "
-                "ADD COLUMN recursive INTEGER NOT NULL DEFAULT 1"
+                "ADD COLUMN recursive INTEGER NOT NULL DEFAULT 0"
             )
-            # Legacy exact records came from both subtree removal and
-            # single-folder unlink. A linked descendant proves the latter:
-            # recursive removal would have unlinked that descendant too.
-            cur.execute("""UPDATE workspace_folder_removals SET recursive = 0
-                WHERE EXISTS (
-                    SELECT 1 FROM folders root
-                    JOIN workspace_folders wf
-                      ON wf.workspace_id = workspace_folder_removals.workspace_id
-                    JOIN folders child ON child.id = wf.folder_id
-                    LEFT JOIN local_folder_mappings root_mapping ON root_mapping.folder_id = root.id
-                    LEFT JOIN local_folder_mappings child_mapping ON child_mapping.folder_id = child.id
-                    WHERE root.id = workspace_folder_removals.folder_id
-                      AND (
-                        substr(REPLACE(child.path, '\\', '/'), 1,
-                               length(RTRIM(REPLACE(root.path, '\\', '/'), '/')) + 1)
-                            = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
-                        OR substr(REPLACE(COALESCE(child_mapping.source_path, child.path), '\\', '/'), 1,
-                                  length(RTRIM(REPLACE(COALESCE(root_mapping.source_path, root.path), '\\', '/'), '/')) + 1)
-                            = RTRIM(REPLACE(COALESCE(root_mapping.source_path, root.path), '\\', '/'), '/') || '/'
-                      )
-                )
-            """)
         scope_version = cur.execute(
             "SELECT value FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'"
         ).fetchone()

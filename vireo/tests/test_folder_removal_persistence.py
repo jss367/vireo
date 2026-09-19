@@ -216,11 +216,13 @@ def test_existing_catalog_gains_removal_tracking(shared_tree):
         assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent}
 
 
-@pytest.mark.parametrize("recursive_removal", [True, False])
-def test_catalog_with_exact_removal_records_gains_subtree_tracking(shared_tree, recursive_removal):
+@pytest.mark.parametrize("operation", ["tree", "single", "restore_child"])
+def test_catalog_upgrade_preserves_legacy_exact_scope(shared_tree, operation):
     db, workspace, other, parent, missing, child = shared_tree
-    if recursive_removal:
+    if operation != "single":
         db.delete_folder(missing)
+        if operation == "restore_child":
+            db.add_workspace_folder(workspace, child)
     else:
         db.remove_workspace_folder(workspace, missing)
     db.conn.execute("DROP VIEW workspace_removed_folders")
@@ -231,8 +233,25 @@ def test_catalog_with_exact_removal_records_gains_subtree_tracking(shared_tree, 
         upgraded.set_active_workspace(other)
         new_folder = upgraded.add_folder(upgraded.get_folder(missing)["path"] + "/new",
                                          parent_id=missing, workspace_root=False)
-        expected = {parent} if recursive_removal else {parent, child, new_folder}
+        # Pre-recursive catalogs excluded known IDs, not unknown future
+        # paths. Upgrading must preserve that scope without inventing intent.
+        expected = {parent, new_folder} if operation == "tree" else {parent, child, new_folder}
         assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == expected
+
+
+def test_upgrade_preserves_recorded_recursive_scope_with_restored_child(shared_tree):
+    db, workspace, other, parent, missing, child = shared_tree
+    db.delete_folder(missing)
+    db.add_workspace_folder(workspace, child)
+    db.conn.execute("DELETE FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'")
+    db.conn.commit()
+    with Database(db._db_path) as upgraded:
+        upgraded.set_active_workspace(other)
+        upgraded.add_folder(upgraded.get_folder(missing)["path"] + "/sibling",
+                            parent_id=missing, workspace_root=False)
+        new_child = upgraded.add_folder(upgraded.get_folder(child)["path"] + "/new",
+                                        parent_id=child, workspace_root=False)
+        assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent, child, new_child}
 
 
 def test_global_folder_delete_cleans_up_removal_records(shared_tree):
