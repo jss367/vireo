@@ -534,11 +534,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   border-color: var(--success);
   background: var(--success);
 }
-.lightbox-detail-status.is-degraded .lb-detail-spinner {
-  animation: none;
-  border-color: var(--warning);
-  background: var(--warning);
-}
 @keyframes lb-detail-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .lb-detail-spinner { animation: none; border-top-color: rgba(255,255,255,0.26); }
@@ -10703,65 +10698,12 @@ function _lbDetailSharpeningPending() {
   return _lbSrcRank(_lbDesiredSrcKey) > _lbSrcRank(_lbCurrentSrcKey);
 }
 
-function _lbDetailIsDegraded() {
-  // /original is gone, the surviving preview holds fewer pixels than the file
-  // does, and the user has zoomed in past fit to look at them. _lbLayoutDims
-  // rebases onto the fallback in this state, so nothing is literally upscaled --
-  // 1:1 becomes 1:1 of the preview. That is the problem: the zoom badge reads
-  // 100% while showing preview pixels, and the detail in the file is not
-  // reachable at any zoom. Confirming Full detail there is a lie at exactly the
-  // moment a photographer is pixel-peeping to judge sharpness.
-  //
-  // Stays quiet at fit on purpose: the preview is everything that view could
-  // resolve anyway, so the missing original costs the user nothing to see.
-  if (!_lbOriginalUnavailable) return false;
-  var img = document.getElementById('lightboxImg');
-  var have = img ? Math.max(img.naturalWidth, img.naturalHeight) : 0;
-  if (!have) return false;
-
-  // A developed JPEG companion can have geometry of its own, and the catalog
-  // row describes the RAW. _lbLayoutDims makes the same exception; here there is
-  // nothing to compare against, because the companion's true size is not known.
-  // Claim nothing rather than warn on dimensions that are not this render's.
-  if (
-    _lightboxCurrentId != null &&
-    _vireoPairKnownByPhoto[String(_lightboxCurrentId)] &&
-    _vireoPairSource(_lightboxCurrentId) === 'jpeg'
-  ) {
-    return false;
-  }
-
-  // What this photo actually renders as, not its catalog dimensions: a 6000px
-  // source cropped to a 3000px render is fully carried by the fallback, and
-  // warning about missing detail there would be false. Same helpers as
-  // _lbLayoutDims, so the warning and the on-screen geometry cannot disagree.
-  var oriented = _lbOrientedPhotoDims(img);
-  if (!oriented) return false;
-  var rendered = _lbDisplayDimsForRecipe(oriented.w, oriented.h, _lbCurrentEditRecipe);
-  var renderLongEdge = Math.max(Number(rendered.w) || 0, Number(rendered.h) || 0);
-  if (renderLongEdge <= have * 1.01) return false;  // the fallback holds it all
-
-  // The file holds more than the fallback. Whether that costs the user anything
-  // depends on the view. Zoomed in, it always does -- _lbLayoutDims rebases onto
-  // the fallback when the original is gone, so 1:1 silently becomes 1:1 of the
-  // preview and the file's detail is unreachable at any zoom. At fit it usually
-  // does not, but not always: a large or high-DPI viewport can need more device
-  // pixels than the fallback has, and then the fit view is visibly undersampled.
-  if (_lbZoom > 1.001) return true;
-  var dims = _lbLayoutDims();
-  if (!dims || !_lbFitScale) return false;
-  var dpr = window.devicePixelRatio || 1;
-  var needed = Math.max(dims.w, dims.h) * _lbFitScale * _lbZoom * dpr;
-  return needed > have * 1.01;
-}
-
 function _lbDetailStatusPhase() {
   // _lbVisualTransitionPending is navigation-only -- it stays false when the
   // lightbox opens from closed, which is the case with the emptiest overlay and
   // the most need for a signal. _lbInitialDecodePending covers both.
   if (_lbVisualTransitionPending || _lbInitialDecodePending) return 'loading';
   if (_lbPreviewLoading || _lbDetailSharpeningPending()) return 'sharpening';
-  if (_lbDetailIsDegraded()) return 'degraded';
   if (_lbDetailStatusSettled) return 'full';
   return 'off';
 }
@@ -10769,7 +10711,6 @@ function _lbDetailStatusPhase() {
 function _lbDetailStatusLabel(phase) {
   if (phase === 'loading') return 'Loading\u2026';
   if (phase === 'sharpening') return 'Sharpening\u2026';
-  if (phase === 'degraded') return 'Preview only';
   return 'Full detail';
 }
 
@@ -10788,14 +10729,7 @@ function _lbPaintDetailStatus(phase) {
   el.style.display = 'inline-flex';
   el.setAttribute('data-phase', phase);
   el.classList.toggle('is-full', phase === 'full');
-  el.classList.toggle('is-degraded', phase === 'degraded');
   if (phase !== 'full') el.classList.remove('is-fading');
-  if (phase === 'degraded') {
-    el.title = 'The original file could not be loaded. This is the sharpest preview available, '
-      + 'so the finest detail in the file is not shown.';
-  } else {
-    el.removeAttribute('title');
-  }
   if (text) text.textContent = _lbDetailStatusLabel(phase);
 }
 
@@ -10819,23 +10753,6 @@ function _lbRenderDetailStatus() {
     _lbResetDetailStatus();
     return;
   }
-  if (phase === 'degraded') {
-    // A standing condition rather than an event, so it skips the show delay and
-    // never fades: the user needs it while the degraded view is on screen, not
-    // for 900ms after some load happened to finish.
-    //
-    // It deliberately does NOT set _lbDetailStatusShown. That flag means "a
-    // progress state was on screen long enough for this load to be worth
-    // confirming", and this is neither progress nor this load. Setting it let a
-    // zoom back to fit promote the warning straight to Full detail with nothing
-    // having loaded, and let the outgoing photo's warning -- still live at
-    // openLightbox's reset, since _lbOriginalUnavailable clears later -- rob the
-    // incoming photo of its quiet period.
-    if (_lbDetailShowTimer) { clearTimeout(_lbDetailShowTimer); _lbDetailShowTimer = null; }
-    _lbCancelDetailConfirmation();
-    _lbPaintDetailStatus('degraded');
-    return;
-  }
   if (phase === 'full') {
     // Only confirm a load the user actually watched happen.
     if (!_lbDetailStatusShown) { _lbResetDetailStatus(); return; }
@@ -10846,7 +10763,6 @@ function _lbRenderDetailStatus() {
   _lbCancelDetailConfirmation();
   if (_lbDetailStatusShown) { _lbPaintDetailStatus(phase); return; }
   if (_lbDetailShowTimer) return;  // delay already armed; do not restart it
-  _lbPaintDetailStatus('off');     // a stale warning must not sit over a live load
   _lbDetailShowTimer = setTimeout(function() {
     _lbDetailShowTimer = null;
     var next = _lbDetailStatusPhase();
@@ -10859,6 +10775,14 @@ function _lbRenderDetailStatus() {
 function _lbMarkDetailSettled() {
   // Nothing was announced, so there is nothing to confirm.
   if (!_lbDetailStatusShown) return;
+  // /original failed for this photo, so the displayed tier may hold fewer pixels
+  // than the file does -- and when it does, _lbLayoutDims rebases onto the
+  // fallback, making 1:1 mean 1:1 of the preview while the zoom badge still
+  // reads 100%. Rather than work out whether this particular view loses detail
+  // (crop, rotation, JPEG companion, viewport and DPR all change the answer),
+  // withhold the claim whenever the original is gone. Absence asserts nothing;
+  // "Full detail" would assert something we cannot vouch for.
+  if (_lbOriginalUnavailable) return;
   _lbCancelDetailConfirmation();
   _lbDetailStatusSettled = true;
   _lbDetailFadeTimer = setTimeout(function() {

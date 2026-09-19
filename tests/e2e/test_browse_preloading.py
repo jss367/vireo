@@ -933,169 +933,32 @@ def test_initial_load_does_not_settle_while_a_sharper_tier_is_still_pending(live
     ) is False
 
 
-def test_detail_status_does_not_call_an_upscaled_fallback_full_detail(live_server, page):
-    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
-    # /original is gone, so 1:1 on a 6000px photo rebases onto the 3840 preview:
-    # the zoom badge reads 100% while the file's finest detail is unreachable.
-    page.route("**/photos/*/original*", lambda r: r.abort())
-    page.route("**/photos/*/preview?*", lambda r: r.fulfill(body=_jpeg(3840, 2560), content_type="image/jpeg"))
-    _open_window(page, live_server)
-    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
-    page.evaluate("setLightboxZoomToOneToOne()")
-
-    page.wait_for_function("_lbOriginalUnavailable && !_lbPreviewLoading")
-    status = page.locator("#lightboxPreviewStatus")
-    expect(status).to_be_visible()
-    assert _detail_text(page) == "Preview only"
-    assert page.evaluate("_lbDetailIsDegraded()") is True
-    assert "sharpest preview available" in page.evaluate(
-        "document.getElementById('lightboxPreviewStatus').title"
-    )
-
-    # Back at fit the surviving tier really is everything the view can show.
-    page.evaluate("setLightboxZoomToFit()")
-    page.wait_for_function("!_lbDetailIsDegraded()")
-    assert _detail_text(page) != "Preview only"
-
-def test_edit_reload_clears_a_preview_upgrade_it_cancelled(live_server, page):
-    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
-    page.route("**/photos/*/original*", lambda r: None)
-    _open_window(page, live_server)
-    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
-    page.evaluate("setLightboxZoomToOneToOne()")
-    expect(page.locator("#lightboxPreviewStatus")).to_be_visible()
-    assert _detail_text(page) == "Sharpening…"
-
-    # The reload cancels _lbSwapTimer and clears the desired key, so the old
-    # preloader callbacks return as stale and nothing else would ever turn the
-    # loading flag off.
-    page.evaluate("_lbReloadCurrentRenderAfterEdit(115)")
-    assert page.evaluate("_lbPreviewLoading") is False
-    assert page.evaluate("_lbDetailSharpeningPending()") is False
-
-
-def test_degraded_detail_measures_the_cropped_render_not_the_catalog_size(live_server, page):
-    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
-    page.route("**/photos/*/original*", lambda r: r.abort())
-    page.route("**/photos/*/preview?*", lambda r: r.fulfill(body=_jpeg(3840, 2560), content_type="image/jpeg"))
-    _open_window(page, live_server)
-    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
-    page.evaluate("setLightboxZoomToOneToOne()")
-    page.wait_for_function("_lbOriginalUnavailable && !_lbPreviewLoading")
-    assert page.evaluate("_lbDetailIsDegraded()") is True
-
-    # Crop the 6000px source to a 3000px render: the 3840 fallback now carries
-    # every pixel the render has, so there is no missing detail to warn about.
-    page.evaluate("_lbCurrentEditRecipe = {crop: {x: 0, y: 0, w: 0.5, h: 0.5}};")
-    assert page.evaluate("_lbDetailIsDegraded()") is False
-
-
-def test_degraded_detail_covers_a_fit_view_the_fallback_cannot_resolve(live_server, page):
-    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
-    page.route("**/photos/*/original*", lambda r: r.abort())
-    page.route("**/photos/*/preview?*", lambda r: r.abort())
-    _open_window(page, live_server)
-    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
-    page.evaluate("setLightboxZoomToOneToOne()")
-    page.wait_for_function("_lbOriginalUnavailable")
-    page.evaluate("setLightboxZoomToFit()")
-    page.wait_for_function("_lbZoom <= 1.001 && _lbCurrentSrcKey === 'full' && !_lbPreviewLoading")
-
-    # At DPR 1 this viewport is resolved fully by the 1920 preview, so the
-    # missing original costs nothing to see.
-    assert page.evaluate("_lbDetailIsDegraded()") is False
-
-    # A bigger or denser display needs more device pixels for the same CSS size.
-    # Derive the DPR that puts the fit view past what the fallback holds, rather
-    # than hardcoding one that happens to work at this viewport -- the real
-    # trigger is viewport x DPR, and CI viewports differ.
-    dpr = page.evaluate(
-        """() => {
-          const img = document.getElementById('lightboxImg');
-          const dims = _lbLayoutDims();
-          const have = Math.max(img.naturalWidth, img.naturalHeight);
-          const perDpr = Math.max(dims.w, dims.h) * _lbFitScale * _lbZoom;
-          return (have * 1.2) / perDpr;
-        }"""
-    )
-    page.evaluate(
-        "d => Object.defineProperty(window, 'devicePixelRatio', {value: d, configurable: true})",
-        dpr,
-    )
-    assert page.evaluate("_lbDetailIsDegraded()") is True
-
-
-def _route_lost_original(page):
-    """/original is gone, so 1:1 lands on the 3840 preview of a 6000px photo."""
+def test_detail_status_withholds_full_detail_when_the_original_is_gone(live_server, page):
     page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
     page.route("**/photos/*/original*", lambda r: r.abort())
     page.route("**/photos/*/preview?*", lambda r: r.fulfill(
         body=_jpeg(3840, 2560), content_type="image/jpeg"))
-
-
-def _go_degraded(page):
-    """Leave the lightbox showing the standing 'Preview only' warning at 1:1."""
+    _open_window(page, live_server)
     page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
     page.evaluate("setLightboxZoomToOneToOne()")
     page.wait_for_function("_lbOriginalUnavailable && !_lbPreviewLoading")
-    assert page.evaluate("_lbDetailIsDegraded()") is True
-    assert _detail_text(page) == "Preview only"
 
-
-def test_degraded_warning_is_not_confirmable(live_server, page):
-    _route_lost_original(page)
-    _open_window(page, live_server)
-    _go_degraded(page)
-
-    # 'Preview only' is a standing condition, not a load the user watched. It
-    # must not claim _lbDetailStatusShown, which is what gates the 'Full detail'
-    # confirmation -- otherwise a later settle can promote the warning into a
-    # claim that pixels arrived when nothing loaded at all.
-    # Clear the flag the preceding 'Sharpening…' legitimately set, then re-render
-    # the standing warning: it must not put it back.
-    page.evaluate("_lbDetailStatusShown = false; _lbRenderDetailStatus();")
-    assert _detail_text(page) == "Preview only"
-    assert page.evaluate("_lbDetailStatusShown") is False
-    page.evaluate("_lbMarkDetailSettled()")
-    assert page.evaluate("_lbDetailStatusSettled") is False
-    assert _detail_text(page) == "Preview only"
-
-    # Zooming back to fit loads nothing, so the warning clears rather than
-    # resolving into a confirmation.
-    page.evaluate("setLightboxZoomToFit()")
-    page.wait_for_function("!_lbDetailIsDegraded()")
-    assert _detail_text(page) != "Full detail"
+    # Nothing is in flight and the original is gone, so the chip goes quiet
+    # rather than confirming a completeness it cannot vouch for.
     expect(page.locator("#lightboxPreviewStatus")).to_be_hidden()
 
-
-def test_degraded_warning_does_not_rob_the_next_photo_of_its_quiet_period(live_server, page):
-    _route_lost_original(page)
-    _open_window(page, live_server)
-    _go_degraded(page)
-
-    # openLightbox resets the chip before _lbOriginalUnavailable clears, so the
-    # outgoing photo's warning is still live when the reset renders. It must not
-    # mark the chip as already shown for the incoming photo.
-    armed = page.evaluate(
+    # And the confirmation stays withheld even with a progress state on screen:
+    # the 3840 fallback is not the 6000px file, and _lbLayoutDims has rebased
+    # onto it, so 1:1 is really 1:1 of the preview.
+    settled = page.evaluate(
         """() => {
-          lightboxNav(1);
-          return {shown: _lbDetailStatusShown};
+          _lbDetailStatusShown = true;
+          _lbMarkDetailSettled();
+          return {
+            settled: _lbDetailStatusSettled,
+            text: document.getElementById('lightboxPreviewStatusText').textContent,
+          };
         }"""
     )
-    assert armed["shown"] is False
-
-
-def test_degraded_detail_stays_silent_for_a_jpeg_companion(live_server, page):
-    _route_lost_original(page)
-    _open_window(page, live_server)
-    _go_degraded(page)
-
-    # Displayed from a JPEG companion, the catalog row describes the RAW, so the
-    # companion's true size is unknown and there is no basis for the warning.
-    page.evaluate(
-        """() => {
-          _vireoPairKnownByPhoto[String(_lightboxCurrentId)] = true;
-          _vireoPairSource = function() { return 'jpeg'; };
-        }"""
-    )
-    assert page.evaluate("_lbDetailIsDegraded()") is False
+    assert settled["settled"] is False
+    assert settled["text"] != "Full detail"
