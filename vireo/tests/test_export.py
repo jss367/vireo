@@ -833,6 +833,34 @@ def test_export_photos_applies_adjustment_recipe(export_env):
     assert max(r, g, b) > 100
 
 
+@pytest.mark.parametrize("key", ["texture", "clarity", "dehaze"])
+def test_export_photos_applies_presence_recipe(export_env, key):
+    import numpy as np
+    from presence import apply_presence
+
+    env = export_env
+    x = np.arange(192, dtype=np.float32)
+    row = 140 + 35 * np.sin(2 * np.pi * x / 24)
+    pixels = np.broadcast_to(row[None, :, None], (120, 192, 3)).astype(np.uint8)
+    source_path = env["src"] / "bird1.jpg"
+    Image.fromarray(pixels).save(source_path, quality=95)
+    env["db"].set_photo_edit_recipe(env["p1"], {"adjustments": {key: 75}})
+
+    result = export_photos(
+        db=env["db"], vireo_dir=env["vireo_dir"], photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "format": "png"},
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(source_path) as source:
+        expected = np.asarray(apply_presence(source, **{key: 75}))
+        assert not np.array_equal(expected, np.asarray(source))
+    with Image.open(os.path.join(env["dest"], "bird1.png")) as exported:
+        np.testing.assert_array_equal(np.asarray(exported), expected)
+
+
 def test_export_non_crop_recipe_loads_with_requested_size(export_env, monkeypatch):
     import export as export_module
 

@@ -36,6 +36,9 @@ _ADJUSTMENT_RANGES = {
     "contrast": (-100.0, 100.0),
     "vibrance": (-100.0, 100.0),
     "saturation": (-100.0, 100.0),
+    "texture": (-100.0, 100.0),
+    "clarity": (-100.0, 100.0),
+    "dehaze": (-100.0, 100.0),
     # Detail ops (see detail.py). Zero is a no-op like every other adjustment;
     # sharpen_radius is validated separately because its no-op is absence, not 0.
     "sharpen": (0.0, 100.0),
@@ -49,6 +52,8 @@ SHARPEN_RADIUS_DEFAULT = 1.0
 # per-pixel tone pipeline. A recipe containing only these must not run the
 # tone pass at all (so a detail-only edit stays byte-exact outside detail).
 _DETAIL_KEYS = frozenset({"sharpen", "sharpen_radius", "noise_reduction"})
+# Global spatial controls run in presence.py before local detail branches.
+_PRESENCE_KEYS = frozenset({"texture", "clarity", "dehaze"})
 
 # Local (mask-weighted) adjustments — see
 # docs/plans/2026-07-03-local-adjustments-design.md. Region values are deltas
@@ -716,7 +721,8 @@ def _apply_recipe_impl(
 
     adjustments = normalized.get("adjustments") or {}
     tone_adjustments = {
-        k: v for k, v in adjustments.items() if k not in _DETAIL_KEYS
+        k: v for k, v in adjustments.items()
+        if k not in _DETAIL_KEYS | _PRESENCE_KEYS
     }
     subject_tone, background_tone = (
         _local_region_deltas(local, _LOCAL_TONE_KEYS)
@@ -747,8 +753,8 @@ def apply_recipe(img, recipe, local_mask=None, native_size=None):
 
     ``local_mask`` is the recipe's edit-mask snapshot (PIL 'L', source
     working space — see local_masks.load_snapshot); without it any local
-    regions in the recipe are skipped. Note the detail pass (global and
-    local) runs in :func:`apply_recipe_to_loaded_image`, not here.
+    regions in the recipe are skipped. Presence and detail passes (global
+    and local) run in :func:`apply_recipe_to_loaded_image`, not here.
     """
     normalized = normalize_recipe(recipe)
     if normalized is None:
@@ -816,7 +822,7 @@ def apply_recipe_to_loaded_image(
     img, recipe, max_size=None, native_size=None, detail_scale=None,
     local_mask=None,
 ):
-    """Apply edits, constrain the long edge, then run the detail pass.
+    """Apply edits, constrain the long edge, then run presence and detail.
 
     Detail ops (sharpen/NR) are neighborhood filters authored in native
     pixels, so they run last — at output resolution, with kernels scaled by
@@ -859,6 +865,16 @@ def apply_recipe_to_loaded_image(
         if detail_scale is not None
         else detail_render_scale(result.size, native_size, normalized)
     )
+
+    # Global presence runs before the two local detail branches so neither
+    # branch can discard it when subject/background sharpening is active.
+    presence = {key: adjustments[key] for key in _PRESENCE_KEYS if adjustments.get(key)}
+    if presence:
+        try:
+            from .presence import apply_presence
+        except ImportError:
+            from presence import apply_presence
+        result = apply_presence(result, scale=scale, **presence)
 
     subject_detail, background_detail = (
         _local_region_deltas(local, _DETAIL_KEYS)
