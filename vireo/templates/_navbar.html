@@ -11088,6 +11088,14 @@ function _lbScheduleAdjacentPhoto(sourceKey, delay) {
 
 function _lbScheduleSourceSwap(targetZoom, immediate) {
   if (!_lightboxCurrentId) return;
+  // Was a sharper tier already requested for the displayed bitmap? Read this
+  // before retargeting: if the new target is the tier already on screen, that
+  // request is being abandoned rather than fulfilled. _lbProgressiveTargetKey
+  // deliberately does not count -- it is the initial pick being evaluated for
+  // the first time, not a request in flight.
+  var abandoningRequest = !!_lbDesiredSrcKey
+    && _lbDesiredSrcKey !== _lbCurrentSrcKey
+    && _lbSrcRank(_lbDesiredSrcKey) > _lbSrcRank(_lbCurrentSrcKey);
   var desired = _lbPickSourceKey(targetZoom);
   // Metadata may still be in flight when a warm preview first becomes visible.
   // Keep the initial conservative tier until geometry can refine it.
@@ -11098,7 +11106,10 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
   }
   if (desired === _lbCurrentSrcKey) {
     _lbProgressiveTargetKey = null;
-    _lbMarkDetailSettled();
+    // Zooming back to a level the current tier already satisfies cancels the
+    // sharper request. Nothing loaded, so go quiet rather than claim the pixels
+    // the user was waiting on arrived.
+    if (!abandoningRequest) _lbMarkDetailSettled();
     _lbSetPreviewLoading(false);
     _lbScheduleAdjacentPhoto(desired);
     return;

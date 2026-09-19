@@ -615,3 +615,22 @@ def test_detail_status_restarts_its_quiet_period_for_each_photo(live_server, pag
     # scratch rather than inherit the outgoing photo's timer or visible chip.
     # Read synchronously: the re-arm is a timer that has not fired yet.
     assert page.evaluate("lightboxNav(1); _lbDetailStatusShown") is False
+
+
+def test_detail_status_does_not_confirm_a_cancelled_upgrade(live_server, page):
+    held = []
+
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", lambda r: held.append(r))
+    _open_window(page, live_server)
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0; LB_DETAIL_SETTLED_MS = 30000;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+    status = page.locator("#lightboxPreviewStatus")
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Sharpening…"
+
+    # Zooming back to fit abandons the request rather than completing it, so the
+    # chip must go quiet -- the original the user was waiting on never arrived.
+    page.evaluate("setLightboxZoomToFit()")
+    expect(status).to_be_hidden()
+    assert page.evaluate("_lbCurrentSrcKey") == "full"
