@@ -618,7 +618,7 @@ body {
   }
 }
 </style>
-<link rel="stylesheet" href="{{ url_for('static', filename='photo_editor_color.css') }}">
+<link rel="stylesheet" href="/static/photo_editor_color.css">
 </head>
 <body>
 {% include '_navbar.html' %}
@@ -4504,6 +4504,6 @@ async function initEditor() {
 
 document.addEventListener('DOMContentLoaded', initEditor);
 </script>
-<script src="{{ url_for('static', filename='photo_editor_color.js') }}"></script>
+<script src="/static/photo_editor_color.js"></script>
 </body>
 </html>
