@@ -2901,3 +2901,37 @@ def test_shared_sidecar_preparation_failure_retains_newer_edits(tmp_path, db):
     assert sync.sync_to_xmp(db)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "2"
     assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize("fail_middle", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+def test_sync_case_aliases_preserve_order_and_retry(tmp_path, db, monkeypatch, fail_middle, existing):
+    import sync
+    from xmp import read_sync_preview_metadata
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(tmp_path, db)
+    alias_path = os.path.join(os.path.dirname(path), "BIRD.xmp")
+    if not os.path.exists(alias_path) or not os.path.samefile(path, alias_path):
+        pytest.skip("needs a case-insensitive filesystem")
+    if not existing:
+        os.unlink(path)
+    second = db.add_photo(folder_id=db.get_photo(first)["folder_id"], filename="BIRD.nef",
+                          extension=".nef", file_size=100, file_mtime=1.0)
+    for pid, rating in [(first, "1"), (second, "2"), (first, "3")]:
+        db.queue_change(pid, "rating", rating)
+    if fail_middle:
+        real_write = sync._write_photo_sync
+
+        def fail_alias(path, plan, *args, **kwargs):
+            if plan.rating == 2:
+                raise OSError("injected alias failure")
+            return real_write(path, plan, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sync, "_write_photo_sync", fail_alias)
+            assert not sync.sync_to_xmp(db, create_missing_sidecars=True)["ok"]
+        assert len(db.get_pending_changes()) == 3
+    assert sync.sync_to_xmp(db, create_missing_sidecars=True)["ok"]
+    assert read_sync_preview_metadata(path)["rating"] == "3"
+    assert not db.get_pending_changes()

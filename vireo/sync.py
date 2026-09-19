@@ -556,6 +556,43 @@ def _ordered_sidecar_steps(db, changes, sync_flags, sync_locations, location_key
     return steps
 
 
+def _sidecar_target_identities(resolved_paths):
+    """Distinguish actual files without treating case spelling as identity.
+
+    Most sidecars have just one resolved spelling and need no extra stat.
+    Conservative alias groups need filesystem evidence: on macOS, realpath
+    can preserve different spellings of the same file. Uncreated aliases or
+    files whose identity cannot be read stay coupled until we can distinguish
+    them; each write still uses its own path, even in that conservative group.
+    """
+    aliases = defaultdict(set)
+    for path in resolved_paths.values():
+        aliases[os.path.normcase(path).casefold()].add(path)
+    identities = {}
+    for canonical, paths in aliases.items():
+        if len(paths) == 1:
+            path = next(iter(paths))
+            identities[path] = ("path", path)
+            continue
+        group = {}
+        for path in paths:
+            try:
+                stat = os.stat(path)
+            except FileNotFoundError:
+                group[path] = ("missing", canonical)
+            except OSError:
+                break
+            else:
+                if not stat.st_ino:
+                    break
+                group[path] = ("file", stat.st_dev, stat.st_ino)
+        else:
+            identities.update(group)
+            continue
+        identities.update(dict.fromkeys(paths, ("unknown", canonical)))
+    return identities
+
+
 def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
                 folder_paths=None, require_workspace_membership=True, status_callback=None):
     """Write pending changes to XMP sidecars.
@@ -728,7 +765,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                     resolve_errors[path] = error
     # Two keys per photo: a case-folded canonical key groups conservative
     # aliases onto one worker so a case-insensitive host never publishes an
-    # aliased sidecar in parallel; a case-preserving identity key names the
+    # aliased sidecar in parallel; a filesystem identity key names the
     # actual target file, so two case variants on a case-sensitive host share
     # a worker but keep independent failure fates. Coupling by the case-folded
     # key would retain an unrelated photo's queued edits whenever a persistent
@@ -736,6 +773,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     by_sidecar = defaultdict(list)
     sidecar_for_photo = {}
     identity_for_photo = {}
+    target_identities = _sidecar_target_identities(resolved_paths)
     for photo_id in accessible_photos:
         path = xmp_paths[photo_id]
         if path in resolve_errors:
@@ -747,7 +785,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             continue
         resolved = resolved_paths[xmp_paths[photo_id]]
         canonical_key = os.path.normcase(resolved).casefold()
-        identity_key = os.path.normcase(resolved)
+        identity_key = target_identities[resolved]
         by_sidecar[canonical_key].append(photo_id)
         sidecar_for_photo[photo_id] = canonical_key
         identity_for_photo[photo_id] = identity_key
@@ -797,7 +835,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         Photos that share a canonical key run on one worker so a case-insensitive
         host never overlaps aliased writes. But two case variants on a
         case-sensitive host are distinct files: a persistent failure on one must
-        not retain the other's queued edits. Partition by the case-preserving
+        not retain the other's queued edits. Partition by the filesystem
         identity so each true target's fate is independent, while cross-photo
         queue order within a truly shared target is still preserved.
         """
