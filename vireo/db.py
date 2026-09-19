@@ -807,6 +807,7 @@ class Database:
                 raise IncompatibleDatabaseError(self._db_path, str(e)) from e
             raise
         self.repair_missing_folder_parents()
+        self.repair_stale_folder_parents()
         self.ensure_default_workspace()
         # Normalize retired keyword types before seeding the built-in genres.
         # Cheap warm-path (single SELECT 1 LIMIT 1) once all legacy rows are
@@ -2598,6 +2599,45 @@ class Database:
             updates,
         )
         self.conn.commit()
+
+    def repair_stale_folder_parents(self):
+        """Repair parent links left behind by older folder moves.
+
+        Only non-NULL links that contradict the saved paths are changed.
+        Managed local copies deliberately retain their archive parentage, so
+        defer links involving those folders until their local session ends.
+        This runs on startup and is idempotent; no filesystem access or photo
+        and workspace membership changes are needed, even for offline paths.
+        """
+        with self.conn:
+            # Read and repair one snapshot: a concurrent move or local-copy
+            # activation must not change paths after we validate the links.
+            self.conn.execute("BEGIN IMMEDIATE")
+            managed_ids = {
+                row[0] for row in self.conn.execute(
+                    "SELECT folder_id FROM local_folder_mappings "
+                    "UNION SELECT folder_id FROM local_workspace_folders"
+                )
+            }
+            rows = self.conn.execute(
+                "SELECT id, path, parent_id FROM folders"
+            ).fetchall()
+            paths = {row["id"]: _path_for_subtree_match(row["path"]) for row in rows}
+            updates = []
+            for row in rows:
+                fid, parent_id = row["id"], row["parent_id"]
+                if parent_id is None or fid in managed_ids or parent_id in managed_ids:
+                    continue
+                parent_path = paths.get(parent_id)
+                if parent_path is not None and paths[fid].startswith(parent_path + "/"):
+                    continue
+                updates.append((self.nearest_ancestor_folder_id(row["path"], exclude_id=fid), fid))
+            self.conn.executemany(
+                "UPDATE folders SET parent_id = ? WHERE id = ?", updates,
+            )
+        if updates:
+            log.info("Repaired %d stale folder parent links", len(updates))
+        return len(updates)
 
     # -- Workspaces --
 
@@ -5506,6 +5546,10 @@ class Database:
                 "UPDATE folders SET path = ? WHERE id = ?", (child_new, child["id"])
             )
             rebased_paths.append((child["path"], child_new))
+        # Browse and subtree filters follow parent_id, not path. Re-link only
+        # after all paths have changed so the moved tree follows its new
+        # ancestors instead of staying nested under the source parent.
+        self._relink_parents_by_path([folder_id] + [c["id"] for c in children])
         # Cascade the rename into ``photos.last_move_source_folder_path`` too.
         # That column stores the STORED source folder path a destination photo
         # was moved from, and the same-stem developed-render collision guard
