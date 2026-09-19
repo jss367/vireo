@@ -1689,7 +1689,7 @@ def _folder_subtree_photos(db, folder_id):
         descendant_predicate = "VIREO_DATE_MOVE_DESCENDS(f.path) = 1"
         descendant_params = ()
     return db.conn.execute(
-        f"""SELECT p.id, p.exif_data, p.timestamp, p.file_mtime
+        f"""SELECT p.id, p.filename, p.exif_data, p.timestamp, p.file_mtime
            FROM photos p
            JOIN folders f ON f.id = p.folder_id
            WHERE f.id = ?
@@ -1744,7 +1744,7 @@ def plan_folder_date_moves_with_capture_dates(
     for photo in photos:
         capture_dt = _photo_capture_datetime(photo)
         capture_dts.append(capture_dt)
-        relative = build_destination_path(capture_dt, template)
+        relative = build_destination_path(capture_dt, template, photo["filename"])
         if not relative:
             raise ValueError("folder template produced an empty path")
         # Canonicalize harmless dot components before grouping or joining.

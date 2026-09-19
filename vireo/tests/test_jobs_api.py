@@ -11448,3 +11448,30 @@ def test_extract_masks_route_reports_unreadable_sources(
     assert any("could not be read" in e for e in (result.get("errors") or [])), (
         f"The job needs an actionable error, not just a counter; got {result!r}"
     )
+
+
+@pytest.mark.parametrize("template", ["{file_type}/%Y", "%Y/{file_type}", "{file_type}"])
+def test_file_type_template_cannot_land_on_after_process_mount(
+    app_and_db, tmp_path, stub_move, template,
+):
+    import config as cfg
+
+    root = tmp_path / "Photos"
+    mount = root / ("2026/RAW" if template.startswith("%Y") else "RAW")
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos", "mount_path": str(mount),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    client = app_and_db[0].test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)], "destination": str(root),
+        "folder_template": template,
+        "after_import": _process_id(app_and_db[1], "Cull-ready"),
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "mount" in resp.get_json()["error"]

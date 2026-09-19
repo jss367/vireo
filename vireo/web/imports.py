@@ -1290,7 +1290,7 @@ def create_imports_blueprint(
                     ts = datetime.fromtimestamp(
                         source_file.stat().st_mtime)
             try:
-                rel_folder = build_destination_path(ts, folder_template)
+                rel_folder = build_destination_path(ts, folder_template, source_file)
             except ValueError:
                 return False
             folder = (
@@ -2532,6 +2532,23 @@ def create_imports_blueprint(
         """
         if value is None:
             return None, None
+        if "{file_type}" in folder_template:
+            from ingest import DESTINATION_FILE_TYPES
+
+            # Check every possible render against the NAS mount guard below.
+            # Treating the token as a literal would miss e.g. a mount at RAW/.
+            snapshot = None
+            for file_type in DESTINATION_FILE_TYPES:
+                templates = [folder_template.replace("{file_type}", file_type)]
+                if "%" in folder_template:
+                    templates.append(f"{file_type}/unsorted")
+                for template in templates:
+                    snapshot, error = _validate_after_process_move(
+                        value, after_import, destination, template,
+                    )
+                    if error is not None:
+                        return None, error
+            return snapshot, None
         if not isinstance(value, dict):
             return None, json_error(
                 "after_process_move must be an object or null, got "

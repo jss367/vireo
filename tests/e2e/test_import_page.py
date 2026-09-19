@@ -5849,3 +5849,42 @@ def test_snapshot_start_sends_no_selection_fields(live_server, page):
     assert "include_paths" not in body
     assert "previewed_count" not in body
     assert "checked_count" not in body
+
+
+def test_import_file_type_folders_preview_and_start(live_server, page, tmp_path):
+    from PIL import Image
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "green").save(card / "photo.JPG")
+    (card / "photo.NEF").write_bytes(b"raw photo contents")
+    archive = tmp_path / "archive"
+    submitted = []
+
+    def capture_import(route):
+        submitted.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({"job_id": "test-type-import"}))
+
+    page.route("**/api/jobs/import-photos", capture_import)
+    page.goto(f"{live_server['url']}/import")
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill(str(card))
+    page.locator("#btnAddSource").click()
+    page.locator("#destInput").fill(str(archive))
+    page.locator("#afterImportSelect").select_option("__none__")
+    page.locator("#folderTemplatePreset").select_option("{file_type}")
+    structure = page.locator("#destStructure")
+    expect(structure).to_be_visible(timeout=15000)
+    expect(structure).to_contain_text("JPEG")
+    expect(structure).to_contain_text("RAW")
+    # Changing back to the default retires the split-folder preview.
+    page.locator("#folderTemplatePreset").select_option("%Y/%Y-%m-%d")
+    expect(structure).not_to_contain_text("RAW")
+    page.locator("#folderTemplatePreset").select_option("{file_type}")
+    expect(structure).to_contain_text("RAW", timeout=15000)
+    expect(page.locator("#btnStart")).to_be_enabled()
+    with page.expect_response("**/api/jobs/import-photos"):
+        page.locator("#btnStart").click()
+    assert len(submitted) == 1
+    assert submitted[0]["folder_template"] == "{file_type}"
+    assert submitted[0]["destination"] == str(archive)
