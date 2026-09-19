@@ -61,7 +61,8 @@ def apply_presence(img, *, texture=0.0, clarity=0.0, dehaze=0.0, scale=1.0):
         img = img.convert("RGBA" if has_alpha else "RGB")
     elif img.mode == "RGB" and "transparency" in img.info:
         img = img.convert("RGBA")
-    texture_sigma = max(0.3, 3.0 * scale)
+    # Distinct floors retain a texture band even in small thumbnails.
+    texture_sigma = max(0.6, 3.0 * scale)
     fine_sigma = max(0.3, 0.7 * scale)
     clarity_sigma = max(0.3, 12.0 * scale)
     haze_sigma = max(0.3, 8.0 * scale)

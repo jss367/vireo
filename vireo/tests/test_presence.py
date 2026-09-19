@@ -75,6 +75,15 @@ def test_texture_targets_finer_detail_than_clarity():
     assert np.abs(clarity - base).mean() > np.abs(texture - base).mean() * 2
 
 
+@pytest.mark.parametrize('scale', [512 / 6000, 256 / 6000])
+def test_texture_remains_visible_at_thumbnail_scales(scale):
+    img = _pattern(period=12)
+    base = np.asarray(img).astype(float)[:, 24:-24]
+    boosted = np.asarray(apply_presence(img, texture=80, scale=scale)).astype(float)[:, 24:-24]
+    softened = np.asarray(apply_presence(img, texture=-80, scale=scale)).astype(float)[:, 24:-24]
+    assert boosted.std() > base.std() > softened.std()
+
+
 def test_dehaze_reduces_veil_and_negative_adds_it():
     scene = np.linspace(30, 230, 192, dtype=np.float32)
     hazy = (scene * 0.6 + 230 * 0.4).astype(np.uint8)
