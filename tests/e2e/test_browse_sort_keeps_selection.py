@@ -950,3 +950,101 @@ def test_expression_reload_asks_about_every_picked_frame_at_once(
     assert len(calls) <= 2, (
         f"one focused query should cover every candidate, got {len(calls)}"
     )
+
+
+def test_sort_change_leaves_the_selected_stack_collapsed(live_server, page):
+    """A re-sort must not open the tray of the stack it is keeping.
+
+    The anchor is a lookup target as well as a selection. Frames of one
+    stack tie on position, so the focused lookup can answer with a hidden
+    frame — and ``loadUntilPhotoRendered`` would then expand that stack's
+    tray to reach it, leaving the collapsed card the user selected standing
+    open and the viewport anchored on a frame instead of the card (Codex P2
+    on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:103]
+    seed_browse_stack(db, burst_ids)
+    # Cover the burst with its highest-ID frame, so "lowest ID wins" and
+    # "the frame we asked about wins" disagree.
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[-1],),
+        )
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id == max(burst_ids), (
+        f"the quality-ranked cover should be {max(burst_ids)}, got {cover_id}"
+    )
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    _change_sort(page, "name_desc")
+
+    assert page.evaluate("() => expandedBrowseStacks.size") == 0, (
+        "the re-sort opened the tray of the stack it was keeping"
+    )
+    expect(page.locator(".browse-stack-tray")).to_have_count(0)
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    )
+    assert _ids_on_screen(page, [cover_id]) == [cover_id], (
+        "the viewport should hold the stack's card"
+    )
+
+
+def test_sort_change_keeps_a_huge_stack_inside_the_lookup_limit(
+    live_server, page,
+):
+    """More frames than the lookup takes must degrade, not fail.
+
+    Nothing caps how many frames a burst can hold, and each candidate is a
+    bound parameter in one ``IN`` clause. Sending them all would make a
+    re-sort on a big enough stack a 400 — after ``resetAndLoad`` has already
+    cleared the window, so the grid would be left empty and the selection
+    gone (Codex P2 on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:106]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    # Stand in for a burst with more frames than the lookup accepts.
+    page.evaluate("() => { BROWSE_MAX_FOCUS_CANDIDATES = 3; }")
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    calls = _capture_queries(page)
+    _change_sort(page, "name_desc")
+
+    focused = [call for call in calls if call["request"].get("focus_photo_id")]
+    assert focused, "the re-sort must still ask where the stack went"
+    for call in focused:
+        candidates = call["request"].get("focus_photo_ids") or []
+        assert len(candidates) <= 2, (
+            f"{len(candidates)} fallback ids sent past the lookup limit"
+        )
+        assert call["response"] is not None, "the focused query failed"
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    ), "the selection was dropped"
+    assert _ids_on_screen(page, burst_ids), "the stack is off screen"

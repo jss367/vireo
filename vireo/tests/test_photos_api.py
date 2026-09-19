@@ -12642,6 +12642,41 @@ def test_api_photos_query_focus_photo_ids_report_a_stack_by_any_frame(
     assert payload["focus_photo_id"] in (hidden, cover)
 
 
+def test_api_photos_query_focus_photo_ids_prefer_the_frame_asked_about(
+    app_and_db,
+):
+    """Frames of one stack tie on position, so the caller's order decides.
+
+    They all report their cover's position, so ranking by ID would answer
+    with whichever frame happens to hold the lowest one. The caller named
+    the frame that *is* the card first, and answering with a hidden member
+    instead sends the client off to expand a tray around a frame the user
+    never opened.
+    """
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    hidden, cover = ids[8], ids[9]
+    assert hidden < cover, "the cover must not be the lowest ID for this test"
+    with db.conn:
+        _seed_browse_burst(db, [hidden, cover], folder_id=folder)
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,),
+        )
+
+    payload = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "stacks": True,
+        "per_page": 3,
+        "focus_photo_id": cover,
+        "focus_photo_ids": [hidden],
+    }).get_json()
+
+    assert payload["focus_photo_id"] == cover
+    assert payload["focus_index"] == 8
+
+
 def test_api_photos_query_focus_photo_ids_report_none_when_all_are_gone(
     app_and_db,
 ):

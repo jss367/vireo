@@ -26113,6 +26113,21 @@ class Database:
         )
         return found[1] if found is not None else None
 
+    @staticmethod
+    def _candidate_preference_case(column, ids):
+        """ORDER BY fragment ranking ``ids`` in the order they were asked for.
+
+        Position alone does not decide between frames of one stack: they all
+        report their cover's position, so a plain ``ORDER BY position, id``
+        would answer with whichever frame happens to hold the lowest ID. The
+        caller asked about a card, and it named the frame that *is* that card
+        first — answering with a hidden member instead would send the client
+        off to expand a tray around a frame the user never opened. Binds one
+        parameter per ID (the ``IN`` list binds them once more).
+        """
+        whens = " ".join(f"WHEN ? THEN {rank}" for rank in range(len(ids)))
+        return f"CASE {column} {whens} ELSE {len(ids)} END"
+
     def query_browse_stack_position_first(self, rules, photo_ids, sort="date",
                                           collection_id=None, folder_id=None,
                                           include_offline_folders=False,
@@ -26143,6 +26158,7 @@ class Database:
         )
         order = self._stack_sort_clause(sort)
         placeholders = ",".join("?" for _ in ids)
+        preference = self._candidate_preference_case("ranked.id", ids)
         query = ranked + f"""
             , cover_positions AS (
                 SELECT _stack_key AS _position_key,
@@ -26154,10 +26170,10 @@ class Database:
             FROM cover_positions
             JOIN ranked ON ranked._stack_key = cover_positions._position_key
             WHERE ranked.id IN ({placeholders})
-            ORDER BY position, id
+            ORDER BY position, {preference}
             LIMIT 1
         """
-        row = self.conn.execute(query, [*params, *ids]).fetchone()
+        row = self.conn.execute(query, [*params, *ids, *ids]).fetchone()
         if row is None:
             return None
         return int(row["id"]), int(row["position"])
@@ -26521,6 +26537,7 @@ class Database:
             "p.sharpness, p.quality_score"
         )
         placeholders = ",".join("?" for _ in ids)
+        preference = self._candidate_preference_case("id", ids)
         query = f"""
             SELECT id, position FROM (
                 SELECT id, ROW_NUMBER() OVER (ORDER BY {order}) - 1 AS position
@@ -26532,13 +26549,13 @@ class Database:
                 ) p
             ) ordered_photos
             WHERE id IN ({placeholders})
-            ORDER BY position, id
+            ORDER BY position, {preference}
             LIMIT 1
         """
         # ORDER BY sits in the outer select list, ahead of the inner
         # subquery's WHERE, so its parameters bind first.
         row = self.conn.execute(
-            query, [*order_params, *params, *ids]
+            query, [*order_params, *params, *ids, *ids]
         ).fetchone()
         if row is None:
             return None

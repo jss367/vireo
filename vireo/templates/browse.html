@@ -2580,6 +2580,10 @@ var anchorScanDepth = 0;
 var pendingFocusAnchor = null;
 // Which photo the last focused load was actually placed by (see loadPhotos).
 var browseResolvedFocusPhotoId = null;
+// How many photos one focused lookup may be asked about, matching
+// ``_MAX_FOCUS_PHOTO_IDS`` on the server. Requests are kept inside it rather
+// than allowed to fail: see buildBrowsePageRequest.
+var BROWSE_MAX_FOCUS_CANDIDATES = 200;
 // The scope the pending anchor belongs to. Sidebar folder/keyword/collection
 // clicks bump ``browseScopeGen``; the photo then belongs to the view the user
 // left, so the anchor must not survive into the new one.
@@ -7443,8 +7447,18 @@ async function resetAndLoad(options) {
     if (!resetRequestIsCurrent()) return null;
     // The frame the server placed the page by becomes the anchor: it is the
     // card the restore selects around and the one the scroll holds onto.
+    // Resolved to the top-level card it is part of, because the anchor is a
+    // lookup target as well as a selection: handed a hidden frame,
+    // ``loadUntilPhotoRendered`` would expand that stack's tray to reach it,
+    // so a plain re-sort would leave the collapsed stack the user selected
+    // standing open (Codex P2 on PR #1695).
     if (anchor && focusAnchor && browseResolvedFocusPhotoId != null) {
-      anchor.photoId = browseResolvedFocusPhotoId;
+      var resolvedCover = anchor.stackSelection
+        ? loadedBrowseStackCoverForPhoto(browseResolvedFocusPhotoId)
+        : null;
+      anchor.photoId = resolvedCover
+        ? resolvedCover.id
+        : browseResolvedFocusPhotoId;
     }
     if (!anchor) {
       if (scrollAnchor) {
@@ -7665,10 +7679,19 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
   // card, so a reload that dropped the frame we asked about first can still
   // be placed by one it kept — in the same request, rather than one retry
   // per frame (Codex P2 on PR #1695).
+  //
+  // Truncated to what the lookup accepts. Nothing caps how many frames a
+  // burst can hold, and every candidate becomes a bound parameter in one
+  // ``IN`` clause, so an enormous stack would otherwise turn a re-sort into
+  // a 400 — and this request runs after the window has been cleared, which
+  // would leave the grid empty and the selection gone (Codex P2 on
+  // PR #1695). Dropping the tail degrades nothing the user can see: the
+  // frame this asks about first is the card itself, and the fallbacks only
+  // matter when the reload dropped it.
   var focusPhotoIds = (requestOptions && requestOptions.focusPhotoIds
-      ? requestOptions.focusPhotoIds.filter(function(id) {
-          return id != null && id !== focusPhotoId;
-        })
+      ? requestOptions.focusPhotoIds
+          .filter(function(id) { return id != null && id !== focusPhotoId; })
+          .slice(0, BROWSE_MAX_FOCUS_CANDIDATES - (focusPhotoId == null ? 0 : 1))
       : []);
   if (activeCollectionId && !dashboardCollectionScope) {
     var cparams = new URLSearchParams();
