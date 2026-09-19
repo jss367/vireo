@@ -8392,11 +8392,25 @@ function openLightbox(photoId, filename, photoList, options) {
   }
   img.onload = handleInitialImageLoad;
   img.onerror = handleInitialImageError;
-  _lbPendingInitialLoadCommit = handleInitialImageLoad;
-  _lbPendingInitialLoadAbandon = abandonInitialLoad;
-  _lbInitialDecodePending = true;
+  var initialSrc = _lbSrcUrl(photoId, _lbCurrentSrcKey);
+  // Reopening the photo already on screen at the same source starts no load:
+  // the bitmap is decoded and still displayed. Reassigning an identical src is
+  // not guaranteed to emit a fresh load event, so arming a pending decode here
+  // could leave a wait that nothing ever ends. A reopen that lands on a
+  // different tier -- restoring a 1:1 viewport, say -- really is loading.
+  var reusingVisibleBitmap = !!(
+    reopeningVisiblePhoto &&
+    img.getAttribute('src') === initialSrc &&
+    img.complete &&
+    img.naturalWidth > 0
+  );
+  if (!reusingVisibleBitmap) {
+    _lbPendingInitialLoadCommit = handleInitialImageLoad;
+    _lbPendingInitialLoadAbandon = abandonInitialLoad;
+    _lbInitialDecodePending = true;
+  }
   _lbRenderDetailStatus();
-  img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
+  img.src = initialSrc;
   if (!_lbVisualTransitionPending) commitVisiblePhotoIdentity();
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };

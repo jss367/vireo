@@ -813,3 +813,32 @@ def test_failed_edit_reload_commits_identity_before_freeing_controls(live_server
     assert page.evaluate(
         "document.getElementById('lightboxActions').getAttribute('aria-busy')"
     ) == "false"
+
+
+def test_reopening_the_visible_photo_does_not_arm_a_decode_that_never_ends(live_server, page):
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    _open_window(page, live_server)
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+
+    # The native "Open in Lightbox" command reopens the photo already on screen.
+    # Reassigning an identical src need not emit a fresh load event, so nothing
+    # may be coming to end a pending decode -- and nothing needs to, since the
+    # bitmap is already decoded and displayed.
+    before = page.evaluate("document.getElementById('lightboxImg').src")
+    # Read synchronously. Chromium does re-fire load for an identical src, which
+    # would clear the flag before a second round trip and hide the bug; whether
+    # a load is armed at all is the engine-independent thing to assert.
+    armed = page.evaluate(
+        """() => {
+          openLightbox(115, 'photo-15.jpg', _lightboxPhotoList);
+          return {
+            pending: _lbInitialDecodePending,
+            parked: !!_lbPendingInitialLoadCommit,
+            src: document.getElementById('lightboxImg').src,
+          };
+        }"""
+    )
+    assert armed["src"] == before
+    assert armed["pending"] is False
+    assert armed["parked"] is False
+    expect(page.locator("#lightboxPreviewStatus")).to_be_hidden()
