@@ -489,8 +489,9 @@ def _recovered_paths(events):
     return out
 
 
+@pytest.mark.parametrize("template", ["%Y/%Y-%m-%d", "{file_type}/%Y/%Y-%m-%d"])
 def test_check_duplicates_reports_files_already_at_destination(
-    app_and_db, tmp_path
+    app_and_db, tmp_path, template
 ):
     """Same name + same size at the planned destination folder → streamed
     as ``recovered``, not counted as duplicate or left in "to copy"."""
@@ -499,6 +500,8 @@ def test_check_duplicates_reports_files_already_at_destination(
     src = _make_dated_source(tmp_path)
     dest = tmp_path / "archive"
     planned = dest / "2026" / "2026-07-03"
+    if "{file_type}" in template:
+        planned = dest / "JPEG" / "2026" / "2026-07-03"
     planned.mkdir(parents=True)
     import shutil
     shutil.copy2(str(src), str(planned / src.name))
@@ -507,7 +510,7 @@ def test_check_duplicates_reports_files_already_at_destination(
     resp = client.post("/api/import/check-duplicates", json={
         "paths": [str(src)],
         "destination": str(dest),
-        "folder_template": "%Y/%Y-%m-%d",
+        "folder_template": template,
     })
     assert resp.status_code == 200
 

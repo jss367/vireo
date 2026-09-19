@@ -331,6 +331,30 @@ def _platform_rsync_candidates():
     return tuple(cands)
 
 
+def rsync_install_guidance() -> dict:
+    """Installation help for the server's platform, shared by setup UIs."""
+    commands = []
+    if sys.platform == "darwin":
+        commands = ["brew install rsync"]
+        hint = (
+            "Install GNU rsync with Homebrew: brew install rsync. "
+            "The rsync bundled with macOS is not supported for Vireo's SSH transfers. "
+            "Vireo detects the Homebrew installation automatically; retry afterward."
+        )
+    elif sys.platform.startswith("linux"):
+        commands = ["sudo apt install rsync", "sudo dnf install rsync"]
+        hint = (
+            "Install GNU rsync with your distribution's package manager: "
+            "sudo apt install rsync (Debian/Ubuntu) or sudo dnf install rsync (Fedora). "
+            "Then retry."
+        )
+    else:
+        hint = "Install GNU rsync and configure its executable under Settings → Paths."
+    if commands:
+        hint += " For a custom installation, set the GNU rsync path under Settings → Paths."
+    return {"hint": hint, "commands": commands}
+
+
 def resolve_rsync_bin(configured=""):
     """Return an absolute path to a GNU rsync binary for remote moves, or None.
 
@@ -639,8 +663,8 @@ def test_remote_connection(remote, rsync_bin):
     if not rsync_bin:
         result["message"] = (
             "SSH and the remote path are reachable, but no GNU rsync was "
-            "found for the transfer. Install GNU rsync for your platform or "
-            "set its path under Settings → Paths.")
+            "found for the transfer. " + rsync_install_guidance()["hint"])
+        result["rsync_install_commands"] = rsync_install_guidance()["commands"]
         return result
     # Probe the REMOTE rsync. `rsync --version` is cheap and side-effect-free;
     # any non-zero exit (or a missing binary, which the remote shell reports
@@ -1689,7 +1713,7 @@ def _folder_subtree_photos(db, folder_id):
         descendant_predicate = "VIREO_DATE_MOVE_DESCENDS(f.path) = 1"
         descendant_params = ()
     return db.conn.execute(
-        f"""SELECT p.id, p.exif_data, p.timestamp, p.file_mtime
+        f"""SELECT p.id, p.filename, p.exif_data, p.timestamp, p.file_mtime
            FROM photos p
            JOIN folders f ON f.id = p.folder_id
            WHERE f.id = ?
@@ -1744,7 +1768,7 @@ def plan_folder_date_moves_with_capture_dates(
     for photo in photos:
         capture_dt = _photo_capture_datetime(photo)
         capture_dts.append(capture_dt)
-        relative = build_destination_path(capture_dt, template)
+        relative = build_destination_path(capture_dt, template, photo["filename"])
         if not relative:
             raise ValueError("folder template produced an empty path")
         # Canonicalize harmless dot components before grouping or joining.

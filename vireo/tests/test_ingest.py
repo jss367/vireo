@@ -7,7 +7,13 @@ from datetime import datetime
 
 import pytest
 from db import Database
-from ingest import build_destination_path, discover_source_files, ingest, preview_destination
+from ingest import (
+    build_destination_path,
+    destination_file_types_for,
+    discover_source_files,
+    ingest,
+    preview_destination,
+)
 from PIL import Image
 
 
@@ -23,6 +29,51 @@ def test_build_destination_path_custom_template():
 
 def test_build_destination_path_none_returns_unsorted():
     assert build_destination_path(None) == "unsorted"
+
+
+@pytest.mark.parametrize("filename,folder", [
+    ("photo.JPG", "JPEG"), ("photo.jpeg", "JPEG"),
+    ("photo.NEF", "RAW"), ("photo.cr3", "RAW"),
+    ("photo.png", "PNG"), ("photo.tif", "TIFF"), ("photo.tiff", "TIFF"),
+    ("photo.webp", "WEBP"), ("photo.bmp", "BMP"),
+])
+def test_file_type_folder_templates(filename, folder):
+    dt = datetime(2026, 3, 28)
+    assert build_destination_path(dt, "{file_type}/%Y/%Y-%m-%d", filename) == f"{folder}/2026/2026-03-28"
+    assert build_destination_path(dt, "%Y/{file_type}", filename) == f"2026/{folder}"
+    assert build_destination_path(None, "{file_type}", filename) == folder
+    assert build_destination_path(None, "{file_type}/%Y", filename) == f"{folder}/unsorted"
+
+
+@pytest.mark.parametrize("template", ["../{file_type}", "/{file_type}", "C:/{file_type}", "{file_type}/..\\escape"])
+def test_file_type_templates_reject_unsafe_paths_even_without_dates(template):
+    with pytest.raises(ValueError, match="unsafe folder template"):
+        build_destination_path(None, template, "photo.jpg")
+
+
+def test_file_type_template_requires_source():
+    with pytest.raises(ValueError, match="require a source file"):
+        build_destination_path(datetime(2026, 3, 28), "{file_type}")
+
+
+def test_destination_file_types_for_raw_only():
+    assert destination_file_types_for("raw") == ("RAW",)
+
+
+def test_destination_file_types_for_jpeg_covers_all_image_categories():
+    # ``jpeg`` accepts every non-RAW image extension, so the guard must
+    # cover every category those extensions can produce, not just "JPEG".
+    result = set(destination_file_types_for("jpeg"))
+    assert "JPEG" in result and "TIFF" in result and "PNG" in result
+    assert "RAW" not in result
+
+
+def test_destination_file_types_for_both_covers_every_category():
+    assert set(destination_file_types_for("both")) >= {"RAW", "JPEG", "TIFF"}
+
+
+def test_destination_file_types_for_extension_list():
+    assert destination_file_types_for([".nef", ".jpg"]) == ("JPEG", "RAW")
 
 
 def test_build_destination_path_rejects_absolute_template():
@@ -872,6 +923,133 @@ def test_ingest_progress_callback(tmp_path):
     assert len(progress_calls) == 3
     assert progress_calls[-1][0] == 3  # current
     assert progress_calls[-1][1] == 3  # total
+
+
+@pytest.mark.parametrize("callback_raises", [False, True])
+@pytest.mark.parametrize("outcome", [
+    "copied", "known_duplicate", "match_failure", "batch_duplicate",
+    "empty_collision", "hash_collision", "copy_failure",
+])
+def test_ingest_progress_once_per_completed_file(
+    tmp_path, monkeypatch, caplog, outcome, callback_raises,
+):
+    import ingest as ingest_module
+
+    src = tmp_path / "card"
+    dst = tmp_path / "library"
+    src.mkdir()
+    dst.mkdir()
+    target = src / "target.jpg"
+    Image.new("RGB", (50, 50), color="blue").save(target)
+    options = {"folder_template": "photos", "verify_by_hash": True}
+    expected_calls = [(1, 1, target.name)]
+    expected_copied = 0
+    expected_skipped = 0
+    expected_failed = 0
+
+    if outcome == "known_duplicate":
+        options["extra_known_hashes"] = {
+            ingest_module.compute_file_hash(str(target)),
+        }
+        expected_skipped = 1
+    elif outcome == "batch_duplicate":
+        (src / "first.jpg").write_bytes(target.read_bytes())
+        expected_calls = [(1, 2, "first.jpg"), (2, 2, target.name)]
+        expected_copied = 1
+        expected_skipped = 1
+    elif outcome in {"empty_collision", "hash_collision"}:
+        if outcome == "empty_collision":
+            target.write_bytes(b"")
+        (dst / "photos").mkdir()
+        (dst / "photos" / target.name).write_bytes(target.read_bytes())
+        expected_skipped = 1
+    elif outcome == "match_failure":
+        def fail_match(self, path):
+            raise OSError("simulated match failure")
+
+        monkeypatch.setattr(ingest_module.DuplicateChecker, "match", fail_match)
+        expected_failed = 1
+    elif outcome == "copy_failure":
+        def fail_copy(*args, **kwargs):
+            raise OSError("simulated copy failure")
+
+        monkeypatch.setattr(ingest_module.shutil, "copy2", fail_copy)
+        expected_failed = 1
+    else:
+        expected_copied = 1
+
+    calls = []
+    callback_error = RuntimeError("progress delivery failed")
+
+    def progress(current, total, filename):
+        calls.append((current, total, filename))
+        # Raise only on the first target notification: a swallowed exception
+        # followed by a retry must not accidentally satisfy pytest.raises.
+        if callback_raises and calls == expected_calls:
+            raise callback_error
+
+    db = Database(str(tmp_path / "test.db"))
+    if callback_raises:
+        with pytest.raises(RuntimeError) as raised:
+            ingest(str(src), str(dst), db=db, progress_callback=progress, **options)
+        assert raised.value is callback_error
+        assert "progress delivery failed" not in caplog.text
+    else:
+        result = ingest(
+            str(src), str(dst), db=db, progress_callback=progress, **options,
+        )
+        assert result["copied"] == expected_copied
+        assert result["skipped_duplicate"] == expected_skipped
+        assert result["failed"] == expected_failed
+        assert result["total"] == len(expected_calls)
+    assert calls == expected_calls
+
+
+def test_ingest_progress_across_both_passes(tmp_path):
+    import ingest as ingest_module
+
+    src = tmp_path / "card"
+    src.mkdir()
+    Image.new("RGB", (50, 50), color="blue").save(src / "copy.jpg")
+    Image.new("RGB", (50, 50), color="red").save(src / "duplicate.jpg")
+    calls = []
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(
+        str(src), str(tmp_path / "library"), db=db,
+        extra_known_hashes={
+            ingest_module.compute_file_hash(str(src / "duplicate.jpg")),
+        },
+        verify_by_hash=True,
+        progress_callback=lambda *event: calls.append(event),
+    )
+
+    # The survivor is encountered first, but is only complete in pass 2.
+    assert calls == [(1, 2, "duplicate.jpg"), (2, 2, "copy.jpg")]
+    assert result["copied"] == 1
+    assert result["skipped_duplicate"] == 1
+    assert result["failed"] == 0
+
+
+def test_ingest_cancel_before_next_copy_does_not_report_completion(tmp_path):
+    from scanner import ScanCancelled
+
+    src = tmp_path / "card"
+    _create_test_files(src, ["first.jpg", "second.jpg"])
+    calls = []
+
+    def checkpoint():
+        if calls:
+            raise ScanCancelled()
+
+    db = Database(str(tmp_path / "test.db"))
+    with pytest.raises(ScanCancelled):
+        ingest(
+            str(src), str(tmp_path / "library"), db=db,
+            skip_duplicates=False, pause_callback=checkpoint,
+            progress_callback=lambda *event: calls.append(event),
+        )
+
+    assert calls == [(1, 2, "first.jpg")]
 
 
 def test_ingest_skip_duplicates_via_db_hash(tmp_path):
@@ -1940,7 +2118,7 @@ def test_preview_destination_reports_template_samples_from_real_dates(tmp_path):
     to be a hardcoded ``2026-07-12`` copied from a test fixture, which
     contradicted the resulting-folders list rendered right below it.
     """
-    from ingest import FOLDER_TEMPLATE_PRESETS
+    from ingest import FOLDER_TEMPLATE_PRESETS, IMPORT_FILE_TYPE_TEMPLATES
 
     src = tmp_path / "sd_card"
     dst = tmp_path / "nas"
@@ -1961,7 +2139,8 @@ def test_preview_destination_reports_template_samples_from_real_dates(tmp_path):
     )
 
     samples = result["template_samples"]["samples"]
-    assert set(samples) == set(FOLDER_TEMPLATE_PRESETS)
+    assert set(samples) == set(FOLDER_TEMPLATE_PRESETS + IMPORT_FILE_TYPE_TEMPLATES)
+    assert samples["{file_type}/%Y/%Y-%m-%d"] == "JPEG/2026/2026-03-25"
     assert samples["%Y/%Y-%m-%d"] == "2026/2026-03-25"
     assert samples["%Y-%m-%d"] == "2026-03-25"
     assert samples["%Y/%m"] == "2026/03"
@@ -1993,7 +2172,12 @@ def test_preview_destination_template_samples_say_unsorted_when_undated(
         sources=[str(src)], destination=str(dst), folder_template="%Y-%m-%d",
     )
 
-    assert set(result["template_samples"]["samples"].values()) == {"unsorted"}
+    from ingest import FOLDER_TEMPLATE_PRESETS
+
+    samples = result["template_samples"]["samples"]
+    assert {samples[t] for t in FOLDER_TEMPLATE_PRESETS} == {"unsorted"}
+    assert samples["{file_type}/%Y/%Y-%m-%d"] == "JPEG/unsorted"
+    assert samples["{file_type}"] == "JPEG"
     assert result["template_samples"]["dated_count"] == 0
 
 
@@ -2151,3 +2335,21 @@ def test_preview_destination_multiple_sources(tmp_path):
     assert result["total_photos"] == 2
     assert result["total_folders"] == 1
     assert result["folders"][0]["count"] == 2
+
+
+def test_ingest_file_type_paths_match_preview_and_staging_checks(tmp_path):
+    from local_processing import archive_conflict_report, existing_archive_bytes
+
+    src, dst = tmp_path / "card", tmp_path / "archive"
+    _create_test_files(str(src), ["photo.jpg", "photo.nef"])
+    template = "{file_type}"
+    preview = preview_destination([str(src)], str(dst), template)
+    assert {f["path"] for f in preview["folders"]} == {"JPEG", "RAW"}
+    with Database(str(tmp_path / "test.db")) as db:
+        result = ingest(str(src), str(dst), db=db, folder_template=template, skip_duplicates=False)
+        assert result["copied"] == 2
+    files = discover_source_files(str(src))
+    assert existing_archive_bytes(str(dst), files, folder_template=template) == sum(f.stat().st_size for f in files)
+    (dst / "RAW/photo.nef").write_bytes(b"partial")
+    conflicts = archive_conflict_report(str(dst), files, folder_template=template, indexed_paths=set())
+    assert str(dst / "RAW/photo.nef") in conflicts["partial"]

@@ -14784,3 +14784,53 @@ def test_remote_zero_byte_source_that_grows_is_not_adopted(
     # pre-existing empty file was left alone.
     assert (mount_dir / "IMG_0001_1.jpg").read_bytes() == b"late bytes"
     assert (mount_dir / "IMG_0001.jpg").stat().st_size == 0
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["local", "ssh"])
+def test_file_type_import_matches_preview_and_recovers_existing_files(
+    tmp_path, monkeypatch, remote,
+):
+    """JPEG/RAW siblings land, catalog, and resume in their separate folders."""
+    from import_job import ImportParams, run_import_job
+    from ingest import preview_destination
+
+    card = _make_card(tmp_path, [("photo.JPG", datetime(2026, 7, 3))])
+    raw = card / "photo.NEF"
+    raw.write_bytes(b"raw photo contents")
+    timestamp = datetime(2026, 7, 3).timestamp()
+    os.utime(raw, (timestamp, timestamp))
+    ra = _remote_archive_for(tmp_path) if remote else None
+    destination = Path(ra["mount_base"]) if remote else tmp_path / "archive"
+    if remote:
+        calls = _remote_calls(ra)
+        _install_fake_remote_rsync(monkeypatch, calls)
+    params = ImportParams(
+        sources=[str(card)], destination=str(destination),
+        folder_template="{file_type}/%Y/%Y-%m-%d",
+        remote_target=ra, verify_by_hash=True, skip_duplicates=False,
+    )
+    preview = preview_destination(params.sources, params.destination, params.folder_template)
+    assert {f["path"] for f in preview["folders"]} == {
+        "JPEG/2026/2026-07-03", "RAW/2026/2026-07-03",
+    }
+    # An interrupted import already copied the RAW without cataloging it.
+    raw_dest = destination / "RAW/2026/2026-07-03/photo.NEF"
+    raw_dest.parent.mkdir(parents=True)
+    raw_dest.write_bytes(raw.read_bytes())
+    db_path = str(tmp_path / "test.db")
+    with Database(db_path) as db:
+        result = run_import_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, params)
+        assert result["failed"] == 0
+        assert result["copied"] == 1
+        assert result["skipped_duplicate"] == 1
+        rows = _photo_rows(db)
+        assert {r["folder_path"] for r in rows} == {f["full_path"] for f in preview["folders"]}
+        assert {r["filename"] for r in rows} == {"photo.JPG", "photo.NEF"}
+        for source in card.iterdir():
+            folder = "RAW" if source.suffix == ".NEF" else "JPEG"
+            assert (destination / folder / "2026/2026-07-03" / source.name).read_bytes() == source.read_bytes()
+        assert not list(destination.rglob("*_1.*"))
+        if remote:
+            assert {c["dest_spec"] for c in calls["rsync"]} == {
+                "me@nas:/volume1/Photography/JPEG/2026/2026-07-03",
+            }

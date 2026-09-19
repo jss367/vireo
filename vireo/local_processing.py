@@ -220,6 +220,7 @@ def archive_conflict_report(
             rel_folder = build_destination_path(
                 timestamps.get(source_file),
                 folder_template,
+                source_file,
             )
             dest_folder = archive_root / rel_folder
             folder_key = os.path.normcase(os.path.abspath(dest_folder))
@@ -323,6 +324,7 @@ def existing_archive_bytes(
             rel_folder = build_destination_path(
                 timestamps.get(source_file),
                 folder_template,
+                source_file,
             )
             dest_folder = archive_root / rel_folder
             folder_key = os.path.normcase(os.path.abspath(dest_folder))
