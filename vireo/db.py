@@ -10,7 +10,11 @@ import unicodedata
 import uuid
 from datetime import datetime
 
-from keyword_identity import identity_sql, resolve_import_alias
+from keyword_identity import (
+    identity_sql,
+    keywords_claim_different_taxa,
+    resolve_import_alias,
+)
 from keyword_normalization import (
     keyword_match_key,
     normalize_keyword_display,
@@ -16403,7 +16407,8 @@ class Database:
         # Reparent children onto the destination before deleting, or the
         # keywords.parent_id FK aborts the merge mid-way.
         children = self.conn.execute(
-            "SELECT id, name, type, place_id FROM keywords WHERE parent_id = ?",
+            "SELECT id, name, type, place_id, taxon_id, source_taxon_id, is_species "
+            "FROM keywords WHERE parent_id = ?",
             (src_id,),
         ).fetchall()
         for child in children:
@@ -16414,11 +16419,23 @@ class Database:
                 )
             except sqlite3.IntegrityError:
                 existing = self.conn.execute(
-                    "SELECT id, type, place_id FROM keywords "
-                    "WHERE parent_id = ? AND name = ?",
+                    "SELECT id, type, place_id, taxon_id, source_taxon_id, is_species "
+                    "FROM keywords WHERE parent_id = ? AND name = ?",
                     (dst_id, child["name"]),
                 ).fetchone()
-                if (
+                if keywords_claim_different_taxa(self, existing, child):
+                    # Two same-named species rows that resolve to DIFFERENT
+                    # taxa. A recursive merge keeps the destination's taxon
+                    # and does not fold `source_taxon_id`, so every photo
+                    # under the migrating row would silently come out tagged
+                    # as the other species. Same reasoning as the distinct
+                    # place case below; keep both rows instead.
+                    disambiguated = f"{child['name']} (id-{child['id']})"
+                    self.conn.execute(
+                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
+                        (dst_id, disambiguated, child["id"]),
+                    )
+                elif (
                     existing["type"] == "location"
                     and child["type"] == "location"
                     and existing["place_id"] is not None

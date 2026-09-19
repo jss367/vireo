@@ -7,6 +7,7 @@ from keyword_identity import (
     keyword_paths,
     location_candidates,
     merge_keywords,
+    path_key,
     preview_keyword_merge,
     reconcile_location,
 )
@@ -719,6 +720,131 @@ def test_manual_merge_at_the_root_collapses_a_whole_duplicate_chain(catalog):
         'United States > California > Borrego Springs > Nature Trail',
         'United States > California > Borrego Springs > Trailhead',
     ]
+
+
+def test_merging_parents_keeps_same_named_children_of_different_species(catalog):
+    """Two branches can each hold a "Hummingbird" that means a different bird.
+    Same name and same type is not the same keyword: collapsing them keeps the
+    destination's taxon and drops the source's, so the migrating row's photos
+    would come out tagged as the other species. Keep both instead, the way the
+    distinct-Google-place collision already does."""
+    db, photos = catalog
+    anna = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte anna', 'Anna\u2019s Hummingbird', 'species', 5112)").lastrowid
+    costa = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte costae', 'Costa\u2019s Hummingbird', 'species', 5113)").lastrowid
+    old = db.add_keyword('Trip A')
+    new = db.add_keyword('Trip B')
+    old_bird = db.add_keyword('Hummingbird', parent_id=old, is_species=True)
+    new_bird = db.add_keyword('Hummingbird', parent_id=new, is_species=True)
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (anna, old_bird))
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (costa, new_bird))
+    db.conn.commit()
+    db.tag_photo(photos[0], old_bird)
+    db.tag_photo(photos[1], new_bird)
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [
+        ('Hummingbird', 'rename')]
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+
+    survivor = db.conn.execute(
+        'SELECT name, parent_id, taxon_id FROM keywords WHERE id = ?', (old_bird,)).fetchone()
+    assert (survivor['name'], survivor['parent_id'], survivor['taxon_id']) == (
+        f'Hummingbird (id-{old_bird})', new, anna)
+    assert db.conn.execute(
+        'SELECT keyword_id FROM photo_keywords WHERE photo_id = ?',
+        (photos[0],)).fetchone()['keyword_id'] == old_bird
+
+
+def test_merging_parents_still_collapses_children_of_the_same_species(catalog):
+    """The split above must not block the ordinary case: a local taxon_id and
+    the matching iNat source_taxon_id name one species, so those children are
+    duplicates and still collapse into one."""
+    db, photos = catalog
+    anna = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte anna', 'Anna\u2019s Hummingbird', 'species', 5112)").lastrowid
+    old = db.add_keyword('Trip A')
+    new = db.add_keyword('Trip B')
+    old_bird = db.add_keyword('Hummingbird', parent_id=old, is_species=True)
+    new_bird = db.add_keyword('Hummingbird', parent_id=new, is_species=True)
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', source_taxon_id = 5112 WHERE id = ?",
+                    (old_bird,))
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (anna, new_bird))
+    db.conn.commit()
+    db.tag_photo(photos[0], old_bird)
+    db.tag_photo(photos[1], new_bird)
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [
+        ('Hummingbird', 'merge')]
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (old_bird,)).fetchone()
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?', (new_bird,))} == {
+        photos[0], photos[1]}
+
+
+def test_merge_conflict_guard_covers_photos_tagged_only_on_a_moved_descendant(catalog):
+    """The selected rows are not the whole blast radius -- a photo can be
+    tagged only on a descendant the merge is about to move. If that photo also
+    carries an unrelated linked place, the merge would queue it a location
+    resync that exports the wrong coordinates, so it has to trip the guard."""
+    db, photos = catalog
+    stray = db.add_keyword('Stray', kw_type='location')
+    leaf = db.add_keyword('Leaf', parent_id=stray, kw_type='location')
+    kept = db.add_keyword('Kept', kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'keep-place' WHERE id = ?", (kept,))
+    elsewhere = db.upsert_place_chain({
+        'place_id': 'other-place', 'name': 'Elsewhere', 'lat': 50, 'lng': 10,
+        'address_components': []})
+    db.conn.commit()
+    db.tag_photo(photos[0], leaf)
+    db.tag_photo(photos[0], elsewhere)
+    db.tag_photo(photos[1], kept)
+
+    with pytest.raises(ValueError, match='different linked place'):
+        preview_keyword_merge(db, [stray, kept], kept)
+    assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (stray,)).fetchone()
+
+
+def test_merge_rewrites_sidecars_for_children_collapsed_by_recursion(catalog):
+    """A child that collapses into a same-named sibling stops existing, so a
+    rewrite keyed to surviving rows skips its photos entirely: their sidecars
+    keep the retired hierarchy and a later rescan recreates the branch that
+    was just merged away. Point those photos at the sibling instead."""
+    db, photos = catalog
+    old = db.add_keyword('Trip A', kw_type='location')
+    new = db.add_keyword('Trip B', kw_type='location')
+    old_lake = db.add_keyword('Lake', parent_id=old, kw_type='location')
+    new_lake = db.add_keyword('Lake', parent_id=new, kw_type='location')
+    db.tag_photo(photos[0], old_lake)
+    db.tag_photo(photos[1], new_lake)
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [('Lake', 'merge')]
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+
+    merges = [json.loads(r['value']) for r in db.conn.execute(
+        "SELECT value FROM pending_changes WHERE photo_id = ? AND change_type = 'keyword_merge'",
+        (photos[0],))]
+    assert {'source_path': ['Trip A', 'Lake'], 'target_id': new_lake,
+            'target_path': ['Trip B', 'Lake']} in merges
+    assert db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location'",
+        (photos[0],)).fetchone()
+    # The retired path must resolve to the surviving sibling on re-import, or
+    # the next scan rebuilds "Trip A > Lake" from the untouched sidecar.
+    alias = db.conn.execute(
+        'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
+        (path_key(['Trip A', 'Lake']),)).fetchone()
+    assert alias['keyword_id'] == new_lake
 
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest

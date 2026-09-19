@@ -381,6 +381,44 @@ def reconcile_location(db, source_id, target_id):
     return candidate
 
 
+
+def taxon_identity(db, row):
+    """Resolve a keyword row's species identity the way ``identity_sql`` does.
+
+    ``source_taxon_id`` is the label source's own iNat id and outranks the
+    local ``taxon_id``; a ``taxon_id`` whose taxon carries an ``inat_id``
+    normalizes to the same ``inat:`` form, so a row linked by local id and a
+    row linked by iNat id resolve equal when they mean the same species.
+    Returns ``None`` for a row that claims no species at all.
+    """
+    if not (row['is_species'] or row['type'] == 'taxonomy'):
+        return None
+    inat = row['source_taxon_id']
+    if inat is None and row['taxon_id'] is not None:
+        found = db.conn.execute(
+            'SELECT inat_id FROM taxa WHERE id = ?', (row['taxon_id'],),
+        ).fetchone()
+        inat = found['inat_id'] if found else None
+    if inat is not None:
+        return f'inat:{inat}'
+    if row['taxon_id'] is not None:
+        return f'taxon:{row["taxon_id"]}'
+    return None
+
+
+def keywords_claim_different_taxa(db, first, second):
+    """Whether two same-named rows stand for two genuinely different species.
+
+    A row that claims no species, or that agrees with the other, is safe to
+    merge -- the metadata fold fills whichever side is missing. Two different
+    claims are not: the merge keeps the destination's taxon and drops the
+    source's, so the migrating row's photos would come out tagged as the
+    other species.
+    """
+    first_id = taxon_identity(db, first)
+    second_id = taxon_identity(db, second)
+    return first_id is not None and second_id is not None and first_id != second_id
+
 def _child_index(rows):
     """parent_id -> ordered child ids, as the merge walks them."""
     children = defaultdict(list)
@@ -399,7 +437,7 @@ def _subtree_ids(children, root_id):
     return found
 
 
-def _plan_subtree_merge(nodes, children, src_id, dst_id, plan):
+def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
     """Mirror ``Database._merge_keyword_into``'s child handling in memory.
 
     The preview has to state what happens to every descendant, and
@@ -418,6 +456,12 @@ def _plan_subtree_merge(nodes, children, src_id, dst_id, plan):
         )
         if existing is None:
             outcome = 'move'
+        elif keywords_claim_different_taxa(db, existing, child):
+            # Distinct species that collide on (name, parent): merging would
+            # retag the incoming row's photos as the other species, so the
+            # write path keeps both under an id suffix.
+            outcome = 'rename'
+            plan['renames'][child_id] = f"{child['name']} (id-{child_id})"
         elif (existing['type'] == 'location' and child['type'] == 'location'
               and existing['place_id'] is not None and child['place_id'] is not None
               and existing['place_id'] != child['place_id']):
@@ -437,7 +481,7 @@ def _plan_subtree_merge(nodes, children, src_id, dst_id, plan):
             'new_name': plan['renames'].get(child_id, child['name']),
         })
         if outcome == 'merge':
-            _plan_subtree_merge(nodes, children, child_id, existing['id'], plan)
+            _plan_subtree_merge(db, nodes, children, child_id, existing['id'], plan)
         else:
             children[src_id].remove(child_id)
             children[dst_id].append(child_id)
@@ -690,7 +734,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     nodes = {r['id']: dict(r) for r in rows}
     plan = {'removed': set(), 'renames': {}, 'children': []}
     for source in sources:
-        _plan_subtree_merge(nodes, children, source['id'], target_id, plan)
+        _plan_subtree_merge(db, nodes, children, source['id'], target_id, plan)
     nodes[target_id]['name'] = resolved['name']
     nodes[target_id]['parent_id'] = resolved['parent_id']
     surviving = [node for node in nodes.values() if node['id'] not in plan['removed']]
@@ -724,11 +768,22 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
         while parent_id is not None and parent_id not in compatible:
             compatible.add(parent_id)
             parent_id = nodes[parent_id]['parent_id'] if parent_id in nodes else None
+        # The affected photos are every photo under the selected SUBTREES,
+        # not just the rows named in the selection. A photo tagged only on a
+        # descendant the merge is about to move -- plus an unrelated linked
+        # place -- would otherwise slip past this guard and then get a
+        # location resync that exports the unrelated place's coordinates.
         others = db.conn.execute(
-            f"""SELECT DISTINCT k.id FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id
+            f"""WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM keywords WHERE id IN ({placeholders})
+                    UNION
+                    SELECT k.id FROM keywords k JOIN descendants d ON k.parent_id = d.id
+                )
+                SELECT DISTINCT k.id FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id
                 WHERE k.type = 'location' AND k.place_id IS NOT NULL
                 AND pk.photo_id IN (SELECT photo_id FROM photo_keywords
-                                   WHERE keyword_id IN ({placeholders}))""", keyword_ids,
+                                   WHERE keyword_id IN (SELECT id FROM descendants))""",
+            keyword_ids,
         )
         if any(r['id'] not in compatible for r in others):
             raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
@@ -788,6 +843,10 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             raise ValueError('The selected keywords changed. Review the updated preview before merging.')
         target = preview['target']
         resolved = preview['resolved']
+        # A child that collapses into an existing sibling loses its
+        # photo_keywords rows to that sibling, so the photos carrying it have
+        # to be read before the merge runs.
+        collapsed = _collapsing_child_tags(db, preview)
         affected = []
         for source in preview['sources']:
             affected.extend((dict(r), source) for r in db.conn.execute(
@@ -827,7 +886,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
                 [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}], _commit=False,
             )
             db.queue_change(pid, 'keyword_add', resolved['name'], workspace_id=ws, _commit=False)
-        _queue_moved_subtree_changes(db, preview, target_id)
+        _queue_moved_subtree_changes(db, preview, target_id, collapsed)
         if resolved['type'] == 'location' or target['type'] == 'location':
             # Filling previously missing coordinates, or moving the retained
             # place in the hierarchy, also affects photos that already had the
@@ -897,38 +956,74 @@ def _queue_survivor_rename(db, target_id, old_name, new_name):
                             workspace_id=ws, _commit=False)
         db.queue_change(pid, 'keyword_add', new_name, workspace_id=ws, _commit=False)
 
-def _queue_moved_subtree_changes(db, preview, target_id):
-    """Rewrite sidecar hierarchies for rows the merge moved but kept.
+def _collapsing_child_tags(db, preview):
+    """Photos carrying a child that is about to collapse into a sibling.
 
-    Reparenting a descendant leaves its flat ``dc:subject`` leaf alone but
-    invalidates the ``lr:hierarchicalSubject`` path (and, for locations, the
-    ``vireo:locationKeywords`` marker) that names its old ancestors. A
-    ``keyword_merge`` change pointed at the row's own id carries the old path
-    to ``sync_to_xmp``, which replaces it with the row's current one.
+    Read before the merge, because ``_merge_keyword_into`` moves these
+    ``photo_keywords`` rows onto the surviving sibling and deletes the child.
     """
-    moved = {int(kid): value for kid, value in preview['path_changes'].items()
-             if int(kid) != target_id}
-    if not moved:
-        return
-    for kid, (old_path, _) in moved.items():
-        db.conn.execute(
-            'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) '
-            'VALUES (?, ?, ?)',
-            (path_key(old_path), json.dumps(old_path, ensure_ascii=False), kid),
-        )
-    placeholders = ','.join('?' for _ in moved)
+    collapsing = {child['id']: child for child in preview['children']
+                  if child['outcome'] == 'merge'}
+    if not collapsing:
+        return []
+    placeholders = ','.join('?' for _ in collapsing)
     rows = db.conn.execute(
         'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id, k.type '
         'FROM photo_keywords pk '
         'JOIN keywords k ON k.id = pk.keyword_id '
         'JOIN photos p ON p.id = pk.photo_id '
         'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
-        f'WHERE pk.keyword_id IN ({placeholders})', list(moved),
+        f'WHERE pk.keyword_id IN ({placeholders})', list(collapsing),
     ).fetchall()
-    for row in rows:
-        old_path, new_path = moved[row['keyword_id']]
+    return [(dict(row), collapsing[row['keyword_id']]) for row in rows]
+
+
+def _queue_moved_subtree_changes(db, preview, target_id, collapsed):
+    """Rewrite sidecar hierarchies for every descendant the merge relocated.
+
+    Reparenting a descendant leaves its flat ``dc:subject`` leaf alone but
+    invalidates the ``lr:hierarchicalSubject`` path (and, for locations, the
+    ``vireo:locationKeywords`` marker) that names its old ancestors. A
+    ``keyword_merge`` change carries the old path to ``sync_to_xmp``, which
+    replaces it with the current one.
+
+    Two kinds of descendant need this. A row that survived under a new parent
+    points the change at itself. A row that collapsed into a same-named
+    sibling no longer exists, so its photos -- now the sibling's -- point at
+    the sibling instead; without this their sidecars keep the retired
+    hierarchy and a later rescan recreates the branch just merged away.
+    """
+    rewrites = {}
+    for kid, (old_path, new_path) in preview['path_changes'].items():
+        if int(kid) != target_id:
+            rewrites[int(kid)] = (old_path, new_path, int(kid))
+    for _, child in collapsed:
+        rewrites[child['id']] = (child['from_path'], child['to_path'], child['into_id'])
+    if not rewrites:
+        return
+    for old_path, _, destination_id in rewrites.values():
+        db.conn.execute(
+            'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) '
+            'VALUES (?, ?, ?)',
+            (path_key(old_path), json.dumps(old_path, ensure_ascii=False), destination_id),
+        )
+    surviving = [kid for kid in rewrites if kid not in {c['id'] for _, c in collapsed}]
+    rows = []
+    if surviving:
+        placeholders = ','.join('?' for _ in surviving)
+        rows = [(dict(r), r['keyword_id']) for r in db.conn.execute(
+            'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id, k.type '
+            'FROM photo_keywords pk '
+            'JOIN keywords k ON k.id = pk.keyword_id '
+            'JOIN photos p ON p.id = pk.photo_id '
+            'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+            f'WHERE pk.keyword_id IN ({placeholders})', surviving,
+        ).fetchall()]
+    rows.extend((row, child['id']) for row, child in collapsed)
+    for row, kid in rows:
+        old_path, new_path, destination_id = rewrites[kid]
         db.queue_change(row['photo_id'], 'keyword_merge', json.dumps({
-            'source_path': old_path, 'target_id': row['keyword_id'],
+            'source_path': old_path, 'target_id': destination_id,
             'target_path': new_path,
         }, sort_keys=True), workspace_id=row['workspace_id'], _commit=False)
         if row['type'] == 'location':
