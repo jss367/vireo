@@ -31590,6 +31590,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             settings_write_lock=_settings_write_lock,
             build_life_list_payload=_build_life_list_payload,
             build_highlights_payload=_build_highlights_payload,
+            resolve_visual=_resolve_visual,
         )
     )
     app.register_blueprint(

@@ -193,6 +193,18 @@ def test_capture_time_reports_skipped():
     assert out["details"] == ["Failed:", "a.NEF: locked"]
 
 
+def test_site_export_summary_reports_partial_results_and_destination():
+    out = describe_result('export-site', {
+        'exported_images': 8, 'photo_count': 10, 'album_count': 2,
+        'destination': '/exports/site-export-example',
+        'errors': ['Photo 1: missing', 'Photo 2: unreadable'],
+    })
+    assert '8 of 10 photos exported' in out['summary']
+    assert 'incomplete: 2 errors' in out['summary']
+    assert 'Export folder: /exports/site-export-example' in out['details']
+    assert 'Photo 1: missing' in out['details']
+
+
 def test_verify_hashes_reports_every_problem_count():
     out = describe_result("verify-hashes", {
         "checked": 100, "ok": 95, "baselined": 3, "modified": 0, "corrupt": 0,

@@ -204,6 +204,7 @@
   <div class="lifelist-actions">
     <button class="publish-btn" onclick="openExportModal()">Export...</button>
     <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
+    <button class="publish-btn" onclick="openSiteExportModal()">Export Entire Site</button>
   </div>
 </div>
 
@@ -311,6 +312,29 @@
     <div class="modal-actions">
       <button id="publishSubmitBtn" class="modal-btn modal-btn-primary" onclick="startPublishSite()" disabled>Publish</button>
       <button class="modal-btn modal-btn-cancel" onclick="closePublishModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="siteExportModal" onclick="if(event.target===this)closeSiteExportModal()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="siteExportTitle">
+    <h3 id="siteExportTitle">Export Entire Site</h3>
+    <p class="modal-hint">Export every photo in the active workspace, including unclassified and unpublished photos, with saved edits as full-resolution JPEGs.</p>
+    <p class="modal-hint">A new folder contains shared photos, album manifests for saved collections, photo metadata, the complete life list, and a README explaining the layout. Photos in multiple albums are saved once. Original RAW files are not included.</p>
+    <label class="modal-label" for="siteExportDest">Destination folder</label>
+    <div class="publish-path-row">
+      <input id="siteExportDest" class="modal-input" type="text" placeholder="/path/to/exports">
+      <button class="modal-btn modal-btn-cancel" onclick="browseSiteExportDest()">Browse</button>
+    </div>
+    <label class="publish-option">
+      <input id="siteExportLocations" type="checkbox">
+      <span>Include location keywords and GPS coordinates.</span>
+    </label>
+    <p class="modal-hint">Follow progress in Jobs. Unreadable photos or unresolved albums are reported as an incomplete export with details in the export folder.</p>
+    <div id="siteExportStatus" class="publish-status" role="status"></div>
+    <div class="modal-actions">
+      <button id="siteExportSubmit" class="modal-btn modal-btn-primary" onclick="startSiteExport()">Export Entire Site</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeSiteExportModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -952,6 +976,13 @@ const publishFolderBrowser = new VireoFolderBrowser({
   overlayId: 'folderBrowser',
   defaultMode: 'destination',
   modes: {
+    siteExport: {
+      title: 'Select Site Export Folder',
+      multiple: false,
+      showCounts: false,
+      startPath: function() { return document.getElementById('siteExportDest').value.trim(); },
+      onSelect: function(path) { document.getElementById('siteExportDest').value = path; },
+    },
     destination: {
       title: 'Select Website Publish Folder',
       multiple: false,
@@ -1019,6 +1050,77 @@ async function startPublishSite() {
     btn.disabled = !publishPreflightReady;
   }
 }
+
+var siteExportStarting = false;
+
+function openSiteExportModal() {
+  document.getElementById('siteExportStatus').textContent = '';
+  document.getElementById('siteExportModal').classList.add('open');
+  document.getElementById('siteExportDest').focus();
+}
+
+function closeSiteExportModal() {
+  if (!siteExportStarting) document.getElementById('siteExportModal').classList.remove('open');
+}
+
+async function browseSiteExportDest() {
+  var input = document.getElementById('siteExportDest');
+  if (typeof pickDirectory === 'function') {
+    var sequence = publishFolderBrowser.sequence;
+    try {
+      var selected = await pickDirectory('Select Site Export Folder', {
+        defaultPath: input.value.trim() || undefined,
+      });
+      if (selected) {
+        input.value = Array.isArray(selected) ? selected[0] : selected;
+        return;
+      }
+      if (typeof isTauri === 'function' && isTauri()) return;
+      if (publishFolderBrowser.sequence !== sequence) {
+        publishFolderBrowser.open('siteExport', {skipInitialBrowse: true});
+        return;
+      }
+    } catch (error) {
+      console.error('Could not open site export folder picker:', error);
+    }
+  }
+  publishFolderBrowser.open('siteExport');
+}
+
+async function startSiteExport() {
+  if (siteExportStarting) return;
+  var status = document.getElementById('siteExportStatus');
+  var destination = document.getElementById('siteExportDest').value.trim();
+  if (!destination) {
+    status.textContent = 'Destination folder is required.';
+    return;
+  }
+  var includeLocations = document.getElementById('siteExportLocations').checked;
+  siteExportStarting = true;
+  var controls = document.querySelectorAll('#siteExportModal input, #siteExportModal button');
+  controls.forEach(function(control) { control.disabled = true; });
+  status.textContent = 'Starting site export…';
+  try {
+    await safeFetch('/api/jobs/export-site', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({destination: destination, include_locations: includeLocations}),
+    });
+    siteExportStarting = false;
+    closeSiteExportModal();
+    if (typeof showToast === 'function') showToast('Site export started. Follow progress in Jobs.', 'info');
+  } catch (error) {
+    status.textContent = 'Could not start site export: ' + error.message;
+  } finally {
+    siteExportStarting = false;
+    controls.forEach(function(control) { control.disabled = false; });
+  }
+}
+
+document.addEventListener('keydown', function(event) {
+  if (event.key === 'Escape' && !document.getElementById('folderBrowser').classList.contains('open')) {
+    closeSiteExportModal();
+  }
+});
 
 // The representative lightbox panel is shared (see _navbar.html) and
 // works on every page. When it changes a representative photo, it dispatches
