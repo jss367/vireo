@@ -4797,6 +4797,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
     log.info("Database init took %.2fs (workspace: %s)", time.time() - _t0,
              init_db.get_workspace(init_db._active_workspace_id)["name"])
+    # File-backed startup skips Database's schema initialization. Repair old
+    # move parentage here too, before Browse can serve the stale hierarchy.
+    init_db.repair_stale_folder_parents()
     # Migrate the legacy 'Needs Classification' default collection BEFORE
     # seeding defaults — otherwise create_default_collections inserts
     # 'Needs Identification' first, then the migration skips renaming
