@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-import threading
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -520,6 +519,83 @@ def _plan_merged_keyword_hierarchies(db, plans):
                 plan.keywords_to_remove_flat.add(source_path[-1])
 
 
+def _ordered_sidecar_steps(db, changes, sync_flags, sync_locations, location_keywords_state):
+    """Keep cross-photo queue order without splitting a keyword rename/merge.
+
+    Same-photo normalization pairs must stay together (remove the old spelling
+    before adding the new one). Place each such operation at its final queue
+    position; other edits retain their order. Ratings run last, still in queue
+    order, so a keyword/flag that creates missing XMP can carry a prior rating.
+    """
+    remaining = {c["id"] for c in changes}
+    positions = {c["id"]: index for index, c in enumerate(changes)}
+    operations = []
+    for change in changes:
+        if change["id"] not in remaining:
+            continue
+        if change["change_type"] in (*_KEYWORD_CHANGE_TYPES, "keyword_merge"):
+            operation = _select_changes(changes, [change["id"]])
+        else:
+            operation = [change]
+        remaining.difference_update(c["id"] for c in operation)
+        operations.append((change["change_type"] == "rating",
+                           max(positions[c["id"]] for c in operation), operation))
+    operations.sort(key=lambda op: op[:2])
+    runs = []
+    for _, _, operation in operations:
+        photo_id = operation[0]["photo_id"]
+        if runs and runs[-1][0] == photo_id:
+            runs[-1][1].extend(operation)
+        else:
+            runs.append((photo_id, list(operation)))
+    steps = []
+    for photo_id, rows in runs:
+        plan = _plan_photo_sync(rows, sync_flags, sync_locations, location_keywords_state)
+        _plan_merged_keyword_hierarchies(db, {photo_id: plan})
+        steps.append((photo_id, plan))
+    return steps
+
+
+def _sidecar_target_identities(resolved_paths):
+    """Distinguish actual files without treating case spelling as identity.
+
+    Most sidecars have just one resolved spelling and need no extra stat.
+    Conservative alias groups need filesystem evidence: on macOS, realpath
+    can preserve different spellings of the same file. Uncreated aliases or
+    files whose identity cannot be read stay coupled until we can distinguish
+    them; each write still uses its own path, even in that conservative group.
+    """
+    aliases = defaultdict(set)
+    for path in resolved_paths.values():
+        aliases[os.path.normcase(path).casefold()].add(path)
+    identities = {}
+    for canonical, paths in aliases.items():
+        if len(paths) == 1:
+            path = next(iter(paths))
+            identities[path] = ("path", path)
+            continue
+        group = {}
+        for path in paths:
+            try:
+                stat = os.stat(path)
+            except FileNotFoundError:
+                # Absence cannot prove that two spellings are distinct. A
+                # successful no-op removal must survive beside a failed add:
+                # clearing it here could resurrect the keyword on retry.
+                group[path] = ("missing", canonical)
+            except OSError:
+                break
+            else:
+                if not stat.st_ino:
+                    break
+                group[path] = ("file", stat.st_dev, stat.st_ino)
+        else:
+            identities.update(group)
+            continue
+        identities.update(dict.fromkeys(paths, ("unknown", canonical)))
+    return identities
+
+
 def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_sidecars=False,
                 folder_paths=None, require_workspace_membership=True, status_callback=None):
     """Write pending changes to XMP sidecars.
@@ -564,6 +640,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     changes = db.get_pending_changes()
     if change_ids is not None:
         changes = _select_changes(changes, change_ids)
+    changes = db.claim_pending_changes_for_sync(changes)
     if not changes:
         return _sync_result(0, [])
 
@@ -587,7 +664,6 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     prepare_failures = {}
     plans = {}
     folder_accessible = {}
-    canonical_folders = {}
     for photo_id, photo_changes in by_photo.items():
         xmp_path = xmp_paths.get(photo_id)
         if not xmp_path:
@@ -598,17 +674,10 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
 
         # Check if the folder exists (NAS might be offline). Cache the answer
         # per folder: on a slow or offline mount this is a network round trip,
-        # and a folder holds thousands of photos. Resolve symlinks here too so
-        # the sidecar grouping below sees one canonical folder per folder
-        # rather than one syscall per photo.
+        # and a folder holds thousands of photos.
         folder = os.path.dirname(xmp_path)
         if folder not in folder_accessible:
             folder_accessible[folder] = os.path.isdir(folder)
-            if folder_accessible[folder]:
-                try:
-                    canonical_folders[folder] = os.path.realpath(folder)
-                except OSError:
-                    canonical_folders[folder] = folder
         if not folder_accessible[folder]:
             prepare_failures[photo_id] = {
                 "photo_id": photo_id,
@@ -676,86 +745,102 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                     "reason": _failure_reason(e),
                 }
 
-    # Group photos that may share a sidecar, so no two threads publish the
-    # same file: a RAW and a JPEG with one basename share one .xmp, and
-    # aliases spell the same file differently -- a folder reached through a
-    # symlink, or components differing only in case on APFS/SMB/NTFS. The key
-    # is the realpath'd folder joined to the basename, then case-folded whole:
-    # ``realpath`` preserves the spelling of every component and ``normcase``
-    # only lowercases on Windows, so folding the basename alone would leave
-    # two folder rows spelled ``/mnt/Photos`` and ``/mnt/PHOTOS`` in separate
-    # groups even though the share treats them as one directory.
-    #
-    # Grouping decides ordering only; each photo is still written through its
-    # own path. That makes an over-grouping harmless: two names a
-    # case-sensitive filesystem keeps distinct (`Masse.xmp` / `Maße.xmp`,
-    # which case-fold alike) are written to their own files, one after the
-    # other, instead of in parallel. Deciding instead to keep one path per
-    # group would silently write one photo's metadata into the other's
-    # sidecar, and knowing which case applies would mean probing the
-    # filesystem's case sensitivity -- a heuristic that is wrong for any
-    # mount whose in-mount path components carry no letters, and an extra
-    # round trip per folder on the NAS this loop exists to keep fast.
+    # Resolve targets on the pool before scheduling writes. A sidecar symlink
+    # can join different basenames; a lock alone serialized those aliases in
+    # arbitrary worker order. Grouping by the full target preserves queue order
+    # for them too. Keep each original write path: case-folding may conservatively
+    # group distinct files on a case-sensitive volume, which must stay distinct.
+    accessible_photos = [
+        pid for pid in by_photo
+        if (path := xmp_paths.get(pid)) and folder_accessible.get(os.path.dirname(path))
+    ]
+    paths = list(dict.fromkeys(xmp_paths[pid] for pid in accessible_photos))
+    resolved_paths = {}
+    resolve_errors = {}
+    if paths:
+        with ThreadPoolExecutor(max_workers=min(_SYNC_MAX_WORKERS, len(paths))) as pool:
+            futures = {pool.submit(os.path.realpath, path): path for path in paths}
+            for future in as_completed(futures):
+                path = futures[future]
+                try:
+                    resolved_paths[path] = future.result()
+                except OSError as error:
+                    resolve_errors[path] = error
+    # Keep conservative aliases on one worker, including preparation failures.
+    # Their identity may only become clear after a sibling creates its sidecar.
     by_sidecar = defaultdict(list)
-    for photo_id in plans:
-        xmp_path = xmp_paths[photo_id]
-        canonical_folder = canonical_folders.get(
-            os.path.dirname(xmp_path), os.path.dirname(xmp_path),
-        )
-        canonical_key = os.path.normcase(
-            os.path.join(canonical_folder, os.path.basename(xmp_path))
-        ).casefold()
-        by_sidecar[canonical_key].append((photo_id, xmp_path))
+    sidecar_for_photo = {}
+    for photo_id in accessible_photos:
+        path = xmp_paths[photo_id]
+        if path in resolve_errors:
+            error = resolve_errors[path]
+            prepare_failures[photo_id] = {
+                "photo_id": photo_id, "error": str(error), "reason": _failure_reason(error),
+            }
+            plans.pop(photo_id, None)
+            continue
+        canonical_key = os.path.normcase(resolved_paths[path]).casefold()
+        by_sidecar[canonical_key].append(photo_id)
+        sidecar_for_photo[photo_id] = canonical_key
 
-    sidecar_locks = {}
-    sidecar_locks_guard = threading.Lock()
-
-    def lock_for(xmp_path):
-        """Return the lock guarding whatever file ``xmp_path`` resolves to.
-
-        Grouping keys on the folder and basename, which catches the aliases
-        that arise from the catalog itself -- a RAW and a JPEG, case variants,
-        a symlinked folder. It cannot catch a sidecar path that is itself a
-        symlink to a different photo's sidecar: those basenames differ, so the
-        two land in different groups and run on different workers, while
-        ``_write_tree_atomic`` resolves the link and replaces the same file.
-        Resolving here costs nothing the publish was not already paying (it
-        resolves too) and it happens on the pool thread, not in the serial
-        prepare loop. The key is case-folded for the same reason the group key
-        is: ``realpath`` keeps each component's spelling, so two case
-        spellings of one directory would otherwise take different locks.
-        """
-        key = os.path.normcase(os.path.realpath(xmp_path)).casefold()
-        with sidecar_locks_guard:
-            lock = sidecar_locks.get(key)
-            if lock is None:
-                lock = sidecar_locks[key] = threading.Lock()
-        return lock
+    shared_changes = defaultdict(list)
+    for change in changes:
+        key = sidecar_for_photo.get(change["photo_id"])
+        if key is not None and len(by_sidecar[key]) > 1 and change["photo_id"] in plans:
+            shared_changes[key].append(change)
+    write_steps = {}
+    for key, photo_ids in by_sidecar.items():
+        if len(photo_ids) == 1:
+            pid = photo_ids[0]
+            write_steps[key] = [(pid, plans[pid])] if pid in plans else []
+        else:
+            write_steps[key] = _ordered_sidecar_steps(
+                db, shared_changes[key], sync_flags, sync_locations,
+                sync_location_keywords_state,
+            )
 
     def write_sidecar_group(canonical_key):
-        """Write every photo queued against one sidecar; never raises."""
-        outcomes = {}
-        for photo_id, xmp_path in by_sidecar[canonical_key]:
+        """Attempt ordered writes, then couple failures by the resulting files.
+
+        Never stop a conservative alias group at its first failure: another
+        spelling may be an unrelated, not-yet-created file. Once all writes
+        were attempted, stat can distinguish that new file from a failed path
+        on case-sensitive storage, or prove both spellings name one file on
+        case-insensitive storage. The latter must retain its entire sequence
+        for retry, including any preparation failures.
+        """
+        photo_ids = by_sidecar[canonical_key]
+        errors = {
+            pid: RuntimeError(prepare_failures[pid]["error"])
+            for pid in photo_ids if pid in prepare_failures
+        }
+        for photo_id, plan in write_steps[canonical_key]:
             try:
-                # One lock at a time and never nested, so no worker can
-                # deadlock against another.
-                with lock_for(xmp_path):
-                    _write_photo_sync(
-                        xmp_path, plans[photo_id], locations.get(photo_id),
-                        location_paths.get(photo_id),
-                        create_missing_sidecars=create_missing_sidecars,
-                    )
-            except Exception as e:  # recorded per photo, as before
-                outcomes[photo_id] = e
-            else:
-                outcomes[photo_id] = None
-        return outcomes
+                _write_photo_sync(
+                    xmp_paths[photo_id], plan, locations.get(photo_id),
+                    location_paths.get(photo_id),
+                    create_missing_sidecars=create_missing_sidecars,
+                )
+            except Exception as e:
+                errors.setdefault(photo_id, e)
+        if not errors:
+            return dict.fromkeys(photo_ids)
+        identities = _sidecar_target_identities({
+            xmp_paths[pid]: resolved_paths[xmp_paths[pid]] for pid in photo_ids
+        })
+        failed_targets = {
+            identities[resolved_paths[xmp_paths[pid]]]: error for pid, error in errors.items()
+        }
+        return {
+            pid: failed_targets.get(identities[resolved_paths[xmp_paths[pid]]])
+            for pid in photo_ids
+        }
 
     results = {}
     total = len(by_photo)
-    completed = len(prepare_failures)
+    completed = len(prepare_failures.keys() - sidecar_for_photo.keys())
     synced = 0
-    failed = len(prepare_failures)
+    failed = completed
     synced_tokens = []
     synced_legacy_ids = []
     checkpoint = 0
@@ -802,10 +887,10 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 results.update(outcomes)
                 completed += len(outcomes)
                 for photo_id, error in outcomes.items():
-                    plan = plans[photo_id]
                     if error is not None:
                         failed += 1
                         continue
+                    plan = plans[photo_id]
                     if plan.unsupported_changes:
                         failed += 1
                     if plan.supported_changes:

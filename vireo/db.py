@@ -1137,6 +1137,7 @@ class Database:
                 change_type TEXT,
                 value       TEXT,
                 change_token TEXT,
+                sync_started INTEGER NOT NULL DEFAULT 0,
                 created_at  TEXT DEFAULT (datetime('now')),
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
             );
@@ -1674,6 +1675,9 @@ class Database:
         """
         )
         cur = self.conn.cursor()
+        pending_cols = {r[1] for r in cur.execute("PRAGMA table_info(pending_changes)")}
+        if "sync_started" not in pending_cols:
+            cur.execute("ALTER TABLE pending_changes ADD COLUMN sync_started INTEGER NOT NULL DEFAULT 0")
         pred_cols = {r[1] for r in cur.execute("PRAGMA table_info(predictions)")}
         if "source_taxon_id" not in pred_cols:
             cur.execute("ALTER TABLE predictions ADD COLUMN source_taxon_id INTEGER")
@@ -22876,6 +22880,33 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
+    def claim_pending_changes_for_sync(self, changes):
+        """Mark selected edits as possibly written and return surviving rows.
+
+        A cancelled keyword must leave an opposing edit once a writer can
+        have seen it. Persist that fact before any filesystem work, including
+        across failed writes or a process restart. Match immutable tokens so
+        a cancellation between selection and this claim cannot resurrect the
+        old edit or claim a replacement that reused its rowid.
+        """
+        if not changes:
+            return []
+        claimed = {}
+        with self.conn:
+            for chunk in _chunks(changes, size=400):
+                placeholders = ",".join("(?, ?)" for _ in chunk)
+                params = [part for c in chunk for part in (c["id"], c["change_token"] or "")]
+                rows = self.conn.execute(
+                    f"""UPDATE pending_changes SET sync_started = 1
+                        WHERE workspace_id = ?
+                          AND (id, COALESCE(change_token, '')) IN (VALUES {placeholders})
+                        RETURNING *""",
+                    [self._ws_id(), *params],
+                ).fetchall()
+                claimed.update({(c["id"], c["change_token"]): c for c in rows})
+        return [claimed[key] for c in changes
+                if (key := (c["id"], c["change_token"])) in claimed]
+
     def get_pending_keyword_removal_keys(self, photo_id, hierarchical=False):
         """Return normalized keyword keys awaiting removal for a photo.
 
@@ -22905,6 +22936,11 @@ class Database:
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
         """Delete matching pending changes. Returns rows removed.
 
+        If a keyword may already have reached a writer, cancelling it queues
+        its inverse in the same transaction. The inverse is also marked as
+        possibly written: further toggles must keep explicit repair work
+        until a sync acknowledges it, even if the first write fails.
+
         Args:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
@@ -22919,13 +22955,23 @@ class Database:
             clauses.append("value = ?")
             params.append(value)
 
-        cur = self.conn.execute(
-            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)}",
+        removed = self.conn.execute(
+            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)} RETURNING *",
             params,
-        )
+        ).fetchall()
+        inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
+        for row in removed:
+            if row["sync_started"] and row["change_type"] in inverse:
+                kind = inverse[row["change_type"]]
+                self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id, _commit=False)
+                self.conn.execute(
+                    "UPDATE pending_changes SET sync_started = 1 "
+                    "WHERE photo_id = ? AND workspace_id = ? AND change_type = ? AND value = ?",
+                    (photo_id, ws_id, kind, row["value"]),
+                )
         if _commit:
             self.conn.commit()
-        return cur.rowcount
+        return len(removed)
 
     def remove_pending_change_token(self, change_token):
         """Delete a single pending change by immutable token. Returns rows removed."""
