@@ -14477,3 +14477,18 @@ def test_point_color_preview_matches_saved_render_and_rejects_invalid_recipe(cli
     }})
     assert invalid.status_code == 400
     assert db.get_photo_edit_recipe(photo_id)['adjustments'] == recipe['adjustments']
+
+
+@pytest.mark.parametrize('saturation', [0, .5, 1, 1.0000004])
+def test_point_color_api_rejects_achromatic_recipes_and_presets(client_with_photo, saturation):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    recipe = {'adjustments': {'point_color': [{'sample': [0, saturation, 50]}]}}
+    saved = client.put(f'/api/photos/{photo_id}/edit-recipe', json={'recipe': recipe})
+    preset = client.post('/api/edit-presets', json={'name': 'Neutral sample', 'recipe': recipe})
+    assert saved.status_code == 400
+    assert preset.status_code == 400
+    assert 'greater than 1%' in saved.get_json()['error']
+    assert 'greater than 1%' in preset.get_json()['error']
+    assert db.get_photo_edit_recipe(photo_id) is None
+    assert client.get('/api/edit-presets').get_json()['presets'] == []

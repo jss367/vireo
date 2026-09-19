@@ -164,7 +164,7 @@ _POINT_COLOR_RANGES = {
 
 
 def _normalize_point_color(value):
-    """Keep neutral samples so picking a color can be saved before adjusting."""
+    """Keep unadjusted color samples, but reject the renderer's zero-weight range."""
     if value is None or value == []:
         return None
     if not isinstance(value, list) or len(value) > 8:
@@ -181,6 +181,8 @@ def _normalize_point_color(value):
             _number(sample[1], "sample saturation", 0, 100),
             _number(sample[2], "sample luminance", 0, 100),
         ]}
+        if normalized["sample"][1] <= 1.0:
+            raise RecipeError("point_color sample saturation must be greater than 1%")
         for key, (lo, hi, default) in _POINT_COLOR_RANGES.items():
             amount = _number(item.get(key, default), f"point_color.{key}", lo, hi)
             if abs(amount - default) > 1e-6:
