@@ -1491,6 +1491,11 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
             CREATE INDEX IF NOT EXISTS idx_taxa_name ON taxa(name);
             CREATE INDEX IF NOT EXISTS idx_taxa_common ON taxa(common_name);
+            -- SpeciesResolver._preferred_common matches a model label or a
+            -- keyword name against the preferred name case-insensitively;
+            -- idx_taxa_common is BINARY, so without this one every unresolved
+            -- name scans the whole 1.3M-row taxa table.
+            CREATE INDEX IF NOT EXISTS idx_taxa_common_lower ON taxa(lower(common_name));
 
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
