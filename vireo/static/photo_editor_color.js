@@ -252,7 +252,7 @@ async function samplePointColorAt(e) {
   }
   if (recipe.local && recipe.local.regions) {
     recipe.local.regions.forEach(function(region) {
-      ['sharpen', 'sharpen_radius', 'noise_reduction'].forEach(function(key) { delete region.adjustments[key]; });
+      ['point_color', 'sharpen', 'sharpen_radius', 'noise_reduction'].forEach(function(key) { delete region.adjustments[key]; });
     });
     recipe.local.regions = recipe.local.regions.filter(function(region) { return Object.keys(region.adjustments).length; });
     if (!recipe.local.regions.length) delete recipe.local;
