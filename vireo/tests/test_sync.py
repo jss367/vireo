@@ -192,13 +192,17 @@ def test_sync_to_xmp_keyword_remove_flat_leaves_matching_hierarchy(tmp_path):
     assert len(db.get_pending_changes()) == 0
 
 
-def test_sync_to_xmp_clears_sibling_workspace_flat_removals(tmp_path):
+@pytest.mark.parametrize("checkpoint_changes", [1, 500])
+def test_sync_to_xmp_clears_sibling_workspace_flat_removals(tmp_path, monkeypatch, checkpoint_changes):
     """One global sidecar write retires equivalent workspace queue rows.
 
     Retirement is visible in every workspace owning a shared folder, but the
     XMP file itself is shared. After one workspace applies the removal, a
     sibling must not retain a stale row that can delete a later manual re-add.
     """
+    import sync
+
+    monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", checkpoint_changes)
     from db import Database
     from sync import sync_to_xmp
     from xmp import read_keywords, write_sidecar
@@ -1834,7 +1838,8 @@ def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
     assert "Kestrel" in read_keywords(xmp_b)
 
 
-def test_sync_clears_by_token_so_a_replacement_row_survives(tmp_path):
+@pytest.mark.parametrize("checkpoint_changes", [1, 500])
+def test_sync_clears_by_token_so_a_replacement_row_survives(tmp_path, monkeypatch, checkpoint_changes):
     """A flag edit made during the sidecar write must not be cleared instead.
 
     queue_flag_change_if_enabled deletes the old flag row and inserts the new
@@ -1845,6 +1850,7 @@ def test_sync_clears_by_token_so_a_replacement_row_survives(tmp_path):
     import sync
     from db import Database
 
+    monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", checkpoint_changes)
     db = Database(str(tmp_path / "t.db"))
     db.set_active_workspace(db.ensure_default_workspace())
     photo, _xmp_path = _setup_photo_with_xmp(tmp_path, db)
@@ -2387,3 +2393,164 @@ def test_sync_from_xmp_ignores_a_stale_vireo_location_keyword(tmp_path, monkeypa
     names = {row["name"] for row in db.get_photo_keywords(pid)}
     assert names == {"Pont de Gau"}
     db.close()
+
+
+@pytest.mark.parametrize("trigger", ["time", "count"])
+def test_sync_checkpoint_survives_interruption_and_retry(tmp_path, db, monkeypatch, trigger):
+    """A restart replays only unacknowledged work, even if other writers finished."""
+    import sqlite3
+
+    import sync
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    photos = []
+    for index in range(3):
+        pid, path = _setup_photo_with_xmp(tmp_path / str(index), db)
+        photos.append((pid, path))
+        db.queue_change(pid, "keyword_add", "Osprey")
+    monkeypatch.setattr(sync, "as_completed", lambda futures: iter(futures))
+    monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1 if trigger == "count" else 500)
+    clock = iter([0, 6, 6])
+    monkeypatch.setattr(sync.time, "monotonic", lambda: next(clock, 6))
+
+    class Interrupted(Exception):
+        pass
+
+    def interrupt_after_checkpoint(progress):
+        if progress["checkpoint"]:
+            assert progress["current"] == progress["synced"] == 1
+            # Verify this is a durable commit, not just this connection's view.
+            with sqlite3.connect(db._db_path) as observer:
+                rows = observer.execute("SELECT photo_id FROM pending_changes").fetchall()
+            assert {row[0] for row in rows} == {pid for pid, _ in photos[1:]}
+            raise Interrupted
+
+    with pytest.raises(Interrupted):
+        sync.sync_to_xmp(db, status_callback=interrupt_after_checkpoint)
+    writes = []
+    real_write = sync._write_photo_sync
+
+    def record_write(path, *args, **kwargs):
+        writes.append(path)
+        return real_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(sync, "_write_photo_sync", record_write)
+    monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 500)
+    result = sync.sync_to_xmp(db)
+    assert result["synced"] == 2
+    assert set(writes) == {path for _, path in photos[1:]}
+    assert db.get_pending_changes() == []  # final flush below either threshold
+
+
+def test_sync_checkpoint_preserves_failures_and_reports_counts(tmp_path, db, monkeypatch):
+    import sync
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    good, _ = _setup_photo_with_xmp(tmp_path / "good", db)
+    failed, failed_path = _setup_photo_with_xmp(tmp_path / "failed", db)
+    malformed, _ = _setup_photo_with_xmp(tmp_path / "malformed", db)
+    db.queue_change(good, "keyword_add", "Osprey")
+    db.queue_change(good, "flag", "flagged")
+    monkeypatch.setattr(sync, "_sync_flags_to_xmp_enabled", lambda db: False)
+    db.queue_change(failed, "keyword_add", "Osprey")
+    db.queue_change(malformed, "rating", "invalid")
+    real_write = sync._write_photo_sync
+
+    def write(path, *args, **kwargs):
+        if path == failed_path:
+            raise OSError("NAS unavailable")
+        return real_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(sync, "_write_photo_sync", write)
+    monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1)
+    progress = []
+    result = sync.sync_to_xmp(db, status_callback=progress.append)
+    assert result["synced"] == 1
+    assert result["failed"] == 3
+    assert progress[-1] == dict(current=3, total=3, synced=1, failed=3, checkpoint=1)
+    assert {(c["photo_id"], c["change_type"]) for c in db.get_pending_changes()} == {
+        (good, "flag"), (failed, "keyword_add"), (malformed, "rating"),
+    }
+
+
+def test_sync_checkpoint_waits_for_shared_sidecar_group(tmp_path, db, monkeypatch):
+    import sync
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, _ = _setup_photo_with_xmp(tmp_path, db)
+    second = db.add_photo(folder_id=db.get_photo(first)["folder_id"], filename="bird.nef",
+                          extension=".nef", file_size=100, file_mtime=1.0)
+    for pid in (first, second):
+        db.queue_change(pid, "keyword_add", str(pid))
+    monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1)
+    real_write = sync._write_photo_sync
+    writes = []
+
+    def write(*args, **kwargs):
+        real_write(*args, **kwargs)
+        writes.append(args[0])
+
+    monkeypatch.setattr(sync, "_write_photo_sync", write)
+    progress = []
+
+    def observe(p):
+        progress.append(p)
+        if p["checkpoint"]:
+            assert len(writes) == 2
+            assert not db.get_pending_changes()
+
+    sync.sync_to_xmp(db, status_callback=observe)
+    assert progress[-1]["checkpoint"] == 1
+    assert progress[-1]["synced"] == 2
+
+
+def test_sync_legacy_checkpoint_keeps_tokened_replacement(tmp_path, db, monkeypatch):
+    import sync
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, _ = _setup_photo_with_xmp(tmp_path, db)
+    db.queue_change(pid, "keyword_add", "Osprey")
+    db.conn.execute("UPDATE pending_changes SET change_token = NULL")
+    db.conn.commit()
+    rowid = db.get_pending_changes()[0]["id"]
+    real_clear = db.clear_pending
+
+    def replace_before_clear(*args, **kwargs):
+        db.remove_pending_changes(pid)
+        db.queue_change(pid, "rating", "5")
+        assert db.get_pending_changes()[0]["id"] == rowid
+        return real_clear(*args, **kwargs)
+
+    monkeypatch.setattr(db, "clear_pending", replace_before_clear)
+    monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1)
+    sync.sync_to_xmp(db)
+    assert [c["change_type"] for c in db.get_pending_changes()] == ["rating"]
+
+
+def test_sync_checkpoint_failure_keeps_unacknowledged_changes(tmp_path, db, monkeypatch):
+    import sync
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    photos = []
+    for index in range(2):
+        pid, _ = _setup_photo_with_xmp(tmp_path / str(index), db)
+        photos.append(pid)
+        db.queue_change(pid, "keyword_add", "Osprey")
+    monkeypatch.setattr(sync, "as_completed", lambda futures: iter(futures))
+    monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1)
+    real_clear = db.clear_pending_by_token
+    calls = []
+
+    def clear(tokens, **kwargs):
+        calls.append(list(tokens))
+        if len(calls) == 2:
+            raise OSError("checkpoint failed")
+        return real_clear(tokens, **kwargs)
+
+    monkeypatch.setattr(db, "clear_pending_by_token", clear)
+    progress = []
+    with pytest.raises(OSError, match="checkpoint failed"):
+        sync.sync_to_xmp(db, status_callback=progress.append)
+    assert [c["photo_id"] for c in db.get_pending_changes()] == photos[1:]
+    assert progress[-1]["checkpoint"] == 1
+    assert progress[-1]["current"] == 1

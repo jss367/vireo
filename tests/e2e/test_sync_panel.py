@@ -322,3 +322,45 @@ def test_rating_preview_accounts_for_auto_included_keyword_pair(
         has_text="XMP rating unchanged"
     )
     expect(rating_group).to_contain_text("5 stars stays in Vireo")
+
+
+def test_open_review_during_sync_shows_progress_then_loads_remaining(live_server, page):
+    """Reloaded pages discover active syncs without loading a changing preview."""
+    state = {"active": True, "current": 20, "pending": 80}
+    previews = []
+
+    def status(route):
+        route.fulfill(json={
+            "pending_count": state["pending"], "pending_photo_count": state["pending"],
+            "change_type_counts": {"rating": state["pending"]},
+            "active_job": {
+                "id": "sync-test", "status": "running",
+                "progress": {"current": state["current"], "total": 100,
+                             "synced": state["current"] - 1, "failed": 1, "checkpoint": 2},
+            } if state["active"] else None,
+        })
+
+    def preview(route):
+        previews.append(route.request.url)
+        route.continue_()
+
+    page.route("**/api/sync/status", status)
+    page.route("**/api/sync/preview?**", preview)
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("void openSyncPreview()")
+    expect(page.locator('#syncPreviewProgressText')).to_have_text(
+        'Processed 20 of 100 photos · 19 synced · 1 with errors'
+    )
+    expect(page.locator('#syncPreviewSyncButton')).to_be_disabled()
+    expect(page.locator('#syncPreviewDiscardAllButton')).to_be_disabled()
+    assert previews == []
+
+    state.update(current=40, pending=60)
+    expect(page.locator('#syncPreviewProgressText')).to_contain_text('Processed 40 of 100')
+    expect(page.locator('#syncBannerText')).to_contain_text('60 changes across 60 photos')
+    assert previews == []
+
+    state.update(active=False, pending=0)
+    expect(page.locator('#syncPreviewProgressText')).to_have_text('No pending changes')
+    assert previews
+    assert page.evaluate('window._syncReviewWaiting') is False

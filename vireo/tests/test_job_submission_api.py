@@ -390,7 +390,7 @@ def test_job_sync_requests_serialize_xmp_work(app_and_db, monkeypatch):
     active = 0
     max_active = 0
 
-    def fake_sync_to_xmp(db, progress_callback=None, change_ids=None):
+    def fake_sync_to_xmp(db, progress_callback=None, change_ids=None, status_callback=None):
         nonlocal active, max_active
         with state_lock:
             calls.append(change_ids)
@@ -447,7 +447,7 @@ def test_cancelled_waiting_sync_does_not_write_xmp(app_and_db, monkeypatch):
     state_lock = threading.Lock()
     calls = []
 
-    def fake_sync_to_xmp(db, progress_callback=None, change_ids=None):
+    def fake_sync_to_xmp(db, progress_callback=None, change_ids=None, status_callback=None):
         with state_lock:
             calls.append(change_ids)
             call_number = len(calls)
@@ -480,3 +480,29 @@ def test_cancelled_waiting_sync_does_not_write_xmp(app_and_db, monkeypatch):
 
     release_first.set()
     wait_for_job_via_runner(app._job_runner, first)
+
+
+def test_sync_job_publishes_checkpoint_and_outcome_counts(app_and_db, tmp_path, monkeypatch):
+    import sync
+
+    app, db = app_and_db
+    photos = db.get_photos()[:2]
+    for folder in db.get_folder_tree():
+        path = tmp_path / f"sync-folder-{folder['id']}"
+        path.mkdir()
+        db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (str(path), folder['id']))
+    db.conn.commit()
+    db.queue_change(photos[0]['id'], 'keyword_add', 'Osprey')
+    db.queue_change(photos[1]['id'], 'rating', 'invalid')
+    monkeypatch.setattr(sync, '_SYNC_CHECKPOINT_CHANGES', 1)
+    client = app.test_client()
+    job_id = client.post('/api/jobs/sync').get_json()['job_id']
+    job = wait_for_job_via_runner(app._job_runner, job_id)
+    assert job['status'] == 'failed'
+    assert job['progress']['current'] == job['progress']['total'] == 2
+    assert job['progress']['synced'] == 1
+    assert job['progress']['failed'] == 1
+    assert job['progress']['checkpoint'] == 1
+    pending = client.get('/api/sync/status').get_json()
+    assert pending['pending_count'] == 1
+    assert pending['active_job'] is None
