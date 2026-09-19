@@ -147,7 +147,9 @@ def _assert_grid_never_jumped(page, before):
 
 @pytest.mark.parametrize("sort", ["date", "prediction_confidence", "prediction_confidence_asc"])
 @pytest.mark.parametrize("scope", ["keyword", "folder"])
-def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server, page, sort, scope):
+@pytest.mark.parametrize("selection_mode", ["pair", "all_matching"])
+def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server, page, sort, scope, selection_mode):
+    """Accepting a species must leave the same photos ready for a second edit."""
     db = live_server["db"]
     _seed_filtered_library(db, live_server["data"]["folders"][0])
     old_keyword = db.add_keyword("Needs identification")
@@ -181,9 +183,16 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
         expect(page.locator("#sortSelect")).to_have_value(sort)
         assert page.evaluate("VireoFilter.hasFilters()") is False
     _scroll_and_select(page)
-    page.locator("#grid .grid-card").nth(31).click(modifiers=["ControlOrMeta"])
+    if selection_mode == "all_matching":
+        page.evaluate("selectAllMatchingPhotos()")
+    else:
+        page.locator("#grid .grid-card").nth(31).click(modifiers=["ControlOrMeta"])
     selected = page.evaluate("getActiveSelection()")
-    assert len(selected) == 2
+    if selection_mode == "all_matching":
+        assert len(selected) == page.evaluate("totalPhotos")
+        assert len(selected) > page.evaluate("photos.length"), "must select unloaded photos"
+    else:
+        assert len(selected) == 2
     before = page.evaluate("gridContainer.scrollTop")
     row = page.locator("#selectionPredictions .prediction-row").filter(has_text="Red-tailed Hawk")
     expect(row.get_by_role("button", name="Accept on all", exact=True)).to_be_visible()
@@ -194,7 +203,7 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
     assert accepted.value.ok
     page.wait_for_function(
         "ids => ids.every(id => { const p = findBrowsePhoto(id);"
-        " return p && p.species.includes('Red-tailed Hawk'); })",
+        " return !p || p.species.includes('Red-tailed Hawk'); })",
         arg=selected,
     )
     page.wait_for_timeout(400)
@@ -206,8 +215,9 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
     keyword_row = page.locator("#selectionKeywordSuggestions .selection-keyword-row").filter(
         has_text="Needs identification"
     )
+    tagged_count = len(set(selected) & set(photo_ids))
     with page.expect_response("**/api/batch/keyword-remove") as removed:
-        keyword_row.get_by_role("button", name="Remove from 2", exact=True).click()
+        keyword_row.get_by_role("button", name=f"Remove from {tagged_count}", exact=True).click()
     assert removed.value.ok
     expect(keyword_row).to_have_count(0)
     page.wait_for_timeout(400)
@@ -323,6 +333,62 @@ def test_membership_refresh_cannot_replace_a_new_filter(live_server, page):
     assert page.evaluate("refreshDone") is None
     assert page.evaluate("photos.map(p => p.id)") == expected
     assert page.evaluate("selectedPhotoId") is None
+
+
+@pytest.mark.parametrize("during_request", ["unchanged", "select_photo", "change_filter", "failure"])
+def test_off_page_selection_reconciliation(live_server, page, during_request):
+    """Reconcile actual membership without overwriting newer user actions."""
+    db = live_server["db"]
+    keyword_id = _seed_filtered_library(db, live_server["data"]["folders"][0])
+    _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
+    _scroll_and_select(page)
+    page.evaluate("selectAllMatchingPhotos()")
+    selected = page.evaluate("getActiveSelection()")
+    loaded = page.evaluate("photos.map(p => p.id)")
+    removed_id = next(photo_id for photo_id in selected if photo_id not in loaded)
+    with db.conn:
+        db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+                        (removed_id, keyword_id))
+    before = page.evaluate("gridContainer.scrollTop")
+    pending = []
+
+    def hold_ids(route):
+        if route.request.post_data_json.get("ids_only"):
+            pending.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/photos/query", hold_ids)
+    page.evaluate("() => { window.refreshDone = resetAndLoad({preserveScroll: true}); }")
+    page.wait_for_timeout(300)
+    assert pending
+    assert page.evaluate("getActiveSelection()") == selected
+    if during_request == "select_photo":
+        card = page.locator("#grid .grid-card").nth(30)
+        new_id = int(card.get_attribute("data-id"))
+        card.click()
+    elif during_request == "change_filter":
+        page.evaluate("() => { VireoFilter.clearAll(true); VireoFilter.addRule('rating', '>=', 4); }")
+        page.wait_for_function("!loading && photos.length === 1 && photos[0].rating === 4")
+    if during_request == "failure":
+        pending[0].fulfill(status=503, content_type="application/json", body='{"error":"Unavailable"}')
+        assert page.evaluate("refreshDone") is False
+        assert page.evaluate("getActiveSelection()") == selected
+        assert page.evaluate("photos.map(p => p.id)") == loaded
+    else:
+        pending[0].continue_()
+        result = page.evaluate("refreshDone")
+        if during_request == "change_filter":
+            assert result is None
+            assert page.evaluate("getActiveSelection()") == []
+            assert page.evaluate("photos.length === 1 && photos[0].rating === 4")
+        else:
+            assert result is True
+            expected = [new_id] if during_request == "select_photo" else [i for i in selected if i != removed_id]
+            assert page.evaluate("getActiveSelection()") == expected
+            assert page.evaluate("photos.length") < len(selected) - 1
+    if during_request in ("unchanged", "failure"):
+        assert abs(page.evaluate("gridContainer.scrollTop") - before) < 2
 
 
 def test_membership_refresh_preserves_expanded_stack_and_member_selection(live_server, page):
