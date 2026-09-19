@@ -846,3 +846,88 @@ def test_reopening_the_visible_photo_does_not_arm_a_decode_that_never_ends(live_
     assert armed["pending"] is False
     assert armed["parked"] is False
     expect(page.locator("#lightboxPreviewStatus")).to_be_hidden()
+
+
+def test_initial_load_does_not_settle_while_a_sharper_tier_is_still_pending(live_server, page):
+    """A user zoom during the initial /full load (e.g. clicking 1:1) leaves an
+    outstanding upgrade in flight even though _lbProgressiveTargetKey is null.
+    Settling the initial load in that state would arm the fade timers on a chip
+    whose pixels have not arrived yet. The chip must stay on 'Sharpening…' and
+    the settle path must not run until the sharper source actually lands.
+    """
+    full_held = []
+    original_held = []
+
+    def hold_full(route):
+        full_held.append(route)
+
+    def hold_original(route):
+        original_held.append(route)
+
+    page.route(
+        re.compile(r"/api/photos/\d+$"),
+        lambda route: route.fulfill(json={
+            "id": int(route.request.url.rsplit("/", 1)[1]),
+            "width": 6000, "height": 4000, "full_uses_original": False,
+            "full_preview_max_size": 1920,
+            "edit_recipe": None, "flag": "none",
+        }),
+    )
+    page.route("**/photos/*/full*", hold_full)
+    page.route("**/photos/*/original*", hold_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate(
+        """() => {
+          _lbScheduleOriginalPreload = function() {};
+          LB_DETAIL_SHOW_DELAY_MS = 0;
+          // A very short settle window makes an accidental settle observable:
+          // if the initial load calls _lbMarkDetailSettled it would clear the
+          // chip before the pending upgrade could land.
+          LB_DETAIL_SETTLED_MS = 40;
+          LB_DETAIL_FADE_MS = 10;
+          // Count calls so we can distinguish a settle that ran and was
+          // cancelled by a follow-up render from one that never ran at all.
+          window._lbSettleCalls = 0;
+          var settle = _lbMarkDetailSettled;
+          _lbMarkDetailSettled = function() { window._lbSettleCalls += 1; return settle.apply(this, arguments); };
+          openLightbox(100, 'photo-0.jpg', [
+            {id: 100, filename: 'photo-0.jpg', width: 6000, height: 4000, edit_recipe: null}
+          ]);
+        }"""
+    )
+    status = page.locator("#lightboxPreviewStatus")
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Loading…"
+
+    # Zoom to 1:1 while /full is still held. That queues an /original upgrade.
+    page.evaluate("setLightboxZoomToOneToOne()")
+    page.wait_for_function("_lbDesiredSrcKey === 'original' && _lbPreviewLoading")
+    page.wait_for_timeout(200)  # let the debounced swap dispatch its request
+    assert original_held, "the 1:1 zoom did not queue an /original request"
+
+    # Release /full. handleInitialImageLoad runs while /original is still in flight.
+    assert full_held
+    for route in full_held:
+        route.fulfill(body=_jpeg(), content_type="image/jpeg")
+    page.wait_for_function("!_lbInitialDecodePending")
+
+    # The pending upgrade is why the chip is up; it must stay up. Settling here
+    # would fade it off before /original arrived, then re-arm it -- exactly the
+    # blink this branch is meant to prevent.
+    assert page.evaluate("_lbSettleCalls") == 0
+    assert page.evaluate("_lbDetailStatusSettled") is False
+    assert page.evaluate("_lbDetailSettleTimer") is None
+    assert page.evaluate("_lbDesiredSrcKey") == "original"
+    assert page.evaluate("_lbCurrentSrcKey") == "full"
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Sharpening…"
+
+    # Well past the (aggressively shortened) settle window: the chip is still
+    # sharpening, not faded and not re-arming.
+    page.wait_for_timeout(100)
+    expect(status).to_be_visible()
+    assert _detail_text(page) == "Sharpening…"
+    assert page.evaluate(
+        "document.getElementById('lightboxPreviewStatus').classList.contains('is-fading')"
+    ) is False

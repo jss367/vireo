@@ -8358,7 +8358,14 @@ function openLightbox(photoId, filename, photoList, options) {
       // No sharper tier is wanted for the current zoom, so what is on screen is
       // everything this view can show. (_lbScheduleOriginalPreload only warms a
       // background copy for a later 1:1 -- it does not change these pixels.)
-      _lbMarkDetailSettled();
+      // A user zoom during the initial /full load (e.g. clicking 1:1) can leave
+      // _lbDesiredSrcKey/_lbPreviewLoading describing an upgrade in flight even
+      // though _lbProgressiveTargetKey is null. Settling here would arm the fade
+      // timer and race the pending upgrade -- confirming a load whose pixels
+      // have not arrived yet. The upgrade's own preloader will settle when it
+      // lands, or clear the chip when it fails. Match the phase predicate so
+      // the chip stays on 'Sharpening…' until then.
+      if (!_lbPreviewLoading && !_lbDetailSharpeningPending()) _lbMarkDetailSettled();
       _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
       if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
     }
