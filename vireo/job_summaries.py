@@ -655,6 +655,17 @@ def _publish_site(result: dict, config: dict) -> tuple[str, list[str]]:
     return summary, _error_details(result)
 
 
+def _export_site(result: dict, config: dict) -> tuple[str, list[str]]:
+    summary = (
+        f"{_int(result, 'exported_images'):,} of {_int(result, 'photo_count'):,} photos "
+        f"exported with {_n(_int(result, 'album_count'), 'album')} and life list"
+    )
+    if result.get("errors"):
+        summary += f" — incomplete: {_n(len(result['errors']), 'error')}"
+    details = [f"Export folder: {result['destination']}"] if result.get("destination") else []
+    return summary, details + _error_details(result)
+
+
 def _duplicate_scan(result: dict, config: dict) -> tuple[str, list[str]]:
     proposals = result.get("proposals")
     if not isinstance(proposals, list):
@@ -695,6 +706,7 @@ _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
     "ingest": _ingest,
     "capture-time": _capture_time,
     "publish-site": _publish_site,
+    "export-site": _export_site,
     "duplicate-scan": _duplicate_scan,
     "move-folder": _move,
     "move-photos": _move,

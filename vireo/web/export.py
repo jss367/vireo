@@ -1,4 +1,4 @@
-"""Export presets, the photo export job, and website publishing."""
+"""Export presets, photo and complete-site exports, and website publishing."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ def create_export_blueprint(
     settings_write_lock,
     build_life_list_payload,
     build_highlights_payload,
+    resolve_visual,
 ):
     """Build the export blueprint.
 
@@ -640,6 +641,63 @@ def create_export_blueprint(
                 "quality": quality,
                 "include_locations": include_locations,
             },
+        )
+
+    @blueprint.route("/api/jobs/export-site", methods=["POST"])
+    @background_job
+    def api_job_export_site(ctx):
+        """Export every workspace photo, albums, metadata, and life list."""
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        destination = body.get("destination")
+        if not isinstance(destination, str) or not destination.strip():
+            return json_error("destination required")
+        destination = destination.strip()
+        if not os.path.isabs(destination) or "\x00" in destination:
+            return json_error("destination must be an absolute folder path")
+        include_locations = body.get("include_locations", False)
+        if not isinstance(include_locations, bool):
+            return json_error("include_locations must be a boolean")
+        effective = get_db().get_effective_config(cfg.load())
+        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            from site_export import export_site
+
+            thread_db = ctx.thread_db()
+            started = time.time()
+
+            def progress(current, total, filename, phase):
+                payload = {
+                    "current": current, "total": total,
+                    "current_file": filename, "phase": phase,
+                    "rate": round(current / max(time.time() - started, 0.01), 1),
+                }
+                job["progress"].update(payload)
+                ctx.runner.push_event(job["id"], "progress", payload)
+
+            try:
+                return export_site(
+                    thread_db, vireo_dir, destination,
+                    build_life_list=build_life_list_payload,
+                    resolve_visual=resolve_visual,
+                    options={
+                        "include_locations": include_locations,
+                        "working_copy_max_size": effective.get("working_copy_max_size", 4096),
+                        "developed_dir": effective.get("darktable_output_dir", "") or "",
+                    },
+                    progress_cb=progress,
+                    checkpoint=lambda: ctx.checkpoint(job),
+                    cancel_check=lambda: ctx.runner.cancellation_requested(job["id"]),
+                    begin_commit=lambda: ctx.runner.begin_uncancellable(job["id"]),
+                )
+            finally:
+                thread_db.close()
+
+        return ctx.start(
+            "export-site", work, pausable=True,
+            config={"destination": destination, "include_locations": include_locations},
         )
 
     return blueprint
