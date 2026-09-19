@@ -58,6 +58,25 @@
   }
   .sync-review-group-header { display: flex; align-items: flex-start; gap: 10px; }
   .sync-review-group-title { color: var(--text-primary); font-size: 14px; font-weight: 650; }
+  .sync-review-group-discard {
+    padding: 4px 10px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    background: none;
+    color: var(--danger);
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .sync-review-group-discard:not(:disabled):hover {
+    background: var(--danger);
+    color: var(--danger-text);
+    border-color: var(--danger);
+  }
+  .sync-review-group-discard:focus-visible {
+    outline: 2px solid var(--danger);
+    outline-offset: 2px;
+  }
   .sync-review-delta {
     display: flex;
     align-items: center;
@@ -786,7 +805,7 @@ function renderSyncPreview() {
       html += '<div class="sync-review-detail">' + escapeHtml(presentation.after_detail) + '</div>';
     }
     html += '</div>';
-    html += '<button class="sync-preview-action" onclick="discardSyncChanges([' + ids.join(',') + '])"' + actionsDisabled + ' style="background:none;border:none;color:var(--text-ghost);font-size:11px;cursor:pointer;white-space:nowrap;" title="Discard this group">Discard group</button>';
+    html += '<button class="sync-preview-action sync-review-group-discard" onclick="discardSyncChanges([' + ids.join(',') + '])"' + actionsDisabled + ' title="Discard this group">Discard group</button>';
     html += '</div>';
     html += '<div class="sync-review-photos">';
     displayedEntries.forEach(function(entry) {
