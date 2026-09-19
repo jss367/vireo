@@ -7,7 +7,8 @@
     <div class="vf-search">
       <span class="vf-search-icon" aria-hidden="true">⌕</span>
       <input type="search" autocomplete="off" spellcheck="false"
-             placeholder="Search photos…" aria-label="Search photos">
+             placeholder="Search photos…" aria-label="Search photos" aria-describedby="vireoSearchError"
+             title='Search all metadata. Use AND, OR, NOT, parentheses, or "quoted phrases".'>
       <kbd>⌘F</kbd>
       <div class="vf-search-suggest" role="listbox" hidden></div>
     </div>
@@ -22,6 +23,8 @@
       <div class="vf-handoff-menu" hidden></div>
     </div>
   </div>
+
+  <div id="vireoSearchError" class="vf-search-error" role="status" aria-live="polite" hidden></div>
 
   <!-- Quick filters are user-configured (Settings -> Quick filters); the row
        is filled in from /api/filters/shortcuts by vireo-filter.js. -->
@@ -294,4 +297,10 @@
   .vf-quick-grid { gap: 12px; }
 }
 </style>
+<style>
+  .vf-search-help { margin: 0; padding: 8px 12px; font-size: 12px; color: var(--text-muted, #aaa); }
+  .vf-search-error { padding: 6px 0; color: var(--text-error, #c85243); font-size: 13px; }
+  .vf-search input[aria-invalid="true"] { outline: 1px solid var(--text-error, #c85243); }
+</style>
+<script src="/static/vireo-search.js"></script>
 <script src="/static/vireo-filter.js"></script>

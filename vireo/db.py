@@ -24593,6 +24593,42 @@ class Database:
             op = rule.get("op", "")
             value = rule.get("value")
 
+            if field == "metadata":
+                from metadata_search import (
+                    PREDICTION_COLUMNS,
+                    photo_metadata_predicates,
+                    values_contain,
+                )
+
+                if op not in ("contains", "not_contains") or not isinstance(value, str) or not value.strip():
+                    raise ValueError("metadata search requires contains/not_contains and a nonempty string")
+                if len(value) > 4096:
+                    raise ValueError("metadata search is limited to 4,096 characters")
+                like = f"%{_escape_like(value)}%"
+                parts = photo_metadata_predicates()
+                params = [like] * len(parts)
+                parts.append(
+                    "EXISTS (SELECT 1 FROM photo_color_labels search_color "
+                    "WHERE search_color.photo_id = p.id AND search_color.workspace_id = ? "
+                    "AND search_color.color LIKE ? ESCAPE '\\')"
+                )
+                params.extend([self._ws_id(), like])
+                # Preserve the displayed canonical species-name lookup from
+                # quick search, including hierarchy leaves linked to a root.
+                species_sql, species_params = _build_leaf(
+                    {"field": "species", "op": "contains", "value": value}
+                )
+                parts.append(species_sql)
+                params.extend(species_params)
+                prediction_sql, prediction_params = _prediction_exists(
+                    values_contain([f"pred.{col}" for col in PREDICTION_COLUMNS]
+                                   + ["COALESCE(prv.status, 'pending')"]), [like],
+                )
+                parts.append(prediction_sql)
+                params.extend(prediction_params)
+                condition = "(" + " OR ".join(parts) + ")"
+                return (f"NOT {condition}" if op == "not_contains" else condition), params
+
             if field == "keyword_identity":
                 if op != 'equals' or not isinstance(value, str) or not value:
                     raise ValueError('keyword_identity requires an equals rule with a nonempty identity')
