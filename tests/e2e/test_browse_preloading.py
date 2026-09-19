@@ -595,3 +595,23 @@ def test_detail_status_clears_when_the_sharper_tier_never_arrives(live_server, p
     # must not claim Full detail either, because the pixels never got sharper.
     expect(status).to_be_hidden()
     assert page.evaluate("_lbCurrentSrcKey") == "full"
+
+
+def test_detail_status_restarts_its_quiet_period_for_each_photo(live_server, page):
+    held = []
+
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", lambda r: held.append(r))
+    _open_window(page, live_server)
+    page.wait_for_function(
+        "Object.values(_lbAdjacentPreloads).some(e => e.photoId === 116 && e.status === 'decoded')"
+    )
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+    expect(page.locator("#lightboxPreviewStatus")).to_be_visible()
+    assert page.evaluate("_lbDetailStatusShown") is True
+
+    # Navigating abandons that upgrade, so the incoming photo must start from
+    # scratch rather than inherit the outgoing photo's timer or visible chip.
+    # Read synchronously: the re-arm is a timer that has not fired yet.
+    assert page.evaluate("lightboxNav(1); _lbDetailStatusShown") is False

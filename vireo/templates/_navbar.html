@@ -7916,7 +7916,11 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbCancelOriginalPreload();
   _lbCancelAdjacentPreloadTimer();
   _lbProgressiveTargetKey = null;
-  _lbCancelDetailConfirmation();
+  // Each photo earns its own quiet period. The outgoing photo's swap is dead as
+  // soon as _lbOpenSeq bumps below, so neither its pending tier nor an
+  // already-visible chip may carry over -- inheriting them would let a photo
+  // that decodes in 100ms still announce Loading and then Full detail.
+  _lbResetDetailStatus();
   _lbSetPreviewLoading(false);
   var fallbackViewportState = options.fallbackViewportState || null;
   var eyeTrackAnchor = options.eyeTrackAnchor || null;
