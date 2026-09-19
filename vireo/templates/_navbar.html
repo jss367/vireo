@@ -10719,6 +10719,18 @@ function _lbDetailIsDegraded() {
   var have = img ? Math.max(img.naturalWidth, img.naturalHeight) : 0;
   if (!have) return false;
 
+  // A developed JPEG companion can have geometry of its own, and the catalog
+  // row describes the RAW. _lbLayoutDims makes the same exception; here there is
+  // nothing to compare against, because the companion's true size is not known.
+  // Claim nothing rather than warn on dimensions that are not this render's.
+  if (
+    _lightboxCurrentId != null &&
+    _vireoPairKnownByPhoto[String(_lightboxCurrentId)] &&
+    _vireoPairSource(_lightboxCurrentId) === 'jpeg'
+  ) {
+    return false;
+  }
+
   // What this photo actually renders as, not its catalog dimensions: a 6000px
   // source cropped to a 3000px render is fully carried by the fallback, and
   // warning about missing detail there would be false. Same helpers as
@@ -10809,11 +10821,18 @@ function _lbRenderDetailStatus() {
   }
   if (phase === 'degraded') {
     // A standing condition rather than an event, so it skips the show delay and
-    // never fades: the user needs it while the upscaled view is on screen, not
+    // never fades: the user needs it while the degraded view is on screen, not
     // for 900ms after some load happened to finish.
+    //
+    // It deliberately does NOT set _lbDetailStatusShown. That flag means "a
+    // progress state was on screen long enough for this load to be worth
+    // confirming", and this is neither progress nor this load. Setting it let a
+    // zoom back to fit promote the warning straight to Full detail with nothing
+    // having loaded, and let the outgoing photo's warning -- still live at
+    // openLightbox's reset, since _lbOriginalUnavailable clears later -- rob the
+    // incoming photo of its quiet period.
     if (_lbDetailShowTimer) { clearTimeout(_lbDetailShowTimer); _lbDetailShowTimer = null; }
     _lbCancelDetailConfirmation();
-    _lbDetailStatusShown = true;
     _lbPaintDetailStatus('degraded');
     return;
   }
@@ -10827,6 +10846,7 @@ function _lbRenderDetailStatus() {
   _lbCancelDetailConfirmation();
   if (_lbDetailStatusShown) { _lbPaintDetailStatus(phase); return; }
   if (_lbDetailShowTimer) return;  // delay already armed; do not restart it
+  _lbPaintDetailStatus('off');     // a stale warning must not sit over a live load
   _lbDetailShowTimer = setTimeout(function() {
     _lbDetailShowTimer = null;
     var next = _lbDetailStatusPhase();

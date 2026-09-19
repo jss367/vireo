@@ -1023,3 +1023,79 @@ def test_degraded_detail_covers_a_fit_view_the_fallback_cannot_resolve(live_serv
         dpr,
     )
     assert page.evaluate("_lbDetailIsDegraded()") is True
+
+
+def _route_lost_original(page):
+    """/original is gone, so 1:1 lands on the 3840 preview of a 6000px photo."""
+    page.route("**/photos/*/full*", lambda r: r.fulfill(body=_jpeg(), content_type="image/jpeg"))
+    page.route("**/photos/*/original*", lambda r: r.abort())
+    page.route("**/photos/*/preview?*", lambda r: r.fulfill(
+        body=_jpeg(3840, 2560), content_type="image/jpeg"))
+
+
+def _go_degraded(page):
+    """Leave the lightbox showing the standing 'Preview only' warning at 1:1."""
+    page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
+    page.evaluate("setLightboxZoomToOneToOne()")
+    page.wait_for_function("_lbOriginalUnavailable && !_lbPreviewLoading")
+    assert page.evaluate("_lbDetailIsDegraded()") is True
+    assert _detail_text(page) == "Preview only"
+
+
+def test_degraded_warning_is_not_confirmable(live_server, page):
+    _route_lost_original(page)
+    _open_window(page, live_server)
+    _go_degraded(page)
+
+    # 'Preview only' is a standing condition, not a load the user watched. It
+    # must not claim _lbDetailStatusShown, which is what gates the 'Full detail'
+    # confirmation -- otherwise a later settle can promote the warning into a
+    # claim that pixels arrived when nothing loaded at all.
+    # Clear the flag the preceding 'Sharpening…' legitimately set, then re-render
+    # the standing warning: it must not put it back.
+    page.evaluate("_lbDetailStatusShown = false; _lbRenderDetailStatus();")
+    assert _detail_text(page) == "Preview only"
+    assert page.evaluate("_lbDetailStatusShown") is False
+    page.evaluate("_lbMarkDetailSettled()")
+    assert page.evaluate("_lbDetailStatusSettled") is False
+    assert _detail_text(page) == "Preview only"
+
+    # Zooming back to fit loads nothing, so the warning clears rather than
+    # resolving into a confirmation.
+    page.evaluate("setLightboxZoomToFit()")
+    page.wait_for_function("!_lbDetailIsDegraded()")
+    assert _detail_text(page) != "Full detail"
+    expect(page.locator("#lightboxPreviewStatus")).to_be_hidden()
+
+
+def test_degraded_warning_does_not_rob_the_next_photo_of_its_quiet_period(live_server, page):
+    _route_lost_original(page)
+    _open_window(page, live_server)
+    _go_degraded(page)
+
+    # openLightbox resets the chip before _lbOriginalUnavailable clears, so the
+    # outgoing photo's warning is still live when the reset renders. It must not
+    # mark the chip as already shown for the incoming photo.
+    armed = page.evaluate(
+        """() => {
+          lightboxNav(1);
+          return {shown: _lbDetailStatusShown};
+        }"""
+    )
+    assert armed["shown"] is False
+
+
+def test_degraded_detail_stays_silent_for_a_jpeg_companion(live_server, page):
+    _route_lost_original(page)
+    _open_window(page, live_server)
+    _go_degraded(page)
+
+    # Displayed from a JPEG companion, the catalog row describes the RAW, so the
+    # companion's true size is unknown and there is no basis for the warning.
+    page.evaluate(
+        """() => {
+          _vireoPairKnownByPhoto[String(_lightboxCurrentId)] = true;
+          _vireoPairSource = function() { return 'jpeg'; };
+        }"""
+    )
+    assert page.evaluate("_lbDetailIsDegraded()") is False
