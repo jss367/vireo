@@ -386,6 +386,21 @@ def test_add_folder_missing_id(app_and_db):
     assert "error" in resp.get_json()
 
 
+def test_remove_folder_from_unknown_workspace_returns_404(app_and_db):
+    """DELETE /api/workspaces/<ws_id>/folders/<folder_id> with an unknown
+    workspace id must return a controlled 404 rather than blowing up on the
+    workspace_folder_removals FK when the tombstone insert runs."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    folder = db.conn.execute("SELECT id FROM folders LIMIT 1").fetchone()
+    fid = folder["id"]
+
+    resp = client.delete(f"/api/workspaces/999999/folders/{fid}")
+    assert resp.status_code == 404
+    assert "error" in resp.get_json()
+
+
 def test_workspace_config_get_and_set(app_and_db):
     """GET config initially empty, POST sets overrides, GET reads them back."""
     app, _db = app_and_db
