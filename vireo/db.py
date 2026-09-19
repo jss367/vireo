@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 
 from keyword_identity import (
+    free_sibling_name,
     identity_sql,
     keywords_claim_different_taxa,
     resolve_import_alias,
@@ -15834,6 +15835,23 @@ class Database:
                 history_curation_fixed,
             )
 
+    def _reparent_disambiguated(self, child, dst_id, new_name):
+        """Move a colliding child under ``dst_id`` under a free name.
+
+        The three collision branches in ``_merge_keyword_into`` all preserve
+        the migrating row rather than folding it away, which means they all
+        rename it -- and a rename is never just the ``keywords`` row. Pending
+        sidecar edits and the species curation tables key on the spelling, so
+        skipping the dependent migration leaves an unsynced ``keyword_add``
+        writing the retired name into XMP and drops starred photos out of the
+        highlight and life-list queries. Caller commits.
+        """
+        self.conn.execute(
+            "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
+            (dst_id, new_name, child["id"]),
+        )
+        self._rename_keyword_dependents(child["id"], child["name"], new_name)
+
     def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
 
@@ -16437,6 +16455,16 @@ class Database:
                     "FROM keywords WHERE parent_id = ? AND name = ?",
                     (dst_id, child["name"]),
                 ).fetchone()
+                # Every disambiguation below has to dodge the whole sibling
+                # set, not just the row it collided with: the suffixed name
+                # can itself be occupied (a user typed it, or an earlier
+                # disambiguation produced it), and a second
+                # UNIQUE(name, parent_id) violation here is uncaught.
+                taken = {
+                    row["name"] for row in self.conn.execute(
+                        "SELECT name FROM keywords WHERE parent_id = ?", (dst_id,)
+                    )
+                }
                 if keywords_claim_different_taxa(self, existing, child):
                     # Two same-named species rows that resolve to DIFFERENT
                     # taxa. A recursive merge keeps the destination's taxon
@@ -16445,10 +16473,9 @@ class Database:
                     # come out tagged as the other species. Same reasoning
                     # as the distinct place case below; keep both rows
                     # instead.
-                    disambiguated = f"{child['name']} (id-{child['id']})"
-                    self.conn.execute(
-                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
-                        (dst_id, disambiguated, child["id"]),
+                    self._reparent_disambiguated(
+                        child, dst_id, free_sibling_name(
+                            taken, child["name"], f"id-{child['id']}"),
                     )
                 elif (
                     existing["type"] == "location"
@@ -16465,11 +16492,9 @@ class Database:
                     # photos onto a sibling that represents a different
                     # Google place. Disambiguate the migrating child with a
                     # place-id suffix so both Google places survive.
-                    suffix = child["place_id"][-8:]
-                    disambiguated = f"{child['name']} ({suffix})"
-                    self.conn.execute(
-                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
-                        (dst_id, disambiguated, child["id"]),
+                    self._reparent_disambiguated(
+                        child, dst_id, free_sibling_name(
+                            taken, child["name"], child["place_id"][-8:]),
                     )
                 elif existing["type"] == child["type"]:
                     merged += self._merge_keyword_into(
@@ -16480,10 +16505,9 @@ class Database:
                     # (LOWER(name), parent_id, type) dedup boundary, so
                     # preserve both by renaming the migrating child rather
                     # than retagging photos across types.
-                    disambiguated = f"{child['name']} (id-{child['id']})"
-                    self.conn.execute(
-                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
-                        (dst_id, disambiguated, child["id"]),
+                    self._reparent_disambiguated(
+                        child, dst_id, free_sibling_name(
+                            taken, child["name"], f"id-{child['id']}"),
                     )
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (src_id,))
         return merged

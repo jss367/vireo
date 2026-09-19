@@ -419,6 +419,23 @@ def keywords_claim_different_taxa(db, first, second):
     second_id = taxon_identity(db, second)
     return first_id is not None and second_id is not None and first_id != second_id
 
+
+def free_sibling_name(taken, base, suffix):
+    """A ``base (suffix)`` name no existing sibling already occupies.
+
+    The disambiguation suffixes are not guaranteed unique on their own -- a
+    user can have typed the very name they produce, or renamed a row into it.
+    Appending an ordinal until the slot is free keeps the merge from hitting
+    ``UNIQUE(name, parent_id)``, which surfaced as an uncaught SQLite error.
+    Deterministic so the preview and the write path agree on the result.
+    """
+    candidate = f'{base} ({suffix})'
+    ordinal = 2
+    while candidate in taken:
+        candidate = f'{base} ({suffix}) {ordinal}'
+        ordinal += 1
+    return candidate
+
 def _child_index(rows):
     """parent_id -> ordered child ids, as the merge walks them."""
     children = defaultdict(list)
@@ -449,11 +466,9 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
     plan['removed'].add(src_id)
     for child_id in list(children.get(src_id, ())):
         child = nodes[child_id]
-        existing = next(
-            (nodes[k] for k in children.get(dst_id, ())
-             if k not in plan['removed'] and nodes[k]['name'] == child['name']),
-            None,
-        )
+        siblings = [nodes[k] for k in children.get(dst_id, ()) if k not in plan['removed']]
+        existing = next((n for n in siblings if n['name'] == child['name']), None)
+        taken = {n['name'] for n in siblings}
         if existing is None:
             outcome = 'move'
         elif keywords_claim_different_taxa(db, existing, child):
@@ -461,19 +476,22 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
             # retag the incoming row's photos as the other species, so the
             # write path keeps both under an id suffix.
             outcome = 'rename'
-            plan['renames'][child_id] = f"{child['name']} (id-{child_id})"
+            plan['renames'][child_id] = free_sibling_name(
+                taken, child['name'], f'id-{child_id}')
         elif (existing['type'] == 'location' and child['type'] == 'location'
               and existing['place_id'] is not None and child['place_id'] is not None
               and existing['place_id'] != child['place_id']):
             # Distinct Google places that collide on (name, parent): the write
             # path keeps both by suffixing the incoming row.
             outcome = 'rename'
-            plan['renames'][child_id] = f"{child['name']} ({child['place_id'][-8:]})"
+            plan['renames'][child_id] = free_sibling_name(
+                taken, child['name'], child['place_id'][-8:])
         elif existing['type'] == child['type']:
             outcome = 'merge'
         else:
             outcome = 'rename'
-            plan['renames'][child_id] = f"{child['name']} (id-{child_id})"
+            plan['renames'][child_id] = free_sibling_name(
+                taken, child['name'], f'id-{child_id}')
         plan['children'].append({
             'id': child_id, 'name': child['name'], 'type': child['type'],
             'outcome': outcome,
@@ -713,12 +731,18 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     species_bearing = {bool(r['is_species'] or r['type'] == 'taxonomy') for r in records}
     if len(species_bearing) > 1:
         raise ValueError('Species keywords cannot be merged with other keyword types.')
+    is_species_keyword = species_bearing.pop()
 
     valid_parents = ({r['parent_id'] for r in records}
                      - selected - _subtree_ids(children, target_id))
     options = _merge_options(records, paths, valid_parents)
     _label_species_options(db, options['species'])
     resolved, requires_choice = _resolve_merge_fields(records, options, overrides)
+
+    # Every selected row agreed on this above, so the merge cannot change it.
+    # Carrying it explicitly keeps a legacy ``general, is_species=1`` survivor
+    # matched by species queries even when a retype cleared the flag mid-merge.
+    resolved['is_species'] = 1 if is_species_keyword else 0
 
     notes = []
     if resolved['type'] != 'location' and resolved['place_id'] is not None:
@@ -853,6 +877,9 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
         # photo_keywords rows to that sibling, so the photos carrying it have
         # to be read before the merge runs.
         collapsed = _collapsing_child_tags(db, preview)
+        # Same reason: a child kept under a disambiguated name still has its
+        # OLD spelling in the sidecars of the photos carrying it.
+        renamed_tags = _renamed_child_tags(db, preview)
         affected = []
         for source in preview['sources']:
             affected.extend((dict(r), source) for r in db.conn.execute(
@@ -869,7 +896,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
                 (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
             )
             db._merge_keyword_into(source['id'], target_id, pending_source_only=True)
-        _apply_merge_overrides(db, target_id, target, resolved)
+        _apply_merge_overrides(db, target_id, resolved)
         _queue_survivor_rename(db, target_id, target['name'], resolved['name'])
         for row, source in affected:
             pid, ws = row['photo_id'], row['workspace_id']
@@ -893,6 +920,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             )
             db.queue_change(pid, 'keyword_add', resolved['name'], workspace_id=ws, _commit=False)
         _queue_moved_subtree_changes(db, preview, target_id, collapsed)
+        _queue_disambiguated_child_renames(db, preview, renamed_tags)
         if (resolved['type'] == 'location' or target['type'] == 'location'
                 or any(s['type'] == 'location' for s in preview['sources'])):
             # Filling previously missing coordinates, or moving the retained
@@ -913,29 +941,38 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
     return preview
 
 
-def _apply_merge_overrides(db, target_id, target, resolved):
+def _apply_merge_overrides(db, target_id, resolved):
     """Write the chooser's resolved identity onto the survivor.
 
     Runs after every ``_merge_keyword_into`` so the sources are already gone:
     the partial ``UNIQUE(place_id) WHERE place_id IS NOT NULL`` index would
     otherwise reject moving a link that a still-present source row holds.
+
+    Diffed against the survivor's CURRENT row rather than its pre-merge
+    snapshot, because the merges just mutated it -- folding in coordinates, a
+    place link, a taxon, and (when the types differed) clearing ``is_species``
+    to stop a retyped row leaking into species queries. Comparing against the
+    snapshot would call those fields unchanged and leave the intermediate
+    state on disk: a row with a taxon link that ``is_species = 1 OR type =
+    'taxonomy'`` no longer matches.
     """
+    current = db.conn.execute(
+        'SELECT name, parent_id, type, place_id, taxon_id, source_taxon_id, '
+        'latitude, longitude, is_species FROM keywords WHERE id = ?', (target_id,),
+    ).fetchone()
     changed = {field: resolved[field] for field in
                ('name', 'parent_id', 'type', 'place_id', 'taxon_id',
-                'source_taxon_id', 'latitude', 'longitude')
-               if resolved[field] != target[field]}
+                'source_taxon_id', 'latitude', 'longitude', 'is_species')
+               if resolved[field] != current[field]}
     if not changed:
         return
     if 'name' in changed:
         # Keep every dependent name string (pending sidecar edits, species
         # curation) in lockstep with the row, exactly as a rename would.
-        db._rename_keyword_dependents(target_id, target['name'], changed['name'])
+        db._rename_keyword_dependents(target_id, current['name'], changed['name'])
     assignments = ', '.join(f'{field} = ?' for field in changed)
     db.conn.execute(f'UPDATE keywords SET {assignments} WHERE id = ?',
                     [*changed.values(), target_id])
-    if resolved['type'] != 'taxonomy' and not resolved['taxon_id']:
-        db.conn.execute('UPDATE keywords SET is_species = 0 WHERE id = ? AND type != ?',
-                        (target_id, 'taxonomy'))
 
 
 
@@ -988,6 +1025,47 @@ def _collapsing_child_tags(db, preview):
     ).fetchall()
     return [(dict(row), collapsing[row['keyword_id']]) for row in rows]
 
+
+
+def _renamed_child_tags(db, preview):
+    """Photos carrying a child the merge will keep under a new name."""
+    renamed = {child['id']: child for child in preview['children']
+               if child['outcome'] == 'rename'}
+    if not renamed:
+        return []
+    placeholders = ','.join('?' for _ in renamed)
+    rows = db.conn.execute(
+        'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id FROM photo_keywords pk '
+        'JOIN photos p ON p.id = pk.photo_id '
+        'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+        f'WHERE pk.keyword_id IN ({placeholders})', list(renamed),
+    ).fetchall()
+    return [(dict(row), renamed[row['keyword_id']]) for row in rows]
+
+
+def _queue_disambiguated_child_renames(db, preview, renamed_tags):
+    """Carry a collision rename out to the flat ``dc:subject`` keyword.
+
+    A child kept under a suffixed name is renamed as far as the user is
+    concerned, so its photos need the same flat remove/add an ordinary rename
+    queues. ``_queue_moved_subtree_changes`` already rewrote the hierarchy for
+    these rows; without this the flat leaf keeps the retired spelling and a
+    rescan reads the row back under a name the database no longer has.
+    """
+    for row, child in renamed_tags:
+        pid, ws = row['photo_id'], row['workspace_id']
+        # Another surviving keyword on the photo -- the twin this row was
+        # renamed to avoid, typically -- may still need the old flat word.
+        still_used = db.conn.execute(
+            'SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id '
+            'WHERE pk.photo_id = ? AND pk.keyword_id != ?', (pid, child['id']),
+        )
+        if not any(keyword_match_key(r['name']) == keyword_match_key(child['name'])
+                   for r in still_used):
+            db.queue_change(pid, 'keyword_remove_flat', child['name'],
+                            workspace_id=ws, _commit=False)
+        db.queue_change(pid, 'keyword_add', child['new_name'],
+                        workspace_id=ws, _commit=False)
 
 def _queue_moved_subtree_changes(db, preview, target_id, collapsed):
     """Rewrite sidecar hierarchies for every descendant the merge relocated.

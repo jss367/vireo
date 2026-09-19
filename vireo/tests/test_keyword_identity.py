@@ -957,6 +957,105 @@ def test_merge_allows_a_linked_descendant_to_collapse_into_an_unlinked_twin(cata
         'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?', (kept_lake,))} == {
         photos[0], photos[1]}
 
+
+def _two_hummingbird_branches(db):
+    """Two trips each holding a "Hummingbird" that means a different bird."""
+    anna = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte anna', 'Anna bird', 'species', 5112)").lastrowid
+    costa = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte costae', 'Costa bird', 'species', 5113)").lastrowid
+    old = db.add_keyword('Trip A')
+    new = db.add_keyword('Trip B')
+    old_bird = db.add_keyword('Hummingbird', parent_id=old, is_species=True)
+    new_bird = db.add_keyword('Hummingbird', parent_id=new, is_species=True)
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (anna, old_bird))
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (costa, new_bird))
+    db.conn.commit()
+    return old, new, old_bird, new_bird
+
+
+def test_disambiguated_child_carries_its_dependent_names(catalog):
+    """Keeping a colliding child under a suffixed name is still a rename. An
+    unsynced keyword_add left on the old spelling would write a word the
+    database no longer has, and the photos need the flat remove/add so their
+    sidecars follow the row."""
+    db, photos = catalog
+    old, new, old_bird, new_bird = _two_hummingbird_branches(db)
+    db.tag_photo(photos[0], old_bird)
+    db.tag_photo(photos[1], new_bird)
+    db.queue_change(photos[0], 'keyword_add', 'Hummingbird')
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+
+    renamed = f'Hummingbird (id-{old_bird})'
+    assert db.conn.execute(
+        'SELECT name FROM keywords WHERE id = ?', (old_bird,)).fetchone()[0] == renamed
+    pending = {(r['change_type'], r['value']) for r in db.conn.execute(
+        'SELECT change_type, value FROM pending_changes WHERE photo_id = ?', (photos[0],))}
+    assert ('keyword_add', renamed) in pending
+    assert ('keyword_add', 'Hummingbird') not in pending
+    assert ('keyword_remove_flat', 'Hummingbird') in pending
+
+
+def test_disambiguation_skips_a_name_that_is_already_taken(catalog):
+    """The suffix is not unique by construction -- a user can already own the
+    exact name it produces. Colliding a second time raised a bare SQLite
+    IntegrityError out of /api/keywords/merge."""
+    db, photos = catalog
+    old, new, old_bird, new_bird = _two_hummingbird_branches(db)
+    squatter = db.add_keyword(f'Hummingbird (id-{old_bird})', parent_id=new)
+    db.tag_photo(photos[0], old_bird)
+    db.tag_photo(photos[1], new_bird)
+    db.tag_photo(photos[2], squatter)
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    planned = next(c['new_name'] for c in preview['children'] if c['id'] == old_bird)
+    assert planned == f'Hummingbird (id-{old_bird}) 2'
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+
+    assert sorted(r['name'] for r in db.conn.execute(
+        'SELECT name FROM keywords WHERE parent_id = ?', (new,))) == [
+        'Hummingbird', f'Hummingbird (id-{old_bird})', f'Hummingbird (id-{old_bird}) 2']
+    # The squatter keeps its own row and photo; only the migrating child moved.
+    assert db.conn.execute(
+        'SELECT keyword_id FROM photo_keywords WHERE photo_id = ?',
+        (photos[2],)).fetchone()['keyword_id'] == squatter
+
+
+def test_merge_keeps_a_legacy_species_flag_a_retype_cleared(catalog):
+    """A legacy ``general, is_species=1`` row absorbing a taxonomy row: the
+    merge clears is_species on the way through so a retyped row cannot leak
+    into species queries, and the chooser then restores a species link. The
+    finalization has to set the flag from the resolved state, not leave the
+    intermediate one -- a linked row that ``is_species = 1 OR type =
+    'taxonomy'`` misses is invisible to every species surface."""
+    db, photos = catalog
+    anna = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte anna', 'Anna bird', 'species', 5112)").lastrowid
+    legacy = db.add_keyword('Hummer', kw_type='general')
+    db.conn.execute('UPDATE keywords SET is_species = 1 WHERE id = ?', (legacy,))
+    taxonomy = db.add_keyword('Hummingbird', is_species=True)
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (anna, taxonomy))
+    db.conn.commit()
+    db.tag_photo(photos[0], taxonomy)
+    db.tag_photo(photos[1], legacy)
+
+    preview = preview_keyword_merge(db, [taxonomy, legacy], legacy)
+    assert preview['resolved']['taxon_id'] == anna
+    merge_keywords(db, [taxonomy, legacy], legacy, preview['preview_token'])
+
+    row = db.conn.execute(
+        'SELECT type, is_species, taxon_id FROM keywords WHERE id = ?', (legacy,)).fetchone()
+    assert (row['type'], row['taxon_id']) == ('general', anna)
+    assert row['is_species'] == 1
+
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
     default, so the preview names the field and withholds its token rather
