@@ -558,6 +558,69 @@ def _fold_merged_identity(destination, absorbed):
     if absorbed['is_species']:
         destination['is_species'] = 1
 
+
+def _resolve_landing(keyword_id, landing):
+    """Follow a row to the surviving row its photos end up on."""
+    seen = set()
+    while keyword_id in landing and keyword_id not in seen:
+        seen.add(keyword_id)
+        keyword_id = landing[keyword_id]
+    return keyword_id
+
+
+def _is_one_place_chain(ids, parent_of):
+    """Whether every id sits on a single ancestor line (a place hierarchy)."""
+    if len(ids) <= 1:
+        return True
+
+    def ancestry(start):
+        chain, node, seen = [], start, set()
+        while node is not None and node not in seen:
+            seen.add(node)
+            chain.append(node)
+            node = parent_of.get(node)
+        return chain
+
+    deepest = max(ids, key=lambda i: len(ancestry(i)))
+    return set(ids) <= set(ancestry(deepest))
+
+
+def _photos_left_with_rival_places(db, keyword_ids, placeholders, landing,
+                                   parent_of, post_types):
+    """Affected photos that would end up holding two unrelated linked places.
+
+    Evaluated against the POST-merge tree: a row can gain a place from the
+    metadata fold, and a collapsing row hands its photos to its destination,
+    so the pre-merge ids on ``photo_keywords`` are not the ones that matter.
+    """
+    rows = db.conn.execute(
+        f"""WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM keywords WHERE id IN ({placeholders})
+                UNION
+                SELECT k.id FROM keywords k JOIN descendants d ON k.parent_id = d.id
+            ),
+            touched AS (
+                SELECT DISTINCT photo_id FROM photo_keywords
+                WHERE keyword_id IN (SELECT id FROM descendants)
+            )
+            SELECT pk.photo_id, pk.keyword_id FROM photo_keywords pk
+            JOIN touched t ON t.photo_id = pk.photo_id
+            JOIN keywords k ON k.id = pk.keyword_id
+            WHERE k.type = 'location' OR pk.keyword_id IN ({placeholders})""",
+        [*keyword_ids, *keyword_ids],
+    ).fetchall()
+    by_photo = defaultdict(set)
+    for row in rows:
+        landed = _resolve_landing(row['keyword_id'], landing)
+        # Every surviving LOCATION row counts, linked or not: an unlinked one
+        # still contributes its own hierarchy to the sidecar, so two of them
+        # off the same line are two competing locations even when only one
+        # carries coordinates.
+        if post_types.get(landed) == 'location':
+            by_photo[row['photo_id']].add(landed)
+    return [photo_id for photo_id, landed in by_photo.items()
+            if not _is_one_place_chain(landed, parent_of)]
+
 def _coordinate_pair(row):
     if row['latitude'] is None or row['longitude'] is None:
         return None
@@ -884,52 +947,24 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
             WHERE keyword_id IN (SELECT id FROM descendants)
             ORDER BY photo_id, keyword_id''', keyword_ids,
     )]
-    # The retained ROW having a place is not the only way this merge can put
-    # a linked location on a photo: a source child collapsing into a linked
-    # sibling, or a linked descendant moving in, lands those photos on that
-    # child's place while the root stays unlinked or non-location. The merge
-    # then queues them a location resync, so a photo that also carries an
-    # unrelated linked place would export one of two independent locations.
-    # Scan whenever a linked location ends up anywhere in the retained
-    # subtree, not only when the root itself carries one.
-    retained_subtree = {target_id} | _subtree_ids(_child_index(surviving), target_id)
-    linked_landing = any(
-        nodes[kid]['type'] == 'location' and nodes[kid]['place_id'] is not None
-        for kid in retained_subtree if kid in nodes
-    )
-    if (resolved['type'] == 'location' and resolved['place_id']) or linked_landing:
-        # Ancestors of the retained path and everything under it are one
-        # place chain; a second independent linked place on an affected
-        # photo is a real conflict the user has to resolve first.
-        # Every row the plan absorbs ends up inside the retained subtree --
-        # its place either transfers to the survivor or already matches, so
-        # no photo comes out of the merge holding it as an independent place.
-        # The conflict query below still sees those rows' pre-merge ids, so
-        # leaving them out rejects valid subtree merges.
-        compatible = set(selected) | set(plan['removed']) | retained_subtree
-        parent_id = resolved['parent_id']
-        while parent_id is not None and parent_id not in compatible:
-            compatible.add(parent_id)
-            parent_id = nodes[parent_id]['parent_id'] if parent_id in nodes else None
-        # The affected photos are every photo under the selected SUBTREES,
-        # not just the rows named in the selection. A photo tagged only on a
-        # descendant the merge is about to move -- plus an unrelated linked
-        # place -- would otherwise slip past this guard and then get a
-        # location resync that exports the unrelated place's coordinates.
-        others = db.conn.execute(
-            f"""WITH RECURSIVE descendants(id) AS (
-                    SELECT id FROM keywords WHERE id IN ({placeholders})
-                    UNION
-                    SELECT k.id FROM keywords k JOIN descendants d ON k.parent_id = d.id
-                )
-                SELECT DISTINCT k.id FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id
-                WHERE k.type = 'location' AND k.place_id IS NOT NULL
-                AND pk.photo_id IN (SELECT photo_id FROM photo_keywords
-                                   WHERE keyword_id IN (SELECT id FROM descendants))""",
-            keyword_ids,
-        )
-        if any(r['id'] not in compatible for r in others):
-            raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
+    # After the merge, every photo this merge touches gets a ``location``
+    # resync, and that resync exports ONE place. Two linked places on a photo
+    # are fine when one contains the other -- a trail inside a park inside a
+    # county is a single chain, and that is what a place hierarchy looks like.
+    # Two SIBLING places are two different locations, and the export would
+    # pick between them arbitrarily. A membership set keyed on "somewhere
+    # under the retained root" cannot tell those apart, so the check walks
+    # each affected photo's own post-merge places instead.
+    landing = {source['id']: target_id for source in sources}
+    landing.update({entry['id']: entry['into_id'] for entry in plan['children']
+                    if entry['outcome'] == 'merge'})
+    parent_of = {node['id']: node['parent_id'] for node in surviving}
+    post_types = {node['id']: node['type'] for node in surviving}
+    post_types[target_id] = resolved['type']
+    conflicted = _photos_left_with_rival_places(
+        db, keyword_ids, placeholders, landing, parent_of, post_types)
+    if conflicted:
+        raise ValueError('Some photos already have a different linked place. Resolve those locations before merging.')
     # Every path this merge retires gets aliased to wherever its photos land,
     # so every one of them can steal a durable alias an unrelated keyword
     # already owns. Check them all, not just the directly selected sources:
@@ -981,6 +1016,9 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
         'requires_choice': requires_choice,
         'children': plan['children'],
         'path_changes': {str(k): v for k, v in path_changes.items()},
+        # Where every surviving row actually lives after the merge, so the
+        # alias writes can tell a retired path from a live one.
+        'live_paths': {n['id']: new_paths[n['id']] for n in surviving},
         'removed_count': len(plan['removed']),
         # Location keywords that will absorb a collapsing sibling's place_id
         # or coordinates. Their photos need a ``location`` resync even though
@@ -1272,11 +1310,22 @@ def _queue_moved_subtree_changes(db, preview, target_id, collapsed):
         rewrites[child['id']] = (child['from_path'], child['to_path'], child['into_id'])
     if not rewrites:
         return
+    # A retired path can be some OTHER surviving row's live path -- rename the
+    # survivor into the slot a source just vacated and the moved-and-
+    # disambiguated child's old path is exactly where its twin now lives.
+    # ``resolve_import_path`` consults aliases before the live tree, so
+    # recording one here would send every future import of that twin's real
+    # hierarchy to the wrong row. The live row owns its own path; skip it.
+    live_paths = {path_key(p): kid for kid, p in preview['live_paths'].items()}
     for old_path, _, destination_id in rewrites.values():
+        key = path_key(old_path)
+        owner = live_paths.get(key)
+        if owner is not None and owner != destination_id:
+            continue
         db.conn.execute(
             'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) '
             'VALUES (?, ?, ?)',
-            (path_key(old_path), json.dumps(old_path, ensure_ascii=False), destination_id),
+            (key, json.dumps(old_path, ensure_ascii=False), destination_id),
         )
     surviving = [kid for kid in rewrites if kid not in {c['id'] for _, c in collapsed}]
     rows = []

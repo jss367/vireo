@@ -10,6 +10,7 @@ from keyword_identity import (
     path_key,
     preview_keyword_merge,
     reconcile_location,
+    resolve_import_path,
 )
 
 
@@ -1226,6 +1227,89 @@ def test_conflict_guard_leaves_non_location_merges_alone(catalog):
 
     preview = preview_keyword_merge(db, [first, second], second)
     assert [(c['name'], c['outcome']) for c in preview['children']] == [('Sub', 'merge')]
+
+
+def test_conflict_guard_treats_sibling_branches_as_rival_places(catalog):
+    """Two places under one root are not one chain. A membership set keyed on
+    "somewhere under the retained root" called them compatible, so a photo
+    landing on Balboa Park while already tagged with its sibling Torrey Pines
+    got a location resync that would export whichever the picker chose."""
+    db, photos = catalog
+    stray = db.add_keyword('Trip A', kw_type='location')
+    kept = db.add_keyword('County', kw_type='location')
+    source_child = db.add_keyword('Balboa Park', parent_id=stray, kw_type='location')
+    balboa = db.add_keyword('Balboa Park', parent_id=kept, kw_type='location')
+    torrey = db.add_keyword('Torrey Pines', parent_id=kept, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'place-A', latitude = 32.73, "
+                    "longitude = -117.14 WHERE id = ?", (balboa,))
+    db.conn.execute("UPDATE keywords SET place_id = 'place-B', latitude = 32.92, "
+                    "longitude = -117.25 WHERE id = ?", (torrey,))
+    db.conn.commit()
+    db.tag_photo(photos[0], source_child)
+    db.tag_photo(photos[0], torrey)
+    db.tag_photo(photos[1], balboa)
+
+    with pytest.raises(ValueError, match='different linked place'):
+        preview_keyword_merge(db, [stray, kept], kept)
+
+
+def test_conflict_guard_allows_a_photo_on_one_place_chain(catalog):
+    """The counterpart: a photo tagged with a place and its own ancestor is a
+    hierarchy, not a conflict, and must still merge."""
+    db, photos = catalog
+    stray = db.add_keyword('Trip A', kw_type='location')
+    kept = db.add_keyword('County', kw_type='location')
+    source_child = db.add_keyword('Balboa Park', parent_id=stray, kw_type='location')
+    balboa = db.add_keyword('Balboa Park', parent_id=kept, kw_type='location')
+    trail = db.add_keyword('Palm Trail', parent_id=balboa, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'place-A' WHERE id = ?", (balboa,))
+    db.conn.execute("UPDATE keywords SET place_id = 'place-T' WHERE id = ?", (trail,))
+    db.conn.commit()
+    db.tag_photo(photos[0], source_child)
+    db.tag_photo(photos[0], trail)      # trail sits under balboa: one chain
+    db.tag_photo(photos[1], balboa)
+
+    preview = preview_keyword_merge(db, [stray, kept], kept)
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [
+        ('Balboa Park', 'merge')]
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'])
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (source_child,)).fetchone()
+
+
+def test_merge_does_not_alias_a_retired_path_a_survivor_still_lives_at(catalog):
+    """Rename the survivor into the slot a source just vacated and the moved
+    child's retired path is exactly where its twin now lives.
+    ``resolve_import_path`` consults aliases before the live tree, so writing
+    one would send every future import of that twin's real hierarchy to the
+    wrong taxon."""
+    db, photos = catalog
+    first = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Aa aa', 'A bird', 'species', 11)").lastrowid
+    second = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Bb bb', 'B bird', 'species', 22)").lastrowid
+    alpha = db.add_keyword('Alpha')
+    beta = db.add_keyword('Beta')
+    alpha_bird = db.add_keyword('Bird', parent_id=alpha, is_species=True)
+    beta_bird = db.add_keyword('Bird', parent_id=beta, is_species=True)
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (first, alpha_bird))
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (second, beta_bird))
+    db.conn.commit()
+    db.tag_photo(photos[0], alpha_bird)
+    db.tag_photo(photos[1], beta_bird)
+
+    overrides = {'name': 'Alpha'}
+    preview = preview_keyword_merge(db, [alpha, beta], beta, overrides)
+    merge_keywords(db, [alpha, beta], beta, preview['preview_token'], overrides)
+
+    rows = [dict(r) for r in db.conn.execute('SELECT * FROM keywords')]
+    live = keyword_paths(rows)[beta_bird]
+    assert live == ['Alpha', 'Bird']
+    # The twin's own hierarchy must not resolve to the disambiguated row.
+    assert resolve_import_path(db, live) != alpha_bird
 
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
