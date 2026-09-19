@@ -2703,19 +2703,61 @@ def test_sidecar_resolution_failure_does_not_abort_other_photos(tmp_path, db, mo
     assert [c['photo_id'] for c in db.get_pending_changes()] == [bad]
 
 
-def test_keyword_cancellation_does_not_hide_latest_shared_sidecar_intent(tmp_path, db):
+@pytest.mark.parametrize('alias', ['raw_jpeg', 'sidecar_symlink', 'folder_symlink'])
+@pytest.mark.parametrize('initially_present', [False, True])
+def test_keyword_cancellation_does_not_hide_latest_shared_sidecar_intent(
+    tmp_path, db, alias, initially_present,
+):
     from sync import sync_to_xmp
     from xmp import read_keywords
 
     db.set_active_workspace(db.ensure_default_workspace())
-    first, path = _setup_photo_with_xmp(tmp_path, db, keywords={'Osprey'})
-    second = db.add_photo(folder_id=db.get_photo(first)['folder_id'], filename='bird.nef',
+    first, path = _setup_photo_with_xmp(
+        tmp_path, db, keywords={'Osprey'} if initially_present else set(),
+    )
+    folder_id = db.get_photo(first)['folder_id']
+    filename = 'bird.nef'
+    if alias != 'raw_jpeg':
+        try:
+            if alias == 'sidecar_symlink':
+                filename = 'alias.nef'
+                os.symlink(path, os.path.join(os.path.dirname(path), 'alias.xmp'))
+            else:
+                folder_alias = tmp_path / 'alias-folder'
+                os.symlink(os.path.dirname(path), folder_alias, target_is_directory=True)
+                folder_id = db.add_folder(str(folder_alias), name='Alias folder')
+        except OSError:
+            pytest.skip('symlink creation unavailable')
+    second = db.add_photo(folder_id=folder_id, filename=filename,
                           extension='.nef', file_size=100, file_mtime=1)
-    db.queue_change(first, 'keyword_remove', 'Osprey')
-    db.queue_change(second, 'keyword_remove', 'Osprey')
-    # Re-adding on the first photo must be newer than the second removal,
-    # even though it cancels the first photo's still-unwritten removal.
-    db._flip_pending_keyword_change(first, 'Osprey', 'keyword_remove', 'keyword_add')
+    initial = 'keyword_remove' if initially_present else 'keyword_add'
+    inverse = 'keyword_add' if initially_present else 'keyword_remove'
+    db.queue_change(first, initial, 'Osprey')
+    db.queue_change(second, initial, 'Osprey')
+    # Cancelling the first edit must preserve its inverse after the sibling
+    # write, even when the sidecars have different stored paths/basenames.
+    db._flip_pending_keyword_change(first, 'Osprey', initial, inverse)
     assert sync_to_xmp(db)['synced'] == 2
-    assert read_keywords(path) == {'Osprey'}
+    assert read_keywords(path) == ({'Osprey'} if initially_present else set())
     assert not db.get_pending_changes()
+
+
+def test_keyword_cancellation_distinguishes_case_sensitive_sidecars(tmp_path, db):
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    first, path = _setup_photo_with_xmp(tmp_path, db, keywords={'Osprey'})
+    other_path = os.path.join(os.path.dirname(path), 'BIRD.xmp')
+    write_sidecar(other_path, flat_keywords={'Osprey'}, hierarchical_keywords={'People|Osprey'})
+    if os.path.samefile(path, other_path):
+        pytest.skip('requires case-sensitive filenames')
+    second = db.add_photo(folder_id=db.get_photo(first)['folder_id'], filename='BIRD.nef',
+                          extension='.nef', file_size=100, file_mtime=1)
+    db.queue_change(first, 'keyword_add', 'Osprey')
+    db.queue_change(second, 'keyword_add', 'Osprey')
+    db._flip_pending_keyword_change(second, 'Osprey', 'keyword_add', 'keyword_remove')
+    assert not [c for c in db.get_pending_changes() if c['photo_id'] == second]
+    assert sync_to_xmp(db)['synced'] == 1
+    assert read_keywords(other_path) == {'Osprey'}
+    assert set(read_hierarchical_keywords(other_path)) == {'People|Osprey'}

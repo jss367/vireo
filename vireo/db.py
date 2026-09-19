@@ -22982,27 +22982,40 @@ class Database:
                 remaining_sql + " LIMIT 1", remaining_params,
             ).fetchone() is not None
             if not needs_inverse and value is not None:
-                # RAW/JPEG siblings can share a sidecar. Compare stored paths
-                # without statting a network volume on an edit request, and
-                # without changing cancellation for unrelated homonyms.
-                own = self.conn.execute(
-                    "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id = p.folder_id "
-                    "WHERE p.id = ?", (photo_id,),
-                ).fetchone()
-                if own is not None:
-                    stem = os.path.splitext(own["filename"])[0]
-                    candidates = self.conn.execute(
-                        "SELECT DISTINCT p.filename FROM photos p "
-                        "JOIN folders f ON f.id = p.folder_id "
-                        "JOIN pending_changes pc ON pc.photo_id = p.id "
-                        "WHERE f.path = ? AND p.filename LIKE ? ESCAPE '\\' AND p.id != ? "
-                        "AND pc.workspace_id = ? AND pc.value = ? "
-                        "AND pc.change_type IN ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
-                        (own["path"], _escape_like(stem) + ".%", photo_id, ws_id, value),
-                    ).fetchall()
-                    needs_inverse = any(
-                        os.path.splitext(row["filename"])[0] == stem for row in candidates
-                    )
+                # Resolve all candidate sidecars, as sync does: differing
+                # basenames or folder spellings may still alias one file.
+                # Do not conservatively treat unrelated homonyms as shared;
+                # that would turn a cancelled add into a destructive removal.
+                candidates = self.conn.execute(
+                    "SELECT DISTINCT f.path, p.filename FROM photos p "
+                    "JOIN folders f ON f.id = p.folder_id "
+                    "JOIN pending_changes pc ON pc.photo_id = p.id "
+                    "WHERE p.id != ? AND pc.workspace_id = ? AND pc.value = ? "
+                    "AND pc.change_type IN ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
+                    (photo_id, ws_id, value),
+                ).fetchall()
+                if candidates:
+                    own = self.conn.execute(
+                        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id = p.folder_id "
+                        "WHERE p.id = ?", (photo_id,),
+                    ).fetchone()
+                    if own is not None:
+                        def sidecar_path(row):
+                            return os.path.join(row["path"], os.path.splitext(row["filename"])[0] + ".xmp")
+
+                        own_path = os.path.normcase(os.path.realpath(sidecar_path(own)))
+                        for path in {sidecar_path(row) for row in candidates}:
+                            other_path = os.path.normcase(os.path.realpath(path))
+                            if own_path == other_path:
+                                needs_inverse = True
+                                break
+                            if own_path.casefold() == other_path.casefold():
+                                # Scheduling may over-group case variants;
+                                # cancellation must confirm they are aliases.
+                                with contextlib.suppress(OSError):
+                                    needs_inverse = os.path.samefile(own_path, other_path)
+                                if needs_inverse:
+                                    break
 
         if _commit:
             self.conn.commit()
