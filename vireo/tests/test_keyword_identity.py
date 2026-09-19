@@ -1160,6 +1160,73 @@ def test_merge_refuses_to_steal_an_alias_owned_by_an_unrelated_keyword(catalog):
         'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
         (path_key(['Stray', 'Leaf']),)).fetchone()['keyword_id'] == unrelated
 
+
+def _collapsing_into_a_linked_child(db, photos, unrelated_place):
+    """Unlinked root; a source child collapses onto a LINKED destination child."""
+    stray = db.add_keyword('Trip A', kw_type='location')
+    kept = db.add_keyword('Trip B', kw_type='location')
+    source_child = db.add_keyword('Lake', parent_id=stray, kw_type='location')
+    kept_child = db.add_keyword('Lake', parent_id=kept, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'lake-x', latitude = 10.0, "
+                    "longitude = 20.0 WHERE id = ?", (kept_child,))
+    if unrelated_place:
+        elsewhere = db.upsert_place_chain({
+            'place_id': 'other-place', 'name': 'Elsewhere', 'lat': 50, 'lng': 10,
+            'address_components': []})
+        db.tag_photo(photos[0], elsewhere)
+    db.conn.commit()
+    db.tag_photo(photos[0], source_child)
+    db.tag_photo(photos[1], kept_child)
+    return stray, kept, kept_child
+
+
+def test_conflict_guard_covers_a_collapse_onto_a_linked_child(catalog):
+    """The retained row carrying a place is not the only way a merge puts a
+    linked location on a photo. A source child collapsing into a linked
+    sibling lands its photos on that child's place while the root stays
+    unlinked, and the merge then queues those photos a location resync -- so
+    one that also carries an unrelated place would export one of two
+    independent locations."""
+    db, photos = catalog
+    stray, kept, _ = _collapsing_into_a_linked_child(db, photos, unrelated_place=True)
+    assert db.conn.execute(
+        'SELECT place_id FROM keywords WHERE id = ?', (kept,)).fetchone()[0] is None
+
+    with pytest.raises(ValueError, match='different linked place'):
+        preview_keyword_merge(db, [stray, kept], kept)
+    assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (stray,)).fetchone()
+
+
+def test_conflict_guard_still_allows_a_clean_collapse_onto_a_linked_child(catalog):
+    """The widened trigger must not refuse the same shape when there is no
+    second place in play -- that is the ordinary duplicate-branch merge."""
+    db, photos = catalog
+    stray, kept, kept_child = _collapsing_into_a_linked_child(
+        db, photos, unrelated_place=False)
+
+    preview = preview_keyword_merge(db, [stray, kept], kept)
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [('Lake', 'merge')]
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'])
+    assert db.conn.execute(
+        'SELECT place_id FROM keywords WHERE id = ?', (kept_child,)).fetchone()[0] == 'lake-x'
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?', (kept_child,))} == {
+        photos[0], photos[1]}
+
+
+def test_conflict_guard_leaves_non_location_merges_alone(catalog):
+    """No linked location anywhere in the retained subtree means no scan."""
+    db, photos = catalog
+    first = db.add_keyword('Genre A', kw_type='general')
+    second = db.add_keyword('Genre B', kw_type='general')
+    db.add_keyword('Sub', parent_id=first)
+    db.add_keyword('Sub', parent_id=second)
+    db.tag_photo(photos[0], first)
+    db.tag_photo(photos[1], second)
+
+    preview = preview_keyword_merge(db, [first, second], second)
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [('Sub', 'merge')]
+
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
     default, so the preview names the field and withholds its token rather

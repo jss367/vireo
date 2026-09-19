@@ -884,7 +884,20 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
             WHERE keyword_id IN (SELECT id FROM descendants)
             ORDER BY photo_id, keyword_id''', keyword_ids,
     )]
-    if resolved['type'] == 'location' and resolved['place_id']:
+    # The retained ROW having a place is not the only way this merge can put
+    # a linked location on a photo: a source child collapsing into a linked
+    # sibling, or a linked descendant moving in, lands those photos on that
+    # child's place while the root stays unlinked or non-location. The merge
+    # then queues them a location resync, so a photo that also carries an
+    # unrelated linked place would export one of two independent locations.
+    # Scan whenever a linked location ends up anywhere in the retained
+    # subtree, not only when the root itself carries one.
+    retained_subtree = {target_id} | _subtree_ids(_child_index(surviving), target_id)
+    linked_landing = any(
+        nodes[kid]['type'] == 'location' and nodes[kid]['place_id'] is not None
+        for kid in retained_subtree if kid in nodes
+    )
+    if (resolved['type'] == 'location' and resolved['place_id']) or linked_landing:
         # Ancestors of the retained path and everything under it are one
         # place chain; a second independent linked place on an affected
         # photo is a real conflict the user has to resolve first.
@@ -893,8 +906,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
         # no photo comes out of the merge holding it as an independent place.
         # The conflict query below still sees those rows' pre-merge ids, so
         # leaving them out rejects valid subtree merges.
-        compatible = (set(selected) | set(plan['removed'])
-                      | _subtree_ids(_child_index(surviving), target_id))
+        compatible = set(selected) | set(plan['removed']) | retained_subtree
         parent_id = resolved['parent_id']
         while parent_id is not None and parent_id not in compatible:
             compatible.add(parent_id)
