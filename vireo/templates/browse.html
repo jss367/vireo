@@ -4605,9 +4605,42 @@ function loadedBrowseStackCoverForPhoto(photoId) {
   }) || null;
 }
 
+/* The cover of the stack the current selection *is*, or null.
+
+   Clicking a collapsed stack card selects every frame it stands for
+   (selectPhoto's ``clickIds.length > 1`` branch) and leaves no focused
+   photo, so by the letter of the guard below a selected stack was
+   indistinguishable from a fifteen-photo batch — and a re-sort dropped the
+   user at the top of the grid instead of keeping them with the stack they
+   had picked. It is not a batch: it is one card, in one position, and it is
+   the card the user is looking at. Resolve it back to that card so it can
+   anchor a reload like any other selected card. */
+function browseSelectedStackCoverId() {
+  if (selectedPhotoId != null || selectedPhotos.size < 2) return null;
+  var isTheSelection = function(photo) {
+    if (!photo || !photo.browse_stack) return false;
+    var ids = browseStackMemberIdsFor(photo);
+    return !!ids && ids.length === selectedPhotos.size
+      && ids.every(function(id) { return selectedPhotos.has(id); });
+  };
+  // Both ways of selecting a whole stack — clicking the collapsed card and
+  // the tray's "Select all" — leave ``selectedIndex`` on the cover's grid
+  // slot, so this hits on the first try in practice. The scan is the
+  // fallback for a selection that outlived its index.
+  if (selectedIndex >= 0 && isTheSelection(photos[selectedIndex])) {
+    return photos[selectedIndex].id;
+  }
+  var cover = photos.find(isTheSelection);
+  return cover ? cover.id : null;
+}
+
 function captureSelectedPhotoAnchor() {
-  if (selectedPhotoId == null || selectedPhotos.size > 0) return null;
-  var card = getBrowsePhotoElement(selectedPhotoId);
+  var stackCoverId = browseSelectedStackCoverId();
+  if (stackCoverId == null && (selectedPhotoId == null || selectedPhotos.size > 0)) {
+    return null;
+  }
+  var anchorId = stackCoverId == null ? selectedPhotoId : stackCoverId;
+  var card = getBrowsePhotoElement(anchorId);
   if (!card) return null;
   var container = document.getElementById('gridContainer');
   var containerRect = container.getBoundingClientRect();
@@ -4625,16 +4658,22 @@ function captureSelectedPhotoAnchor() {
   // member actually lives; ``loadUntilPhotoRendered`` with
   // ``resolveStackMember: true`` will re-expand the tray on the far side
   // (Codex review r4013378153).
-  var index = photos.findIndex(function(p) { return p.id === selectedPhotoId; });
+  var index = photos.findIndex(function(p) { return p.id === anchorId; });
   if (index < 0) {
-    var cover = loadedBrowseStackCoverForPhoto(selectedPhotoId);
-    if (cover) index = photos.findIndex(function(p) { return p.id === cover.id; });
+    var memberCover = loadedBrowseStackCoverForPhoto(anchorId);
+    if (memberCover) {
+      index = photos.findIndex(function(p) { return p.id === memberCover.id; });
+    }
   }
   return {
-    photoId: selectedPhotoId,
+    photoId: anchorId,
     topOffset: cardRect.top - containerRect.top,
-    detailVisible: document.getElementById('detailContent').classList.contains('visible'),
+    // A stack selection has no focused frame, so the panel is the batch
+    // inspector rather than one photo's detail — there is nothing to reopen.
+    detailVisible: stackCoverId == null
+      && document.getElementById('detailContent').classList.contains('visible'),
     index: index,
+    stackSelection: stackCoverId != null,
   };
 }
 
@@ -4737,7 +4776,14 @@ function anchorRestoreIsPending(anchor, restoreEpoch) {
 
 function anchorSelectionIsCurrent(anchor, restoreEpoch) {
   if (restoreEpoch != null && anchorRestoreEpoch !== restoreEpoch) return false;
-  return !!anchor && selectedPhotoId === anchor.photoId && selectedPhotos.size === 0;
+  if (!anchor) return false;
+  // A restored stack selection lives in ``selectedPhotos`` with no focused
+  // photo — the shape clicking the collapsed card produces, not the
+  // single-focus shape the line below describes.
+  if (anchor.stackSelection) {
+    return selectedPhotoId == null && selectedPhotos.size > 0;
+  }
+  return selectedPhotoId === anchor.photoId && selectedPhotos.size === 0;
 }
 
 async function loadUntilPhotoRendered(photoId, shouldContinue, options) {
@@ -7427,8 +7473,37 @@ async function resetAndLoad(options) {
       return true;
     }
 
-    selectedPhotoId = anchor.photoId;
-    selectedIndex = anchorIndex;
+    // A selected stack comes back as a selected stack. Read the membership
+    // off the reloaded grid instead of replaying the captured ids: a re-sort
+    // can hand the group a different cover, and a membership-change reload
+    // can have added or dropped frames — restoring the old list would select
+    // photos this view no longer contains.
+    var restoredStackIds = anchor.stackSelection
+      ? browseStackMemberIds(anchorGridId)
+      : null;
+    if (anchor.stackSelection && !restoredStackIds) {
+      // The group did not survive the reload — Stacks switched off
+      // mid-flight, or the frames no longer group. Hold the position
+      // without inventing a single-photo selection the user never made:
+      // Delete/Export/Develop act on whatever is selected.
+      requestAnimationFrame(function() {
+        if (!resetRequestIsCurrent()) return;
+        if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
+        restorePhotoAnchor(anchor);
+        updateScrollPosition();
+      });
+      return true;
+    }
+
+    if (restoredStackIds) {
+      selectedPhotos = new Set(restoredStackIds);
+      selectedPhotoId = null;
+      selectedIndex = anchorIndex;
+      abandonDetailFocusForBatch();
+    } else {
+      selectedPhotoId = anchor.photoId;
+      selectedIndex = anchorIndex;
+    }
     refreshCardSelectionVisuals();
     updateBatchBar();
     if (anchor.detailVisible) loadDetail(anchor.photoId);
@@ -8084,7 +8159,16 @@ function applyFilters() {
 function onSortChanged() {
   if (timelineMode) loadCalendarData();
   if (!dashboardCollectionScope) activeCollectionId = null;
-  reloadBrowseResults({ preserveAnchor: true, focusAnchor: true });
+  // A batch selection that is not a single stack has no one card to keep the
+  // user with, but they still have a place in the grid: hold it without
+  // turning it into a selection. With nothing selected at all there is
+  // nothing to hold onto and a re-sort deliberately starts at the top —
+  // position N in the old order says nothing about the new one.
+  reloadBrowseResults({
+    preserveAnchor: true,
+    focusAnchor: true,
+    preserveViewport: selectedPhotos.size > 0,
+  });
 }
 
 function toggleBrowseStacks() {

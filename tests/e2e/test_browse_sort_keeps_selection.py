@@ -16,6 +16,8 @@ import json
 
 from playwright.sync_api import expect
 
+from e2e.stack_seed import seed_browse_stack
+
 
 def _seed_sortable_library(db, folder_id, count=160):
     """Filenames and capture dates that run in opposite directions.
@@ -471,3 +473,139 @@ def test_sort_change_without_a_selection_still_starts_at_the_top(live_server, pa
         "document.getElementById('gridContainer').scrollTop"
     ) == 0
     expect(page.locator("#loadPreviousPhotosBanner")).to_be_hidden()
+
+
+def _enable_stacks(page):
+    page.locator("#browseStacksToggle").check()
+    page.wait_for_timeout(400)
+    page.wait_for_function(
+        "() => !loading && browseDatasetReady", timeout=15000
+    )
+
+
+def _loaded_stack_cover_id(page):
+    """The cover of the one collapsed stack in the loaded window, or None."""
+    return page.evaluate(
+        """() => {
+             const cover = photos.find(
+               p => p.browse_stack && p.browse_stack.count > 1
+             );
+             return cover ? cover.id : null;
+           }"""
+    )
+
+
+def _topmost_card_id(page):
+    """The first card still on screen — what the viewport anchor holds onto."""
+    return page.evaluate(
+        """() => {
+             const c = document.getElementById('gridContainer');
+             const top = c.getBoundingClientRect().top;
+             for (const el of document.querySelectorAll('#grid .grid-card')) {
+               if (el.getBoundingClientRect().bottom > top + 1) {
+                 return parseInt(el.dataset.id, 10);
+               }
+             }
+             return null;
+           }"""
+    )
+
+
+def _ids_on_screen(page, ids):
+    """Which of ``ids`` have a grid card inside the scroll container."""
+    return page.evaluate(
+        """ids => {
+             const c = document.getElementById('gridContainer');
+             const box = c.getBoundingClientRect();
+             return ids.filter(id => {
+               const el = document.querySelector(
+                 `#grid .grid-card[data-id='${id}']`
+               );
+               if (!el) return false;
+               const r = el.getBoundingClientRect();
+               return r.bottom > box.top && r.top < box.bottom;
+             });
+           }""",
+        ids,
+    )
+
+
+def test_sort_change_keeps_the_selected_stack(live_server, page):
+    """A selected stack is a selected card, and a re-sort keeps it.
+
+    Clicking a collapsed stack card selects every frame it stands for and
+    leaves no focused photo — which read to ``captureSelectedPhotoAnchor``
+    as "a batch is selected". It declined, and the re-sort cleared the
+    selection and snapped back to the top of the new order. A stack is one
+    card in one position, so it anchors the reload like any other card.
+    """
+    ids = _seed_sortable_library(
+        live_server["db"], live_server["data"]["folders"][0]
+    )
+    # Deep enough into both orders that the focused page is not page 1.
+    burst_ids = ids[100:103]
+    seed_browse_stack(live_server["db"], burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids, (
+        f"expected the seeded burst {burst_ids} to be the loaded window's "
+        f"only stack, got cover {cover_id}"
+    )
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        """ids => selectedPhotoId === null && selectedPhotos.size === ids.length
+             && ids.every(id => selectedPhotos.has(id))""",
+        arg=burst_ids,
+    )
+
+    _change_sort(page, "name_desc")
+
+    assert page.evaluate("selectedPhotoId") is None
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    ), "re-sorting dropped the selected stack"
+    assert page.evaluate("earliestPage") > 1, (
+        "the grid restarted at page 1 instead of jumping to the stack"
+    )
+    assert _ids_on_screen(page, burst_ids), (
+        "the selected stack is off screen after the re-sort"
+    )
+    expect(page.locator("#selectionCount")).to_have_text(
+        "3 photos selected · 1 stack"
+    )
+
+
+def test_sort_change_holds_the_place_of_a_batch_selection(live_server, page):
+    """A loose batch has no one card to keep the user with — but it has a place.
+
+    The selection itself does not survive: the new order can put those
+    photos anywhere and ``resetAndLoad`` clears ids that may no longer be
+    loaded. The position does, so the user lands where they were working
+    instead of at the top of the catalog.
+    """
+    _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
+    _open_browse(page, live_server)
+    _scroll_until_loaded(page, 100)
+    _select_photo_at(page, 80)
+    page.locator("#grid .grid-card").nth(81).click(modifiers=["ControlOrMeta"])
+    page.wait_for_function("() => selectedPhotos.size === 2")
+    anchored_id = _topmost_card_id(page)
+    assert anchored_id is not None
+
+    _change_sort(page, "name_desc")
+
+    assert page.evaluate("selectedPhotos.size") == 0, (
+        "a loose batch cannot survive a re-sort — its ids may not be loaded"
+    )
+    assert page.evaluate("earliestPage") > 1, (
+        "the grid restarted at page 1 instead of holding the batch's place"
+    )
+    assert _ids_on_screen(page, [anchored_id]) == [anchored_id], (
+        "the re-sort threw away the place the batch was working in"
+    )
