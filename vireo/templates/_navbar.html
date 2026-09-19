@@ -5441,6 +5441,7 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     _lbSwapTimer = null;
   }
   _lbDesiredSrcKey = null;
+  _lbProgressiveTargetKey = null;
   if (wrap) wrap.classList.remove('zoomed');
   _lbApplyTransform();
   // Replacing img.onload/onerror orphans handleInitialImageLoad when the
@@ -5458,14 +5459,25 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
-    _lbRenderDetailStatus();
-    _lbScheduleOriginalPreload(photoId);
+    // Settle the load this reload displaced. It schedules the neighbours and
+    // renders the status itself, so only do that work when there was nothing
+    // pending (a reload from the adjustments panel, long after the open).
+    if (!_lbFinishInitialLoad()) {
+      _lbRenderDetailStatus();
+      _lbScheduleOriginalPreload(photoId);
+    }
   };
   img.onerror = function() {
     img.onload = null;
     img.onerror = null;
     if (_lightboxCurrentId !== photoId) return;
     _lbInitialDecodePending = false;
+    // Nothing is going to render, so release the displaced load rather than
+    // leaving the transition frozen on a photo that failed.
+    _lbPendingInitialLoadCommit = null;
+    _lbVisualTransitionPending = false;
+    _lbSetPhotoTransitionPending(false);
+    _lbFlushDeferredOverlayApply();
     _lbRenderDetailStatus();
     if (typeof showToast === 'function') {
       showToast('Could not reload edited photo', 'error');
@@ -8256,6 +8268,7 @@ function openLightbox(photoId, filename, photoList, options) {
     });
 
   function handleInitialImageLoad() {
+    if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbPendingInitialLoadCommit = null;
     // The commit below momentarily clears the transition before deciding whether
     // a sharper tier is still needed. Paint once, at the end, so the chip does
     // not blink off and restart its show delay between those two states.
@@ -8343,6 +8356,7 @@ function openLightbox(photoId, filename, photoList, options) {
     if (_lbCurrentSrcKey !== 'original') {
       img.onload = null;
       img.onerror = null;
+      if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbPendingInitialLoadCommit = null;
       // No further fallback tier is available. Clear the pending visual
       // transition — otherwise the metadata callback would keep skipping
       // layout updates and _lbSaveViewportState would keep treating the
@@ -8372,6 +8386,7 @@ function openLightbox(photoId, filename, photoList, options) {
   }
   img.onload = handleInitialImageLoad;
   img.onerror = handleInitialImageError;
+  _lbPendingInitialLoadCommit = handleInitialImageLoad;
   _lbInitialDecodePending = true;
   _lbRenderDetailStatus();
   img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
@@ -8845,6 +8860,7 @@ function closeLightbox(e) {
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbInitialDecodePending = false;
+  _lbPendingInitialLoadCommit = null;
   _lbResetDetailStatus();
   _lbCancelOriginalPreload();
   _lbClearAdjacentPreloads();
@@ -10592,6 +10608,20 @@ var LB_DETAIL_SHOW_DELAY_MS = 250;
 var LB_DETAIL_SETTLED_MS = 900;
 var LB_DETAIL_FADE_MS = 250;
 var _lbInitialDecodePending = false; // this photo's first bitmap has not decoded
+// openLightbox publishes its completion here so anything that takes the image
+// loader over mid-load can still end that load properly. Replacing
+// img.onload/img.onerror without this leaves the navigation transition frozen:
+// the action bar stays inert, deferred overlays never paint, and the status chip
+// never clears, all long after the replacement bitmap has rendered.
+var _lbPendingInitialLoadCommit = null;
+
+function _lbFinishInitialLoad() {
+  var finish = _lbPendingInitialLoadCommit;
+  if (!finish) return false;
+  _lbPendingInitialLoadCommit = null;
+  finish();
+  return true;
+}
 var _lbDetailStatusShown = false;    // chip is on screen (past the show delay)
 var _lbDetailStatusSettled = false;  // showing the Full detail confirmation
 var _lbDetailStatusHold = 0;         // >0 suppresses paints mid-transition

@@ -726,3 +726,47 @@ def test_detail_status_clears_when_an_edit_reload_takes_over_the_initial_load(li
 
     page.wait_for_function("!_lbInitialDecodePending")
     expect(status).not_to_have_text("Loading…")
+
+
+def test_edit_reload_completes_the_navigation_it_displaced(live_server, page):
+    held = []
+    serving = {"ready": True}
+
+    def serve(route):
+        if serving["ready"]:
+            route.fulfill(body=_jpeg(), content_type="image/jpeg")
+        else:
+            held.append(route)
+
+    page.route("**/photos/*/full*", serve)
+    _open_window(page, live_server)
+    page.evaluate(
+        """() => {
+          LB_DETAIL_SHOW_DELAY_MS = 0;
+          _lbClearAdjacentPreloads();
+          _lbScheduleAdjacentPhoto = function() {};
+        }"""
+    )
+    serving["ready"] = False
+    page.evaluate("lightboxNav(1)")
+    page.wait_for_function("_lbVisualTransitionPending && _lightboxCurrentId === 116")
+    expect(page.locator("#lightboxPreviewStatus")).to_be_visible()
+
+    # A metadata response carrying a changed recipe replaces the initial
+    # loader's handlers mid-navigation. Whoever displaces that load owes it a
+    # completion, or the transition stays frozen after the bitmap renders.
+    page.evaluate("_lbReloadCurrentRenderAfterEdit(116)")
+    serving["ready"] = True
+    page.wait_for_timeout(150)
+    assert held
+    for route in held:
+        route.fulfill(body=_jpeg(), content_type="image/jpeg")
+
+    page.wait_for_function("!_lbVisualTransitionPending")
+    assert page.evaluate("_lightboxCommittedId") == 116
+    assert page.evaluate("_lbInitialDecodePending") is False
+    # The action bar is usable again, not left inert by the frozen transition.
+    assert page.evaluate(
+        "document.getElementById('lightboxActions').getAttribute('aria-busy')"
+    ) == "false"
+    expect(page.locator("#lightboxPreviewStatus")).not_to_have_text("Loading…")
