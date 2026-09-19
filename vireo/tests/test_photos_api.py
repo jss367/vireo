@@ -12465,7 +12465,7 @@ def test_api_photos_query_focus_holds_one_read_snapshot(app_and_db, monkeypatch)
     # Position 5 of 12; at three a page that is the last row of page 2.
     target = ids[5]
 
-    original = Database.query_photo_position
+    original = Database.query_photo_position_first
     inserted = []
 
     def insert_between(self, *args, **kwargs):
@@ -12485,7 +12485,9 @@ def test_api_photos_query_focus_holds_one_read_snapshot(app_and_db, monkeypatch)
         writer.close()
         return position
 
-    monkeypatch.setattr(Database, "query_photo_position", insert_between)
+    # The endpoint resolves focus through the list form, so that is where a
+    # mid-request commit has to land to exercise the snapshot.
+    monkeypatch.setattr(Database, "query_photo_position_first", insert_between)
 
     response = app.test_client().post("/api/photos/query", json={
         "rules": [],
@@ -12559,6 +12561,152 @@ def test_api_photos_query_visual_focus_holds_one_read_snapshot(
     assert [photo["id"] for photo in payload["photos"]] == [target], (
         "the focused page must still hold the photo its position described"
     )
+
+
+def test_api_photos_query_focus_photo_ids_places_by_a_surviving_frame(
+    app_and_db,
+):
+    """Several candidates, one answer: the first one the query still holds.
+
+    Browse holds onto cards, and a stack card is several photos. When the
+    result set it reloads into has dropped the frame Browse would ask about
+    first, any other frame the user picked places the same card — and asking
+    about them together costs one query instead of one request per frame.
+    """
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    missing, present = 10 ** 6, ids[7]
+
+    response = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "per_page": 3,
+        "focus_photo_id": missing,
+        "focus_photo_ids": [missing + 1, present],
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["focus_photo_id"] == present, (
+        "the response must name the candidate it was placed by"
+    )
+    assert payload["focus_index"] == 7
+    assert payload["focus_page"] == 3
+    assert present in [photo["id"] for photo in payload["photos"]]
+
+
+def test_api_photos_query_focus_photo_ids_take_the_earliest_candidate(
+    app_and_db,
+):
+    """Order in the result set decides, not order in the request."""
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+
+    payload = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "per_page": 50,
+        "focus_photo_ids": [ids[9], ids[2], ids[6]],
+    }).get_json()
+
+    assert payload["focus_photo_id"] == ids[2]
+    assert payload["focus_index"] == 2
+
+
+def test_api_photos_query_focus_photo_ids_report_a_stack_by_any_frame(
+    app_and_db,
+):
+    """Every frame of a burst shares its card's position."""
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    hidden, cover = ids[8], ids[9]
+    with db.conn:
+        _seed_browse_burst(db, [hidden, cover], folder_id=folder)
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,),
+        )
+
+    payload = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "stacks": True,
+        "per_page": 3,
+        "focus_photo_ids": [10 ** 6, hidden, cover],
+    }).get_json()
+
+    assert payload["focus_index"] == 8
+    assert payload["focus_page"] == 3
+    assert payload["focus_photo_id"] in (hidden, cover)
+
+
+def test_api_photos_query_focus_photo_ids_prefer_the_frame_asked_about(
+    app_and_db,
+):
+    """Frames of one stack tie on position, so the caller's order decides.
+
+    They all report their cover's position, so ranking by ID would answer
+    with whichever frame happens to hold the lowest one. The caller named
+    the frame that *is* the card first, and answering with a hidden member
+    instead sends the client off to expand a tray around a frame the user
+    never opened.
+    """
+    app, db = app_and_db
+    folder, ids = _seed_sortable_photos(db)
+    hidden, cover = ids[8], ids[9]
+    assert hidden < cover, "the cover must not be the lowest ID for this test"
+    with db.conn:
+        _seed_browse_burst(db, [hidden, cover], folder_id=folder)
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,),
+        )
+
+    payload = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "sort": "name",
+        "stacks": True,
+        "per_page": 3,
+        "focus_photo_id": cover,
+        "focus_photo_ids": [hidden],
+    }).get_json()
+
+    assert payload["focus_photo_id"] == cover
+    assert payload["focus_index"] == 8
+
+
+def test_api_photos_query_focus_photo_ids_report_none_when_all_are_gone(
+    app_and_db,
+):
+    """No candidate in the result set is an answer, not a silent page 1."""
+    app, db = app_and_db
+    folder, _ = _seed_sortable_photos(db)
+
+    payload = app.test_client().post("/api/photos/query", json={
+        "rules": [],
+        "folder_id": folder,
+        "per_page": 3,
+        "focus_photo_ids": [10 ** 6, 10 ** 6 + 1],
+    }).get_json()
+
+    assert payload["focus_index"] is None
+    assert payload["focus_photo_id"] is None
+    assert payload["page"] == 1
+
+
+def test_api_photos_query_focus_photo_ids_must_be_a_bounded_int_list(
+    app_and_db,
+):
+    app, _ = app_and_db
+    client = app.test_client()
+    for bad in ("12", 1, {"id": 1}, [1, "2"], [True], list(range(201))):
+        resp = client.post("/api/photos/query", json={
+            "rules": [], "focus_photo_ids": bad,
+        })
+        assert resp.status_code == 400, bad
+        assert "focus_photo_ids" in resp.get_json()["error"]
 
 
 def test_api_photos_query_focus_photo_id_must_be_an_integer(app_and_db):

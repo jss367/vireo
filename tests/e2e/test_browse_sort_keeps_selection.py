@@ -13,8 +13,11 @@ straight to the page holding it, rather than paging forward until it appears.
 
 import contextlib
 import json
+import re
 
 from playwright.sync_api import expect
+
+from e2e.stack_seed import seed_browse_stack
 
 
 def _seed_sortable_library(db, folder_id, count=160):
@@ -471,3 +474,633 @@ def test_sort_change_without_a_selection_still_starts_at_the_top(live_server, pa
         "document.getElementById('gridContainer').scrollTop"
     ) == 0
     expect(page.locator("#loadPreviousPhotosBanner")).to_be_hidden()
+
+
+def _enable_stacks(page):
+    page.locator("#browseStacksToggle").check()
+    page.wait_for_timeout(400)
+    page.wait_for_function(
+        "() => !loading && browseDatasetReady", timeout=15000
+    )
+
+
+def _loaded_stack_cover_id(page):
+    """The cover of the one collapsed stack in the loaded window, or None."""
+    return page.evaluate(
+        """() => {
+             const cover = photos.find(
+               p => p.browse_stack && p.browse_stack.count > 1
+             );
+             return cover ? cover.id : null;
+           }"""
+    )
+
+
+def _topmost_card_id(page):
+    """The first card still on screen — what the viewport anchor holds onto."""
+    return page.evaluate(
+        """() => {
+             const c = document.getElementById('gridContainer');
+             const top = c.getBoundingClientRect().top;
+             for (const el of document.querySelectorAll('#grid .grid-card')) {
+               if (el.getBoundingClientRect().bottom > top + 1) {
+                 return parseInt(el.dataset.id, 10);
+               }
+             }
+             return null;
+           }"""
+    )
+
+
+def _ids_on_screen(page, ids):
+    """Which of ``ids`` have a grid card inside the scroll container."""
+    return page.evaluate(
+        """ids => {
+             const c = document.getElementById('gridContainer');
+             const box = c.getBoundingClientRect();
+             return ids.filter(id => {
+               const el = document.querySelector(
+                 `#grid .grid-card[data-id='${id}']`
+               );
+               if (!el) return false;
+               const r = el.getBoundingClientRect();
+               return r.bottom > box.top && r.top < box.bottom;
+             });
+           }""",
+        ids,
+    )
+
+
+def test_sort_change_keeps_the_selected_stack(live_server, page):
+    """A selected stack is a selected card, and a re-sort keeps it.
+
+    Clicking a collapsed stack card selects every frame it stands for and
+    leaves no focused photo — which read to ``captureSelectedPhotoAnchor``
+    as "a batch is selected". It declined, and the re-sort cleared the
+    selection and snapped back to the top of the new order. A stack is one
+    card in one position, so it anchors the reload like any other card.
+    """
+    ids = _seed_sortable_library(
+        live_server["db"], live_server["data"]["folders"][0]
+    )
+    # Deep enough into both orders that the focused page is not page 1.
+    burst_ids = ids[100:103]
+    seed_browse_stack(live_server["db"], burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids, (
+        f"expected the seeded burst {burst_ids} to be the loaded window's "
+        f"only stack, got cover {cover_id}"
+    )
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        """ids => selectedPhotoId === null && selectedPhotos.size === ids.length
+             && ids.every(id => selectedPhotos.has(id))""",
+        arg=burst_ids,
+    )
+
+    _change_sort(page, "name_desc")
+
+    assert page.evaluate("selectedPhotoId") is None
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    ), "re-sorting dropped the selected stack"
+    assert page.evaluate("earliestPage") > 1, (
+        "the grid restarted at page 1 instead of jumping to the stack"
+    )
+    assert _ids_on_screen(page, burst_ids), (
+        "the selected stack is off screen after the re-sort"
+    )
+    expect(page.locator("#selectionCount")).to_have_text(
+        "3 photos selected · 1 stack"
+    )
+
+
+def test_sort_change_holds_the_place_of_a_batch_selection(live_server, page):
+    """A loose batch has no one card to keep the user with — but it has a place.
+
+    The selection itself does not survive: the new order can put those
+    photos anywhere and ``resetAndLoad`` clears ids that may no longer be
+    loaded. The position does, so the user lands where they were working
+    instead of at the top of the catalog.
+    """
+    _seed_sortable_library(live_server["db"], live_server["data"]["folders"][0])
+    _open_browse(page, live_server)
+    _scroll_until_loaded(page, 100)
+    _select_photo_at(page, 80)
+    page.locator("#grid .grid-card").nth(81).click(modifiers=["ControlOrMeta"])
+    page.wait_for_function("() => selectedPhotos.size === 2")
+    anchored_id = _topmost_card_id(page)
+    assert anchored_id is not None
+
+    _change_sort(page, "name_desc")
+
+    assert page.evaluate("selectedPhotos.size") == 0, (
+        "a loose batch cannot survive a re-sort — its ids may not be loaded"
+    )
+    assert page.evaluate("earliestPage") > 1, (
+        "the grid restarted at page 1 instead of holding the batch's place"
+    )
+    assert _ids_on_screen(page, [anchored_id]) == [anchored_id], (
+        "the re-sort threw away the place the batch was working in"
+    )
+
+
+def test_sort_change_keeps_a_stack_selected_from_a_collapsed_tray(
+    live_server, page,
+):
+    """"Select all" in a tray, then collapse it: still a whole-stack selection.
+
+    Collapsing pins the focus to the visible cover and keeps every member in
+    ``selectedPhotos`` (``batchHasHiddenMembers`` in toggleBrowseStack),
+    because a collapsed tray cannot hold a focus on a hidden frame. Reading
+    a focused photo as "this must be a hand-built batch" dropped that
+    selection on the next re-sort (Codex P2 on PR #1695).
+    """
+    ids = _seed_sortable_library(
+        live_server["db"], live_server["data"]["folders"][0]
+    )
+    burst_ids = ids[100:103]
+    seed_browse_stack(live_server["db"], burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    badge = page.locator(
+        f"#grid .grid-card[data-id='{cover_id}'] .browse-stack-badge"
+    )
+    badge.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    badge.click()
+    tray = page.locator(f".browse-stack-tray[data-stack-cover-id='{cover_id}']")
+    expect(tray).to_be_visible()
+    tray.get_by_role("button", name="Select all").click()
+    badge.click()
+    expect(tray).to_be_hidden()
+    page.wait_for_function(
+        """args => selectedPhotoId === args.cover
+             && args.ids.every(id => selectedPhotos.has(id))
+             && selectedPhotos.size === args.ids.length""",
+        arg={"cover": cover_id, "ids": burst_ids},
+    )
+
+    _change_sort(page, "name_desc")
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    ), "re-sorting dropped a stack selected through the tray"
+    assert _ids_on_screen(page, burst_ids), (
+        "the selected stack is off screen after the re-sort"
+    )
+
+
+def _seed_two_adjacent_stacks(db, ids):
+    """Four consecutive frames that group as two stacks, not one.
+
+    A burst is a run of consecutive frames with the same species/location
+    keywords inside the time gap, so a species keyword on the first pair and
+    nothing on the second splits the run in two. Giving the second pair that
+    same keyword later merges all four — the membership change this test
+    needs.
+    """
+    import datetime
+
+    base = datetime.datetime.fromisoformat("2024-05-01T01:40:00")
+    with db.conn:
+        for offset, photo_id in enumerate(ids):
+            db.conn.execute(
+                "UPDATE photos SET timestamp = ? WHERE id = ?",
+                ((base + datetime.timedelta(seconds=offset)).isoformat(), photo_id),
+            )
+    keyword_id = db.add_keyword("Merlin", is_species=True)
+    for photo_id in ids[:2]:
+        db.tag_photo(photo_id, keyword_id)
+    return keyword_id
+
+
+def test_history_reload_restores_the_frames_the_user_picked(live_server, page):
+    """A frame that joined the stack must not join the selection with it.
+
+    ``afterHistoryChange`` re-runs the query and folds the pre-action ids
+    back in, trusting ``resetAndLoad`` to restore nothing else. If the stack
+    restore adopted the reloaded group's membership, an edit that merged a
+    neighbouring frame into the burst would hand a later batch export or
+    delete a photo the user never selected (Codex P2 on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    quartet = ids[100:104]
+    keyword_id = _seed_two_adjacent_stacks(db, quartet)
+    picked = quartet[2:]
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = page.evaluate(
+        """ids => {
+             const cover = photos.find(
+               p => p.browse_stack && p.browse_stack.count > 1
+                 && ids.includes(p.id)
+             );
+             return cover ? cover.id : null;
+           }""",
+        picked,
+    )
+    assert cover_id in picked, "the unkeyworded pair must be its own stack"
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        """ids => selectedPhotos.size === ids.length
+             && ids.every(id => selectedPhotos.has(id))""",
+        arg=picked,
+    )
+
+    # The edit an undo/redo would replay: the picked pair gains the keyword
+    # that was keeping it apart from its neighbours, so all four merge.
+    for photo_id in picked:
+        db.tag_photo(photo_id, keyword_id)
+    page.evaluate("() => afterHistoryChange()")
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        picked
+    ), "the merged-in frames were selected without the user picking them"
+    merged_cover = page.evaluate(
+        """ids => {
+             const cover = photos.find(
+               p => p.browse_stack && ids.some(id => p.browse_stack.photo_ids.includes(id))
+             );
+             return cover ? {id: cover.id, count: cover.browse_stack.count} : null;
+           }""",
+        picked,
+    )
+    assert merged_cover["count"] == 4, (
+        f"the four frames should have merged into one stack, got {merged_cover}"
+    )
+    # Two of four frames selected is exactly what the partial mark says.
+    expect(
+        page.locator(f"#grid .grid-card[data-id='{merged_cover['id']}']")
+    ).to_have_class(re.compile(r"\bstack-partial\b"))
+
+
+def test_expression_reload_bounds_its_search_for_a_missing_stack(
+    live_server, page,
+):
+    """Loading a saved expression must not page the whole result set.
+
+    ``expressionLoaded`` asks to keep the user's place without a focused
+    lookup, and the expression it loads can exclude the anchored stack
+    entirely. Scanning to ``allLoaded`` to find out would issue one request
+    per page — ~1,200 of them for a 60k-photo collection (Codex P1 on
+    PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0], count=400)
+    # Near the top, so a bounded scan is visibly shorter than a full one.
+    burst_ids = ids[:2]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    page.locator(f"#grid .grid-card[data-id='{cover_id}']").click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    # The expression the user just loaded does not contain the stack.
+    with db.conn:
+        db.conn.execute(
+            "DELETE FROM photos WHERE id IN (?, ?)", tuple(burst_ids)
+        )
+
+    calls = _capture_queries(page)
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    # 400 photos is 8 pages; the bounded scan stops one page past the
+    # anchor's old position, so a handful of requests is the whole budget.
+    assert len(calls) <= 4, (
+        f"the reload paged through the result set: {len(calls)} queries"
+    )
+    assert page.evaluate("selectedPhotos.size") == 0, (
+        "the stack is gone from this expression — nothing should stay selected"
+    )
+
+
+def test_expression_reload_finds_a_stack_that_moved(live_server, page):
+    """Bounding the scan must not truncate before a photo that *is* there.
+
+    An ``expressionLoaded`` reload gets no focused load, so the scan has to
+    find the anchor by paging. A budget guessed from the previous result
+    set's index stops short whenever the reload moves the stack more than a
+    page — and the ``!card`` branch then clears the selection the reload
+    exists to keep (Codex P2 on PR #1695). Browse asks for the position
+    instead of guessing it.
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0], count=400)
+    burst_ids = ids[:2]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    page.locator(f"#grid .grid-card[data-id='{cover_id}']").click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    # The reload moves the stack from the first page to the last.
+    with db.conn:
+        for offset, photo_id in enumerate(burst_ids):
+            db.conn.execute(
+                "UPDATE photos SET timestamp = ? WHERE id = ?",
+                (f"2024-05-02T00:00:0{offset}", photo_id),
+            )
+
+    calls = _capture_queries(page)
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    ), "the reload gave up before reaching the stack and dropped it"
+    assert _ids_on_screen(page, burst_ids), (
+        "the stack was found but the grid is not showing it"
+    )
+    # The server places it: one focused query, not eight pages of paging
+    # towards it.
+    assert len(calls) <= 2, f"{len(calls)} queries to reach the stack"
+    assert page.evaluate("earliestPage") > 1, (
+        "the grid paged to the stack instead of being served its page"
+    )
+
+
+def test_expression_reload_falls_back_to_a_surviving_frame(live_server, page):
+    """The cover can be the frame the reload dropped.
+
+    A saved expression that excludes the stack's cover but keeps the rest
+    still contains most of what the user picked. Aiming only at the old
+    cover, the focused load comes back empty-handed and the ``!card`` path
+    clears the whole selection — including frames that are right there
+    (Codex P2 on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:103]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    # The expression the user loads keeps the burst but not its cover.
+    survivors = [pid for pid in burst_ids if pid != cover_id]
+    with db.conn:
+        db.conn.execute("DELETE FROM photos WHERE id = ?", (cover_id,))
+
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        survivors
+    ), "the frames that survived the reload were cleared along with the cover"
+    assert _ids_on_screen(page, survivors), (
+        "the surviving frames are selected but off screen"
+    )
+
+
+def test_expression_reload_asks_about_every_picked_frame_at_once(
+    live_server, page,
+):
+    """A burst is not four frames long, and the fallback is not four deep.
+
+    Trying the picked frames one page request at a time meant capping the
+    attempts, and any cap discards a selection that survived below it: drop
+    the first four frames of a six-frame burst and the two that are left —
+    still grouped, still picked — were never asked about (Codex P2 on
+    PR #1695). One focused request carries them all.
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:106]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    picked = page.evaluate("() => Array.from(selectedPhotos)")
+    assert len(picked) == 6, picked
+
+    # Everything the fallback would have reached one attempt at a time.
+    dropped, survivors = picked[:4], picked[4:]
+    with db.conn:
+        db.conn.execute(
+            "DELETE FROM photos WHERE id IN (%s)"
+            % ",".join("?" * len(dropped)),
+            dropped,
+        )
+
+    calls = _capture_queries(page)
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        survivors
+    ), "the frames past the old attempt cap were dropped from the selection"
+    assert _ids_on_screen(page, survivors), (
+        "the surviving frames are selected but off screen"
+    )
+    assert len(calls) <= 2, (
+        f"one focused query should cover every candidate, got {len(calls)}"
+    )
+
+
+def test_sort_change_leaves_the_selected_stack_collapsed(live_server, page):
+    """A re-sort must not open the tray of the stack it is keeping.
+
+    The anchor is a lookup target as well as a selection. Frames of one
+    stack tie on position, so the focused lookup can answer with a hidden
+    frame — and ``loadUntilPhotoRendered`` would then expand that stack's
+    tray to reach it, leaving the collapsed card the user selected standing
+    open and the viewport anchored on a frame instead of the card (Codex P2
+    on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:103]
+    seed_browse_stack(db, burst_ids)
+    # Cover the burst with its highest-ID frame, so "lowest ID wins" and
+    # "the frame we asked about wins" disagree.
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[-1],),
+        )
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id == max(burst_ids), (
+        f"the quality-ranked cover should be {max(burst_ids)}, got {cover_id}"
+    )
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    _change_sort(page, "name_desc")
+
+    assert page.evaluate("() => expandedBrowseStacks.size") == 0, (
+        "the re-sort opened the tray of the stack it was keeping"
+    )
+    expect(page.locator(".browse-stack-tray")).to_have_count(0)
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    )
+    assert _ids_on_screen(page, [cover_id]) == [cover_id], (
+        "the viewport should hold the stack's card"
+    )
+
+
+def test_sort_change_keeps_a_huge_stack_inside_the_lookup_limit(
+    live_server, page,
+):
+    """More frames than the lookup takes must degrade, not fail.
+
+    Nothing caps how many frames a burst can hold, and each candidate is a
+    bound parameter in one ``IN`` clause. Sending them all would make a
+    re-sort on a big enough stack a 400 — after ``resetAndLoad`` has already
+    cleared the window, so the grid would be left empty and the selection
+    gone (Codex P2 on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:106]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    # Stand in for a burst with more frames than the lookup accepts.
+    page.evaluate("() => { BROWSE_MAX_FOCUS_CANDIDATES = 3; }")
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    page.wait_for_function(
+        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+    )
+
+    calls = _capture_queries(page)
+    _change_sort(page, "name_desc")
+
+    focused = [call for call in calls if call["request"].get("focus_photo_id")]
+    assert focused, "the re-sort must still ask where the stack went"
+    for call in focused:
+        candidates = call["request"].get("focus_photo_ids") or []
+        assert len(candidates) <= 2, (
+            f"{len(candidates)} fallback ids sent past the lookup limit"
+        )
+        assert call["response"] is not None, "the focused query failed"
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        burst_ids
+    ), "the selection was dropped"
+    assert _ids_on_screen(page, burst_ids), "the stack is off screen"
+
+
+def test_expression_reload_asks_past_the_first_lookup_of_candidates(
+    live_server, page,
+):
+    """Frames past the first lookup are asked about, not dropped.
+
+    One lookup takes a bounded number of candidates, but a burst can be
+    longer than that, and an expression can keep exactly its tail — the few
+    frames of a long burst the user rated. Trimming to the bound would
+    discard the only frames that still match and clear a selection that
+    survived (Codex P2 on PR #1695).
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:106]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    # Stand in for a burst longer than one lookup: three candidates a time.
+    page.evaluate("() => { BROWSE_MAX_FOCUS_CANDIDATES = 3; }")
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    picked = page.evaluate("() => Array.from(selectedPhotos)")
+    assert len(picked) == 6, picked
+
+    # The expression keeps only the tail: everything in the first lookup is
+    # gone, so the first request can place nothing.
+    dropped, survivors = picked[:3], picked[3:]
+    with db.conn:
+        db.conn.execute(
+            "DELETE FROM photos WHERE id IN (?, ?, ?)", dropped,
+        )
+
+    calls = _capture_queries(page)
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        survivors
+    ), "the frames past the first lookup were never asked about"
+    assert _ids_on_screen(page, survivors), (
+        "the surviving frames are selected but off screen"
+    )
+    for call in calls:
+        candidates = call["request"].get("focus_photo_ids") or []
+        assert len(candidates) <= 2, (
+            f"{len(candidates)} fallback ids sent past the lookup limit"
+        )

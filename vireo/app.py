@@ -4171,6 +4171,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }), 500
 
     _MAX_PER_PAGE = 500
+    # A focused lookup may be asked about several photos at once (every frame
+    # of the stack Browse is holding onto). Bursts are runs of frames, not
+    # catalogs, so this is a sanity bound on the request rather than a policy
+    # limit — each candidate is one more ID in one ranking query.
+    _MAX_FOCUS_PHOTO_IDS = 200
+
+    def _focus_candidate_ids(focus_photo_id, focus_photo_ids):
+        """The photos a focused request may be placed by, in caller order.
+
+        ``focus_photo_id`` stays first when both are given: it is the card
+        the caller actually wants, and the list is its fallback.
+        """
+        candidates = []
+        for pid in ([focus_photo_id] if focus_photo_id is not None else []) + list(
+            focus_photo_ids or []
+        ):
+            if pid not in candidates:
+                candidates.append(pid)
+        return candidates
 
     def json_error(msg, status=400, *, code=None, message=None):
         """Return a JSON error response with an optional user-facing message."""
@@ -7154,11 +7173,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # its loaded window there. A photo that no longer matches reports
         # ``focus_index: null`` and the requested page — never a silent
         # substitution the grid would have no way to notice.
+        #
+        # ``focus_photo_ids`` is the same question asked of several photos at
+        # once, for a caller holding a card that stands for more than one:
+        # every frame of a selected stack shares the card's position, so any
+        # frame this result set still contains can place it. The response
+        # names the one that answered, since the caller cannot assume it was
+        # the frame it would have asked about first.
         focus_photo_id = payload.get("focus_photo_id")
         if focus_photo_id is not None and (
             not isinstance(focus_photo_id, int) or isinstance(focus_photo_id, bool)
         ):
             return json_error("focus_photo_id must be an integer", 400)
+        focus_photo_ids = payload.get("focus_photo_ids")
+        if focus_photo_ids is not None and (
+            not isinstance(focus_photo_ids, list)
+            or len(focus_photo_ids) > _MAX_FOCUS_PHOTO_IDS
+            or any(not isinstance(pid, int) or isinstance(pid, bool)
+                   for pid in focus_photo_ids)
+        ):
+            return json_error(
+                "focus_photo_ids must be a list of at most "
+                f"{_MAX_FOCUS_PHOTO_IDS} integers", 400,
+            )
+        focus_candidates = _focus_candidate_ids(focus_photo_id, focus_photo_ids)
+        # One name for "is this a focused request" from here down, so the
+        # snapshot, the lookups and the response stay in step.
+        focus_photo_id = focus_candidates[0] if focus_candidates else None
         rules = _inject_active_visual_model(rules)
         try:
             visual = _validate_visual_arg(payload.get("visual"))
@@ -7281,15 +7322,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # already, so the focused page is a list index rather than
                 # another query.
                 focus_index = None
-                if focus_photo_id is not None:
+                focus_resolved_id = None
+                if focus_candidates:
+                    # Earliest-placed candidate, so a stack whose first
+                    # frames this clause dropped is still placed by the ones
+                    # it kept — the same rule the SQL path applies.
+                    wanted = set(focus_candidates)
                     if stack_items is not None:
                         for item_index, item in enumerate(stack_items):
-                            if (item["cover_id"] == focus_photo_id
-                                    or focus_photo_id in item["member_ids"]):
+                            hit = wanted.intersection(
+                                [item["cover_id"], *item["member_ids"]]
+                            )
+                            if hit:
                                 focus_index = item_index
+                                focus_resolved_id = min(hit)
                                 break
-                    elif focus_photo_id in logical_ids:
-                        focus_index = logical_ids.index(focus_photo_id)
+                    else:
+                        placed = [
+                            (logical_ids.index(pid), pid)
+                            for pid in wanted if pid in logical_ids
+                        ]
+                        if placed:
+                            focus_index, focus_resolved_id = min(placed)
                     if focus_index is not None:
                         page = focus_index // per_page + 1
                 start = (page - 1) * per_page
@@ -7328,9 +7382,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "per_page": per_page,
                     "visual": visual_info,
                 }
-                if focus_photo_id is not None:
+                if focus_candidates:
                     response["focus_index"] = focus_index
                     response["focus_page"] = page
+                    response["focus_photo_id"] = focus_resolved_id
                 if stacks:
                     # Availability totals below are photo counts, so the
                     # underlying (unstacked) total is what they must agree
@@ -7390,29 +7445,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.conn.execute("BEGIN")
         try:
             focus_index = None
+            focus_resolved_id = None
             try:
                 # One stack configuration for the whole request. The position
                 # below has to be read under exactly the grouping the page
                 # fetch uses, or a focused re-sort lands on the wrong page.
                 stack_cfg = db.browse_stack_settings(cfg.load()) if stacks else None
-                if focus_photo_id is not None:
+                if focus_candidates:
                     # Stacked Browse pages logical items, so a hidden member
                     # resolves to the page its cover sits on.
-                    focus_index = (
-                        db.query_browse_stack_position(
-                            rules, focus_photo_id, sort=sort,
+                    found = (
+                        db.query_browse_stack_position_first(
+                            rules, focus_candidates, sort=sort,
                             collection_id=collection_id, folder_id=folder_id,
                             include_offline_folders=include_offline,
                             stack_config=stack_cfg,
                         )
                         if stacks
-                        else db.query_photo_position(
-                            rules, focus_photo_id, sort=sort,
+                        else db.query_photo_position_first(
+                            rules, focus_candidates, sort=sort,
                             collection_id=collection_id, folder_id=folder_id,
                             include_offline_folders=include_offline,
                         )
                     )
-                    if focus_index is not None:
+                    if found is not None:
+                        focus_resolved_id, focus_index = found
                         page = focus_index // per_page + 1
                 underlying_total = db.count_photos_for_rules(
                     rules,
@@ -7452,9 +7509,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "page": page,
                 "per_page": per_page,
             }
-            if focus_photo_id is not None:
+            if focus_candidates:
                 response["focus_index"] = focus_index
                 response["focus_page"] = page
+                response["focus_photo_id"] = focus_resolved_id
             if stacks:
                 response["underlying_total"] = underlying_total
                 response["stack_count"] = stack_count
@@ -13675,14 +13733,66 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         stacks = _request_bool_arg("stacks")
+        # Same focused lookup ``/api/photos/query`` offers, for the same
+        # reason: a collection-scoped grid that reloads around a selected
+        # card (a re-sort, an undo, a folder-health refresh) has to be told
+        # where that card landed. Without it Browse could only page towards
+        # the card, which costs one request per page of a result set that
+        # may not contain it at all. ``focus_photo_ids`` is the several-frame
+        # form — any frame of a selected stack places the same card.
+        focus_photo_id = request.args.get("focus_photo_id", None, type=int)
+        raw_focus_ids = (request.args.get("focus_photo_ids") or "").strip()
+        focus_photo_ids = []
+        if raw_focus_ids:
+            try:
+                focus_photo_ids = [
+                    int(part) for part in raw_focus_ids.split(",") if part.strip()
+                ]
+            except ValueError:
+                return json_error(
+                    "focus_photo_ids must be a comma-separated list of integers",
+                    400,
+                )
+            if len(focus_photo_ids) > _MAX_FOCUS_PHOTO_IDS:
+                return json_error(
+                    "focus_photo_ids must hold at most "
+                    f"{_MAX_FOCUS_PHOTO_IDS} integers", 400,
+                )
+        focus_candidates = _focus_candidate_ids(focus_photo_id, focus_photo_ids)
+        # Offset pagination is only self-consistent within one snapshot. A
+        # commit landing between the position lookup and the page fetch can
+        # move the card across the page boundary, and the response would
+        # carry a ``focus_page`` whose rows omit it — clearing the very
+        # selection this path exists to preserve (the reasoning
+        # ``/api/photos/query`` documents at its own focused lookup).
+        focus_snapshot = bool(focus_candidates) and not db.conn.in_transaction
+        if focus_snapshot:
+            db.conn.execute("BEGIN")
         # If the saved rules can't be resolved (e.g. an unknown field/op left
         # over from an older schema), surface a 400 instead of a 500 so
         # callers can render a real error — this is the same collection state
         # that /api/collections flags with count_error=True.
+        focus_index = None
+        focus_resolved_id = None
         try:
             underlying_total = db.count_collection_photos(collection_id)
+            stack_cfg = db.browse_stack_settings(cfg.load()) if stacks else None
+            if focus_candidates:
+                found = (
+                    db.query_browse_stack_position_first(
+                        [], focus_candidates, sort=sort,
+                        collection_id=collection_id, stack_config=stack_cfg,
+                    )
+                    if stacks
+                    else db.query_photo_position_first(
+                        [], focus_candidates, sort=sort,
+                        collection_id=collection_id,
+                    )
+                )
+                if found is not None:
+                    focus_resolved_id, focus_index = found
+                    page = focus_index // per_page + 1
             if stacks:
-                stack_cfg = db.browse_stack_settings(cfg.load())
                 photos = db.query_browse_stacks(
                     [], collection_id=collection_id, sort=sort,
                     page=page, per_page=per_page, stack_config=stack_cfg,
@@ -13702,6 +13812,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "Collection %s has unresolvable rules", collection_id
             )
             return json_error(f"collection rules cannot be resolved: {e}", 400)
+        finally:
+            if focus_snapshot and db.conn.in_transaction:
+                db.conn.rollback()
         photo_dicts = _prepare_browse_photo_dicts(db, photos)
         response = {
             "photos": photo_dicts,
@@ -13709,6 +13822,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "per_page": per_page,
             "total": total,
         }
+        if focus_candidates:
+            response["focus_index"] = focus_index
+            response["focus_page"] = page
+            response["focus_photo_id"] = focus_resolved_id
         if stacks:
             response["underlying_total"] = underlying_total
             response["stack_count"] = stack_count
