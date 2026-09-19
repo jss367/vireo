@@ -2662,6 +2662,7 @@ function sendReport() {
     </p>
     <div id="missingFoldersList"></div>
     <div class="modal-actions">
+      <button class="modal-btn danger" id="missingFoldersRemoveAllBtn" onclick="removeAllMissingFolders()" style="display:none;color:var(--danger);margin-right:auto;">Remove All</button>
       <button class="modal-btn" onclick="loadMissingFolders()">Check Again</button>
       <button class="modal-btn modal-btn-cancel" onclick="closeMissingFoldersModal()">Close</button>
     </div>
@@ -14514,6 +14515,8 @@ let _relocateSelectedSub = null; // {name, path} of clicked subfolder, or null f
 let _relocateBrowserPath = '';
 let _pendingCascaded = [];
 let _browseRelocateGen = 0;
+let _missingFoldersRows = [];
+let _missingFoldersRemoving = false;
 
 function openMissingFoldersModal() {
   document.getElementById('missingFoldersModal').classList.add('open');
@@ -14526,6 +14529,9 @@ function closeMissingFoldersModal() {
 }
 
 async function loadMissingFolders() {
+  if (_missingFoldersRemoving) return;
+  _missingFoldersRows = [];
+  document.getElementById('missingFoldersRemoveAllBtn').style.display = 'none';
   const container = document.getElementById('missingFoldersList');
   container.innerHTML = '<p style="color:var(--text-secondary);">Checking folders…</p>';
   // Own mutation gen (POST-vs-POST supersession) and in-flight counter —
@@ -14625,6 +14631,8 @@ async function loadMissingFolders() {
     // of whether closeMissingFoldersModal's own GET was rejected by our
     // in-flight guard.
     _updateMissingFoldersBanner(folders);
+    _missingFoldersRows = folders;
+    document.getElementById('missingFoldersRemoveAllBtn').style.display = folders.length ? '' : 'none';
     if (folders.length === 0) {
       container.textContent = '';
       const ok = document.createElement('p');
@@ -14817,9 +14825,40 @@ function closeCascadeConfirm() {
 function confirmCascade() { closeCascadeConfirm(); }
 
 async function startRemoveFolder(folderId, path, photoCount) {
+  if (_missingFoldersRemoving) return;
   if (!confirm(`This will remove ${photoCount} photo${photoCount !== 1 ? 's' : ''} from Vireo.\n\nThe files on disk (if they still exist) won't be touched.\n\nRemove "${path}"?`)) return;
   await safeFetch(`/api/folders/${folderId}`, {method: 'DELETE'});
   loadMissingFolders();
+}
+
+async function removeAllMissingFolders() {
+  if (_missingFoldersRemoving || !_missingFoldersRows.length) return;
+  // Remove children first: deleting a parent also removes its descendants.
+  const folders = [..._missingFoldersRows].sort((a, b) => b.path.length - a.path.length);
+  const photoCount = folders.reduce((total, folder) => total + folder.photo_count, 0);
+  if (!confirm(`Remove all ${folders.length} missing folder${folders.length !== 1 ? 's' : ''} from Vireo?\n\nThese folders contain ${photoCount} photo${photoCount !== 1 ? 's' : ''}. Their subfolders will also be removed from Vireo.\n\nThe files on disk (if they still exist) won't be touched.`)) return;
+
+  _missingFoldersRemoving = true;
+  const button = document.getElementById('missingFoldersRemoveAllBtn');
+  const controls = document.querySelectorAll('#missingFoldersModal button');
+  controls.forEach(control => { control.disabled = true; });
+  let removed = 0;
+  try {
+    for (const folder of folders) {
+      button.textContent = `Removing ${removed + 1} of ${folders.length}…`;
+      await safeFetch(`/api/folders/${folder.id}`, {method: 'DELETE'});
+      removed++;
+    }
+    showToast(`Removed ${removed} missing folder${removed !== 1 ? 's' : ''} from Vireo.`, 'success');
+  } catch (e) {
+    // Stop before an ancestor can cascade over a descendant that failed.
+    showToast(`Removal stopped after ${removed} of ${folders.length} folders. ${e.message || 'Please try again.'}`, 'error');
+  } finally {
+    _missingFoldersRemoving = false;
+    button.textContent = 'Remove All';
+    controls.forEach(control => { control.disabled = false; });
+    await loadMissingFolders();
+  }
 }
 
 /* ---------- Missing Originals Modal ---------- */
