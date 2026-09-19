@@ -96,6 +96,51 @@ def test_new_descendants_still_materialize(shared_tree):
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, new_folder}
 
 
+@pytest.mark.parametrize("operation", ["delete", "unlink_tree"])
+def test_new_folders_under_removed_subtree_stay_hidden(shared_tree, operation):
+    db, workspace, other, parent, missing, child = shared_tree
+    if operation == "delete":
+        db.delete_folder(missing)
+    else:
+        db.remove_workspace_folder_tree(workspace, missing)
+    db.set_active_workspace(other)
+    removed_path = db.get_folder(missing)["path"]
+    new_folder = db.add_folder(removed_path + "/new", parent_id=missing, workspace_root=False)
+    sibling = db.add_folder(removed_path + "-sibling", parent_id=parent, workspace_root=False)
+    assert {w["id"] for w in db.get_folder_workspaces(new_folder)} == {other}
+    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, sibling}
+
+    # Registration during a parent rescan must use the same subtree rule.
+    db.set_active_workspace(workspace)
+    db.add_folder(db.get_folder(parent)["path"])
+    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, sibling}
+    db.add_workspace_folder(workspace, missing)
+    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {
+        parent, missing, child, new_folder, sibling,
+    }
+
+
+def test_single_folder_unlink_does_not_remove_descendants(shared_tree):
+    db, workspace, other, parent, missing, child = shared_tree
+    db.remove_workspace_folder(workspace, missing)
+    db.set_active_workspace(other)
+    new_folder = db.add_folder(db.get_folder(missing)["path"] + "/new",
+                               parent_id=missing, workspace_root=False)
+    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, child, new_folder}
+    assert {w["id"] for w in db.get_folder_workspaces(child)} == {workspace, other}
+
+
+def test_explicit_subfolder_root_can_override_removed_ancestor(shared_tree):
+    db, workspace, other, parent, missing, child = shared_tree
+    db.delete_folder(missing)
+    db.add_workspace_folder(workspace, child)
+    db.set_active_workspace(other)
+    new_folder = db.add_folder(db.get_folder(child)["path"] + "/new",
+                               parent_id=child, workspace_root=False)
+    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, child, new_folder}
+    assert {w["id"] for w in db.get_folder_workspaces(child)} == {workspace, other}
+
+
 def test_background_discovery_cannot_restore_a_concurrent_removal(shared_tree, monkeypatch):
     db, workspace, other, parent, missing, child = shared_tree
     # Mimic a legacy descendant that discovery is just about to relink.
@@ -134,6 +179,19 @@ def test_existing_catalog_gains_removal_tracking(shared_tree):
     with Database(db._db_path) as upgraded:
         upgraded.set_active_workspace(workspace)
         upgraded.delete_folder(missing)
+        assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent}
+
+
+def test_catalog_with_exact_removal_records_gains_subtree_tracking(shared_tree):
+    db, workspace, other, parent, missing, child = shared_tree
+    db.delete_folder(missing)
+    db.conn.execute("DROP VIEW workspace_removed_folders")
+    db.conn.execute("ALTER TABLE workspace_folder_removals DROP COLUMN recursive")
+    db.conn.commit()
+    with Database(db._db_path) as upgraded:
+        upgraded.set_active_workspace(other)
+        upgraded.add_folder(upgraded.get_folder(missing)["path"] + "/new",
+                            parent_id=missing, workspace_root=False)
         assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent}
 
 

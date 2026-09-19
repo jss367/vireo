@@ -600,7 +600,7 @@ def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) 
         """INSERT OR IGNORE INTO workspace_folders
            (workspace_id, folder_id, is_root)
            SELECT ?, ?, 0 WHERE NOT EXISTS (
-               SELECT 1 FROM workspace_folder_removals
+               SELECT 1 FROM workspace_removed_folders
                WHERE workspace_id = ? AND folder_id = ?
            )""",
         [(ws_id, folder_id, ws_id, folder_id) for ws_id, folder_id in pairs],

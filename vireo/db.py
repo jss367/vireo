@@ -1026,6 +1026,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS workspace_folder_removals (
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
                 folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+                recursive INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (workspace_id, folder_id)
             );
             CREATE INDEX IF NOT EXISTS idx_workspace_folder_removals_folder
@@ -1692,6 +1693,49 @@ class Database:
         """
         )
         cur = self.conn.cursor()
+        removal_cols = {r[1] for r in cur.execute("PRAGMA table_info(workspace_folder_removals)")}
+        if "recursive" not in removal_cols:
+            cur.execute(
+                "ALTER TABLE workspace_folder_removals "
+                "ADD COLUMN recursive INTEGER NOT NULL DEFAULT 1"
+            )
+        # Share the effective removal scope across passive discovery,
+        # membership reads and local-copy preparation. Source paths keep
+        # the scope stable while folders are rebased into local storage.
+        cur.execute("""CREATE VIEW IF NOT EXISTS workspace_removed_folders AS
+            WITH paths AS NOT MATERIALIZED (
+                SELECT f.id,
+                       RTRIM(REPLACE(f.path, '\\', '/'), '/') AS path,
+                       RTRIM(REPLACE(COALESCE(m.source_path, f.path), '\\', '/'), '/') AS source_path
+                FROM folders f
+                LEFT JOIN local_folder_mappings m ON m.folder_id = f.id
+            )
+            SELECT removed.workspace_id, candidate.id AS folder_id
+            FROM workspace_folder_removals removed
+            JOIN paths root ON root.id = removed.folder_id
+            JOIN paths candidate
+              ON candidate.id = root.id
+              OR (removed.recursive = 1
+                  AND (substr(candidate.path, 1, length(root.path) + 1) = root.path || '/'
+                       OR substr(candidate.source_path, 1, length(root.source_path) + 1) = root.source_path || '/'))
+            WHERE NOT EXISTS (
+                SELECT 1 FROM workspace_folders direct
+                WHERE direct.workspace_id = removed.workspace_id
+                  AND direct.folder_id = candidate.id
+            ) AND NOT EXISTS (
+                -- An explicitly restored subfolder root may cover new
+                -- descendants without restoring its removed ancestors.
+                SELECT 1 FROM workspace_folders restored
+                JOIN paths restored_path ON restored_path.id = restored.folder_id
+                WHERE restored.workspace_id = removed.workspace_id
+                  AND restored.is_root = 1
+                  AND (substr(restored_path.path, 1, length(root.path) + 1) = root.path || '/'
+                       OR substr(restored_path.source_path, 1, length(root.source_path) + 1) = root.source_path || '/')
+                  AND (candidate.id = restored.folder_id
+                       OR substr(candidate.path, 1, length(restored_path.path) + 1) = restored_path.path || '/'
+                       OR substr(candidate.source_path, 1, length(restored_path.source_path) + 1) = restored_path.source_path || '/')
+            )
+        """)
         pred_cols = {r[1] for r in cur.execute("PRAGMA table_info(predictions)")}
         if "source_taxon_id" not in pred_cols:
             cur.execute("ALTER TABLE predictions ADD COLUMN source_taxon_id INTEGER")
@@ -3215,7 +3259,7 @@ class Database:
             """INSERT OR IGNORE INTO workspace_folders
                (workspace_id, folder_id, is_root)
                SELECT ?, ?, 0 WHERE ? OR NOT EXISTS (
-                   SELECT 1 FROM workspace_folder_removals
+                   SELECT 1 FROM workspace_removed_folders
                    WHERE workspace_id = ? AND folder_id = ?
                )""",
             [(workspace_id, fid, restore_removed or fid == folder_id, workspace_id, fid)
@@ -3275,17 +3319,19 @@ class Database:
     def _removed_workspace_folder_ids(self, workspace_id):
         return {
             row["folder_id"] for row in self.conn.execute(
-                "SELECT folder_id FROM workspace_folder_removals WHERE workspace_id = ?",
+                "SELECT folder_id FROM workspace_removed_folders WHERE workspace_id = ?",
                 (workspace_id,),
             )
         }
 
-    def _remember_workspace_folder_removals(self, workspace_id, folder_ids):
+    def _remember_workspace_folder_removals(self, workspace_id, folder_ids, *, recursive=False):
         """Record removals in the caller's unlink/delete transaction."""
         self.conn.executemany(
-            """INSERT OR IGNORE INTO workspace_folder_removals (workspace_id, folder_id)
-               SELECT ?, id FROM folders WHERE id = ?""",
-            [(workspace_id, fid) for fid in folder_ids],
+            """INSERT INTO workspace_folder_removals (workspace_id, folder_id, recursive)
+               SELECT ?, id, ? FROM folders WHERE id = ?
+               ON CONFLICT(workspace_id, folder_id) DO UPDATE
+               SET recursive = MAX(recursive, excluded.recursive)""",
+            [(workspace_id, recursive, fid) for fid in folder_ids],
         )
 
     def remove_workspace_folder(self, workspace_id, folder_id):
@@ -3303,7 +3349,7 @@ class Database:
     def remove_workspace_folder_tree(self, workspace_id, folder_id):
         """Unlink a folder and its path descendants from a workspace."""
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
-        self._remember_workspace_folder_removals(workspace_id, folder_ids)
+        self._remember_workspace_folder_removals(workspace_id, folder_ids, recursive=True)
         for chunk in _chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
             self.conn.execute(
@@ -3371,7 +3417,7 @@ class Database:
             """INSERT OR IGNORE INTO workspace_folders
                (workspace_id, folder_id, is_root)
                SELECT ?, ?, 0 WHERE NOT EXISTS (
-                   SELECT 1 FROM workspace_folder_removals
+                   SELECT 1 FROM workspace_removed_folders
                    WHERE workspace_id = ? AND folder_id = ?
                )""",
             [(workspace_id, fid, workspace_id, fid) for fid in candidate_ids],
@@ -3448,7 +3494,7 @@ class Database:
                     )
                   )
                ) AND NOT EXISTS (
-                   SELECT 1 FROM workspace_folder_removals removed
+                   SELECT 1 FROM workspace_removed_folders removed
                    WHERE removed.workspace_id = w.id AND removed.folder_id = target.id
                )
                GROUP BY w.id, w.name, w.pinned_at
@@ -7492,7 +7538,7 @@ class Database:
             # active workspace's links, leaving the other workspaces' links
             # (and the folder rows and photos) untouched.
             if active_ws is not None:
-                self._remember_workspace_folder_removals(active_ws, kept_subtree_ids)
+                self._remember_workspace_folder_removals(active_ws, kept_subtree_ids, recursive=True)
                 for chunk in _chunks(kept_subtree_ids):
                     placeholders = ",".join("?" for _ in chunk)
                     self.conn.execute(

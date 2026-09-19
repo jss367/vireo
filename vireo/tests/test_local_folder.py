@@ -1781,15 +1781,28 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
         db.delete_folder(child_id if remove_root else descendant_id)
         expected = {parent_id} if remove_root else {parent_id, child_id}
         db.set_active_workspace(child_ws)
+        late = descendant / "late"
+        late.mkdir()
+        (late / "new.jpg").write_bytes(b"new original")
+        late_id = db.add_folder(str(late), parent_id=descendant_id, workspace_root=False)
         vireo_dir = str(tmp_path / "vireo")
 
         stage_folder(db, child_id, vireo_dir)
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
         assert {w["id"] for w in db.get_folder_workspaces(descendant_id)} == {child_ws, observer_ws}
+        assert {w["id"] for w in db.get_folder_workspaces(late_id)} == {child_ws, observer_ws}
         assert observer_ws in affected_workspace_ids(db, child_id)
         assert {f["id"] for f in db.get_workspace_folders(observer_ws)} == {
-            parent_id, child_id, descendant_id,
+            parent_id, child_id, descendant_id, late_id,
         }
+        # A folder first cataloged after staging has only a local path,
+        # with no original-source mapping of its own yet.
+        local_new_id = db.add_folder(
+            str(Path(db.get_folder(descendant_id)["path"]) / "local-new"),
+            parent_id=descendant_id, workspace_root=False,
+        )
+        assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
+        assert parent_ws not in {w["id"] for w in db.get_folder_workspaces(local_new_id)}
 
         discard_folder(db, child_id, vireo_dir)
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
