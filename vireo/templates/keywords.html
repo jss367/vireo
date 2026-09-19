@@ -74,7 +74,7 @@
   }
   .kw-bulk-btn.danger:hover { background: rgba(231,76,60,0.15); }
   .kw-merge-dialog {
-    width: 520px; max-width: calc(100vw - 48px); max-height: 80vh;
+    width: 660px; max-width: calc(100vw - 48px); max-height: 86vh;
     padding: 24px; border: 1px solid var(--border-primary); border-radius: 8px;
     background: var(--bg-secondary); color: var(--text-primary);
   }
@@ -83,6 +83,40 @@
   #kwMergePreview { overflow-wrap: anywhere; }
   #kwMergeError { color: var(--danger); }
   .kw-merge-dialog button:disabled { opacity: 0.5; cursor: default; }
+  .kw-merge-field { margin: 14px 0; }
+  .kw-merge-field > .modal-label { display: block; margin-bottom: 5px; }
+  .kw-merge-choices { display: flex; flex-direction: column; gap: 2px; }
+  .kw-merge-choice {
+    display: flex; gap: 8px; align-items: flex-start; cursor: pointer;
+    font-size: 12px; line-height: 1.45; padding: 5px 7px; border-radius: 4px;
+  }
+  .kw-merge-choice:hover { background: var(--bg-tertiary); }
+  .kw-merge-choice input { margin: 2px 0 0; flex: none; }
+  .kw-merge-choice .kw-merge-sub { color: var(--text-secondary); }
+  .kw-merge-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .kw-merge-chip {
+    padding: 3px 9px; border-radius: 10px; font-size: 11.5px; cursor: pointer;
+    border: 1px solid var(--border-secondary); background: var(--bg-tertiary);
+    color: var(--text-secondary);
+  }
+  .kw-merge-chip:hover { color: var(--text-primary); border-color: var(--accent); }
+  .kw-merge-coords { display: flex; gap: 8px; align-items: center; }
+  .kw-merge-coords .modal-input { flex: 1; min-width: 0; }
+  .kw-merge-needed { color: var(--danger); font-size: 12px; margin: 4px 0 0; }
+  #kwMergeMap {
+    height: 220px; margin: 12px 0; border-radius: 6px;
+    border: 1px solid var(--border-primary); background: var(--bg-tertiary);
+  }
+  #kwMergeMapNote { font-size: 11.5px; color: var(--text-secondary); margin: -6px 0 12px; }
+  .kw-merge-result {
+    background: var(--bg-tertiary); border-radius: 6px; padding: 10px 12px;
+    font-size: 12.5px; line-height: 1.5;
+  }
+  .kw-merge-result p { margin: 0 0 6px; font-size: 12.5px; }
+  .kw-merge-result p:last-child { margin-bottom: 0; }
+  .kw-merge-result ul { margin: 6px 0 0; padding-left: 18px; }
+  .kw-merge-result li { margin-bottom: 3px; }
+  .kw-merge-note { color: var(--text-secondary); }
 
   /* Table */
   .kw-table-wrap {
@@ -263,10 +297,14 @@
 
 <dialog id="kwMergeDialog" class="kw-merge-dialog" aria-labelledby="kwMergeTitle">
   <h3 id="kwMergeTitle">Merge selected keywords</h3>
-  <p>Choose the keyword to keep. Its name, type, and parent path will remain.
-    Missing coordinates will be filled from another selected keyword when available.</p>
-  <label class="modal-label" for="kwMergeTarget">Keyword to keep</label>
+  <p>Pick the record to keep, then set what the combined keyword looks like. Every
+    selected keyword's photos end up on it. Changing the record to keep resets the
+    fields below to that record's own values.</p>
+  <label class="modal-label" for="kwMergeTarget">Record to keep</label>
   <select id="kwMergeTarget" class="modal-input"></select>
+  <div id="kwMergeFields"></div>
+  <div id="kwMergeMap" hidden></div>
+  <p id="kwMergeMapNote" hidden></p>
   <div id="kwMergePreview" role="status" aria-live="polite"></div>
   <p id="kwMergeError" role="alert" hidden></p>
   <p>This combines photo tags across the entire catalog, including other workspaces.
@@ -576,48 +614,391 @@
     if (count > 0) { bar.classList.add('visible'); } else { bar.classList.remove('visible'); }
   }
 
-  // -- Explicit merge with a catalog-wide preview --
+  // -- Explicit merge: pick a record to keep, then compose the result --
   const mergeDialog = document.getElementById('kwMergeDialog');
   const mergeTarget = document.getElementById('kwMergeTarget');
   const mergeConfirm = document.getElementById('kwMergeConfirm');
   const mergeCancel = document.getElementById('kwMergeCancel');
   const mergeError = document.getElementById('kwMergeError');
   const mergePreview = document.getElementById('kwMergePreview');
+  const mergeFields = document.getElementById('kwMergeFields');
+  const mergeMapEl = document.getElementById('kwMergeMap');
+  const mergeMapNote = document.getElementById('kwMergeMapNote');
   let mergeIds = [];
   let mergeToken = null;
   let mergeRequest = 0;
   let mergeSaving = false;
+  // The dialog's per-field picks. Absent key = "use the kept record's value",
+  // which is what the server falls back to, so an untouched field keeps
+  // tracking the record-to-keep dropdown instead of freezing on first render.
+  let mergeOverrides = {};
+  let mergeFieldsFor = null;
+  let mergeDebounce = null;
+  let mergeMap = null;
+  let mergeMapLayer = null;
+
+  function osmLink(latitude, longitude, label) {
+    const url = 'https://www.openstreetmap.org/?mlat=' + encodeURIComponent(latitude) +
+      '&mlon=' + encodeURIComponent(longitude) + '#map=14/' + encodeURIComponent(latitude) +
+      '/' + encodeURIComponent(longitude);
+    return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener" ' +
+      'onclick="return openExternalLink(event, this.href)">' + escapeHtml(label) + '</a>';
+  }
+
+  function formatCoords(latitude, longitude) {
+    return Number(latitude).toFixed(4) + ', ' + Number(longitude).toFixed(4);
+  }
+
+  function loadLeaflet() {
+    if (window._vireoLeafletPromise) return window._vireoLeafletPromise;
+    window._vireoLeafletPromise = new Promise(function(resolve, reject) {
+      if (window.L) { resolve(window.L); return; }
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(link);
+      const script = document.createElement('script');
+      script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      script.async = true;
+      script.onload = function() { resolve(window.L); };
+      script.onerror = function() { reject(new Error('Could not load the map.')); };
+      document.head.appendChild(script);
+    });
+    return window._vireoLeafletPromise;
+  }
+
+  function scheduleMergePreview(immediate) {
+    clearTimeout(mergeDebounce);
+    if (immediate) { refreshMergePreview(); return; }
+    mergeConfirm.disabled = true;
+    mergeDebounce = setTimeout(refreshMergePreview, 300);
+  }
+
+  function mergeChoice(group, value, checked, title, subtitle) {
+    return '<label class="kw-merge-choice">' +
+      '<input type="radio" name="' + group + '" value="' + escapeHtml(value) + '"' +
+      (checked ? ' checked' : '') + '>' +
+      '<span>' + title + (subtitle ? '<br><span class="kw-merge-sub">' + subtitle + '</span>' : '') +
+      '</span></label>';
+  }
+
+  /* Build the per-attribute controls for one "record to keep". Rebuilt only
+     when that dropdown changes -- re-rendering on every preview would fight
+     the user's typing in the name and coordinate inputs. */
+  function renderMergeFields(data) {
+    const options = data.options;
+    const resolved = data.resolved;
+    const needed = new Set(data.requires_choice);
+    const parts = [];
+
+    parts.push('<div class="kw-merge-field">' +
+      '<label class="modal-label" for="kwMergeName">Name</label>' +
+      '<input type="text" id="kwMergeName" class="modal-input" value="' +
+      escapeHtml(resolved.name) + '">' +
+      (options.name.length > 1 ? '<div class="kw-merge-chips">' +
+        options.name.map(o => '<button type="button" class="kw-merge-chip" data-name="' +
+          escapeHtml(o.value) + '">' + escapeHtml(o.value) + '</button>').join('') +
+        '</div>' : '') +
+      '</div>');
+
+    if (options.parent.length > 1) {
+      parts.push('<div class="kw-merge-field">' +
+        '<label class="modal-label" for="kwMergeParent">Parent path</label>' +
+        '<select id="kwMergeParent" class="modal-input">' +
+        options.parent.map(o => '<option value="' + (o.parent_id === null ? '' : o.parent_id) + '"' +
+          (o.parent_id === resolved.parent_id ? ' selected' : '') + '>' +
+          escapeHtml(o.path.length ? o.path.join(' → ') : 'No parent (top level)') +
+          '</option>').join('') +
+        '</select></div>');
+    }
+
+    if (options.type.length > 1) {
+      parts.push('<div class="kw-merge-field">' +
+        '<label class="modal-label" for="kwMergeType">Type</label>' +
+        '<select id="kwMergeType" class="modal-input">' +
+        options.type.map(o => '<option value="' + escapeHtml(o.value) + '"' +
+          (o.value === resolved.type ? ' selected' : '') + '>' + escapeHtml(o.value) +
+          '</option>').join('') +
+        '</select></div>');
+    }
+
+    if (options.place.length) {
+      parts.push('<div class="kw-merge-field">' +
+        '<label class="modal-label">Linked Google place</label>' +
+        '<div class="kw-merge-choices">' +
+        options.place.map(o => mergeChoice('kwMergePlace', o.place_id,
+          !needed.has('place') && o.place_id === resolved.place_id,
+          escapeHtml(o.name),
+          escapeHtml(o.path.join(' → ')) +
+          (o.latitude != null && o.longitude != null
+            ? ' · ' + osmLink(o.latitude, o.longitude, formatCoords(o.latitude, o.longitude))
+            : ''))).join('') +
+        mergeChoice('kwMergePlace', '', !needed.has('place') && resolved.place_id === null,
+          'No linked place', '') +
+        '</div>' +
+        (needed.has('place')
+          ? '<p class="kw-merge-needed">These keywords point at different Google places. ' +
+            'Pick the one the combined keyword should keep.</p>'
+          : '') +
+        '</div>');
+    }
+
+    if (options.species.length) {
+      parts.push('<div class="kw-merge-field">' +
+        '<label class="modal-label">Species link</label>' +
+        '<div class="kw-merge-choices">' +
+        options.species.map((o, index) => mergeChoice('kwMergeSpecies', String(index),
+          !needed.has('species') && o.taxon_id === resolved.taxon_id &&
+            o.source_taxon_id === resolved.source_taxon_id,
+          escapeHtml(o.name),
+          'taxon ' + (o.taxon_id === null ? '—' : o.taxon_id) +
+            ' · source taxon ' + (o.source_taxon_id === null ? '—' : o.source_taxon_id))).join('') +
+        mergeChoice('kwMergeSpecies', '', !needed.has('species') && resolved.taxon_id === null &&
+          resolved.source_taxon_id === null, 'No species link', '') +
+        '</div>' +
+        (needed.has('species')
+          ? '<p class="kw-merge-needed">These keywords point at different taxa. ' +
+            'Pick the one the combined keyword should keep.</p>'
+          : '') +
+        '</div>');
+    }
+
+    parts.push('<div class="kw-merge-field">' +
+      '<label class="modal-label" for="kwMergeLat">Coordinates</label>' +
+      '<div class="kw-merge-coords">' +
+      '<input type="number" step="any" id="kwMergeLat" class="modal-input" placeholder="Latitude" value="' +
+      (resolved.latitude == null ? '' : resolved.latitude) + '">' +
+      '<input type="number" step="any" id="kwMergeLng" class="modal-input" placeholder="Longitude" value="' +
+      (resolved.longitude == null ? '' : resolved.longitude) + '">' +
+      '</div>' +
+      '<div class="kw-merge-chips">' +
+      options.coordinates.map(o => '<button type="button" class="kw-merge-chip" data-lat="' +
+        o.latitude + '" data-lng="' + o.longitude + '">' + escapeHtml(o.name) + ': ' +
+        formatCoords(o.latitude, o.longitude) + '</button>').join('') +
+      '<button type="button" class="kw-merge-chip" data-clear-coords="1">Clear</button>' +
+      '</div></div>');
+
+    mergeFields.innerHTML = parts.join('');
+    wireMergeFields(data);
+  }
+
+  function wireMergeFields(data) {
+    const nameInput = document.getElementById('kwMergeName');
+    nameInput.addEventListener('input', function() {
+      mergeOverrides.name = nameInput.value;
+      scheduleMergePreview(false);
+    });
+    const latInput = document.getElementById('kwMergeLat');
+    const lngInput = document.getElementById('kwMergeLng');
+    function readCoords() {
+      if (latInput.value.trim() === '' && lngInput.value.trim() === '') {
+        mergeOverrides.coordinates = null;
+      } else {
+        mergeOverrides.coordinates = {
+          latitude: latInput.value.trim() === '' ? null : Number(latInput.value),
+          longitude: lngInput.value.trim() === '' ? null : Number(lngInput.value)
+        };
+      }
+      scheduleMergePreview(false);
+    }
+    latInput.addEventListener('input', readCoords);
+    lngInput.addEventListener('input', readCoords);
+
+    mergeFields.addEventListener('click', function(event) {
+      const chip = event.target.closest('.kw-merge-chip');
+      if (!chip) return;
+      if (chip.dataset.name !== undefined) {
+        nameInput.value = chip.dataset.name;
+        mergeOverrides.name = chip.dataset.name;
+      } else if (chip.dataset.clearCoords) {
+        latInput.value = ''; lngInput.value = '';
+        mergeOverrides.coordinates = null;
+      } else {
+        latInput.value = chip.dataset.lat;
+        lngInput.value = chip.dataset.lng;
+        mergeOverrides.coordinates = {
+          latitude: Number(chip.dataset.lat), longitude: Number(chip.dataset.lng)
+        };
+      }
+      scheduleMergePreview(true);
+    });
+
+    const parentSelect = document.getElementById('kwMergeParent');
+    if (parentSelect) {
+      parentSelect.addEventListener('change', function() {
+        mergeOverrides.parent_id = parentSelect.value === '' ? null : Number(parentSelect.value);
+        scheduleMergePreview(true);
+      });
+    }
+    const typeSelect = document.getElementById('kwMergeType');
+    if (typeSelect) {
+      typeSelect.addEventListener('change', function() {
+        mergeOverrides.type = typeSelect.value;
+        scheduleMergePreview(true);
+      });
+    }
+    mergeFields.addEventListener('change', function(event) {
+      const input = event.target;
+      if (input.name === 'kwMergePlace') {
+        mergeOverrides.place_id = input.value === '' ? null : input.value;
+        // A newly chosen place brings its own point unless the user has
+        // already typed one; a marker left on the old row's coordinates
+        // would put the retained place somewhere it isn't.
+        if (mergeOverrides.coordinates === undefined) {
+          const picked = data.options.place.find(o => o.place_id === input.value);
+          if (picked && picked.latitude != null && picked.longitude != null) {
+            latInput.value = picked.latitude;
+            lngInput.value = picked.longitude;
+          }
+        }
+        scheduleMergePreview(true);
+      } else if (input.name === 'kwMergeSpecies') {
+        mergeOverrides.species = input.value === ''
+          ? null
+          : {
+              taxon_id: data.options.species[Number(input.value)].taxon_id,
+              source_taxon_id: data.options.species[Number(input.value)].source_taxon_id
+            };
+        scheduleMergePreview(true);
+      }
+    });
+  }
+
+  function renderMergeSummary(data) {
+    const resolved = data.resolved;
+    const childLine = child => {
+      const where = child.to_path ? escapeHtml(child.to_path.join(' → ')) : '';
+      if (child.outcome === 'merge') {
+        return escapeHtml(child.name) + ' — merges into the keyword already at ' + where;
+      }
+      if (child.outcome === 'rename') {
+        return escapeHtml(child.name) + ' — kept separately as ' + where +
+          ' (a different keyword already uses that name there)';
+      }
+      return escapeHtml(child.name) + ' — moves to ' + where;
+    };
+    let html = '<div class="kw-merge-result">' +
+      '<p><strong>' + escapeHtml(resolved.path.join(' → ')) + '</strong> · ' +
+      escapeHtml(resolved.type) + '</p>' +
+      '<p>' + data.combined_count + ' distinct photos after merging · ' +
+      data.removed_count + ' keyword record' + (data.removed_count === 1 ? '' : 's') +
+      ' removed</p>';
+    if (resolved.place_id) {
+      html += '<p>Keeps the Google place link' +
+        (resolved.latitude != null && resolved.longitude != null
+          ? ' · ' + osmLink(resolved.latitude, resolved.longitude,
+              formatCoords(resolved.latitude, resolved.longitude))
+          : '') + '</p>';
+    } else if (resolved.latitude != null && resolved.longitude != null) {
+      html += '<p>Coordinates: ' +
+        osmLink(resolved.latitude, resolved.longitude,
+                formatCoords(resolved.latitude, resolved.longitude)) + '</p>';
+    }
+    if (data.children.length) {
+      html += '<p>' + (data.children.length === 1
+        ? '1 child keyword moves under it:'
+        : data.children.length + ' child keywords move under it:') + '</p><ul>' +
+        data.children.map(child => '<li>' + childLine(child) +
+          (child.photo_count ? ' · ' + child.photo_count + ' photos in this branch' : '') +
+          '</li>').join('') + '</ul>';
+    }
+    (data.notes || []).forEach(note => {
+      html += '<p class="kw-merge-note">' + escapeHtml(note) + '</p>';
+    });
+    html += '<p class="kw-merge-note">Imported names and paths will resolve to the ' +
+      'combined keyword on future imports.</p></div>';
+    mergePreview.innerHTML = html;
+  }
+
+  /* Plot every selected keyword that has a point, plus the point the merge
+     will keep, so "which of these is the right place" is answerable without
+     leaving the dialog. */
+  async function renderMergeMap(data) {
+    const points = [];
+    [data.target, ...data.sources].forEach(record => {
+      if (record.latitude != null && record.longitude != null) {
+        points.push({
+          latitude: record.latitude, longitude: record.longitude,
+          label: record.path.join(' → '), kept: false
+        });
+      }
+    });
+    const resolved = data.resolved;
+    if (resolved.latitude != null && resolved.longitude != null) {
+      points.push({
+        latitude: resolved.latitude, longitude: resolved.longitude,
+        label: 'Combined keyword: ' + resolved.path.join(' → '), kept: true
+      });
+    }
+    if (!points.length) {
+      mergeMapEl.hidden = true;
+      mergeMapNote.hidden = false;
+      mergeMapNote.textContent =
+        'None of the selected keywords has coordinates, so there is nothing to map.';
+      return;
+    }
+    mergeMapEl.hidden = false;
+    let L;
+    try {
+      L = await loadLeaflet();
+    } catch (error) {
+      mergeMapEl.hidden = true;
+      mergeMapNote.hidden = false;
+      mergeMapNote.textContent =
+        'Map unavailable offline — the coordinate links above open OpenStreetMap.';
+      return;
+    }
+    if (!mergeDialog.open) return;
+    mergeMapNote.hidden = true;
+    if (!mergeMap) {
+      mergeMap = L.map(mergeMapEl, {attributionControl: true});
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors', maxZoom: 19
+      }).addTo(mergeMap);
+    }
+    if (mergeMapLayer) mergeMapLayer.remove();
+    mergeMapLayer = L.layerGroup(points.map(point => {
+      const marker = point.kept
+        ? L.marker([point.latitude, point.longitude], {title: point.label, zIndexOffset: 1000})
+        : L.circleMarker([point.latitude, point.longitude], {
+            radius: 7, color: '#888', weight: 2, fillOpacity: 0.35
+          });
+      return marker.bindTooltip(point.label);
+    })).addTo(mergeMap);
+    mergeMap.invalidateSize();
+    mergeMap.fitBounds(L.latLngBounds(points.map(p => [p.latitude, p.longitude])),
+                       {padding: [28, 28], maxZoom: 14});
+  }
 
   async function refreshMergePreview() {
     const requestId = ++mergeRequest;
+    const targetId = Number(mergeTarget.value);
     mergeToken = null;
     mergeConfirm.disabled = true;
     mergeError.hidden = true;
-    mergePreview.textContent = 'Loading preview…';
+    if (mergeFieldsFor === null) mergePreview.textContent = 'Loading preview…';
     try {
       const response = await fetch('/api/keywords/merge-preview', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({keyword_ids: mergeIds, target_id: Number(mergeTarget.value)})
+        body: JSON.stringify({keyword_ids: mergeIds, target_id: targetId,
+                              overrides: mergeOverrides})
       });
       const data = await response.json();
       if (requestId !== mergeRequest || !mergeDialog.open) return;
       if (!response.ok) throw new Error(data.error || 'Could not preview merge.');
-      let details = '<p><strong>' + data.combined_count + ' distinct photos after merging</strong></p>' +
-        '<p>Keep: ' + escapeHtml(data.target.path.join(' → ')) + ' (' + escapeHtml(data.target.type) + ')</p>' +
-        '<p>Merge into it: ' + data.sources.map(k => escapeHtml(k.path.join(' → '))).join('; ') + '</p>';
-      if (data.latitude != null && data.longitude != null) {
-        details += '<p>Coordinates: ' + data.latitude.toFixed(4) + ', ' + data.longitude.toFixed(4) + '</p>';
+      if (mergeFieldsFor !== targetId) {
+        renderMergeFields(data);
+        mergeFieldsFor = targetId;
       }
-      if (data.target.place_id) {
-        details += '<p>Google place link retained.</p>';
-      }
-      details += '<p>Imported names and paths will resolve to the retained keyword on future imports.</p>';
-      mergePreview.innerHTML = details;
-      mergeToken = data.preview_token;
-      mergeConfirm.disabled = false;
+      renderMergeSummary(data);
+      renderMergeMap(data);
+      mergeToken = data.preview_token || null;
+      // No token means the preview is still asking a question (two different
+      // linked places, say); merging now would have to guess the answer.
+      mergeConfirm.disabled = !mergeToken;
     } catch (error) {
       if (requestId !== mergeRequest || !mergeDialog.open) return;
-      mergePreview.textContent = '';
+      if (mergeFieldsFor === null) mergePreview.textContent = '';
       mergeError.textContent = error.message;
       mergeError.hidden = false;
     }
@@ -626,6 +1007,11 @@
   function openMergeDialog(ids) {
     if (ids.length < 2) return;
     mergeIds = [...ids];
+    mergeOverrides = {};
+    mergeFieldsFor = null;
+    mergeFields.innerHTML = '';
+    mergeMapEl.hidden = true;
+    mergeMapNote.hidden = true;
     const records = mergeIds.map(id => allKeywords.find(k => k.id === id)).filter(Boolean);
     // Prefer the record carrying a place/taxon link, then coordinates.
     const score = k => (k.place_id ? 8 : 0) + (k.taxon_id ? 4 : 0) +
@@ -642,10 +1028,21 @@
   }
 
   document.getElementById('kwBulkMerge').addEventListener('click', () => openMergeDialog([...selectedIds]));
-  mergeTarget.addEventListener('change', refreshMergePreview);
+  mergeTarget.addEventListener('change', function() {
+    // A different surviving record has its own defaults; keeping the old
+    // picks would silently apply one record's identity to another.
+    mergeOverrides = {};
+    mergeFieldsFor = null;
+    refreshMergePreview();
+  });
   mergeCancel.addEventListener('click', () => mergeDialog.close());
   mergeDialog.addEventListener('cancel', event => { if (mergeSaving) event.preventDefault(); });
-  mergeDialog.addEventListener('close', () => { ++mergeRequest; mergeToken = null; });
+  mergeDialog.addEventListener('close', () => {
+    ++mergeRequest;
+    clearTimeout(mergeDebounce);
+    mergeToken = null;
+    if (mergeMap) { mergeMap.remove(); mergeMap = null; mergeMapLayer = null; }
+  });
   mergeConfirm.addEventListener('click', async function() {
     if (!mergeToken || mergeSaving) return;
     mergeSaving = true;
@@ -656,7 +1053,8 @@
     try {
       const response = await fetch('/api/keywords/merge', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({keyword_ids: mergeIds, target_id: Number(mergeTarget.value), preview_token: mergeToken})
+        body: JSON.stringify({keyword_ids: mergeIds, target_id: Number(mergeTarget.value),
+                              preview_token: mergeToken, overrides: mergeOverrides})
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not merge keywords.');
@@ -664,7 +1062,7 @@
       selectedIds.clear();
       await loadKeywords();
       if (!document.getElementById('kwLocationReview').hidden) await loadLocationMatches();
-      showToast('Keywords merged into “' + data.target.name + '”.', 'success');
+      showToast('Keywords merged into “' + data.resolved.name + '”.', 'success');
     } catch (error) {
       await refreshMergePreview();
       mergeError.textContent = error.message;

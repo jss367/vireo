@@ -1,7 +1,10 @@
+import json
+
 import pytest
 from db import Database
 from keyword_identity import (
     grouped_keywords,
+    keyword_paths,
     location_candidates,
     merge_keywords,
     preview_keyword_merge,
@@ -560,40 +563,316 @@ def test_manual_merge_stale_preview_and_rollback(catalog, monkeypatch):
     assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
 
 
-@pytest.mark.parametrize('case', ['type', 'species', 'children', 'different_place', 'photo_conflict', 'alias', 'workspace', 'different_taxon'])
+@pytest.mark.parametrize('case', ['species', 'photo_conflict', 'alias', 'workspace', 'overlap'])
 def test_manual_merge_rejects_unsafe_selection(catalog, case):
     db, photos = catalog
     source, target, _ = place_pair(db)
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
-    if case == 'type':
-        db.update_keyword(source, type='individual')
-    elif case == 'species':
+    if case == 'species':
         db.conn.execute('UPDATE keywords SET is_species = 1 WHERE id = ?', (source,))
-    elif case == 'children':
-        db.add_keyword('Child', parent_id=source)
-    elif case in ('different_place', 'photo_conflict', 'alias'):
+    elif case in ('photo_conflict', 'alias'):
         other = db.upsert_place_chain({'place_id': 'other-place', 'name': 'Other lake', 'lat': 34, 'lng': -116, 'address_components': []})
-        if case == 'different_place':
-            source = other
-            db.tag_photo(photos[0], source)
-        elif case == 'photo_conflict':
+        if case == 'photo_conflict':
             db.tag_photo(photos[0], other)
         else:
             from keyword_identity import path_key
             db.conn.execute('INSERT INTO keyword_import_aliases VALUES (?, ?, ?)', (path_key(['Lake Hodges']), '["Lake Hodges"]', other))
     elif case == 'workspace':
         db.set_active_workspace(db.create_workspace('Empty'))
-    elif case == 'different_taxon':
-        source, target = species_pair(db)[:2]
-        db.tag_photo(photos[0], source)
-        db.tag_photo(photos[1], target)
-        db.conn.execute('UPDATE keywords SET source_taxon_id = 999 WHERE id = ?', (source,))
+    elif case == 'overlap':
+        # The source's subtree contains the row being kept, so absorbing it
+        # would write the survivor as its own parent.
+        db.conn.execute('UPDATE keywords SET parent_id = ? WHERE id = ?', (source, target))
     db.conn.commit()
     with pytest.raises(ValueError):
         preview_keyword_merge(db, [source, target], target)
     assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (source,)).fetchone()
 
+
+def _nested_place_branches(db):
+    """A junk-rooted duplicate branch beside a clean one, as geocoding leaves it."""
+    junk = db.add_keyword('92004', kw_type='location')
+    stray = db.add_keyword('Borrego Springs', parent_id=junk, kw_type='location')
+    road = db.add_keyword('Unnamed Road', parent_id=stray, kw_type='location')
+    trailhead = db.add_keyword('Trailhead', parent_id=road, kw_type='location')
+    county = db.add_keyword('San Diego County', kw_type='location')
+    kept = db.add_keyword('Borrego Springs', parent_id=county, kw_type='location')
+    return stray, kept, road, trailhead
+
+
+def test_manual_merge_reparents_a_whole_subtree(catalog):
+    """A duplicate branch merges children and all; the preview's predicted
+    paths are the paths the write path actually produces, and every photo
+    tagged on a moved descendant gets its sidecar hierarchy rewritten even
+    though its own flat keyword never changed."""
+    db, photos = catalog
+    stray, kept, road, trailhead = _nested_place_branches(db)
+    db.tag_photo(photos[0], trailhead)
+    db.tag_photo(photos[1], kept)
+    preview = preview_keyword_merge(db, [stray, kept], kept)
+
+    assert [(c['id'], c['outcome'], c['to_path']) for c in preview['children']] == [
+        (road, 'move', ['San Diego County', 'Borrego Springs', 'Unnamed Road']),
+    ]
+    assert preview['children'][0]['photo_count'] == 1
+    predicted = {int(k): v[1] for k, v in preview['path_changes'].items()}
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'])
+
+    rows = [dict(r) for r in db.conn.execute('SELECT * FROM keywords')]
+    actual = keyword_paths(rows)
+    assert all(actual[kid] == path for kid, path in predicted.items())
+    assert actual[trailhead] == [
+        'San Diego County', 'Borrego Springs', 'Unnamed Road', 'Trailhead']
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (stray,)).fetchone()
+
+    merges = [json.loads(r['value']) for r in db.conn.execute(
+        "SELECT value FROM pending_changes WHERE photo_id = ? AND change_type = 'keyword_merge'",
+        (photos[0],))]
+    moved = next(m for m in merges if m['target_id'] == trailhead)
+    assert moved['source_path'] == [
+        '92004', 'Borrego Springs', 'Unnamed Road', 'Trailhead']
+    assert moved['target_path'] == actual[trailhead]
+    assert db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location'",
+        (photos[0],)).fetchone()
+
+
+def test_manual_merge_child_collisions_match_the_write_path(catalog):
+    """The preview replays the merge's own collision rules, so what it says
+    about each colliding child is what the merge does: same type collapses,
+    a distinct Google place under the same name survives under a suffix."""
+    db, photos = catalog
+    old = db.add_keyword('Park', kw_type='location')
+    new = db.add_keyword('Parc', kw_type='location')
+    twin_old = db.add_keyword('Trail', parent_id=old, kw_type='location')
+    twin_new = db.add_keyword('Trail', parent_id=new, kw_type='location')
+    place_old = db.add_keyword('Overlook', parent_id=old, kw_type='location')
+    place_new = db.add_keyword('Overlook', parent_id=new, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'place-aaaaaaaa' WHERE id = ?", (place_old,))
+    db.conn.execute("UPDATE keywords SET place_id = 'place-bbbbbbbb' WHERE id = ?", (place_new,))
+    db.conn.commit()
+    db.tag_photo(photos[0], twin_old)
+    db.tag_photo(photos[1], twin_new)
+    db.tag_photo(photos[2], place_old)
+
+    preview = preview_keyword_merge(db, [old, new], new)
+    outcomes = {c['id']: (c['outcome'], c['new_name']) for c in preview['children']}
+    assert outcomes[twin_old] == ('merge', 'Trail')
+    assert outcomes[place_old] == ('rename', 'Overlook (aaaaaaaa)')
+
+    merge_keywords(db, [old, new], new, preview['preview_token'])
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (twin_old,)).fetchone()
+    assert {r['photo_id'] for r in db.conn.execute(
+        'SELECT photo_id FROM photo_keywords WHERE keyword_id = ?', (twin_new,))} == {
+        photos[0], photos[1]}
+    survivor = db.conn.execute(
+        'SELECT name, parent_id FROM keywords WHERE id = ?', (place_old,)).fetchone()
+    assert (survivor['name'], survivor['parent_id']) == ('Overlook (aaaaaaaa)', new)
+    assert db.conn.execute(
+        'SELECT place_id FROM keywords WHERE id = ?', (place_new,)).fetchone()[0] == 'place-bbbbbbbb'
+
+
+
+def test_manual_merge_at_the_root_collapses_a_whole_duplicate_chain(catalog):
+    """Geocoding can leave a second copy of a whole place chain under a junk
+    root. Merging the two roots has to cascade all the way down in one pass,
+    and each collapsing level has to name the keyword it lands in rather than
+    reporting a destination it no longer has."""
+    db, photos = catalog
+    junk = db.add_keyword('92004', kw_type='location')
+    stray = junk
+    for name in ('United States', 'California', 'Borrego Springs'):
+        stray = db.add_keyword(name, parent_id=stray, kw_type='location')
+    trailhead = db.add_keyword('Trailhead', parent_id=stray, kw_type='location')
+    kept = None
+    for name in ('United States', 'California', 'Borrego Springs'):
+        kept = db.add_keyword(name, parent_id=kept, kw_type='location')
+    trail = db.add_keyword('Nature Trail', parent_id=kept, kw_type='location')
+    db.tag_photo(photos[0], trailhead)
+    db.tag_photo(photos[1], trail)
+    stray_root = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'United States' AND parent_id = ?",
+        (junk,)).fetchone()[0]
+    kept_root = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'United States' AND parent_id IS NULL"
+    ).fetchone()[0]
+
+    preview = preview_keyword_merge(db, [stray_root, kept_root], kept_root)
+    assert preview['removed_count'] == 3
+    assert all(child['to_path'] for child in preview['children'])
+    assert [(c['name'], c['outcome']) for c in preview['children']] == [
+        ('California', 'merge'), ('Borrego Springs', 'merge'), ('Trailhead', 'move')]
+    merge_keywords(db, [stray_root, kept_root], kept_root, preview['preview_token'])
+
+    rows = [dict(r) for r in db.conn.execute('SELECT * FROM keywords')]
+    actual = keyword_paths(rows)
+    assert actual[trailhead] == ['United States', 'California', 'Borrego Springs', 'Trailhead']
+    assert actual[trail] == ['United States', 'California', 'Borrego Springs', 'Nature Trail']
+    # Only the emptied junk root is left behind; nothing else duplicated.
+    assert sorted(' > '.join(actual[r['id']]) for r in rows
+                  if r['type'] == 'location') == [
+        '92004',
+        'United States',
+        'United States > California',
+        'United States > California > Borrego Springs',
+        'United States > California > Borrego Springs > Nature Trail',
+        'United States > California > Borrego Springs > Trailhead',
+    ]
+
+def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
+    """Two rows carrying different real-world identities have no honest
+    default, so the preview names the field and withholds its token rather
+    than silently retagging photos onto one of them."""
+    db, photos = catalog
+    first, second, _ = place_pair(db)
+    other = db.upsert_place_chain({
+        'place_id': 'other-place', 'name': 'Other lake', 'lat': 34, 'lng': -116,
+        'address_components': []})
+    db.tag_photo(photos[0], other)
+    db.tag_photo(photos[1], second)
+
+    preview = preview_keyword_merge(db, [other, second], second)
+    assert preview['requires_choice'] == ['place']
+    assert 'preview_token' not in preview
+    assert {o['place_id'] for o in preview['options']['place']} == {'other-place', 'test-place'}
+    with pytest.raises(ValueError, match='Choose which'):
+        merge_keywords(db, [other, second], second, 'no-token')
+
+    chosen = {'place_id': 'other-place'}
+    preview = preview_keyword_merge(db, [other, second], second, chosen)
+    assert preview['resolved']['place_id'] == 'other-place'
+    # Coordinates follow the chosen place rather than the retained row's.
+    assert (preview['latitude'], preview['longitude']) == (34, -116)
+    merge_keywords(db, [other, second], second, preview['preview_token'], chosen)
+    row = db.conn.execute(
+        'SELECT place_id, latitude, longitude FROM keywords WHERE id = ?', (second,)).fetchone()
+    assert (row['place_id'], row['latitude'], row['longitude']) == ('other-place', 34, -116)
+    assert not db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (other,)).fetchone()
+
+
+def test_manual_merge_asks_which_species_link_to_keep(catalog):
+    db, photos = catalog
+    source, target = species_pair(db)[:2]
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    db.conn.execute('UPDATE keywords SET source_taxon_id = 999 WHERE id = ?', (source,))
+    db.conn.commit()
+
+    preview = preview_keyword_merge(db, [source, target], target)
+    assert preview['requires_choice'] == ['species']
+    pick = {'species': {'taxon_id': preview['options']['species'][0]['taxon_id'],
+                        'source_taxon_id': 999}}
+    preview = preview_keyword_merge(db, [source, target], target, pick)
+    merge_keywords(db, [source, target], target, preview['preview_token'], pick)
+    assert db.conn.execute(
+        'SELECT source_taxon_id FROM keywords WHERE id = ?', (target,)).fetchone()[0] == 999
+
+
+def test_manual_merge_mixes_spelling_and_place_across_rows(catalog):
+    """The retained row supplies the record that survives, not every value on
+    it: keeping one row's spelling alongside another's place link is the
+    whole point of the chooser."""
+    db, photos = catalog
+    plain = db.add_keyword('Borrego Palm Cyn.', kw_type='location')
+    linked = db.upsert_place_chain({
+        'place_id': 'trailhead', 'name': 'Borrego Palm Canyon Trailhead',
+        'lat': 33.27, 'lng': -116.42, 'address_components': []})
+    db.tag_photo(photos[0], plain)
+    db.tag_photo(photos[1], linked)
+
+    overrides = {'name': 'Borrego Palm Cyn.', 'parent_id': None}
+    preview = preview_keyword_merge(db, [plain, linked], linked, overrides)
+    assert preview['resolved']['name'] == 'Borrego Palm Cyn.'
+    assert preview['resolved']['place_id'] == 'trailhead'
+    assert not preview['requires_choice']
+    merge_keywords(db, [plain, linked], linked, preview['preview_token'], overrides)
+
+    row = db.conn.execute(
+        'SELECT name, place_id, latitude FROM keywords WHERE id = ?', (linked,)).fetchone()
+    assert (row['name'], row['place_id'], row['latitude']) == (
+        'Borrego Palm Cyn.', 'trailhead', 33.27)
+    # The renamed survivor's photos must export the chosen spelling, and the
+    # spelling the merge retired must come back out of the sidecars.
+    pending = {(r['photo_id'], r['change_type'], r['value']) for r in db.conn.execute(
+        'SELECT photo_id, change_type, value FROM pending_changes')}
+    assert (photos[1], 'keyword_add', 'Borrego Palm Cyn.') in pending
+    assert (photos[0], 'keyword_add', 'Borrego Palm Cyn.') in pending
+    assert all(value != 'Borrego Palm Canyon Trailhead'
+               for _, change_type, value in pending if change_type == 'keyword_add')
+
+
+def test_manual_merge_rename_carries_pending_edits_and_curation(catalog):
+    """A chooser rename is a rename: strings that mirror the keyword's name
+    have to move with it or an unsynced add writes the retired spelling."""
+    db, photos = catalog
+    source = db.add_keyword('Wing St. Canyon', kw_type='location')
+    target = db.add_keyword('Wing Street Canyon', kw_type='location')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    db.queue_change(photos[1], 'keyword_add', 'Wing Street Canyon')
+
+    overrides = {'name': 'Wing Canyon'}
+    preview = preview_keyword_merge(db, [source, target], target, overrides)
+    merge_keywords(db, [source, target], target, preview['preview_token'], overrides)
+
+    values = {r['value'] for r in db.conn.execute(
+        "SELECT value FROM pending_changes WHERE change_type = 'keyword_add'")}
+    assert values == {'Wing Canyon'}
+    assert db.conn.execute(
+        'SELECT name FROM keywords WHERE id = ?', (target,)).fetchone()[0] == 'Wing Canyon'
+
+
+@pytest.mark.parametrize('overrides,message', [
+    ({'name': '   '}, 'Enter a name'),
+    ({'name': 'A|B'}, 'may not contain'),
+    ({'parent_id': 424242}, 'offered parent'),
+    ({'type': 'genre'}, 'types'),
+    ({'place_id': 'not-selected'}, 'linked places'),
+    ({'coordinates': {'latitude': 91, 'longitude': 0}}, 'between'),
+    ({'coordinates': {'latitude': 'north', 'longitude': 0}}, 'numeric'),
+    ({'coordinates': 33.2}, 'both a latitude'),
+    ({'nonsense': 1}, 'Unrecognized'),
+])
+def test_manual_merge_rejects_unusable_overrides(catalog, overrides, message):
+    db, photos = catalog
+    source = db.add_keyword('Wing St. Canyon', kw_type='location')
+    target = db.add_keyword('Wing Street Canyon', kw_type='location')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    with pytest.raises(ValueError, match=message):
+        preview_keyword_merge(db, [source, target], target, overrides)
+
+
+def test_manual_merge_coordinates_are_editable_and_clearable(catalog):
+    db, photos = catalog
+    source = db.add_keyword('Wing St. Canyon', kw_type='location')
+    target = db.add_keyword('Wing Street Canyon', kw_type='location')
+    db.update_keyword(target, latitude=32.7447, longitude=-117.2186)
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+
+    overrides = {'coordinates': {'latitude': 33.0, 'longitude': -116.0}}
+    preview = preview_keyword_merge(db, [source, target], target, overrides)
+    assert (preview['latitude'], preview['longitude']) == (33.0, -116.0)
+    merge_keywords(db, [source, target], target, preview['preview_token'], overrides)
+    row = db.conn.execute(
+        'SELECT latitude, longitude FROM keywords WHERE id = ?', (target,)).fetchone()
+    assert (row['latitude'], row['longitude']) == (33.0, -116.0)
+
+
+def test_manual_merge_preview_token_covers_the_chooser(catalog):
+    """A token minted for one set of picks must not authorize another."""
+    db, photos = catalog
+    source = db.add_keyword('Wing St. Canyon', kw_type='location')
+    target = db.add_keyword('Wing Street Canyon', kw_type='location')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    preview = preview_keyword_merge(db, [source, target], target)
+    with pytest.raises(ValueError, match='changed'):
+        merge_keywords(db, [source, target], target, preview['preview_token'],
+                       {'name': 'Something else'})
+    assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (source,)).fetchone()
 
 def test_manual_merge_api_validation_and_revalidation(app_and_db):
     app, db = app_and_db

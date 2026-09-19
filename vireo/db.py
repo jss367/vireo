@@ -14126,14 +14126,8 @@ class Database:
         Post-migration, stored names are already normalized, so this is a
         no-op in the common case — it exists so the duplicate-cleanup and
         migration paths can canonicalize a survivor whose spelling predates
-        normalization, keeping every dependent name string (pending sidecar
-        changes, species curation snapshots) in lockstep with the row.
-
-        Retargeting of pending changes and species curation rows is scoped
-        to photos that actually carry ``keyword_id`` (and, for pending
-        changes, the workspaces those (photo, keyword) tags belong to), so
-        a separate same-spelling keyword row elsewhere in the DB is never
-        rewritten by side effect.
+        normalization. ``_rename_keyword_dependents`` then carries the new
+        spelling into every string that mirrors it.
 
         ``disambiguate_on_conflict`` — when a different-type keyword already
         occupies (cleaned, parent_id) and the UPDATE would hit
@@ -14152,22 +14146,6 @@ class Database:
         cleaned = normalize_keyword_display(old_name)
         if not cleaned or cleaned == old_name:
             return
-        # Collect (photo_id, workspace_id) for photos actually tagged with
-        # this keyword row, scoped through workspace_folders. Captured
-        # before the keywords UPDATE so a downstream _merge_keyword_into
-        # still sees the same tags via photo_keywords.
-        tag_rows = self.conn.execute(
-            """SELECT DISTINCT pk.photo_id, wf.workspace_id
-               FROM photo_keywords pk
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE pk.keyword_id = ?""",
-            (keyword_id,),
-        ).fetchall()
-        photo_workspace_pairs = [
-            (r["photo_id"], r["workspace_id"]) for r in tag_rows
-        ]
-        affected_photo_ids = sorted({r["photo_id"] for r in tag_rows})
         # A same-name row in a different dedupe boundary (another type at
         # the same parent) can still occupy the table-level
         # UNIQUE(name, parent_id) slot. The links still merge correctly;
@@ -14191,11 +14169,44 @@ class Database:
             self.conn.execute(
                 "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
             )
+        # Keep every dependent name string in lockstep with the row.
+        self._rename_keyword_dependents(keyword_id, old_name, cleaned)
+
+    def _rename_keyword_dependents(self, keyword_id, old_name, new_name):
+        """Carry a keyword row's rename into every string that mirrors its name.
+
+        Pending sidecar edits and the species curation tables store the
+        keyword's spelling rather than its id, so a row renamed without this
+        leaves an unsynced ``keyword_add`` writing the old word into XMP and
+        drops starred photos out of the highlight/life-list queries, which
+        compare those strings exact against ``keywords.name``.
+
+        Scoped to photos that actually carry ``keyword_id`` (and, for pending
+        changes, the workspaces those (photo, keyword) tags belong to), so a
+        separate same-spelling keyword row elsewhere in the DB is never
+        rewritten by side effect. Safe to call either side of the
+        ``keywords`` UPDATE: only ``photo_keywords`` is read, and a name
+        change does not touch it. Caller commits.
+        """
+        if not old_name or not new_name or old_name == new_name:
+            return
+        tag_rows = self.conn.execute(
+            """SELECT DISTINCT pk.photo_id, wf.workspace_id
+               FROM photo_keywords pk
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE pk.keyword_id = ?""",
+            (keyword_id,),
+        ).fetchall()
+        photo_workspace_pairs = [
+            (r["photo_id"], r["workspace_id"]) for r in tag_rows
+        ]
+        affected_photo_ids = sorted({r["photo_id"] for r in tag_rows})
         # Retarget pending keyword_add/keyword_remove rows queued under the
         # pre-canonical spelling so a still-unsynced sidecar write can't
         # leak the legacy variant after the DB row was rewritten. A pending
         # row that would collide with an existing (photo_id, change_type,
-        # cleaned) row is dropped rather than duplicated, matching
+        # new_name) row is dropped rather than duplicated, matching
         # queue_change's dedupe contract.
         if affected_photo_ids:
             for chunk in _chunks(affected_photo_ids):
@@ -14213,7 +14224,7 @@ class Database:
                                 AND COALESCE(pc2.workspace_id, -1)
                                     = COALESCE(pending_changes.workspace_id, -1)
                           )""",
-                    [old_name, *chunk, cleaned],
+                    [old_name, *chunk, new_name],
                 )
                 self.conn.execute(
                     f"""UPDATE pending_changes
@@ -14221,7 +14232,7 @@ class Database:
                         WHERE change_type IN ('keyword_add', 'keyword_remove')
                           AND value = ?
                           AND photo_id IN ({placeholders})""",
-                    [cleaned, old_name, *chunk],
+                    [new_name, old_name, *chunk],
                 )
         # Species curation tables key rows by the species name string, which
         # is compared exact against ``keywords.name``. Now that the UPDATE
@@ -14234,11 +14245,11 @@ class Database:
         # representatives rename isn't needed here.
         if photo_workspace_pairs:
             self.rename_species_highlights_species(
-                old_name, cleaned,
+                old_name, new_name,
                 photo_workspace_pairs=photo_workspace_pairs, _commit=False,
             )
             self.rename_photo_preferences_species(
-                old_name, cleaned,
+                old_name, new_name,
                 photo_workspace_pairs=photo_workspace_pairs, _commit=False,
             )
 
