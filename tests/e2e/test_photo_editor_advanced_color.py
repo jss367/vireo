@@ -442,3 +442,21 @@ def test_reopening_color_picker_ignores_previous_pending_sample(live_server, pag
     page.locator('#editorImg').click(force=True)
     expect(page.locator('#pointColorStatus')).to_contain_text('Color sampled')
     assert len(page.evaluate('pointColorSamples()')) == 1
+
+
+@pytest.mark.parametrize('hex_color', ['#000000', '#808080', '#ffffff', '#808180'])
+def test_custom_point_color_rejects_neutral_samples(live_server, page, color_photo, hex_color):
+    page.goto(f"{live_server['url']}/edit/{color_photo}")
+    expect(page.locator('#editorFilename')).to_have_text('color-study.png')
+    page.locator('#pointColorCustom').evaluate("""(el, color) => {
+      el.value = color;
+      el.dispatchEvent(new Event('change'));
+    }""", hex_color)
+    expect(page.locator('#pointColorStatus')).to_contain_text('Choose a more saturated color')
+    assert page.evaluate('pointColorSamples()') == []
+    expect(page.locator('#pointColor_hue')).to_be_disabled()
+    expect(page.locator('#saveBtn')).to_be_disabled()
+    page.locator('#pointColorCustom').evaluate("el => { el.value='#008000'; el.dispatchEvent(new Event('change')); }")
+    assert len(page.evaluate('pointColorSamples()')) == 1
+    expect(page.locator('#pointColor_hue')).to_be_enabled()
+    expect(page.locator('#pointColorStatus')).to_have_text('')

@@ -155,9 +155,13 @@ function resetCurveChannel() {
 }
 
 function addPointColorSample(sample) {
-  if (editorState.loading) return;
+  if (editorState.loading) return false;
   var samples = pointColorSamples();
-  if (samples.length >= 8) return;
+  if (samples.length >= 8) return false;
+  if (sample[1] < 1) {
+    document.getElementById('pointColorStatus').textContent = 'Choose a more saturated color; neutral gray has no distinct hue.';
+    return false;
+  }
   sample = sample.map(colorRound);
   sample[0] %= 360;
   samples.push({sample: sample});
@@ -165,6 +169,7 @@ function addPointColorSample(sample) {
   _setAdjustmentSection('point_color', samples);
   syncPointControls();
   markChanged(true);
+  return true;
 }
 function rgbToPointSample(r, g, b) {
   r /= 255; g /= 255; b /= 255;
@@ -266,11 +271,7 @@ async function samplePointColorAt(e) {
     ctx.drawImage(source, Math.min(source.naturalWidth - 1, Math.floor(x * source.naturalWidth)), Math.min(source.naturalHeight - 1, Math.floor(y * source.naturalHeight)), 1, 1, 0, 0, 1, 1);
     var pixel = ctx.getImageData(0, 0, 1, 1).data;
     var sample = rgbToPointSample(pixel[0], pixel[1], pixel[2]);
-    if (sample[1] < 1) {
-      document.getElementById('pointColorStatus').textContent = 'Choose a more saturated color; neutral gray has no distinct hue.';
-      return;
-    }
-    addPointColorSample(sample);
+    if (!addPointColorSample(sample)) return;
     document.getElementById('pointColorStatus').textContent = 'Color sampled. Adjust the ranges and color sliders below.';
   } catch (_) {
     if (seq === colorEditor.pickSequence) document.getElementById('pointColorStatus').textContent = 'Could not sample this photo. Try again.';
