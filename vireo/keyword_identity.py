@@ -506,7 +506,19 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
             # disambiguates -- and the aliases and hierarchy rewrites queued
             # from the prediction would point those photos at the wrong
             # sibling.
+            #
+            # Track whether the fold gives the retained location child a
+            # place_id or coordinates it did not have before: photos tagged
+            # solely with that survivor keep the fold's new place/coords in
+            # the catalog but the old (or missing) location metadata in their
+            # sidecars until a ``location`` resync is queued for them.
+            before = {f: nodes[existing['id']][f]
+                      for f in ('place_id', 'latitude', 'longitude')}
             _fold_merged_identity(nodes[existing['id']], child)
+            if nodes[existing['id']]['type'] == 'location' and any(
+                    before[f] is None and nodes[existing['id']][f] is not None
+                    for f in before):
+                plan['metadata_folded'].add(existing['id'])
             _plan_subtree_merge(db, nodes, children, child_id, existing['id'], plan)
         else:
             children[src_id].remove(child_id)
@@ -545,6 +557,26 @@ def _distinct(values):
     return list(ordered.values())
 
 
+def _fold_species(values):
+    """Like ``_distinct`` but coalesce complementary taxon fields per group.
+
+    Two rows can name the same species through different columns -- one via a
+    local ``taxon_id``, the other via an iNat ``source_taxon_id``. They share
+    the same resolved ``taxon_identity`` so they collapse to one option, but
+    keeping only the first row's raw payload discards the other row's
+    complementary link; ``_apply_merge_overrides`` then writes the missing
+    field back as ``None``.
+    """
+    ordered = {}
+    for key, source_id, payload in values:
+        entry = ordered.setdefault(key, {**payload, 'from': []})
+        for field in ('taxon_id', 'source_taxon_id'):
+            if entry.get(field) is None and payload.get(field) is not None:
+                entry[field] = payload[field]
+        entry['from'].append(source_id)
+    return list(ordered.values())
+
+
 def _merge_options(db, records, paths, valid_parents):
     """Every value each editable attribute can take, tagged with its source rows."""
     return {
@@ -565,7 +597,12 @@ def _merge_options(db, records, paths, valid_parents):
         # local ``taxon_id`` and one linked by the matching iNat
         # ``source_taxon_id`` name one species, and offering them as two
         # indistinguishable choices would demand a decision with no answer.
-        'species': _distinct([
+        # Fold the non-null taxon fields within each group so a survivor that
+        # picks that option keeps BOTH links -- ``_apply_merge_overrides``
+        # otherwise writes the missing side back as ``None`` and drops either
+        # the local taxon link or the source provenance depending on which
+        # row is retained.
+        'species': _fold_species([
             (taxon_identity(db, r), r['id'],
              {'taxon_id': r['taxon_id'], 'source_taxon_id': r['source_taxon_id'],
               'name': r['name']})
@@ -649,14 +686,25 @@ def _resolve_merge_fields(records, options, overrides):
         resolved['parent_id'] = target['parent_id']
 
     if 'type' in overrides:
-        if overrides['type'] not in {option['value'] for option in options['type']}:
+        chosen = overrides['type']
+        # Reject non-string values before the membership test — ``value in set``
+        # raises ``TypeError`` on an unhashable dict or list, and the route
+        # catches only ``ValueError``, so a malformed payload would otherwise
+        # come out as a 500 instead of the intended 400.
+        if not isinstance(chosen, str):
             raise ValueError('Choose one of the selected keywords’ types.')
-        resolved['type'] = overrides['type']
+        if chosen not in {option['value'] for option in options['type']}:
+            raise ValueError('Choose one of the selected keywords’ types.')
+        resolved['type'] = chosen
     else:
         resolved['type'] = target['type']
 
     if 'place_id' in overrides:
         chosen = overrides['place_id']
+        # Same guard: an unhashable dict or list would raise ``TypeError`` in
+        # the membership test and bypass the ``ValueError`` -> 400 handler.
+        if chosen is not None and not isinstance(chosen, str):
+            raise ValueError('Choose one of the selected keywords’ linked places, or no link.')
         if chosen is not None and chosen not in {o['place_id'] for o in options['place']}:
             raise ValueError('Choose one of the selected keywords’ linked places, or no link.')
         resolved['place_id'] = chosen
@@ -786,7 +834,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     # Replay the write path's reparenting so the preview can name each
     # descendant's fate and the merge can queue its sidecar path rewrite.
     nodes = {r['id']: dict(r) for r in rows}
-    plan = {'removed': set(), 'renames': {}, 'children': []}
+    plan = {'removed': set(), 'renames': {}, 'children': [], 'metadata_folded': set()}
     for source in sources:
         _plan_subtree_merge(db, nodes, children, source['id'], target_id, plan)
     nodes[target_id]['name'] = resolved['name']
@@ -906,6 +954,11 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
         'children': plan['children'],
         'path_changes': {str(k): v for k, v in path_changes.items()},
         'removed_count': len(plan['removed']),
+        # Location keywords that will absorb a collapsing sibling's place_id
+        # or coordinates. Their photos need a ``location`` resync even though
+        # the row itself does not move -- the catalog gains new location
+        # metadata their sidecars still lack.
+        'metadata_folded_ids': sorted(plan['metadata_folded']),
         'notes': notes,
     }
     if not requires_choice:
@@ -974,6 +1027,23 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             db.queue_change(pid, 'keyword_add', resolved['name'], workspace_id=ws, _commit=False)
         _queue_moved_subtree_changes(db, preview, target_id, collapsed)
         _queue_disambiguated_child_renames(db, preview, renamed_tags)
+        # A retained location child that gained place_id/coords via
+        # ``_merge_keyword_into``'s COALESCE fold has photos whose sidecars
+        # still hold the old (or empty) location. ``_queue_moved_subtree_changes``
+        # only touches path-changed survivors and the collapsed child's
+        # photos, so a photo tagged solely with the retained sibling would
+        # otherwise keep stale GPS and location metadata in its sidecar.
+        for folded_id in preview.get('metadata_folded_ids', []):
+            for row in db.conn.execute(
+                'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
+                'JOIN photos p ON p.id = pk.photo_id '
+                'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+                'WHERE pk.keyword_id = ?', (folded_id,),
+            ).fetchall():
+                db.remove_pending_changes(row['photo_id'], 'location',
+                                          workspace_id=row['workspace_id'], _commit=False)
+                db.queue_change(row['photo_id'], 'location', 'effective',
+                                workspace_id=row['workspace_id'], _commit=False)
         if (resolved['type'] == 'location' or target['type'] == 'location'
                 or any(s['type'] == 'location' for s in preview['sources'])):
             # Filling previously missing coordinates, or moving the retained

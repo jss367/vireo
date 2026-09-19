@@ -1784,3 +1784,93 @@ def test_manual_merge_rejects_case_insensitive_sibling_collision(catalog):
     # guard has not swallowed the normal case.
     ok = preview_keyword_merge(db, [source, target], target, {'name': 'baz'})
     assert ok['resolved']['name'] == 'baz'
+
+
+def test_manual_merge_rejects_non_scalar_choice_payloads(catalog):
+    """``overrides`` reaches this code from ``request.get_json``, so a
+    malformed payload like ``{"type": {}}`` or ``{"place_id": []}`` can arrive
+    with an unhashable value. A membership test against a set would raise
+    ``TypeError`` and escape ``ValueError``-only handling as an HTTP 500;
+    the caller expected a 400 with a clear message.
+    """
+    db, photos = catalog
+    source = db.add_keyword('Wing St. Canyon', kw_type='location')
+    target = db.add_keyword('Wing Street Canyon', kw_type='location')
+    db.tag_photo(photos[0], source)
+    db.tag_photo(photos[1], target)
+    for bad_type in ({}, [], 5):
+        with pytest.raises(ValueError, match='types'):
+            preview_keyword_merge(db, [source, target], target, {'type': bad_type})
+    for bad_place in ({}, [], 5):
+        with pytest.raises(ValueError, match='linked places'):
+            preview_keyword_merge(db, [source, target], target, {'place_id': bad_place})
+
+
+def test_species_option_preserves_complementary_taxon_links(catalog):
+    """A row linked by local ``taxon_id`` and one linked by the matching iNat
+    ``source_taxon_id`` name the same species and collapse into one option.
+    That option has to carry BOTH raw links -- ``_apply_merge_overrides``
+    otherwise writes the missing field back as ``None`` and drops either the
+    local link or the source provenance."""
+    db, photos = catalog
+    anna = db.conn.execute(
+        "INSERT INTO taxa(name, common_name, rank, inat_id) "
+        "VALUES ('Calypte anna', 'Anna bird', 'species', 5112)").lastrowid
+    by_local = db.add_keyword('Hummer A', is_species=True)
+    by_inat = db.add_keyword('Hummer B', is_species=True)
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+                    (anna, by_local))
+    db.conn.execute("UPDATE keywords SET type = 'taxonomy', source_taxon_id = 5112 WHERE id = ?",
+                    (by_inat,))
+    db.conn.commit()
+    db.tag_photo(photos[0], by_local)
+    db.tag_photo(photos[1], by_inat)
+
+    preview = preview_keyword_merge(db, [by_local, by_inat], by_local)
+    (option,) = preview['options']['species']
+    assert option['taxon_id'] == anna
+    assert option['source_taxon_id'] == 5112
+    merge_keywords(db, [by_local, by_inat], by_local, preview['preview_token'])
+    row = db.conn.execute(
+        'SELECT taxon_id, source_taxon_id FROM keywords WHERE id = ?', (by_local,)
+    ).fetchone()
+    assert row['taxon_id'] == anna
+    assert row['source_taxon_id'] == 5112
+
+
+def test_merge_resyncs_photos_on_a_metadata_folded_child(catalog):
+    """When two parent branches have colliding location children and the
+    incoming child supplies a ``place_id`` or coordinates the retained child
+    lacks, ``_merge_keyword_into`` folds that metadata onto the retained
+    child. Photos tagged solely with the retained child now sit at a new
+    catalog location; without a ``location`` resync their sidecars still
+    hold the old (empty) location metadata."""
+    db, photos = catalog
+    kept = db.add_keyword('Park A', kw_type='location')
+    stray = db.add_keyword('Park B', kw_type='location')
+    kept_lake = db.add_keyword('Lake', parent_id=kept, kw_type='location')
+    stray_lake = db.add_keyword('Lake', parent_id=stray, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'lake-place', "
+                    "latitude = 33.06, longitude = -117.11 WHERE id = ?", (stray_lake,))
+    db.conn.commit()
+    # Photo 0 is tagged solely with the retained (place-less) child.
+    db.tag_photo(photos[0], kept_lake)
+    # Photo 1 is tagged with the collapsing sibling that supplies the place.
+    db.tag_photo(photos[1], stray_lake)
+
+    preview = preview_keyword_merge(db, [stray, kept], kept)
+    assert kept_lake in preview['metadata_folded_ids']
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'])
+
+    # The retained child now carries the collapsing sibling's place.
+    row = db.conn.execute(
+        'SELECT place_id, latitude, longitude FROM keywords WHERE id = ?',
+        (kept_lake,)).fetchone()
+    assert row['place_id'] == 'lake-place'
+
+    # Both photos need a ``location`` resync -- the one tagged solely with
+    # the retained child too, or its sidecar keeps the pre-fold location.
+    resynced = {r['photo_id'] for r in db.conn.execute(
+        "SELECT photo_id FROM pending_changes WHERE change_type = 'location'")}
+    assert photos[0] in resynced
+    assert photos[1] in resynced
