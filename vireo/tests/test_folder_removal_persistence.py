@@ -130,6 +130,40 @@ def test_single_folder_unlink_does_not_remove_descendants(shared_tree):
     assert {w["id"] for w in db.get_folder_workspaces(child)} == {workspace, other}
 
 
+@pytest.mark.parametrize("legacy_records", [False, True])
+def test_refresh_after_large_subtree_removal_has_bounded_query_work(shared_tree, legacy_records):
+    db, workspace, other, parent, missing, child = shared_tree
+    path = db.get_folder(missing)["path"]
+    db.conn.executemany(
+        "INSERT INTO folders (path, parent_id) VALUES (?, ?)",
+        [(f"{path}/folder-{i}", missing) for i in range(3000)],
+    )
+    db.conn.commit()
+    db.add_workspace_folder(workspace, parent)
+    db.add_workspace_folder(other, parent)
+    db.remove_workspace_folder_tree(workspace, missing)
+    if legacy_records:
+        db.conn.execute("UPDATE workspace_folder_removals SET recursive = 1")
+        db.conn.execute("DELETE FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'")
+        db.conn.commit()
+        with Database(db._db_path):
+            pass
+    ticks = 0
+
+    def limit_query_work():
+        nonlocal ticks
+        ticks += 1
+        return ticks > 5000
+
+    # Count SQLite VM work instead of wall time: a redundant recursive
+    # record for every descendant used to scan the catalog quadratically.
+    db.conn.set_progress_handler(limit_query_work, 1000)
+    try:
+        assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
+    finally:
+        db.conn.set_progress_handler(None, 0)
+
+
 def test_explicit_subfolder_root_can_override_removed_ancestor(shared_tree):
     db, workspace, other, parent, missing, child = shared_tree
     db.delete_folder(missing)
@@ -187,6 +221,7 @@ def test_catalog_with_exact_removal_records_gains_subtree_tracking(shared_tree):
     db.delete_folder(missing)
     db.conn.execute("DROP VIEW workspace_removed_folders")
     db.conn.execute("ALTER TABLE workspace_folder_removals DROP COLUMN recursive")
+    db.conn.execute("DELETE FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'")
     db.conn.commit()
     with Database(db._db_path) as upgraded:
         upgraded.set_active_workspace(other)
