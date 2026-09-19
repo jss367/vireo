@@ -140,6 +140,35 @@ def test_missing_photo_produces_incomplete_export_and_failed_job(tmp_path, monke
     db.close()
 
 
+@pytest.mark.parametrize('include_locations', [False, True])
+def test_album_definitions_respect_location_export_option(tmp_path, monkeypatch, include_locations):
+    app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
+    latitude, longitude = 37.421234, -122.081234
+    db.conn.execute('UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?',
+                    (latitude, longitude, meta['p1']))
+    db.conn.commit()
+    rules = {'mode': 'all', 'rules': [
+        {'field': 'gps_lat', 'op': 'equals', 'value': latitude},
+        {'mode': 'any', 'rules': [{'field': 'gps_lng', 'op': 'equals', 'value': longitude}]},
+    ]}
+    album_id = db.add_collection('Selected photos', json.dumps(rules))
+    job = _run_export(app, tmp_path / 'export', include_locations=include_locations)
+    assert job['status'] == 'completed', job
+    root = Path(job['result']['destination'])
+    album = next(a for a in _read(root, 'site.json')['albums'] if a['id'] == album_id)
+    exported = _read(root, album['manifest'])
+    assert exported['photo_ids'] == [meta['p1']]
+    assert (root / exported['photos'][0]['image']).is_file()
+    if include_locations:
+        assert exported['rules'] == rules
+    else:
+        for manifest in root.rglob('*.json'):
+            text = manifest.read_text()
+            assert str(latitude) not in text and str(longitude) not in text
+        assert 'rules' not in exported and 'visual' not in exported
+    db.close()
+
+
 def test_site_export_applies_saved_crop(tmp_path, monkeypatch):
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     db.set_photo_edit_recipe(meta['p1'], {'crop': {'x': 0, 'y': 0, 'w': 0.5, 'h': 1}})

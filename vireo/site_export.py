@@ -25,7 +25,9 @@ See site.json for completion status and errors. A run with errors is incomplete.
   species, keywords, album IDs, saved edits, and available title/caption/notes metadata.
   Location keywords and coordinates are included only when requested.
 - albums/<collection ID>-<name>/album.json: each saved collection as an album,
-  including its definition and its membership at export time. Photos in multiple
+  including its membership at export time. Collection definitions (filter rules
+  and visual-search prompts) are included only when location export is enabled,
+  because they can contain coordinates or location keywords. Photos in multiple
   albums are stored once; each album references the shared photo ID and image.
   Empty albums are preserved. Unresolvable collections have status "error" and
   unknown membership (null), never a silently broadened or empty result.
@@ -81,7 +83,8 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
         try:
             rules = json.loads(row["rules"])
             visual = json.loads(row["visual_json"]) if row["visual_json"] else None
-            album.update(rules=rules, visual=visual)
+            if include_locations:
+                album.update(rules=rules, visual=visual)
             if visual is not None:
                 info, ids, _ = resolve_visual(
                     db, rules, visual, include_offline_folders=True,
