@@ -2479,3 +2479,42 @@ def test_location_merge_rename_preserves_sidecar_ownership(
         if enabled:
             assert not read_hierarchical_keywords(str(path))
     assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize('tag_source', [False, True])
+def test_location_merge_preserves_directly_tagged_ancestor(catalog, tmp_path, monkeypatch, tag_source):
+    import config as cfg
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db, photos = catalog
+    settings = {'write_location_keywords_to_xmp': True}
+    monkeypatch.setattr(cfg, 'load', lambda: settings)
+    monkeypatch.setattr(cfg, 'load_strict', lambda: settings)
+    target = db.add_keyword('Old County', kw_type='location')
+    source = db.add_keyword('Alternate County', kw_type='location')
+    ancestor = source if tag_source else target
+    db.tag_photo(photos[1], target if tag_source else source)
+    leaf = db.add_keyword('Lake', parent_id=ancestor, kw_type='location')
+    photo = photos[0]
+    db.tag_photo(photo, ancestor, source='manual')
+    db.tag_photo(photo, leaf, source='manual')
+    folder = tmp_path / 'photos'
+    folder.mkdir()
+    sidecar = str(folder / '0.xmp')
+    old_name = 'Alternate County' if tag_source else 'Old County'
+    write_sidecar(sidecar, flat_keywords={old_name}, hierarchical_keywords=set())
+    db.queue_change(photo, 'location', 'effective')
+    assert sync_to_xmp(db)['failed'] == 0
+    overrides = {'name': 'New County'}
+    preview = preview_keyword_merge(db, [source, target], target, overrides)
+    merge_keywords(db, [source, target], target, preview['preview_token'], overrides)
+    assert sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(sidecar) == {'New County', 'Lake'}
+    assert 'New County|Lake' in read_hierarchical_keywords(sidecar)
+    assert {k['id'] for k in db.get_photo_keywords(photo)} == {target, leaf}
+    # Clearing the exported leaf must leave the separately assigned ancestor.
+    db.untag_photo(photo, leaf)
+    db.queue_change(photo, 'location', 'effective')
+    assert sync_to_xmp(db)['failed'] == 0
+    assert read_keywords(sidecar) == {'New County'}

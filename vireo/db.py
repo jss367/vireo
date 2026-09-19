@@ -10604,26 +10604,8 @@ class Database:
             "place_id": row["place_id"],
         }
 
-    def get_photo_location_paths(self, photo_ids):
-        """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
-
-        The leaf is chosen exactly as :meth:`get_assigned_photo_location`
-        chooses it -- coordinate-bearing first, then deepest in the chain,
-        then most recent id as the tie-break -- so the keywords written to
-        a sidecar always describe the same place as the GPS written beside
-        them. When a photo carries both a coordinate-bearing location and
-        a coordinate-less one (the generic keyword-add endpoint attaches
-        another ``type='location'`` keyword without replacing the
-        current), the coord-bearing row wins here just as it does in
-        :meth:`get_assigned_photo_location`. Unlike that method this one
-        does not *require* coordinates: a free-text location the user
-        typed still has a name worth writing when there is no coord-bearing
-        alternative.
-
-        Photos with no linked location are absent from the result, which is
-        how the sync engine tells "write these keywords" from "remove the ones
-        we wrote".
-        """
+    def _get_photo_location_leaves(self, photo_ids):
+        """Choose the effective exported location row for each photo."""
         if not photo_ids:
             return {}
 
@@ -10648,6 +10630,34 @@ class Database:
             ).fetchall()
             for row in rows:
                 leaves[row["photo_id"]] = row
+
+        return leaves
+
+    def get_photo_location_keyword_ids(self, photo_ids):
+        """Return the keyword IDs owning each photo's exported location."""
+        return {pid: row["id"] for pid, row in self._get_photo_location_leaves(photo_ids).items()}
+
+    def get_photo_location_paths(self, photo_ids):
+        """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
+
+        The leaf is chosen exactly as :meth:`get_assigned_photo_location`
+        chooses it -- coordinate-bearing first, then deepest in the chain,
+        then most recent id as the tie-break -- so the keywords written to
+        a sidecar always describe the same place as the GPS written beside
+        them. When a photo carries both a coordinate-bearing location and
+        a coordinate-less one (the generic keyword-add endpoint attaches
+        another ``type='location'`` keyword without replacing the
+        current), the coord-bearing row wins here just as it does in
+        :meth:`get_assigned_photo_location`. Unlike that method this one
+        does not *require* coordinates: a free-text location the user
+        typed still has a name worth writing when there is no coord-bearing
+        alternative.
+
+        Photos with no linked location are absent from the result, which is
+        how the sync engine tells "write these keywords" from "remove the ones
+        we wrote".
+        """
+        leaves = self._get_photo_location_leaves(photo_ids)
 
         # One cache for the whole batch: a shoot shares a place, so thousands
         # of photos resolve the same handful of chains.

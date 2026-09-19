@@ -495,12 +495,14 @@ def _plan_merged_keyword_hierarchies(db, plans):
         return
     rows = db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall()
     paths = keyword_paths(rows)
+    location_leaves = db.get_photo_location_keyword_ids([
+        pid for pid, plan in plans.items() if plan.sync_location_keywords
+    ])
     for photo_id, plan in plans.items():
         if not plan.keyword_merges:
             continue
         tagged = db.get_photo_keywords(photo_id)
         tagged_ids = {k['id'] for k in tagged}
-        location_ids = {k['id'] for k in tagged if k['type'] == 'location'}
         tagged_names = {keyword_match_key(k['name']) for k in tagged}
         tagged_paths = {path_key(paths[k['id']]) for k in tagged}
         for merge in plan.keyword_merges:
@@ -510,7 +512,7 @@ def _plan_merged_keyword_hierarchies(db, plans):
             old_hierarchy = '|'.join(source_path)
             if target_id in tagged_ids:
                 plan.hierarchy_replacements[old_hierarchy] = '|'.join(target_path)
-                if not (plan.sync_location_keywords and target_id in location_ids):
+                if target_id != location_leaves.get(photo_id):
                     plan.keywords_to_add.add(target_path[-1])
                     if len(target_path) > 1:
                         plan.hierarchies_to_add.add('|'.join(target_path))

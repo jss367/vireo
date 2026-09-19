@@ -1211,7 +1211,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             db.clear_equivalent_flat_removals(
                 [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}], _commit=False,
             )
-            _queue_merge_keyword_add(db, pid, ws, resolved['name'], resolved['type'],
+            _queue_merge_keyword_add(db, pid, ws, target_id, resolved['name'], resolved['type'],
                                      location_export_settings)
         _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
                                      set(preview['location_change_ids']))
@@ -1334,7 +1334,7 @@ def _apply_merge_overrides(db, target_id, resolved):
 
 
 
-def _queue_merge_keyword_add(db, photo_id, workspace_id, name, keyword_type, settings):
+def _queue_merge_keyword_add(db, photo_id, workspace_id, keyword_id, name, keyword_type, settings):
     """Let location sync own generated terms; ordinary additions mean user ownership."""
     if keyword_type == 'location':
         if workspace_id not in settings:
@@ -1351,7 +1351,13 @@ def _queue_merge_keyword_add(db, photo_id, workspace_id, name, keyword_type, set
             key = 'write_location_keywords_to_xmp'
             settings[workspace_id] = bool(overrides.get(key, settings['global'].get(key, False)))
         if settings[workspace_id]:
-            return
+            leaves = settings.setdefault('leaves', {})
+            if photo_id not in leaves:
+                leaves[photo_id] = db.get_photo_location_keyword_ids([photo_id]).get(photo_id)
+            # Only the effective leaf gets a generated flat term. Directly
+            # tagged ancestors still need their own ordinary keyword addition.
+            if leaves[photo_id] == keyword_id:
+                return
     db.queue_change(photo_id, 'keyword_add', name, workspace_id=workspace_id, _commit=False)
 
 
@@ -1381,7 +1387,7 @@ def _queue_survivor_rename(db, target_id, old_name, new_name, keyword_type, sett
                    for r in still_used):
             db.queue_change(pid, 'keyword_remove_flat', old_name,
                             workspace_id=ws, _commit=False)
-        _queue_merge_keyword_add(db, pid, ws, new_name, keyword_type, settings)
+        _queue_merge_keyword_add(db, pid, ws, target_id, new_name, keyword_type, settings)
 
 def _collapsing_child_tags(db, preview):
     """Photos carrying a child that is about to collapse into a sibling.
@@ -1446,7 +1452,7 @@ def _queue_disambiguated_child_renames(db, preview, renamed_tags, settings):
         keyword_type = db.conn.execute(
             'SELECT type FROM keywords WHERE id = ?', (child['id'],),
         ).fetchone()['type']
-        _queue_merge_keyword_add(db, pid, ws, child['new_name'], keyword_type, settings)
+        _queue_merge_keyword_add(db, pid, ws, child['id'], child['new_name'], keyword_type, settings)
 
 def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
                                  location_change_ids):
