@@ -2797,3 +2797,81 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
     assert sync.sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == ({'Osprey'} if redo else set())
     assert not db.get_pending_changes()
+
+
+@pytest.mark.parametrize('failed_index', [0, 1])
+def test_casefold_collision_write_failure_leaves_other_sidecar_successful(tmp_path, db, monkeypatch, failed_index):
+    import sync
+    from xmp import read_sync_preview_metadata, write_sidecar
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    folder = tmp_path / 'photos'
+    folder.mkdir()
+    folder_id = db.add_folder(str(folder), name='Photos')
+    photos, paths = [], []
+    for name in ('first', 'second'):
+        path = str(folder / (name + '.xmp'))
+        write_sidecar(path, flat_keywords={'Osprey'}, hierarchical_keywords=set())
+        paths.append(path)
+        photos.append(db.add_photo(folder_id=folder_id, filename=name + '.jpg',
+                                   extension='.jpg', file_size=100, file_mtime=1))
+    # Force the scheduling collision without depending on the host volume's
+    # case sensitivity; the two real files and their write outcomes stay distinct.
+    normcase = os.path.normcase
+
+    class SameFold(str):
+        def casefold(self):
+            return 'same-scheduling-key'
+
+    def collision_key(path):
+        result = normcase(path)
+        return SameFold(result) if result in paths else result
+
+    monkeypatch.setattr(sync.os.path, 'normcase', collision_key)
+    for pid, rating in ((photos[0], '1'), (photos[1], '2'), (photos[0], '3')):
+        db.queue_change(pid, 'rating', rating)
+    original_write = sync._write_photo_sync
+
+    def fail_one(path, *args, **kwargs):
+        if path == paths[failed_index]:
+            raise OSError('One sidecar is unwritable')
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(sync, '_write_photo_sync', fail_one)
+    for _ in range(2):
+        result = sync.sync_to_xmp(db)
+        assert result['failed'] == 1
+        assert {c['photo_id'] for c in db.get_pending_changes()} == {photos[failed_index]}
+    assert read_sync_preview_metadata(paths[1 - failed_index])['rating'] == ('3' if failed_index else '2')
+
+
+def test_failed_case_alias_is_retained_when_other_write_creates_sidecar(tmp_path, db, monkeypatch):
+    import sync
+    from xmp import read_sync_preview_metadata
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    folder = tmp_path / 'photos'
+    folder.mkdir()
+    folder_id = db.add_folder(str(folder), name='Photos')
+    photos = [db.add_photo(folder_id=folder_id, filename=name + '.jpg',
+                           extension='.jpg', file_size=100, file_mtime=1)
+              for name in ('bird', 'BIRD')]
+    paths = [str(folder / (name + '.xmp')) for name in ('bird', 'BIRD')]
+    for pid, rating in zip(photos, ('1', '2'), strict=True):
+        db.queue_change(pid, 'rating', rating)
+    write = sync._write_photo_sync
+
+    def fail_first(path, *args, **kwargs):
+        if path == paths[0]:
+            raise OSError('First write failed before creating a file')
+        return write(path, *args, **kwargs)
+
+    monkeypatch.setattr(sync, '_write_photo_sync', fail_first)
+    result = sync.sync_to_xmp(db, create_missing_sidecars=True)
+    shared = os.path.exists(paths[0]) and os.path.samefile(*paths)
+    assert result['failed'] == (2 if shared else 1)
+    assert {c['photo_id'] for c in db.get_pending_changes()} == (set(photos) if shared else {photos[0]})
+    monkeypatch.setattr(sync, '_write_photo_sync', write)
+    assert sync.sync_to_xmp(db, create_missing_sidecars=True)['failed'] == 0
+    assert read_sync_preview_metadata(paths[1])['rating'] == '2'
+    assert not db.get_pending_changes()

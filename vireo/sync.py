@@ -694,7 +694,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     # coalesces scheduling; each write still uses its own original path.
     def sidecar_key(path):
         try:
-            return os.path.normcase(os.path.realpath(path)).casefold(), None
+            return os.path.normcase(os.path.realpath(path)), None
         except (OSError, ValueError) as error:
             return None, error
 
@@ -718,7 +718,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         pid = change["photo_id"]
         if pid not in plans:
             continue
-        key = canonical_keys[xmp_paths[pid]]
+        key = canonical_keys[xmp_paths[pid]].casefold()
         runs = by_sidecar[key]
         if not runs or runs[-1][0] != pid:
             runs.append((pid, []))
@@ -744,7 +744,11 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         """Write every photo queued against one sidecar; never raises."""
         ordered = sidecar_plans[canonical_key]
         outcomes = dict.fromkeys(pid for pid, _, _ in ordered)
+        failed_paths = {}
         for photo_id, xmp_path, plan in ordered:
+            path = canonical_keys[xmp_path]
+            if path in failed_paths:
+                continue
             try:
                 _write_photo_sync(
                     xmp_path, plan, locations.get(photo_id),
@@ -752,10 +756,22 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                     create_missing_sidecars=create_missing_sidecars,
                 )
             except Exception as e:
-                # Retry the whole shared-sidecar sequence after a partial
-                # failure. Clearing a later successful intent would let an
-                # older failed one overwrite it on the next sync.
-                return dict.fromkeys(outcomes, e)
+                failed_paths[path] = e
+        # A folded scheduling group can contain independent files. Retry
+        # the whole sequence only for actual aliases of a failed sidecar.
+        # Check after writing too: a successful write may have created a
+        # previously missing case alias on a case-insensitive volume.
+        for failed_path, error in failed_paths.items():
+            for photo_id, xmp_path, _ in ordered:
+                path = canonical_keys[xmp_path]
+                aliases = path == failed_path
+                if not aliases:
+                    try:
+                        aliases = os.path.samefile(path, failed_path)
+                    except (OSError, ValueError):
+                        aliases = False
+                if aliases:
+                    outcomes[photo_id] = error
         return outcomes
 
     results = {}
