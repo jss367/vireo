@@ -145,6 +145,86 @@ def _assert_grid_never_jumped(page, before):
     assert page.evaluate("retainedThumbnail.isConnected"), "unchanged thumbnail was replaced"
 
 
+@pytest.mark.parametrize("sort", ["date", "prediction_confidence", "prediction_confidence_asc"])
+@pytest.mark.parametrize("scope", ["keyword", "folder"])
+def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server, page, sort, scope):
+    db = live_server["db"]
+    _seed_filtered_library(db, live_server["data"]["folders"][0])
+    old_keyword = db.add_keyword("Needs identification")
+    photo_ids = [row[0] for row in db.conn.execute(
+        "SELECT id FROM photos WHERE filename LIKE 'marsh%'"
+    )]
+    for photo_id in photo_ids:
+        db.tag_photo(photo_id, old_keyword)
+        detection = db.save_detections(photo_id, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.95, "category": "animal",
+        }], detector_model="test-detector")[0]
+        db.add_prediction(detection_id=detection, species="Red-tailed Hawk",
+                          confidence=0.92, model="BioCLIP-2")
+
+    if scope == "keyword":
+        _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
+    else:
+        page.add_init_script("localStorage.clear()")
+        page.goto(live_server["url"] + "/browse")
+        page.wait_for_function("!loading && browseDatasetReady && VireoFilter.isReady()")
+    page.locator("#sortSelect").select_option(sort)
+    page.wait_for_function("!loading && browseDatasetReady")
+    if scope == "folder":
+        folder_id = live_server["data"]["folders"][0]
+        page.locator(f'#folderTree .tree-item[data-folder-id="{folder_id}"]').click()
+        page.wait_for_function(
+            "id => !loading && browseDatasetReady && activeFolderId === id", arg=folder_id,
+        )
+        # Clicking a folder keeps the previous sort, including confidence.
+        expect(page.locator("#sortSelect")).to_have_value(sort)
+        assert page.evaluate("VireoFilter.hasFilters()") is False
+    _scroll_and_select(page)
+    page.locator("#grid .grid-card").nth(31).click(modifiers=["ControlOrMeta"])
+    selected = page.evaluate("getActiveSelection()")
+    assert len(selected) == 2
+    before = page.evaluate("gridContainer.scrollTop")
+    row = page.locator("#selectionPredictions .prediction-row").filter(has_text="Red-tailed Hawk")
+    expect(row.get_by_role("button", name="Accept on all", exact=True)).to_be_visible()
+    _watch_grid_frames(page)
+
+    with page.expect_response("**/api/predictions/batch-accept") as accepted:
+        row.get_by_role("button", name="Accept on all", exact=True).click()
+    assert accepted.value.ok
+    page.wait_for_function(
+        "ids => ids.every(id => { const p = findBrowsePhoto(id);"
+        " return p && p.species.includes('Red-tailed Hawk'); })",
+        arg=selected,
+    )
+    page.wait_for_timeout(400)
+    page.wait_for_function("!loading")
+    assert page.evaluate("getActiveSelection()") == selected
+    _assert_grid_never_jumped(page, before)
+
+    # The follow-up action must remain available on the same selection.
+    keyword_row = page.locator("#selectionKeywordSuggestions .selection-keyword-row").filter(
+        has_text="Needs identification"
+    )
+    with page.expect_response("**/api/batch/keyword-remove") as removed:
+        keyword_row.get_by_role("button", name="Remove from 2", exact=True).click()
+    assert removed.value.ok
+    expect(keyword_row).to_have_count(0)
+    page.wait_for_timeout(400)
+    page.wait_for_function("!loading")
+    assert page.evaluate("getActiveSelection()") == selected
+    assert abs(page.evaluate("gridContainer.scrollTop") - before) < 2
+    if scope == "folder":
+        assert page.evaluate("activeFolderId") == folder_id
+    for photo_id in selected:
+        names = {row[0] for row in db.conn.execute(
+            "SELECT k.name FROM keywords k JOIN photo_keywords pk ON pk.keyword_id = k.id "
+            "WHERE pk.photo_id = ?", (photo_id,),
+        )}
+        assert "Red-tailed Hawk" in names
+        assert "Needs identification" not in names
+
+
 @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
 def test_adding_species_removes_missing_photos_without_any_jump(live_server, page, batch):
     _seed_filtered_library(live_server["db"], live_server["data"]["folders"][0])

@@ -6151,7 +6151,12 @@ function refreshActiveCollectionAfterMembershipChange(mutations) {
   var predictionEdit = !mutations ||
     mutations.indexOf(MUTATION_PREDICTION) !== -1;
   if (predictionEdit && sortSelectRanksOnPredictionConfidence()) {
-    reloadBrowseResults({ preserveAnchor: true, focusAnchor: true });
+    // A batch spanning several cards has no single-photo anchor. Keep its
+    // grid window and surviving selection so accepting a species can be
+    // followed by another edit on those same photos.
+    reloadBrowseResults(selectedPhotos.size > 0
+      ? { preserveScroll: true }
+      : { preserveAnchor: true, focusAnchor: true });
     return;
   }
   // Collections open into the filter bar now (Phase 5): when a membership
