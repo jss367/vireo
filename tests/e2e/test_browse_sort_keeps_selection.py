@@ -896,3 +896,57 @@ def test_expression_reload_falls_back_to_a_surviving_frame(live_server, page):
     assert _ids_on_screen(page, survivors), (
         "the surviving frames are selected but off screen"
     )
+
+
+def test_expression_reload_asks_about_every_picked_frame_at_once(
+    live_server, page,
+):
+    """A burst is not four frames long, and the fallback is not four deep.
+
+    Trying the picked frames one page request at a time meant capping the
+    attempts, and any cap discards a selection that survived below it: drop
+    the first four frames of a six-frame burst and the two that are left —
+    still grouped, still picked — were never asked about (Codex P2 on
+    PR #1695). One focused request carries them all.
+    """
+    db = live_server["db"]
+    ids = _seed_sortable_library(db, live_server["data"]["folders"][0])
+    burst_ids = ids[100:106]
+    seed_browse_stack(db, burst_ids)
+    _open_browse(page, live_server)
+    _enable_stacks(page)
+    _scroll_until_loaded(page, 110)
+
+    cover_id = _loaded_stack_cover_id(page)
+    assert cover_id in burst_ids
+    card = page.locator(f"#grid .grid-card[data-id='{cover_id}']")
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    card.click()
+    picked = page.evaluate("() => Array.from(selectedPhotos)")
+    assert len(picked) == 6, picked
+
+    # Everything the fallback would have reached one attempt at a time.
+    dropped, survivors = picked[:4], picked[4:]
+    with db.conn:
+        db.conn.execute(
+            "DELETE FROM photos WHERE id IN (%s)"
+            % ",".join("?" * len(dropped)),
+            dropped,
+        )
+
+    calls = _capture_queries(page)
+    page.evaluate(
+        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+    )
+    page.wait_for_function("() => !loading", timeout=15000)
+
+    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+        survivors
+    ), "the frames past the old attempt cap were dropped from the selection"
+    assert _ids_on_screen(page, survivors), (
+        "the surviving frames are selected but off screen"
+    )
+    assert len(calls) <= 2, (
+        f"one focused query should cover every candidate, got {len(calls)}"
+    )

@@ -467,6 +467,146 @@ def test_collection_photos_respects_requested_sort(app_and_db):
     ]
 
 
+def _all_photos_collection(client):
+    return client.post(
+        "/api/collections", json={"name": "All", "rules": []},
+    ).get_json()["id"]
+
+
+def _photo_ids_by_name(db):
+    return {
+        row["filename"]: row["id"]
+        for row in db.conn.execute("SELECT id, filename FROM photos")
+    }
+
+
+def test_collection_photos_focus_serves_that_photos_page(app_and_db):
+    """A collection-scoped grid can be told where its card landed.
+
+    Browse reloads around the card the user selected — a re-sort, an undo, a
+    folder-health refresh. Without a focused lookup here it could only page
+    towards that card, one request per page of a result set that may not
+    even contain it any more.
+    """
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+    cid = _all_photos_collection(client)
+    target = _photo_ids_by_name(db)["bird3.jpg"]
+
+    payload = client.get(
+        f"/api/collections/{cid}/photos?sort=name&per_page=1"
+        f"&focus_photo_id={target}"
+    ).get_json()
+
+    assert payload["focus_index"] == 2
+    assert payload["focus_page"] == 3
+    assert payload["page"] == 3
+    assert payload["focus_photo_id"] == target
+    assert [photo["id"] for photo in payload["photos"]] == [target]
+
+
+def test_collection_photos_focus_ids_place_by_a_surviving_frame(app_and_db):
+    """The frame Browse asks about first may not be in the collection."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+    cid = _all_photos_collection(client)
+    target = _photo_ids_by_name(db)["bird2.jpg"]
+
+    payload = client.get(
+        f"/api/collections/{cid}/photos?sort=name&per_page=1"
+        f"&focus_photo_id={10 ** 6}&focus_photo_ids={10 ** 6 + 1},{target}"
+    ).get_json()
+
+    assert payload["focus_photo_id"] == target
+    assert payload["focus_index"] == 1
+    assert payload["page"] == 2
+
+
+def test_collection_photos_focus_reports_a_photo_it_does_not_hold(app_and_db):
+    """Absent is an answer — never a silent page 1 the caller cannot spot."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+    cid = _all_photos_collection(client)
+
+    payload = client.get(
+        f"/api/collections/{cid}/photos?sort=name&per_page=1"
+        f"&focus_photo_id={10 ** 6}"
+    ).get_json()
+
+    assert payload["focus_index"] is None
+    assert payload["focus_photo_id"] is None
+    assert payload["page"] == 1
+
+
+def test_collection_photos_focus_places_a_stack_by_any_frame(app_and_db):
+    """Stacked pages count cards, so a hidden frame reports its cover's
+    page — the same rule ``/api/photos/query`` applies."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+    ids = _photo_ids_by_name(db)
+    p1, p2, p3 = ids["bird1.jpg"], ids["bird2.jpg"], ids["bird3.jpg"]
+    # bird1 and bird3 become one burst: same folder, a second apart.
+    db.conn.execute(
+        "UPDATE photos SET folder_id = (SELECT folder_id FROM photos WHERE id = ?), "
+        "timestamp = '2024-01-15T10:00:01' WHERE id = ?",
+        (p1, p3),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp = '2024-01-15T10:00:00' WHERE id = ?", (p1,),
+    )
+    db.conn.commit()
+    cid = _all_photos_collection(client)
+
+    stacked = client.get(
+        f"/api/collections/{cid}/photo-ids?sort=name&stacks=true"
+    ).get_json()["photo_ids"]
+    hidden = stacked[1]
+
+    payload = client.get(
+        f"/api/collections/{cid}/photos?sort=name&stacks=true&per_page=1"
+        f"&focus_photo_id={hidden}"
+    ).get_json()
+
+    assert payload["focus_index"] == 0, (
+        "the burst is the first card under sort=name"
+    )
+    assert payload["page"] == 1
+    assert payload["photos"][0]["id"] == stacked[0]
+    assert p2 not in [photo["id"] for photo in payload["photos"]]
+
+
+def test_collection_photos_focus_ids_must_be_integers(app_and_db):
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+    cid = _all_photos_collection(client)
+
+    for bad in ("x", "1,x", ",".join(str(n) for n in range(201))):
+        resp = client.get(
+            f"/api/collections/{cid}/photos?focus_photo_ids={bad}"
+        )
+        assert resp.status_code == 400, bad
+        assert "focus_photo_ids" in resp.get_json()["error"]
+
+
+def test_collection_photos_omit_focus_keys_when_not_asked(app_and_db):
+    """Ordinary paging must not start paying for a position it never
+    requested."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+    cid = _all_photos_collection(client)
+
+    payload = client.get(f"/api/collections/{cid}/photos").get_json()
+
+    assert "focus_index" not in payload
+    assert "focus_photo_id" not in payload
+
+
 def test_collection_add_photos(app_and_db):
     """POST /api/collections/<id>/add-photos adds photo_ids and returns total."""
     app, db = app_and_db

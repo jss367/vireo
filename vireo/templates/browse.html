@@ -2578,6 +2578,8 @@ var anchorScanDepth = 0;
 // focused reload can pick up the older one's anchor (Codex review
 // r4021334323). Cleared once every in-flight focused reload has settled.
 var pendingFocusAnchor = null;
+// Which photo the last focused load was actually placed by (see loadPhotos).
+var browseResolvedFocusPhotoId = null;
 // The scope the pending anchor belongs to. Sidebar folder/keyword/collection
 // clicks bump ``browseScopeGen``; the photo then belongs to the view the user
 // left, so the anchor must not survive into the new one.
@@ -7292,15 +7294,6 @@ function browseFilterReloadOptions(info) {
   if (reason === 'expressionRefreshed') return { preserveScroll: true };
 }
 
-/* Whether the endpoint this scope reads from can answer "where is this
-   photo". ``/api/collections/<id>/photos`` has no focused lookup, so a grid
-   scoped to a plain collection has to page towards its anchor instead of
-   being told where it landed. Asked of the request builder rather than
-   restating its scope rules, so the two cannot drift apart. */
-function browseRequestSupportsFocus() {
-  return buildBrowsePageRequest(1, 1, { focusPhotoId: 1 }).focusPhotoId != null;
-}
-
 /* Drop the loaded window — the pages, their stack caches, and the paging
    cursors — so the next load starts a fresh contiguous window. Selection,
    collection scope and anchors are the caller's business. */
@@ -7439,10 +7432,20 @@ async function resetAndLoad(options) {
   if (anchor || scrollAnchor) anchorScanDepth++;
   try {
     var initialLoadStatus = await loadPhotos(
-      (anchor && focusAnchor) ? { focusPhotoId: anchor.photoId } : undefined
+      (anchor && focusAnchor)
+        // A stack anchor offers every frame the user picked, so the reload
+        // can be placed by one it kept even when the frame we aimed at is
+        // gone (Codex P2 on PR #1695).
+        ? { focusPhotoId: anchor.photoId, focusPhotoIds: anchor.stackIds }
+        : undefined
     );
     if (initialLoadStatus !== true) return initialLoadStatus;
     if (!resetRequestIsCurrent()) return null;
+    // The frame the server placed the page by becomes the anchor: it is the
+    // card the restore selects around and the one the scroll holds onto.
+    if (anchor && focusAnchor && browseResolvedFocusPhotoId != null) {
+      anchor.photoId = browseResolvedFocusPhotoId;
+    }
     if (!anchor) {
       if (scrollAnchor) {
         await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
@@ -7457,15 +7460,13 @@ async function resetAndLoad(options) {
     // hidden member — instead of paging towards a photo that is either
     // already here or not in this result set at all.
     //
-    // The reloads that cannot be focused have to page. ``preserveScroll``
-    // membership refreshes may have edited the anchor out of the filter, and
-    // a grid scoped to a plain collection gets no focused lookup from its
-    // endpoint (``browseRequestSupportsFocus``). Both re-run the query the
-    // user is already looking at, so the anchor's old position plus a page
-    // is a sound bound — and a bound there must be, or a 60k-photo result
-    // set that no longer contains the photo costs ~1,200 sequential
-    // requests to find that out.
-    var anchorScanBudget = (focusAnchor && browseRequestSupportsFocus())
+    // ``preserveScroll`` membership refreshes are the one anchored reload
+    // that still pages: they re-run the query already on screen after an
+    // edit that may have moved the anchor out of it, so the anchor's old
+    // position plus a page is a sound bound — and a bound there must be, or
+    // a 60k-photo result set that no longer contains the photo costs ~1,200
+    // sequential requests to find that out.
+    var anchorScanBudget = focusAnchor
       ? 0
       : Math.max(anchor.index || 0, 0) + perPage;
     var card = await loadUntilPhotoRendered(
@@ -7475,35 +7476,6 @@ async function resetAndLoad(options) {
     );
     if (!resetRequestIsCurrent()) return null;
 
-    // The frame we aimed at is not in this result set. A stack anchor knows
-    // the other frames the user picked, so try those before giving up: an
-    // expression that keeps two of a burst's three frames should restore
-    // those two, not clear a selection it still contains (Codex P2 on
-    // PR #1695). One focused page request each, with the window reset
-    // between attempts so the grid stays contiguous, and capped — a burst
-    // whose first few picked frames have all gone is a burst that has gone.
-    if (!card && focusAnchor && anchor.stackSelection
-        && anchorScanShouldContinue()) {
-      var alternates = anchor.stackIds
-        .filter(function(id) { return id !== anchor.photoId; })
-        .slice(0, 3);
-      for (var alternate = 0; alternate < alternates.length && !card; alternate++) {
-        clearBrowseLoadedWindow();
-        document.getElementById('grid').innerHTML = '';
-        var retryStatus = await loadPhotos({ focusPhotoId: alternates[alternate] });
-        if (retryStatus !== true) return retryStatus;
-        if (!resetRequestIsCurrent()) return null;
-        card = await loadUntilPhotoRendered(
-          alternates[alternate],
-          anchorScanShouldContinue,
-          { resolveStackMember: true, budget: anchorScanBudget }
-        );
-        if (!resetRequestIsCurrent()) return null;
-        // The surviving frame becomes the anchor: it is the card the restore
-        // below selects around and the one the scroll position holds onto.
-        if (card) anchor.photoId = alternates[alternate];
-      }
-    }
     if (!anchorRestoreIsPending(anchor, restoreEpoch)) return true;
     if (!card) {
       clearActiveSelectionAndDetail();
@@ -7689,16 +7661,29 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
   var focusPhotoId = (requestOptions && requestOptions.focusPhotoId != null)
     ? requestOptions.focusPhotoId
     : null;
+  // The other frames of a focused stack card. Any of them places the same
+  // card, so a reload that dropped the frame we asked about first can still
+  // be placed by one it kept — in the same request, rather than one retry
+  // per frame (Codex P2 on PR #1695).
+  var focusPhotoIds = (requestOptions && requestOptions.focusPhotoIds
+      ? requestOptions.focusPhotoIds.filter(function(id) {
+          return id != null && id !== focusPhotoId;
+        })
+      : []);
   if (activeCollectionId && !dashboardCollectionScope) {
     var cparams = new URLSearchParams();
     cparams.set('page', page);
     cparams.set('per_page', requestPerPage);
     cparams.set('sort', document.getElementById('sortSelect').value);
     if (browseStacksEnabled()) cparams.set('stacks', '1');
+    if (focusPhotoId != null) cparams.set('focus_photo_id', focusPhotoId);
+    if (focusPhotoIds.length) {
+      cparams.set('focus_photo_ids', focusPhotoIds.join(','));
+    }
     return {
       url: '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString(),
       options: {},
-      focusPhotoId: null,
+      focusPhotoId: focusPhotoId,
     };
   }
 
@@ -7718,6 +7703,7 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
   if (activeFolderId) body.folder_id = activeFolderId;
   if (activeCollectionId && dashboardCollectionScope) body.collection_id = activeCollectionId;
   if (focusPhotoId != null) body.focus_photo_id = focusPhotoId;
+  if (focusPhotoIds.length) body.focus_photo_ids = focusPhotoIds;
   return {
     url: '/api/photos/query',
     options: {
@@ -7842,9 +7828,17 @@ async function loadPhotos(options) {
   // that page instead of the requested one. Multi-page chunking would make
   // the returned ``focus_page`` ambiguous (it counts perPage-sized pages),
   // so a focused load always asks for exactly one page.
+  //
+  // ``options.focusPhotoIds`` names the other photos that would do just as
+  // well — the frames of a selected stack, which all share their card's
+  // position. The server places the first of them the result set still
+  // contains and names it in ``focus_photo_id``; the caller reads which
+  // one answered from ``browseResolvedFocusPhotoId``.
   var focusPhotoId = (options && options.focusPhotoId != null)
     ? options.focusPhotoId
     : null;
+  var focusPhotoIds = (options && options.focusPhotoIds) || null;
+  if (focusPhotoId != null) browseResolvedFocusPhotoId = null;
   // When placeholder cells are already visible, the user is actively
   // waiting on this load — fetch several pages in one request. Chunks must
   // stay aligned to perPage-sized pages so page/per_page arithmetic holds
@@ -7864,7 +7858,9 @@ async function loadPhotos(options) {
 
   var request = buildBrowsePageRequest(
     reqPage, reqPerPage,
-    focusPhotoId == null ? null : { focusPhotoId: focusPhotoId }
+    focusPhotoId == null
+      ? null
+      : { focusPhotoId: focusPhotoId, focusPhotoIds: focusPhotoIds }
   );
 
   try {
@@ -7895,6 +7891,12 @@ async function loadPhotos(options) {
       focusedPage = data.focus_page;
       earliestPage = focusedPage;
       currentPage = focusedPage;
+      // Which candidate the server placed the page by. Usually the one we
+      // asked about first; a stack whose leading frames this result set
+      // dropped answers with a frame it kept.
+      browseResolvedFocusPhotoId = Number.isInteger(data.focus_photo_id)
+        ? data.focus_photo_id
+        : request.focusPhotoId;
     }
     var firstNewIdx = photos.length;
 

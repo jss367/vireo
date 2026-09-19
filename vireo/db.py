@@ -26105,12 +26105,44 @@ class Database:
 
         Raises ValueError on malformed rules.
         """
+        found = self.query_browse_stack_position_first(
+            rules, [photo_id], sort=sort, collection_id=collection_id,
+            folder_id=folder_id,
+            include_offline_folders=include_offline_folders,
+            stack_config=stack_config,
+        )
+        return found[1] if found is not None else None
+
+    def query_browse_stack_position_first(self, rules, photo_ids, sort="date",
+                                          collection_id=None, folder_id=None,
+                                          include_offline_folders=False,
+                                          stack_config=None):
+        """The earliest-placed of ``photo_ids`` once stacks are projected.
+
+        Returns ``(photo_id, position)`` for whichever candidate the grid
+        shows first, or ``None`` when the result set contains none of them.
+
+        Browse asks with a list when the card it wants to keep is a stack:
+        the reload it is about to paint can drop any individual frame — a
+        saved expression that matches only part of a burst, an undo that
+        moves frames out of the filter — and any surviving frame the user
+        picked identifies the same card. One ranking answers for all of
+        them, so the fallback costs one query rather than one page request
+        per frame. Ties (frames of one stack share their cover's position)
+        resolve by ID so the answer is stable.
+
+        Raises ValueError on malformed rules.
+        """
+        ids = [int(pid) for pid in dict.fromkeys(photo_ids)]
+        if not ids:
+            return None
         ranked, params = self._ranked_stack_query(
             rules, sort=sort, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
             stack_config=stack_config,
         )
         order = self._stack_sort_clause(sort)
+        placeholders = ",".join("?" for _ in ids)
         query = ranked + f"""
             , cover_positions AS (
                 SELECT _stack_key AS _position_key,
@@ -26118,13 +26150,17 @@ class Database:
                 FROM ranked
                 WHERE _stack_cover_rank = 1
             )
-            SELECT cover_positions.position AS position
+            SELECT ranked.id AS id, cover_positions.position AS position
             FROM cover_positions
             JOIN ranked ON ranked._stack_key = cover_positions._position_key
-            WHERE ranked.id = ?
+            WHERE ranked.id IN ({placeholders})
+            ORDER BY position, id
+            LIMIT 1
         """
-        row = self.conn.execute(query, [*params, photo_id]).fetchone()
-        return int(row["position"]) if row is not None else None
+        row = self.conn.execute(query, [*params, *ids]).fetchone()
+        if row is None:
+            return None
+        return int(row["id"]), int(row["position"])
 
     def _stacked_photo_ids(self, rules, sort="date",
                            collection_id=None, folder_id=None,
@@ -26409,11 +26445,39 @@ class Database:
     ):
         """Return a photo's zero-based position in a universal-filter result
         set, or ``None`` when it does not match — the rules analog of
-        ``get_photo_position``.
+        ``get_photo_position``. One-ID shorthand for
+        ``query_photo_position_first``.
+        """
+        found = self.query_photo_position_first(
+            rules, [photo_id], sort=sort, collection_id=collection_id,
+            folder_id=folder_id,
+            include_offline_folders=include_offline_folders,
+        )
+        return found[1] if found is not None else None
 
-        Browse calls this (through ``focus_photo_id`` on
-        ``/api/photos/query``) when a re-sort has to hold onto the photo the
-        user has selected. Materializing the ordered ID list and indexing it
+    def query_photo_position_first(
+        self,
+        rules,
+        photo_ids,
+        sort="date",
+        collection_id=None,
+        folder_id=None,
+        include_offline_folders=False,
+    ):
+        """The earliest-placed of ``photo_ids`` in a universal-filter result
+        set, as ``(photo_id, position)``, or ``None`` when the result set
+        contains none of them.
+
+        Browse asks with a list when the card it is holding onto stands for
+        several photos: any frame of a selected stack identifies the same
+        card, so a reload that dropped some of them can still be placed by
+        the ones it kept. Ranking once answers for every candidate; ties
+        resolve by ID so the answer is stable.
+
+        Browse calls this (through ``focus_photo_id`` /
+        ``focus_photo_ids`` on ``/api/photos/query`` and the collection
+        photos endpoint) when a re-sort has to hold onto the card the user
+        has selected. Materializing the ordered ID list and indexing it
         client-side would move O(result set) IDs over the wire on every sort
         change; probing serial pages until the photo appears would issue
         O(position / per_page) filtered queries. A ROW_NUMBER window over the
@@ -26421,6 +26485,9 @@ class Database:
 
         Raises ValueError on malformed rules.
         """
+        ids = [int(pid) for pid in dict.fromkeys(photo_ids)]
+        if not ids:
+            return None
         folder_join, join_clause, where, params = self._build_query_from_rules(
             rules, include_offline_folders=include_offline_folders,
         )
@@ -26453,8 +26520,9 @@ class Database:
             "p.id, p.timestamp, p.filename, p.rating, "
             "p.sharpness, p.quality_score"
         )
+        placeholders = ",".join("?" for _ in ids)
         query = f"""
-            SELECT position FROM (
+            SELECT id, position FROM (
                 SELECT id, ROW_NUMBER() OVER (ORDER BY {order}) - 1 AS position
                 FROM (
                     SELECT DISTINCT {position_cols} FROM photos p
@@ -26463,14 +26531,18 @@ class Database:
                     {where}
                 ) p
             ) ordered_photos
-            WHERE id = ?
+            WHERE id IN ({placeholders})
+            ORDER BY position, id
+            LIMIT 1
         """
         # ORDER BY sits in the outer select list, ahead of the inner
         # subquery's WHERE, so its parameters bind first.
         row = self.conn.execute(
-            query, [*order_params, *params, photo_id]
+            query, [*order_params, *params, *ids]
         ).fetchone()
-        return int(row["position"]) if row is not None else None
+        if row is None:
+            return None
+        return int(row["id"]), int(row["position"])
 
     _SUGGEST_VALUE_EXPRS = {
         "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
