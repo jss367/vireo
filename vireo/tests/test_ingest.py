@@ -874,6 +874,133 @@ def test_ingest_progress_callback(tmp_path):
     assert progress_calls[-1][1] == 3  # total
 
 
+@pytest.mark.parametrize("callback_raises", [False, True])
+@pytest.mark.parametrize("outcome", [
+    "copied", "known_duplicate", "match_failure", "batch_duplicate",
+    "empty_collision", "hash_collision", "copy_failure",
+])
+def test_ingest_progress_once_per_completed_file(
+    tmp_path, monkeypatch, caplog, outcome, callback_raises,
+):
+    import ingest as ingest_module
+
+    src = tmp_path / "card"
+    dst = tmp_path / "library"
+    src.mkdir()
+    dst.mkdir()
+    target = src / "target.jpg"
+    Image.new("RGB", (50, 50), color="blue").save(target)
+    options = {"folder_template": "photos", "verify_by_hash": True}
+    expected_calls = [(1, 1, target.name)]
+    expected_copied = 0
+    expected_skipped = 0
+    expected_failed = 0
+
+    if outcome == "known_duplicate":
+        options["extra_known_hashes"] = {
+            ingest_module.compute_file_hash(str(target)),
+        }
+        expected_skipped = 1
+    elif outcome == "batch_duplicate":
+        (src / "first.jpg").write_bytes(target.read_bytes())
+        expected_calls = [(1, 2, "first.jpg"), (2, 2, target.name)]
+        expected_copied = 1
+        expected_skipped = 1
+    elif outcome in {"empty_collision", "hash_collision"}:
+        if outcome == "empty_collision":
+            target.write_bytes(b"")
+        (dst / "photos").mkdir()
+        (dst / "photos" / target.name).write_bytes(target.read_bytes())
+        expected_skipped = 1
+    elif outcome == "match_failure":
+        def fail_match(self, path):
+            raise OSError("simulated match failure")
+
+        monkeypatch.setattr(ingest_module.DuplicateChecker, "match", fail_match)
+        expected_failed = 1
+    elif outcome == "copy_failure":
+        def fail_copy(*args, **kwargs):
+            raise OSError("simulated copy failure")
+
+        monkeypatch.setattr(ingest_module.shutil, "copy2", fail_copy)
+        expected_failed = 1
+    else:
+        expected_copied = 1
+
+    calls = []
+    callback_error = RuntimeError("progress delivery failed")
+
+    def progress(current, total, filename):
+        calls.append((current, total, filename))
+        # Raise only on the first target notification: a swallowed exception
+        # followed by a retry must not accidentally satisfy pytest.raises.
+        if callback_raises and calls == expected_calls:
+            raise callback_error
+
+    db = Database(str(tmp_path / "test.db"))
+    if callback_raises:
+        with pytest.raises(RuntimeError) as raised:
+            ingest(str(src), str(dst), db=db, progress_callback=progress, **options)
+        assert raised.value is callback_error
+        assert "progress delivery failed" not in caplog.text
+    else:
+        result = ingest(
+            str(src), str(dst), db=db, progress_callback=progress, **options,
+        )
+        assert result["copied"] == expected_copied
+        assert result["skipped_duplicate"] == expected_skipped
+        assert result["failed"] == expected_failed
+        assert result["total"] == len(expected_calls)
+    assert calls == expected_calls
+
+
+def test_ingest_progress_across_both_passes(tmp_path):
+    import ingest as ingest_module
+
+    src = tmp_path / "card"
+    src.mkdir()
+    Image.new("RGB", (50, 50), color="blue").save(src / "copy.jpg")
+    Image.new("RGB", (50, 50), color="red").save(src / "duplicate.jpg")
+    calls = []
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(
+        str(src), str(tmp_path / "library"), db=db,
+        extra_known_hashes={
+            ingest_module.compute_file_hash(str(src / "duplicate.jpg")),
+        },
+        verify_by_hash=True,
+        progress_callback=lambda *event: calls.append(event),
+    )
+
+    # The survivor is encountered first, but is only complete in pass 2.
+    assert calls == [(1, 2, "duplicate.jpg"), (2, 2, "copy.jpg")]
+    assert result["copied"] == 1
+    assert result["skipped_duplicate"] == 1
+    assert result["failed"] == 0
+
+
+def test_ingest_cancel_before_next_copy_does_not_report_completion(tmp_path):
+    from scanner import ScanCancelled
+
+    src = tmp_path / "card"
+    _create_test_files(src, ["first.jpg", "second.jpg"])
+    calls = []
+
+    def checkpoint():
+        if calls:
+            raise ScanCancelled()
+
+    db = Database(str(tmp_path / "test.db"))
+    with pytest.raises(ScanCancelled):
+        ingest(
+            str(src), str(tmp_path / "library"), db=db,
+            skip_duplicates=False, pause_callback=checkpoint,
+            progress_callback=lambda *event: calls.append(event),
+        )
+
+    assert calls == [(1, 2, "first.jpg")]
+
+
 def test_ingest_skip_duplicates_via_db_hash(tmp_path):
     """Files whose hash is already in the DB (from a prior scan) are skipped."""
     src = tmp_path / "sd_card"
