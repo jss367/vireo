@@ -15885,6 +15885,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
     def api_remove_workspace_folder(ws_id, folder_id):
         db = _get_db()
+        # Pre-check the workspace — an unknown id would otherwise hit the
+        # workspace_folder_removals FK when we record the tombstone and 500.
+        if not db.get_workspace(ws_id):
+            return json_error("Workspace not found", 404)
         # Removing a staged root while local work is active would leave
         # local_workspace_folders and the manifest covering paths the UI no
         # longer shows, so a later sync could publish/delete files for a

@@ -1020,6 +1020,25 @@ class Database:
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
+            -- Remember removed catalog entries that survive in other
+            -- workspaces, so recursive discovery cannot link them back.
+            -- These are catalog removals, not filesystem scan exclusions:
+            -- explicitly importing a folder again restores its membership.
+            CREATE TABLE IF NOT EXISTS workspace_folder_removals (
+                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+                recursive INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (workspace_id, folder_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_folder_removals_folder
+                ON workspace_folder_removals(folder_id);
+            CREATE TRIGGER IF NOT EXISTS workspace_folder_restore_on_link
+            AFTER INSERT ON workspace_folders
+            BEGIN
+                DELETE FROM workspace_folder_removals
+                WHERE workspace_id = NEW.workspace_id AND folder_id = NEW.folder_id;
+            END;
+
             -- Sync-only photo grants. Rows here give ``_resolve_xmp_paths``
             -- a way to find a photo's sidecar for a workspace that owns a
             -- queued edit on the photo but has no ``workspace_folders`` link
@@ -1676,6 +1695,85 @@ class Database:
         """
         )
         cur = self.conn.cursor()
+        removal_cols = {r[1] for r in cur.execute("PRAGMA table_info(workspace_folder_removals)")}
+        if "recursive" not in removal_cols:
+            # The old table only recorded exact folder IDs. A single-folder
+            # unlink and a subtree removal followed by an explicit child
+            # restore can leave identical rows, so recursion cannot safely
+            # be inferred from current membership. Preserve the stored
+            # exact scope; future tree removals record recursion explicitly.
+            cur.execute(
+                "ALTER TABLE workspace_folder_removals "
+                "ADD COLUMN recursive INTEGER NOT NULL DEFAULT 0"
+            )
+        scope_version = cur.execute(
+            "SELECT value FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'"
+        ).fetchone()
+        if scope_version is None or scope_version[0] != "1":
+            # Upgrade catalogs created by earlier branch builds too: their
+            # view scanned the full catalog for every exact removal, and
+            # every descendant could carry a redundant recursive record.
+            recursive_by_workspace = {}
+            for row in cur.execute(
+                "SELECT workspace_id, folder_id FROM workspace_folder_removals WHERE recursive = 1"
+            ).fetchall():
+                recursive_by_workspace.setdefault(row["workspace_id"], set()).add(row["folder_id"])
+            for workspace_id, folder_ids in recursive_by_workspace.items():
+                redundant = folder_ids - self._folder_removal_root_ids(folder_ids)
+                cur.executemany(
+                    "UPDATE workspace_folder_removals SET recursive = 0 WHERE workspace_id = ? AND folder_id = ?",
+                    [(workspace_id, fid) for fid in redundant],
+                )
+            cur.execute("DROP VIEW IF EXISTS workspace_removed_folders")
+            cur.execute(
+                "INSERT OR REPLACE INTO db_meta(key, value) VALUES ('workspace_folder_removal_scope_version', '1')"
+            )
+        # Share the effective removal scope across passive discovery,
+        # membership reads and local-copy preparation. Source paths keep
+        # the scope stable while folders are rebased into local storage.
+        cur.execute("""CREATE VIEW IF NOT EXISTS workspace_removed_folders AS
+            WITH paths AS NOT MATERIALIZED (
+                SELECT f.id,
+                       RTRIM(REPLACE(f.path, '\\', '/'), '/') AS path,
+                       RTRIM(REPLACE(COALESCE(m.source_path, f.path), '\\', '/'), '/') AS source_path
+                FROM folders f
+                LEFT JOIN local_folder_mappings m ON m.folder_id = f.id
+            ), scopes AS NOT MATERIALIZED (
+                -- Exact records use primary-key lookups; only recursive
+                -- roots need to search the catalog for descendants.
+                SELECT workspace_id, folder_id AS root_id, folder_id
+                FROM workspace_folder_removals
+                UNION ALL
+                SELECT removed.workspace_id, root.id, candidate.id
+                FROM workspace_folder_removals removed
+                JOIN paths root ON root.id = removed.folder_id
+                JOIN paths candidate
+                  ON substr(candidate.path, 1, length(root.path) + 1) = root.path || '/'
+                  OR substr(candidate.source_path, 1, length(root.source_path) + 1) = root.source_path || '/'
+                WHERE removed.recursive = 1 AND candidate.id != root.id
+            )
+            SELECT removed.workspace_id, candidate.id AS folder_id
+            FROM scopes removed
+            JOIN paths root ON root.id = removed.root_id
+            JOIN paths candidate ON candidate.id = removed.folder_id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM workspace_folders direct
+                WHERE direct.workspace_id = removed.workspace_id
+                  AND direct.folder_id = candidate.id
+            ) AND NOT EXISTS (
+                -- An explicitly restored subfolder root may cover new
+                -- descendants without restoring its removed ancestors.
+                SELECT 1 FROM workspace_folders restored
+                JOIN paths restored_path ON restored_path.id = restored.folder_id
+                WHERE restored.workspace_id = removed.workspace_id
+                  AND restored.is_root = 1
+                  AND (substr(restored_path.path, 1, length(root.path) + 1) = root.path || '/'
+                       OR substr(restored_path.source_path, 1, length(root.source_path) + 1) = root.source_path || '/')
+                  AND (candidate.id = restored.folder_id
+                       OR substr(candidate.path, 1, length(restored_path.path) + 1) = restored_path.path || '/'
+                       OR substr(candidate.source_path, 1, length(restored_path.source_path) + 1) = restored_path.source_path || '/')
+            )
+        """)
         pending_cols = {r[1] for r in cur.execute("PRAGMA table_info(pending_changes)")}
         if "sync_started" not in pending_cols:
             cur.execute("ALTER TABLE pending_changes ADD COLUMN sync_started INTEGER NOT NULL DEFAULT 0")
@@ -3217,7 +3315,7 @@ class Database:
         return [int(r["folder_id"]) for r in rows]
 
     def _add_workspace_folder_no_commit(
-            self, workspace_id, folder_id, *, is_root=True):
+            self, workspace_id, folder_id, *, is_root=True, restore_removed=False):
         """Link a folder + descendants to a workspace WITHOUT committing.
 
         Same body as ``add_workspace_folder`` minus the ``commit()`` and cache
@@ -3227,12 +3325,25 @@ class Database:
         persisting a preceding UPDATE that an outer failure was meant to
         undo. The caller is responsible for committing (and for invalidating
         the workspace's new-images cache) after its own transaction closes.
+        Internal merges preserve removed descendants unless the caller
+        explicitly asks to restore them.
         """
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
+        if not restore_removed:
+            removed = self._removed_workspace_folder_ids(workspace_id)
+            # The directly imported/scanned folder is intentional. Known
+            # descendants need their own scan or explicit add to restore
+            # them; registering a parent must not resurrect missing rows.
+            folder_ids = [fid for fid in folder_ids if fid == folder_id or fid not in removed]
         self.conn.executemany(
             """INSERT OR IGNORE INTO workspace_folders
-               (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
-            [(workspace_id, fid) for fid in folder_ids],
+               (workspace_id, folder_id, is_root)
+               SELECT ?, ?, 0 WHERE ? OR NOT EXISTS (
+                   SELECT 1 FROM workspace_removed_folders
+                   WHERE workspace_id = ? AND folder_id = ?
+               )""",
+            [(workspace_id, fid, restore_removed or fid == folder_id, workspace_id, fid)
+             for fid in folder_ids],
         )
         if is_root:
             for chunk in _chunks(folder_ids):
@@ -3244,10 +3355,15 @@ class Database:
                     [folder_id, workspace_id] + chunk,
                 )
 
-    def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True):
-        """Link a folder and its known descendants to a workspace."""
+    def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True,
+                             restore_removed=True):
+        """Link a folder and descendants, restoring explicit removals by default.
+
+        Scanner registration passes ``restore_removed=False``: only the
+        directly visited folder restores membership, not removed descendants.
+        """
         self._add_workspace_folder_no_commit(
-            workspace_id, folder_id, is_root=is_root)
+            workspace_id, folder_id, is_root=is_root, restore_removed=restore_removed)
         self.conn.commit()
         # The folder's untracked files now count toward this workspace's
         # new-images backlog. Drop any stale cached payload so the next read
@@ -3280,8 +3396,58 @@ class Database:
             self._db_path, [workspace_id],
         )
 
+    def _removed_workspace_folder_ids(self, workspace_id):
+        return {
+            row["folder_id"] for row in self.conn.execute(
+                "SELECT folder_id FROM workspace_removed_folders WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+        }
+
+    def _folder_removal_root_ids(self, folder_ids):
+        """Find topmost surviving paths without walking every subtree again."""
+        paths = []
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            paths.extend(
+                (_path_for_subtree_match(row["path"]), row["id"])
+                for row in self.conn.execute(
+                    f"""SELECT f.id, COALESCE(m.source_path, f.path) AS path
+                        FROM folders f
+                        LEFT JOIN local_folder_mappings m ON m.folder_id = f.id
+                        WHERE f.id IN ({placeholders})""", chunk,
+                )
+            )
+        roots = set()
+        root_paths = set()
+        for path, folder_id in sorted(paths):
+            ancestor = path
+            while ancestor not in root_paths and "/" in ancestor:
+                ancestor = ancestor.rpartition("/")[0]
+            if ancestor not in root_paths:
+                roots.add(folder_id)
+                root_paths.add(path)
+        return roots
+
+    def _remember_workspace_folder_removals(self, workspace_id, folder_ids, *, recursive=False):
+        """Record removals in the caller's unlink/delete transaction."""
+        folder_ids = list(folder_ids)
+        roots = self._folder_removal_root_ids(folder_ids) if recursive else set()
+        # Keep exact descendant records so importing just one folder does
+        # not restore its children. Only topmost surviving folders need a
+        # recursive record to cover future discoveries.
+        self.conn.executemany(
+            """INSERT INTO workspace_folder_removals (workspace_id, folder_id, recursive)
+               SELECT ?, id, ? FROM folders WHERE id = ?
+               ON CONFLICT(workspace_id, folder_id) DO UPDATE
+               SET recursive = CASE WHEN ? THEN excluded.recursive
+                                    ELSE MAX(recursive, excluded.recursive) END""",
+            [(workspace_id, fid in roots, fid, recursive) for fid in folder_ids],
+        )
+
     def remove_workspace_folder(self, workspace_id, folder_id):
         """Unlink a single folder from a workspace."""
+        self._remember_workspace_folder_removals(workspace_id, [folder_id])
         self.conn.execute(
             "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
             (workspace_id, folder_id),
@@ -3294,6 +3460,7 @@ class Database:
     def remove_workspace_folder_tree(self, workspace_id, folder_id):
         """Unlink a folder and its path descendants from a workspace."""
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
+        self._remember_workspace_folder_removals(workspace_id, folder_ids, recursive=True)
         for chunk in _chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
             self.conn.execute(
@@ -3351,12 +3518,20 @@ class Database:
                 ).fetchall()
             }
             candidate_ids -= existing
+        candidate_ids -= self._removed_workspace_folder_ids(workspace_id)
         if not candidate_ids:
             return
+        # Recheck in the INSERT: a Remove request may have committed after
+        # the discovery snapshot. In that case the stale reader must not
+        # recreate the link and clear its removal record via the trigger.
         self.conn.executemany(
             """INSERT OR IGNORE INTO workspace_folders
-               (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
-            [(workspace_id, fid) for fid in candidate_ids],
+               (workspace_id, folder_id, is_root)
+               SELECT ?, ?, 0 WHERE NOT EXISTS (
+                   SELECT 1 FROM workspace_removed_folders
+                   WHERE workspace_id = ? AND folder_id = ?
+               )""",
+            [(workspace_id, fid, workspace_id, fid) for fid in candidate_ids],
         )
         self.conn.commit()
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
@@ -3411,7 +3586,7 @@ class Database:
                JOIN folders target ON target.id = ?
                LEFT JOIN local_folder_mappings target_lfm
                  ON target_lfm.folder_id = target.id
-               WHERE wf.folder_id = target.id
+               WHERE (wf.folder_id = target.id
                   OR (
                     wf.is_root = 1
                     AND (
@@ -3429,6 +3604,10 @@ class Database:
                          ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
                     )
                   )
+               ) AND NOT EXISTS (
+                   SELECT 1 FROM workspace_removed_folders removed
+                   WHERE removed.workspace_id = w.id AND removed.folder_id = target.id
+               )
                GROUP BY w.id, w.name, w.pinned_at
                ORDER BY (w.pinned_at IS NULL), LOWER(w.name), w.id""",
             (folder_id,),
@@ -4650,6 +4829,7 @@ class Database:
                 self._active_workspace_id,
                 folder_id,
                 is_root=workspace_root,
+                restore_removed=False,
             )
         return folder_id
 
@@ -7473,6 +7653,7 @@ class Database:
             # active workspace's links, leaving the other workspaces' links
             # (and the folder rows and photos) untouched.
             if active_ws is not None:
+                self._remember_workspace_folder_removals(active_ws, kept_subtree_ids, recursive=True)
                 for chunk in _chunks(kept_subtree_ids):
                     placeholders = ",".join("?" for _ in chunk)
                     self.conn.execute(

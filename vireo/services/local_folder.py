@@ -593,10 +593,17 @@ def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) 
         return
     folder_ids = [folder["folder_id"] for folder in folders]
     pairs = [(ws_id, folder_id) for ws_id in ancestor_ws_ids for folder_id in folder_ids]
+    # Staging in another workspace is automatic discovery, not an explicit
+    # restore. Check removals in the INSERT so even a concurrent unlink
+    # cannot be undone by clearing its removal record in the link trigger.
     db.conn.executemany(
         """INSERT OR IGNORE INTO workspace_folders
-           (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
-        pairs,
+           (workspace_id, folder_id, is_root)
+           SELECT ?, ?, 0 WHERE NOT EXISTS (
+               SELECT 1 FROM workspace_removed_folders
+               WHERE workspace_id = ? AND folder_id = ?
+           )""",
+        [(ws_id, folder_id, ws_id, folder_id) for ws_id, folder_id in pairs],
     )
     db.conn.commit()
     for ws_id in ancestor_ws_ids:

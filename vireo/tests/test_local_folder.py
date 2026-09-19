@@ -1757,6 +1757,58 @@ def test_ancestor_workspace_materialized_before_stage_rebase(tmp_path):
         db.close()
 
 
+@pytest.mark.parametrize("remove_root", [True, False])
+def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove_root):
+    """Local-copy preparation must not undo another workspace's removal."""
+    from services.local_folder import affected_workspace_ids
+
+    with Database(str(tmp_path / "vireo.db")) as db:
+        parent_ws = db.create_workspace("Parent")
+        child_ws = db.create_workspace("Child")
+        observer_ws = db.create_workspace("Observer")
+        parent = tmp_path / "nas" / "parent"
+        child = parent / "child"
+        descendant = child / "descendant"
+        descendant.mkdir(parents=True)
+        (descendant / "bird.jpg").write_bytes(b"original")
+        parent_id = db.add_folder(str(parent), link_to_workspace=False)
+        child_id = db.add_folder(str(child), parent_id=parent_id, link_to_workspace=False)
+        descendant_id = db.add_folder(str(descendant), parent_id=child_id, link_to_workspace=False)
+        db.add_workspace_folder(parent_ws, parent_id)
+        db.add_workspace_folder(child_ws, child_id)
+        db.add_workspace_folder(observer_ws, parent_id)
+        db.set_active_workspace(parent_ws)
+        db.delete_folder(child_id if remove_root else descendant_id)
+        expected = {parent_id} if remove_root else {parent_id, child_id}
+        db.set_active_workspace(child_ws)
+        late = descendant / "late"
+        late.mkdir()
+        (late / "new.jpg").write_bytes(b"new original")
+        late_id = db.add_folder(str(late), parent_id=descendant_id, workspace_root=False)
+        vireo_dir = str(tmp_path / "vireo")
+
+        stage_folder(db, child_id, vireo_dir)
+        assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
+        assert {w["id"] for w in db.get_folder_workspaces(descendant_id)} == {child_ws, observer_ws}
+        assert {w["id"] for w in db.get_folder_workspaces(late_id)} == {child_ws, observer_ws}
+        assert observer_ws in affected_workspace_ids(db, child_id)
+        assert {f["id"] for f in db.get_workspace_folders(observer_ws)} == {
+            parent_id, child_id, descendant_id, late_id,
+        }
+        # A folder first cataloged after staging has only a local path,
+        # with no original-source mapping of its own yet.
+        local_new_id = db.add_folder(
+            str(Path(db.get_folder(descendant_id)["path"]) / "local-new"),
+            parent_id=descendant_id, workspace_root=False,
+        )
+        assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
+        assert parent_ws not in {w["id"] for w in db.get_folder_workspaces(local_new_id)}
+
+        discard_folder(db, child_id, vireo_dir)
+        assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
+        assert (descendant / "bird.jpg").read_bytes() == b"original"
+
+
 def test_workspace_status_exposes_visible_ancestor_for_missing_local_root(tmp_path):
     """When a local session's rebased folders.path goes missing (managed local
     directory unmounted or deleted, so check_folder_health marks it 'missing'
