@@ -13,6 +13,7 @@ dependencies = [
     "huggingface_hub>=1.4.1",
     "imagehash>=4.3.2",
     "numpy>=2.4.2",
+    "opencv-python-headless>=4.13.0.92",
     "onnxruntime>=1.22.0",
     "Pillow>=12.1.1",
     "rawpy>=0.26.1",

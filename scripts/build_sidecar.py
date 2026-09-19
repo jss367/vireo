@@ -127,6 +127,8 @@ def main():
         "--hidden-import", "scoring",
         "--hidden-import", "compare",
         "--hidden-import", "develop",
+        "--hidden-import", "panorama",
+        "--hidden-import", "cv2",
         "--hidden-import", "dino_embed",
         "--hidden-import", "image_loader",
         "--hidden-import", "label_photos",
