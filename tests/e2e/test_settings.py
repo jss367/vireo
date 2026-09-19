@@ -83,6 +83,87 @@ def _wait_for_settings_idle(page):
     return status
 
 
+def test_remote_target_folder_browse_saves_and_cancel_preserves(live_server, page, tmp_path):
+    """Both local fields browse real folders and persist to the right target."""
+    mount = tmp_path / "Mounted Photos"
+    archive = tmp_path / "Local Archive"
+    mount.mkdir()
+    archive.mkdir()
+    targets = [
+        {"id": "nas-a", "name": "First NAS", "host": "nas-a", "user": "me",
+         "remote_path": "/photos", "mount_path": str(tmp_path)},
+        {"id": "nas-b", "name": "Second NAS", "host": "nas-b", "user": "me",
+         "remote_path": "/photos", "mount_path": str(tmp_path),
+         "local_archive_root": str(tmp_path)},
+    ]
+    page.request.post(live_server["url"] + "/api/config", data={"remote_targets": targets})
+    page.goto(live_server["url"] + "/settings")
+    _wait_for_settings_idle(page)
+    for label, folder in (("Local mount path", mount),
+                          ("Local archive root (chained moves)", archive)):
+        page.get_by_role("button", name="Browse for " + label, exact=True).nth(1).click()
+        browser = page.locator("#folderBrowser")
+        expect(browser).to_be_visible()
+        browser.locator(".folder-browser-item", has_text=folder.name).click()
+        expect(page.locator("#folderBrowserPath")).to_have_text(str(folder))
+        with page.expect_response(lambda r: "/api/config" in r.url and r.request.method == "POST"):
+            page.get_by_role("button", name="Select This Folder", exact=True).click()
+        expect(page.get_by_role("textbox", name=label, exact=True).nth(1)).to_have_value(str(folder))
+
+    page.get_by_role("button", name="Browse for Local mount path", exact=True).nth(1).click()
+    page.locator("#folderBrowser").get_by_role("button", name="Cancel", exact=True).click()
+    page.reload()
+    _wait_for_settings_idle(page)
+    mounts = page.get_by_role("textbox", name="Local mount path", exact=True)
+    expect(mounts.nth(0)).to_have_value(str(tmp_path))
+    expect(mounts.nth(1)).to_have_value(str(mount))
+    expect(page.get_by_role("textbox", name="Local archive root (chained moves)", exact=True).nth(1)).to_have_value(str(archive))
+
+
+def test_remote_target_native_picker_cancel_and_selection(live_server, page):
+    page.goto(live_server["url"] + "/settings")
+    _wait_for_settings_idle(page)
+    page.evaluate("""() => {
+      _remoteTargetsState = [{id: 'nas', host: 'nas', user: 'me', remote_path: '/photos',
+                             mount_path: '/original'}];
+      renderRemoteTargets();
+      window.isTauri = () => true;
+      window.pickDirectory = async () => null;
+    }""")
+    button = page.get_by_role("button", name="Browse for Local mount path", exact=True)
+    button.click()
+    expect(button).to_be_enabled()
+    expect(page.locator("#folderBrowser")).not_to_be_visible()
+    field = page.get_by_role("textbox", name="Local mount path", exact=True)
+    expect(field).to_have_value("/original")
+    page.evaluate("window.pickDirectory = async () => '/chosen folder'")
+    with page.expect_response(lambda r: "/api/config" in r.url and r.request.method == "POST"):
+        button.click()
+    expect(field).to_have_value("/chosen folder")
+
+
+def test_remote_target_rsync_hint_copies_install_command(live_server, page):
+    page.route("**/api/remote-targets/test", lambda route: route.fulfill(json={
+        "ok": False, "message": "Install GNU rsync with Homebrew: brew install rsync.",
+        "rsync_install_commands": ["brew install rsync"],
+    }))
+    page.goto(live_server["url"] + "/settings")
+    _wait_for_settings_idle(page)
+    page.evaluate("""() => {
+      _remoteTargetsState = [{id: 'nas', host: 'nas', user: 'me', remote_path: '/photos'}];
+      renderRemoteTargets();
+      Object.defineProperty(navigator, 'clipboard', {value: {
+        writeText: async text => { window.copiedCommand = text; }
+      }, configurable: true});
+    }""")
+    page.get_by_role("button", name="Test connection", exact=True).click()
+    copy = page.get_by_role("button", name="Copy brew install rsync", exact=True)
+    expect(copy).to_be_visible()
+    copy.click()
+    expect(copy).to_have_text("Copied")
+    assert page.evaluate("window.copiedCommand") == "brew install rsync"
+
+
 def test_settings_autosave_shows_saved_confirmation(live_server, page):
     """Changing a curated field reports Saving… and then a persistent Saved ✓ time."""
     url = live_server["url"]
