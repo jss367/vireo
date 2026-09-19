@@ -568,6 +568,27 @@ def _resolve_landing(keyword_id, landing):
     return keyword_id
 
 
+
+def _exported_location_chain(kid, parent_of, types, names):
+    """The contiguous location path a row actually exports, or None.
+
+    ``get_photo_location_paths`` walks up from the tagged leaf and stops at
+    the first non-location ancestor, so a location under a general keyword
+    exports only itself. Moving such a row changes its textual path without
+    changing one byte of what the sidecar records.
+    """
+    if types.get(kid) != 'location':
+        return None
+    chain, node, seen = [], kid, set()
+    while node is not None and node not in seen:
+        seen.add(node)
+        chain.append(names.get(node))
+        parent = parent_of.get(node)
+        if parent is None or types.get(parent) != 'location':
+            break
+        node = parent
+    return tuple(reversed(chain))
+
 def _is_one_place_chain(ids, parent_of, post_types):
     """Whether every id sits on a single EXPORTED location line.
 
@@ -980,11 +1001,30 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     def _is_location(kid):
         return kid in by_id and by_id[kid]['type'] == 'location'
 
+    before = ({r['id']: r['parent_id'] for r in rows},
+              {r['id']: r['type'] for r in rows},
+              {r['id']: r['name'] for r in rows})
+    after_parents = {n['id']: n['parent_id'] for n in surviving}
+    after_types = {n['id']: n['type'] for n in surviving}
+    after_types[target_id] = resolved['type']
+    after_names = {n['id']: n['name'] for n in surviving}
+
+    def _chain_changed(kid):
+        return (_exported_location_chain(kid, *before)
+                != _exported_location_chain(kid, after_parents, after_types, after_names))
+
+    # A moved row only needs the location treatment when the path it
+    # EXPORTS changes. Relocating a location that sits under a general
+    # ancestor rewrites its textual path while leaving its exported chain
+    # identical, so neither a resync nor a rival-place check is warranted.
     location_change_ids = {kid for kid in
-                           ({source['id'] for source in sources}
-                            | {entry['id'] for entry in plan['children']}
-                            | set(path_changes) | set(plan['metadata_folded']))
-                           if _is_location(kid)}
+                           ({entry['id'] for entry in plan['children']}
+                            | set(path_changes))
+                           if _is_location(kid) and _chain_changed(kid)}
+    location_change_ids |= {kid for kid in
+                            ({source['id'] for source in sources}
+                             | set(plan['metadata_folded']))
+                            if _is_location(kid)}
     if resolved['type'] == 'location' or _is_location(target_id) or any(
             source['type'] == 'location' for source in sources):
         # Every source-tagged photo becomes a target-tagged photo, and the
@@ -1083,6 +1123,9 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
         # the row itself does not move -- the catalog gains new location
         # metadata their sidecars still lack.
         'metadata_folded_ids': sorted(plan['metadata_folded']),
+        # The rows whose EXPORTED location actually moves, so the preview's
+        # guard and the merge's resync agree on which photos are affected.
+        'location_change_ids': sorted(location_change_ids),
         'notes': notes,
     }
     if not requires_choice:
@@ -1158,7 +1201,8 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
                 [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}], _commit=False,
             )
             db.queue_change(pid, 'keyword_add', resolved['name'], workspace_id=ws, _commit=False)
-        _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys)
+        _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
+                                     set(preview['location_change_ids']))
         _queue_disambiguated_child_renames(db, preview, renamed_tags)
         # A retained location child that gained place_id/coords via
         # ``_merge_keyword_into``'s COALESCE fold has photos whose sidecars
@@ -1369,7 +1413,8 @@ def _queue_disambiguated_child_renames(db, preview, renamed_tags):
         db.queue_change(pid, 'keyword_add', child['new_name'],
                         workspace_id=ws, _commit=False)
 
-def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys):
+def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
+                                 location_change_ids):
     """Rewrite sidecar hierarchies for every descendant the merge relocated.
 
     Reparenting a descendant leaves its flat ``dc:subject`` leaf alone but
@@ -1432,7 +1477,11 @@ def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_ke
             'source_path': old_path, 'target_id': destination_id,
             'target_path': new_path,
         }, sort_keys=True), workspace_id=row['workspace_id'], _commit=False)
-        if row['type'] == 'location':
+        # Same set the preview's rival-place guard used, so the two agree on
+        # which rows really move their exported location. A location under a
+        # general ancestor keeps its exported chain through a reparent and
+        # needs the hierarchy rewrite above but no resync.
+        if kid in location_change_ids:
             db.remove_pending_changes(row['photo_id'], 'location',
                                       workspace_id=row['workspace_id'], _commit=False)
             db.queue_change(row['photo_id'], 'location', 'effective',

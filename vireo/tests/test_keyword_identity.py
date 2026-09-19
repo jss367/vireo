@@ -1505,6 +1505,61 @@ def test_conflict_guard_ignores_photos_that_get_no_location_change(catalog):
         "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location'",
         (photos[1],)).fetchone()
 
+
+def test_moving_a_location_under_a_general_ancestor_is_not_a_location_change(catalog):
+    """`get_photo_location_paths` stops at the first non-location ancestor,
+    so a location under a general keyword exports only itself. Reparenting
+    it rewrites its textual path without changing one byte of what the
+    sidecar records -- it needs the hierarchy rewrite but no resync, and no
+    rival-place check."""
+    db, photos = catalog
+    stray = db.add_keyword('Trip A', kw_type='general')
+    kept = db.add_keyword('Trip B', kw_type='general')
+    notes = db.add_keyword('Notes', parent_id=stray, kw_type='general')
+    park = db.add_keyword('Park', parent_id=notes, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'place-p' WHERE id = ?", (park,))
+    elsewhere = db.upsert_place_chain({
+        'place_id': 'other', 'name': 'Elsewhere', 'lat': 9, 'lng': 9,
+        'address_components': []})
+    db.conn.commit()
+    db.tag_photo(photos[0], park)
+    db.tag_photo(photos[0], elsewhere)     # independent location tag
+    db.tag_photo(photos[1], kept)
+
+    preview = preview_keyword_merge(db, [stray, kept], kept)
+    assert park not in preview['location_change_ids']
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'])
+
+    # The move still gets its hierarchy rewrite...
+    merges = [json.loads(r['value']) for r in db.conn.execute(
+        "SELECT value FROM pending_changes WHERE photo_id = ? AND change_type = 'keyword_merge'",
+        (photos[0],))]
+    assert any(m['target_id'] == park for m in merges)
+    # ...but no location resync, because nothing it exports moved.
+    assert not db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location'",
+        (photos[0],)).fetchone()
+
+
+def test_moving_a_location_under_a_location_ancestor_still_resyncs(catalog):
+    """Counterpart: when the ancestor IS a location, the exported chain does
+    change and the resync is required."""
+    db, photos = catalog
+    stray = db.add_keyword('Region A', kw_type='location')
+    kept = db.add_keyword('Region B', kw_type='location')
+    park = db.add_keyword('Park', parent_id=stray, kw_type='location')
+    db.conn.execute("UPDATE keywords SET place_id = 'place-p' WHERE id = ?", (park,))
+    db.conn.commit()
+    db.tag_photo(photos[0], park)
+    db.tag_photo(photos[1], kept)
+
+    preview = preview_keyword_merge(db, [stray, kept], kept)
+    assert park in preview['location_change_ids']
+    merge_keywords(db, [stray, kept], kept, preview['preview_token'])
+    assert db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location'",
+        (photos[0],)).fetchone()
+
 def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     """Two rows carrying different real-world identities have no honest
     default, so the preview names the field and withholds its token rather
