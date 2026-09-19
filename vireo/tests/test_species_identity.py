@@ -595,6 +595,47 @@ def test_unversioned_database_does_not_trust_discarded_alias_collisions(db):
     assert resolver.resolve("Red-crowned Amazon").taxon_id == 18976
 
 
+def test_unversioned_database_identifies_a_preferred_name_only_one_taxon_carries(db):
+    """A bare model label and a native scientific one are the same review row.
+
+    The catalog cannot certify *alternate* names until it is re-downloaded,
+    but a preferred name it holds exactly once is not an index entry that a
+    lossy import could have collapsed. Refusing it used to split one species
+    into two Accept buttons: the bare label under ``name:`` and the native
+    prediction under ``taxon:``, the second one wearing a "(Amazona finschi)"
+    suffix because its own common name no longer resolved back to it.
+    """
+    db.set_meta("common_name_identity_version", "")
+    resolver = SpeciesResolver(db=db)
+    bare = resolver.prediction({
+        "species": LILAC["common_name"], "classifier_model": "BioCLIP-2.5",
+        "labels_fingerprint": "custom",
+    })
+    native = resolver.prediction({
+        "species": LILAC["common_name"], "scientific_name": LILAC["scientific_name"],
+        "classifier_model": "iNat21 (EVA-02 Large)", "labels_fingerprint": "tol",
+    })
+    assert bare.key == native.key == f"taxon:{LILAC['taxon_id']}"
+    assert bare.display_name == native.display_name == LILAC["common_name"]
+    # Keyword rows are spelled however the catalog stored them.
+    assert resolver.resolve(LILAC["common_name"].lower()).key == bare.key
+
+
+def test_unversioned_database_refuses_a_preferred_name_two_taxa_share(db):
+    db.conn.execute("UPDATE taxa SET common_name = ? WHERE inat_id = ?",
+                    (LILAC["common_name"], RED["taxon_id"]))
+    db.set_meta("common_name_identity_version", "")
+    resolver = SpeciesResolver(db=db)
+    assert resolver.resolve(LILAC["common_name"]).key == "name:" + keyword_match_key(LILAC["common_name"])
+    assert resolver.resolve(LILAC["scientific_name"]).taxon_id == LILAC["taxon_id"]
+
+
+def test_verified_database_still_refuses_a_name_the_index_called_ambiguous(db):
+    db.set_meta("ambiguous_common_names", json.dumps([LILAC["common_name"].lower()]))
+    resolver = SpeciesResolver(db=db)
+    assert resolver.resolve(LILAC["common_name"]).taxon_id is None
+
+
 def test_import_preserves_ambiguity_even_when_only_one_preferred_name_matches(db, tmp_path):
     from taxonomy import populate_taxa_db_from_json
 
@@ -937,17 +978,20 @@ def _review_conflict(data, expected_species):
 
 
 def test_unstamped_catalog_does_not_flag_a_species_against_itself(db, tmp_path):
-    """A catalog whose taxonomy never recorded common-name provenance leaves
-    every predicted common name unresolved (``name:``) while the confirmed
-    keyword keeps its taxon identity. Review must not read that plumbing
-    difference as two species disagreeing under one name.
+    """A predicted common name the catalog cannot pin to one taxon stays
+    unresolved (``name:``) while the confirmed keyword keeps the taxon its
+    accept bound. Review must not read that plumbing difference as two
+    species disagreeing under one name.
     """
     from pipeline import attach_species_identities
 
     if not shutil.which("node"):
         pytest.skip("Node is required to execute the review comparison")
-    # No stamp: SpeciesResolver distrusts every common name in this catalog.
+    # No stamp, and a second taxon carries the same preferred name: neither
+    # the index nor the catalog itself can say which species the label means.
     db.set_meta("common_name_identity_version", "")
+    db.conn.execute("INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, ?)",
+                    (18994, "Amazona autumnalis", LILAC["common_name"], "species"))
     pid = _confirmed_species_photo(db, tmp_path, LILAC)
     resolver = SpeciesResolver(db=db)
     assert resolver.resolve(LILAC["common_name"]).key == "name:lilac-crowned parrot"

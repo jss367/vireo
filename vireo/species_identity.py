@@ -77,10 +77,14 @@ class SpeciesResolver:
         if correction:
             return self._lookup(correction["scientific_name"], scientific=True) or correction
         # Existing DB indexes also lost alternate-name collisions. Until a
-        # taxonomy import records its provenance, only explicit science/IDs
-        # and the curated corrections above are evidence of identity.
-        if not scientific and (not self._common_names_verified or name.lower().strip() in self._ambiguous_common):
+        # taxonomy import records its provenance, only explicit science/IDs,
+        # the curated corrections above, and a preferred name this catalog
+        # can prove unique are evidence of identity.
+        if not scientific and name.lower().strip() in self._ambiguous_common:
+            # An index that recorded this collision is authoritative about it.
             return self._lookup(name, scientific=True)
+        if not scientific and not self._common_names_verified:
+            return self._lookup(name, scientific=True) or self._preferred_common(name)
         if scientific:
             rows = self.db.conn.execute(
                 "SELECT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
@@ -103,6 +107,27 @@ class SpeciesResolver:
                 "WHERE cn.name = ? COLLATE NOCASE",
                 (name, name, name),
             ).fetchall()
+        return dict(rows[0]) if len(rows) == 1 else None
+
+    def _preferred_common(self, name):
+        """Identity from a *preferred* common name only one taxon carries.
+
+        The lossy alternate-name index kept a single target per name and
+        discarded the rest, so an alternate is not evidence until a fresh
+        download. ``taxa.common_name`` is a per-row field of the taxon itself,
+        which no import ever collapsed: when exactly one taxon in the catalog
+        carries this name, it identifies that taxon as precisely as a
+        versioned index would. Refusing it splits one species into two review
+        rows — a bare model label under ``name:`` and the same species under
+        ``taxon:`` — each with its own Accept button (CORE_PHILOSOPHY: "No
+        black boxes"). Alternates and names two taxa share stay unresolved.
+        """
+        if self.db is None:
+            return None
+        rows = self.db.conn.execute(
+            "SELECT DISTINCT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
+            "FROM taxa WHERE lower(common_name) = lower(?) LIMIT 2", (name,),
+        ).fetchall()
         return dict(rows[0]) if len(rows) == 1 else None
 
     def resolve(self, name, scientific_name=None, source=None):
