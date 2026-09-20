@@ -29,6 +29,27 @@ def original_preparation_guard(vireo_dir, photo_id):
         return lock
 
 
+def photo_source_matches(selected, current):
+    """Whether a catalog row still describes the selected source asset."""
+    return selected is not None and current is not None and all(
+        selected[key] == current[key]
+        for key in ("folder_id", "filename", "file_size", "file_mtime", "companion_path")
+    )
+
+
+def cleanup_preparation_offline_files(vireo_dir, photo_id):
+    """Remove offline assets while holding original_preparation_guard.
+
+    Unlike full photo-deletion cleanup, this never touches artifacts owned
+    by independent thumbnail, preview, mask, or interactive render producers.
+    """
+    import glob
+
+    for family in ("originals", "xmp", "companions"):
+        for path in glob.glob(os.path.join(vireo_dir, "offline", family, f"{photo_id}.*")):
+            _unlink_cached_rel(vireo_dir, os.path.relpath(path, vireo_dir))
+
+
 def _copy_atomic(src, dst):
     """Copy ``src`` to ``dst`` via a unique sibling temp file."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)

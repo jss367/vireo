@@ -578,7 +578,9 @@ def test_preparation_preserves_errors_for_existing_photos(
     assert db.get_photo(photo_id) is not None
 
 
-@pytest.mark.parametrize("stage", ["before_turn", "after_copy", "during_render"])
+@pytest.mark.parametrize(
+    "stage", ["before_turn", "after_copy", "during_render", "raw_render", "working_copy_render", "fallback_render"],
+)
 def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, stage):
     import image_loader
     import offline_cache
@@ -594,6 +596,14 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
     replacement_path = os.path.join(folder, "replacement.jpg")
     replacement_bytes = []
     replacement_cache = []
+    replacement_artifacts = {}
+    if stage in ("raw_render", "working_copy_render", "fallback_render"):
+        suffix = ".tif" if stage == "working_copy_render" else ".nef"
+        name = "old" + suffix
+        Path(folder, selected["filename"]).rename(Path(folder, name))
+        db.conn.execute("UPDATE photos SET filename=?, extension=? WHERE id=?", (name, suffix, photo_id))
+        db.conn.commit()
+        selected = db.get_photo(photo_id)
 
     def replace_photo():
         other_db = Database(app.config["DB_PATH"])
@@ -608,6 +618,18 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
                 width=800, height=600,
             )
             assert new_id == photo_id  # Reproduce SQLite recycling the highest ID.
+            # Independent producers have already cached the replacement.
+            # Old preparation must not purge any of these families.
+            for relative in (
+                f"thumbnails/{photo_id}.jpg", f"previews/{photo_id}_1920.jpg",
+                f"masks/{photo_id}.png", f"external-edits/{photo_id}.jpg",
+                f"inat-uploads/{photo_id}.jpg", f"originals/{photo_id}.display.jpg",
+                f"originals/{photo_id}_replacement.jpg",
+            ):
+                path = Path(vireo_dir, relative)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"replacement artifact")
+                replacement_artifacts[path] = path.read_bytes()
             if stage == "before_turn":
                 # Work not yet started must leave the new owner's cache alone.
                 cached = offline_cache.cache_photo_original(
@@ -638,7 +660,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
             Path(dst).write_bytes(old_bytes)
 
         monkeypatch.setattr(offline_cache, "_copy_atomic", publish_after_replacement)
-    else:
+    elif stage == "during_render":
         db.set_photo_edit_recipe(photo_id, {"rotation": 90})
         original_load = image_loader.load_image
 
@@ -649,6 +671,21 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
             return image
 
         monkeypatch.setattr(image_loader, "load_image", replace_during_render)
+    elif stage == "fallback_render":
+        monkeypatch.setattr(image_loader, "extract_working_copy", lambda *a, **kw: False)
+
+        def fallback_with_replacement(*args, **kwargs):
+            replace_photo()
+            return Image.new("RGB", (800, 600), "red")
+
+        monkeypatch.setattr(image_loader, "load_image", fallback_with_replacement)
+    else:
+        def extract_with_replacement(source, destination, **kwargs):
+            Image.new("RGB", (800, 600), "red").save(destination, "JPEG")
+            replace_photo()
+            return True
+
+        monkeypatch.setattr(image_loader, "extract_working_copy", extract_with_replacement)
 
     client = app.test_client()
     started = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
@@ -662,6 +699,12 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
     assert job["result"]["errors"] == []
     assert db.get_photo(photo_id)["filename"] == "replacement.jpg"
     assert Path(replacement_path).read_bytes() == replacement_bytes[0]
+    for path, expected in replacement_artifacts.items():
+        assert path.read_bytes() == expected, path
+    assert not list(Path(vireo_dir, "originals").glob("*.tmp"))
+    assert not list(Path(vireo_dir, "working").glob("*.tmp"))
+    if stage == "working_copy_render":
+        assert db.get_photo(photo_id)["working_copy_path"] is None
     if stage == "before_turn":
         assert Path(replacement_cache[0]).read_bytes() == replacement_bytes[0]
         assert db.offline_original_get(photo_id) is not None
@@ -777,3 +820,36 @@ def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
     if replacement_endpoint == "prepare-full-resolution":
         assert replacement_job["result"]["ready"] == 1
         assert replacement_job["result"]["copied"] == 1
+
+
+@pytest.mark.parametrize("extension", [".nef", ".tif"])
+def test_preparation_publishes_current_source_extraction(client_with_photo, monkeypatch, extension):
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute("SELECT path FROM folders WHERE id=?", (photo["folder_id"],)).fetchone()["path"]
+    filename = "extract" + extension
+    Path(folder, photo["filename"]).rename(Path(folder, filename))
+    db.conn.execute("UPDATE photos SET filename=?, extension=? WHERE id=?", (filename, extension, photo_id))
+    db.conn.commit()
+
+    def extract(source, destination, **kwargs):
+        Image.new("RGB", (800, 600), "blue").save(destination, "JPEG")
+        return True
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", extract)
+    client = app.test_client()
+    started = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["ready"] == 1
+    assert job["result"]["copied"] == 1
+    assert job["result"]["skipped_deleted"] == 0
+    vireo_dir = Path(app.config["THUMB_CACHE_DIR"]).parent
+    if extension == ".nef":
+        rendered = vireo_dir / "originals" / f"{photo_id}.display.jpg"
+    else:
+        rendered = vireo_dir / db.get_photo(photo_id)["working_copy_path"]
+    with Image.open(rendered) as image:
+        assert image.size == (800, 600)
