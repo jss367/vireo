@@ -19140,17 +19140,24 @@ def test_extract_masks_preflight_error_denominator_matches_stage_total(
 
 def _seed_cached_mask(db, tmp_path, photo_id, sam2_variant, dinov2_variant,
                       prompt=(0.1, 0.1, 0.5, 0.5), detector="MegaDetector"):
-    """Give `photo_id` a complete, active mask for the configured variant."""
+    """Give `photo_id` a complete, active mask for the configured variant.
+
+    Writes ``photos.active_mask_variant`` directly so callers can seed a
+    stale-prompt scenario without tripping ``set_active_mask_variant``'s
+    guard against activating a mask that doesn't match the current
+    primary — the stale state this helper simulates is exactly what the
+    guard is there to prevent.
+    """
     from PIL import Image
     mask_dir = tmp_path / ".vireo" / "masks"
     os.makedirs(mask_dir, exist_ok=True)
     mask_file = str(mask_dir / f"{photo_id}.{sam2_variant}.png")
     Image.new("L", (4, 4), 255).save(mask_file)
     db.upsert_photo_mask(photo_id, sam2_variant, mask_file, detector, *prompt)
-    db.set_active_mask_variant(photo_id, sam2_variant)
     db.conn.execute(
-        "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
-        (dinov2_variant, photo_id),
+        "UPDATE photos SET mask_path=?, active_mask_variant=?, "
+        "dino_embedding_variant=? WHERE id=?",
+        (mask_file, sam2_variant, dinov2_variant, photo_id),
     )
     db.conn.commit()
     return mask_file

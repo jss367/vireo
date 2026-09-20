@@ -197,6 +197,47 @@ def test_cannot_reactivate_mask_from_previous_primary(db, subject_photo):
         db.set_active_mask_variant(photo_id, 'test')
 
 
+def test_activate_mask_survives_floor_change_without_state_sync(db, subject_photo):
+    """The guard checks the current effective primary, not the cached
+    ``photo_subject_state``: a workspace-level ``detector_confidence``
+    raise (or a peer workspace running with a different floor) can flip
+    the primary before subject analysis or selection has a chance to
+    refresh the cache. Both mask-extraction paths resolve the primary
+    using the current floor, so the freshly written mask must be
+    activatable even while the cached state still names the previous
+    subject.
+    """
+    photo_id, ids, path = subject_photo
+    analyze_photo(db, photo_id, path)
+    # Initial primary is ids[1] (sharp/higher-quality subject). Insert a
+    # mask matching it and activate; photo_subject_state now names ids[1].
+    det_hi = next(d for d in db.get_detections(photo_id) if d['id'] == ids[1])
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id,variant,path,created_at,"
+        "detector_model,prompt_x,prompt_y,prompt_w,prompt_h) "
+        "VALUES (?,'test','mask.png',1,?,?,?,?,?)",
+        (photo_id, det_hi['detector_model'],
+         *(det_hi['box_' + k] for k in 'xywh')),
+    )
+    db.set_active_mask_variant(photo_id, 'test')
+    # Raise the workspace's detector_confidence above ids[1]'s 0.7 so the
+    # current effective primary flips to ids[0] (0.95) WITHOUT syncing
+    # photo_subject_state, which still names ids[1].
+    db.update_workspace(db._ws_id(), config_overrides={'detector_confidence': 0.8})
+    det_lo = next(d for d in db.get_detections(photo_id, min_conf=0.8)
+                  if d['id'] == ids[0])
+    # A re-extraction under the new floor would rewrite the mask row with
+    # the new primary's prompt; activating that mask must not raise even
+    # though the cached state still points at the previous subject.
+    db.upsert_photo_mask(
+        photo_id=photo_id, variant='test', path='mask.png',
+        detector_model=det_lo['detector_model'],
+        prompt_x=det_lo['box_x'], prompt_y=det_lo['box_y'],
+        prompt_w=det_lo['box_w'], prompt_h=det_lo['box_h'],
+    )
+    db.set_active_mask_variant(photo_id, 'test')
+
+
 def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)

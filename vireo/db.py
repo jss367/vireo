@@ -11993,21 +11993,36 @@ class Database:
         fsync per photo. Bulk callers MUST call ``commit_with_retry``
         themselves once the loop completes.
         """
+        # Resolve the effective primary detection the same way both
+        # mask-extraction paths do: the top-ordered non-full-image
+        # detection above the workspace's current detector_confidence
+        # floor. ``photo_subject_state.detection_id`` can lag when the
+        # floor changes (workspace override, or another workspace
+        # sharing this photo runs with a different floor), so checking
+        # the mask's prompt against the cached state would reject a
+        # mask that extraction just produced from the current primary.
+        import config as cfg
+        from subjects import primary_order_sql
+        effective = self.get_effective_config(cfg.load())
+        min_conf = effective.get("detector_confidence", 0.2)
         row = self.conn.execute(
-            "SELECT pm.*, ss.detection_id AS selected_id, d.detector_model AS selected_model, "
-            "d.box_x AS selected_x, d.box_y AS selected_y, d.box_w AS selected_w, d.box_h AS selected_h "
-            "FROM photo_masks pm LEFT JOIN photo_subject_state ss ON ss.photo_id=pm.photo_id "
-            "LEFT JOIN detections d ON d.id=ss.detection_id "
-            "WHERE pm.photo_id=? AND pm.variant=?",
-            (photo_id, variant),
+            f"SELECT pm.*, d.detector_model AS primary_model, "
+            f"d.box_x AS primary_x, d.box_y AS primary_y, "
+            f"d.box_w AS primary_w, d.box_h AS primary_h "
+            f"FROM photo_masks pm LEFT JOIN detections d ON d.id=("
+            f"SELECT id FROM detections WHERE photo_id=pm.photo_id "
+            f"AND detector_confidence>=? AND detector_model!='full-image' "
+            f"ORDER BY {primary_order_sql()} LIMIT 1) "
+            f"WHERE pm.photo_id=? AND pm.variant=?",
+            (min_conf, photo_id, variant),
         ).fetchone()
         if row is None:
             raise ValueError(
                 f"No photo_masks row for photo {photo_id} variant {variant!r}"
             )
-        if row["selected_id"] is not None and (
-            row["detector_model"] != row["selected_model"]
-            or any(row["prompt_" + k] != row["selected_" + k] for k in "xywh")
+        if row["primary_model"] is not None and (
+            row["detector_model"] != row["primary_model"]
+            or any(row["prompt_" + k] != row["primary_" + k] for k in "xywh")
         ):
             raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
         self.conn.execute(
