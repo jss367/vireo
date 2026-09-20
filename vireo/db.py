@@ -12603,6 +12603,17 @@ class Database:
             ws_id, min_conf, min_conf, EYE_KP_FINGERPRINT_VERSION,
             *scope_params,
         )
+        # ``set_active_mask_variant`` refuses to activate a mask whose stored
+        # prompt no longer matches the primary detection. The eye stage does
+        # not extract masks — it consumes ``photos.mask_path`` directly — so
+        # filter stale masks here too: the active mask row must have been
+        # generated from the currently-selected primary (same detector_model
+        # AND same prompt_x/y/w/h). Without this predicate, after a
+        # ``detector_confidence`` change the eye stage would run keypoint
+        # inference over a mask cropped from the previous primary and stamp
+        # the fingerprint on a wrong-subject result. The full Process
+        # pipeline regenerates stale masks first, so this only matters for
+        # the standalone eye stage where mask extraction is skipped.
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
@@ -12620,7 +12631,16 @@ class Database:
                 AND d.detector_model != 'full-image'
                 AND d.detector_confidence >= ?
                JOIN predictions pr ON pr.detection_id = d.id
+               JOIN photo_masks pm
+                 ON pm.photo_id = p.id
+                AND pm.variant = p.active_mask_variant
+                AND pm.detector_model = d.detector_model
+                AND pm.prompt_x = d.box_x
+                AND pm.prompt_y = d.box_y
+                AND pm.prompt_w = d.box_w
+                AND pm.prompt_h = d.box_h
                WHERE p.mask_path IS NOT NULL
+                 AND p.active_mask_variant IS NOT NULL
                  AND d.id = (
                     SELECT d2.id FROM detections d2
                     WHERE d2.photo_id = p.id

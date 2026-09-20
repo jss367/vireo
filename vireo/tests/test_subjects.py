@@ -244,7 +244,21 @@ def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident
     for index, detection_id in enumerate(ids[:2]):
         db.add_prediction(detection_id, f'Bird {index}', .9, 'bioclip',
                           taxonomy={'class': 'Aves', 'scientific_name': 'Test bird'})
-    db.conn.execute("UPDATE photos SET mask_path='mask.png' WHERE id=?", (photo_id,))
+    # A production photo has ``mask_path`` set only through
+    # ``set_active_mask_variant``, which requires a matching photo_masks
+    # row for the current primary. The stale-mask predicate now insists
+    # on the same invariant.
+    primary_det = next(d for d in db.get_detections(photo_id)
+                       if d['category'] == 'animal'
+                       and d['detector_model'] != 'full-image')
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id,variant,path,created_at,"
+        "detector_model,prompt_x,prompt_y,prompt_w,prompt_h) "
+        "VALUES (?,'test','mask.png',1,?,?,?,?,?)",
+        (photo_id, primary_det['detector_model'],
+         *(primary_det['box_' + k] for k in 'xywh')),
+    )
+    db.set_active_mask_variant(photo_id, 'test')
     rows = db.list_photos_for_eye_keypoint_stage([photo_id])
     assert len(rows) == 1
     assert rows[0]['box_x'] == .6
@@ -260,14 +274,26 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     state-ID check. Both mask-extraction paths already re-resolve the
     primary at the current floor, so the eye stage must too or it would
     never compute eye focus for the new primary until analysis or
-    selection refreshed the cache.
+    selection refreshed the cache. A stale mask (belonging to the
+    previous primary) still excludes the photo — the Process pipeline
+    regenerates masks first, and the standalone eye stage must wait
+    until that regeneration lands so it doesn't stamp an eye result
+    against a wrong-subject mask.
     """
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     for detection_id in ids[:2]:
         db.add_prediction(detection_id, 'Test', .9, 'bioclip',
                           taxonomy={'class': 'Aves', 'scientific_name': 'Test bird'})
-    db.conn.execute("UPDATE photos SET mask_path='mask.png' WHERE id=?", (photo_id,))
+    det_hi = next(d for d in db.get_detections(photo_id) if d['id'] == ids[1])
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id,variant,path,created_at,"
+        "detector_model,prompt_x,prompt_y,prompt_w,prompt_h) "
+        "VALUES (?,'test','mask.png',1,?,?,?,?,?)",
+        (photo_id, det_hi['detector_model'],
+         *(det_hi['box_' + k] for k in 'xywh')),
+    )
+    db.set_active_mask_variant(photo_id, 'test')
     # Baseline: cached state names ids[1] (initial primary at floor 0.2);
     # eye stage surfaces the photo on ids[1]'s box.
     baseline = db.list_photos_for_eye_keypoint_stage([photo_id])
@@ -276,8 +302,25 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     # now the effective primary, but photo_subject_state still names
     # ids[1] — which now falls below the confidence join. Under the old
     # predicate every detection would be excluded; under the fix, ids[0]
-    # surfaces immediately.
+    # surfaces once the mask has been regenerated for it.
     db.update_workspace(db._ws_id(), config_overrides={'detector_confidence': 0.8})
+    # Before regeneration the cached mask still points at ids[1]'s
+    # prompt, so the stale-mask predicate excludes the photo — the eye
+    # stage will not run keypoint inference against a wrong-subject
+    # mask.
+    assert db.list_photos_for_eye_keypoint_stage([photo_id]) == []
+    # Regenerate the mask against the new primary (as extract_masks_stage
+    # would). photo_subject_state is intentionally not touched — the eye
+    # stage must resolve the primary at the current floor.
+    det_lo = next(d for d in db.get_detections(photo_id, min_conf=0.8)
+                  if d['id'] == ids[0])
+    db.upsert_photo_mask(
+        photo_id=photo_id, variant='test', path='mask.png',
+        detector_model=det_lo['detector_model'],
+        prompt_x=det_lo['box_x'], prompt_y=det_lo['box_y'],
+        prompt_w=det_lo['box_w'], prompt_h=det_lo['box_h'],
+    )
+    db.set_active_mask_variant(photo_id, 'test')
     rows = db.list_photos_for_eye_keypoint_stage([photo_id])
     assert len(rows) == 1
     assert rows[0]['box_x'] == .05

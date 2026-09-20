@@ -2235,9 +2235,10 @@ def test_eye_keypoints_plan_will_run_when_fingerprint_outdated(tmp_path, monkeyp
         lambda config: None,
     )
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
     # Old fingerprint string — definitely doesn't match current.
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/a.png', eye_tenengrad=0.5, "
+        "UPDATE photos SET eye_tenengrad=0.5, "
         "eye_kp_fingerprint='superanimal-old' WHERE id=?",
         (pid,),
     )
@@ -2268,14 +2269,13 @@ def test_eye_keypoints_plan_will_run_when_some_pending(tmp_path, monkeypatch):
     from pipeline import EYE_KP_FINGERPRINT_VERSION
     pid_done, did_done = _add_photo_with_detection(db, folder_id, "done.jpg")
     pid_todo, did_todo = _add_photo_with_detection(db, folder_id, "todo.jpg")
+    _mark_sam_done(db, pid_done, "/m/d.png")
+    _mark_sam_done(db, pid_todo, "/m/t.png")
     # done.jpg: processed with current fingerprint → not stale, not pending
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/d.png', eye_tenengrad=0.5, "
+        "UPDATE photos SET eye_tenengrad=0.5, "
         "eye_kp_fingerprint=? WHERE id=?",
         (EYE_KP_FINGERPRINT_VERSION, pid_done),
-    )
-    db.conn.execute(
-        "UPDATE photos SET mask_path='/m/t.png' WHERE id=?", (pid_todo,),
     )
     for did in (did_done, did_todo):
         db.conn.execute(

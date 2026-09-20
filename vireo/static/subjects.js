@@ -110,6 +110,11 @@
       _lbLoadMaskVariants(photoId);
       document.dispatchEvent(new CustomEvent('vireo:primary-subject-changed', {detail: {photoId}}));
     } catch (error) {
+      // A request that finished after the user opened a different photo
+      // belongs to no active lightbox subject panel; surfacing its error
+      // would blame the newly-open photo. Match the success-path
+      // stale-request checks.
+      if (seq !== generation || _lightboxCurrentId !== photoId) return;
       showToast(error.message || 'Could not change primary subject', 'error');
     } finally {
       busy = false;
@@ -150,6 +155,7 @@
       if (typeof window.vireoRefreshPhotoRenders === 'function') window.vireoRefreshPhotoRenders([photoId]);
       if (_lightboxCurrentId === photoId) _lbReloadCurrentRenderAfterEdit(photoId);
     } catch (error) {
+      if (seq !== generation || _lightboxCurrentId !== photoId) return;
       showToast(error.message || 'Could not apply suggestion', 'error');
     } finally {
       busy = false;
@@ -172,6 +178,7 @@
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     } catch (error) {
+      if (seq !== generation || _lightboxCurrentId !== photoId) return;
       showToast(error.message || 'Could not analyze subjects', 'error');
     } finally {
       busy = false;

@@ -2372,7 +2372,6 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
         width=800,
         height=600,
     )
-    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
 
     det_ids = db.save_detections(
         pid,
@@ -2395,6 +2394,14 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
             "scientific_name": "Vulpes vulpes",
         },
     )
+    # Register the mask through the mask-variant path so the stale-mask
+    # predicate can confirm the row matches the primary detection.
+    db.upsert_photo_mask(
+        photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(pid, "test")
     return db, pid
 
 
@@ -2504,12 +2511,18 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    db.update_photo_pipeline_features(other_pid, mask_path=str(tmp_path / "mask.png"))
     det_ids = db.save_detections(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
     )
+    db.upsert_photo_mask(
+        photo_id=other_pid, variant="test",
+        path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(other_pid, "test")
     db.add_prediction(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2575,9 +2588,6 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    db.update_photo_pipeline_features(
-        other_pid, mask_path=str(tmp_path / "mask.png"),
-    )
     det_ids = db.save_detections(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
@@ -2589,6 +2599,13 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         model="bioclip-2.5", category="match",
         taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
     )
+    db.upsert_photo_mask(
+        photo_id=other_pid, variant="test",
+        path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(other_pid, "test")
 
     calls = {"n": 0}
 
@@ -2667,12 +2684,18 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    db.update_photo_pipeline_features(other_pid, mask_path=str(tmp_path / "mask.png"))
     det_ids = db.save_detections(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
     )
+    db.upsert_photo_mask(
+        photo_id=other_pid, variant="test",
+        path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(other_pid, "test")
     db.add_prediction(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2755,7 +2778,6 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
         timestamp="2026-04-16T10:00:00",
         width=img_w, height=img_h,
     )
-    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
 
     det_ids = db.save_detections(
         pid,
@@ -2763,6 +2785,15 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
           "confidence": 0.95}],
         detector_model="MegaDetector",
     )
+    # Register the mask through the same path production uses, so
+    # ``list_photos_for_eye_keypoint_stage``'s stale-mask predicate
+    # can confirm the mask row matches the primary detection's prompt.
+    db.upsert_photo_mask(
+        photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.125, prompt_y=0.167, prompt_w=0.75, prompt_h=0.667,
+    )
+    db.set_active_mask_variant(pid, "test")
     db.add_prediction(
         det_ids[0],
         species="Vulpes vulpes",

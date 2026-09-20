@@ -1305,14 +1305,30 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     # Analyze every retained subject, including cached detector runs from older
     # libraries. Detection/classification results remain usable if a source goes
     # offline; missing analyses are retried on the next run.
+    #
+    # Cancellation participates cooperatively: the outer detect loop honors
+    # ``runner.is_cancelled`` and re-classify has already cleared the prior
+    # detection rows for photos the user asked to stop. Committing more
+    # subject analyses after cancel would silently publish work past the
+    # stop button, so probe before each photo and inside ``analyze_photo``'s
+    # lock-guarded commit points via the checkpoint callback.
     from subjects import analyze_photo
+
+    def _subject_analysis_checkpoint():
+        if runner is not None and runner.is_cancelled(job["id"]):
+            raise ResourceWaitCancelled(
+                "Cancelled during subject analysis"
+            )
+
     for photo in photos:
         if photo["id"] not in processed_ids or photo["id"] in cached_detections:
             continue
+        _subject_analysis_checkpoint()
         image_path = os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
         try:
             analyze_photo(db, photo["id"], image_path,
-                          min_conf=det_conf_threshold, force=reclassify)
+                          min_conf=det_conf_threshold, force=reclassify,
+                          checkpoint=_subject_analysis_checkpoint)
         except ResourceWaitCancelled:
             raise
         except Exception:

@@ -7569,12 +7569,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             _pause_or_cancel_pending,
                         ), acquire_photo_mask(photo_id):
                             # Re-resolve under the lock: primary may have changed
-                            # since photos_to_process was built.
+                            # since photos_to_process was built. Mirror the
+                            # build-time candidacy filter exactly — weak-rescued
+                            # photos require category=='animal' on top of the
+                            # lower floor and MDv6/detector filter, matching
+                            # ``_preflight_mask_outcomes`` and the classify/mask
+                            # anchor gate. Without the animal filter, a photo
+                            # whose only qualifying MDv6 detection above
+                            # ``weak_detection_confidence`` is non-animal (for
+                            # example after a concurrent reclassify removed its
+                            # animal box since ``photos_to_process`` was built)
+                            # would produce a mask over the wrong subject
+                            # instead of falling through to ``skipped``.
                             current = [d for d in thread_db.get_detections(
                                 photo_id, min_conf=(weak_detection_confidence
                                     if photo_id in contextual_weak_ids else detector_confidence),
                                 detector_model="megadetector-v6" if photo_id in contextual_weak_ids else None,
-                            ) if d["detector_model"] != "full-image"]
+                            ) if d["detector_model"] != "full-image"
+                              and (photo_id not in contextual_weak_ids
+                                   or d["category"] == "animal")]
                             if not current:
                                 skipped += 1
                                 i += 1
@@ -7622,6 +7635,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     # fall through to the full recompute, which
                                     # writes set_active_mask_variant +
                                     # update_photo_embeddings together.
+                                    # Subject switching (subjects.sync_primary)
+                                    # clears both active_mask_variant AND
+                                    # dino_subject_embedding atomically inside
+                                    # ``_clear_primary_features``, so an
+                                    # active_mask_variant that still equals
+                                    # sam2_variant is enough to prove the
+                                    # denormalised subject state is fresh —
+                                    # a subject A→B→A round-trip would have
+                                    # nulled the variant here before the
+                                    # embedding could go stale (Codex P2
+                                    # r4056402007).
                                     state = thread_db.conn.execute(
                                         "SELECT active_mask_variant, "
                                         "dino_embedding_variant FROM photos "
