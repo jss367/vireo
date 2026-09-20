@@ -9252,6 +9252,13 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
         photo_ids.append(photo_id)
         detection_ids.append(detection_id)
 
+    # The foreign detector outranks MDv6 at the weak floor, but is not
+    # eligible for contextual rescue. State must follow the extracted MDv6 box.
+    db.write_detection_batch(photo_ids[1], "other-detector", [{
+        "box": {"x": .6, "y": .2, "w": .2, "h": .3},
+        "confidence": .19, "category": "animal",
+    }])
+
     db.add_prediction(
         detection_ids[0], "Great-tailed Grackle", 0.9, "inat21",
     )
@@ -9275,6 +9282,12 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
     run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
 
     assert state["proxy_calls"] == expected_proxy_calls
+    if expected_proxy_calls == 3:
+        primary = db.conn.execute(
+            "SELECT detection_id FROM photo_subject_state WHERE photo_id=?",
+            (photo_ids[1],),
+        ).fetchone()
+        assert primary["detection_id"] == detection_ids[1]
 
 
 def test_pipeline_extract_masks_cancel_marks_stage_cancelled(

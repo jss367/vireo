@@ -7569,67 +7569,24 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         with bind_resource_cancel_check(
                             _pause_or_cancel_pending,
                         ), acquire_photo_mask(photo_id):
-                            # In a ``skip_classify=True`` run, ``detect_stage``
-                            # returns early so the subject-analysis
-                            # synchronization normally performed inside
-                            # ``_detect_batch``'s ``analyze_photo`` loop never
-                            # runs. A ``detector_confidence`` change since
-                            # ``photos_to_process`` was built (or another
-                            # workspace sharing this photo writing
-                            # ``photo_subject_state`` under a different floor)
-                            # can promote a new primary here; without a sync
-                            # the mask extraction below would replace the mask
-                            # and DINO data for the new primary while
-                            # ``photo_subject_state`` and the old subject's
-                            # ``eye_*`` fields remained unchanged. A still-
-                            # current ``eye_kp_fingerprint`` then causes
-                            # ``list_photos_for_eye_keypoint_stage()`` to omit
-                            # the photo, leaving eye focus from the previous
-                            # subject. ``sync_primary`` clears mask_path,
-                            # active_mask_variant, dino_subject_embedding, and
-                            # eye_*/eye_kp_fingerprint when the primary
-                            # detection actually changed, matching the
-                            # standalone Extract Masks path
-                            # (app.py:27729) (Codex r4056646680).
-                            from subjects import sync_primary
-                            # Match the subsequent ``current`` query's floor:
-                            # weak-rescued photos use ``weak_detection_confidence``.
-                            # Passing ``detector_confidence`` for a contextual
-                            # weak candidate whose animal detection sits between
-                            # the two floors would make ``sync_primary`` see no
-                            # primary and clear mask_path, active_mask_variant
-                            # and the DINO embedding — invalidating the cache
-                            # every Process run right before the code below
-                            # correctly re-resolves the same detection at the
-                            # weak floor and repeats SAM/DINO inference
-                            # (Codex r4056724365).
+                            # Resolve both state and extraction against the same
+                            # candidate set, including MDv6-only weak rescue.
+                            # Synchronizing under the lock clears old eye/DINO
+                            # results when the effective primary changed.
+                            from subjects import retained, sync_primary
+                            subject_floor = (weak_detection_confidence
+                                if photo_id in contextual_weak_ids else detector_confidence)
+                            subject_detector = ("megadetector-v6"
+                                if photo_id in contextual_weak_ids else None)
                             sync_primary(
-                                thread_db, photo_id,
-                                min_conf=(weak_detection_confidence
-                                    if photo_id in contextual_weak_ids
-                                    else detector_confidence),
+                                thread_db, photo_id, min_conf=subject_floor,
+                                detector_model=subject_detector,
                             )
                             commit_with_retry(thread_db.conn)
-                            # Re-resolve under the lock: primary may have changed
-                            # since photos_to_process was built. Mirror the
-                            # build-time candidacy filter exactly — weak-rescued
-                            # photos require category=='animal' on top of the
-                            # lower floor and MDv6/detector filter, matching
-                            # ``_preflight_mask_outcomes`` and the classify/mask
-                            # anchor gate. Without the animal filter, a photo
-                            # whose only qualifying MDv6 detection above
-                            # ``weak_detection_confidence`` is non-animal (for
-                            # example after a concurrent reclassify removed its
-                            # animal box since ``photos_to_process`` was built)
-                            # would produce a mask over the wrong subject
-                            # instead of falling through to ``skipped``.
-                            current = [d for d in thread_db.get_detections(
-                                photo_id, min_conf=(weak_detection_confidence
-                                    if photo_id in contextual_weak_ids else detector_confidence),
-                                detector_model="megadetector-v6" if photo_id in contextual_weak_ids else None,
-                            ) if d["detector_model"] != "full-image"
-                              and (photo_id not in contextual_weak_ids
-                                   or d["category"] == "animal")]
+                            current = retained(
+                                thread_db, photo_id, min_conf=subject_floor,
+                                detector_model=subject_detector,
+                            )
                             if not current:
                                 skipped += 1
                                 i += 1

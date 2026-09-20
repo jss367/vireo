@@ -24,8 +24,9 @@ def primary_order_sql(alias="detections"):
         {alias}.detector_confidence DESC, {alias}.id ASC"""
 
 
-def retained(db, photo_id, min_conf=None):
-    detections = (dict(d) for d in db.get_detections(photo_id, min_conf=min_conf))
+def retained(db, photo_id, min_conf=None, *, detector_model=None):
+    detections = (dict(d) for d in db.get_detections(
+        photo_id, min_conf=min_conf, detector_model=detector_model))
     return [d for d in detections
             if d.get("category", "animal") == "animal" and d.get("detector_model") != "full-image"]
 
@@ -170,13 +171,13 @@ def _clear_primary_features(db, photo_id):
         eye_kp_fingerprint=NULL, dino_subject_embedding=NULL WHERE id=?""", (photo_id,))
 
 
-def sync_primary(db, photo_id, *, min_conf=None):
+def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
     """Project primary quality; clear stale subject-dependent outputs on a switch.
 
     Mask snapshots referenced by manual edits are immutable and untouched.
     Existing photo_masks remain cached, and prompt matching decides reuse.
     """
-    detections = retained(db, photo_id, min_conf)
+    detections = retained(db, photo_id, min_conf, detector_model=detector_model)
     if not detections:
         _clear_primary_features(db, photo_id)
         db.conn.execute("DELETE FROM photo_subject_state WHERE photo_id=?", (photo_id,))
