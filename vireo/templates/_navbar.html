@@ -12948,7 +12948,7 @@ function formatDuration(seconds) {
     var blocked = historyBusy || historyPendingWrites > 0;
     ['undo', 'redo'].forEach(function(operation) {
       var button = document.getElementById(operation === 'undo' ? 'historyUndoBtn' : 'historyRedoBtn');
-      var status = historyStatus[operation];
+      var status = (typeof window.localHistoryStatus === 'function' && window.localHistoryStatus(operation)) || historyStatus[operation];
       button.disabled = blocked || !status.available;
       var label = operation === 'undo' ? 'Undo' : 'Redo';
       button.title = status.available ? label + ': ' + status.description : 'Nothing to ' + operation;
@@ -12957,7 +12957,7 @@ function formatDuration(seconds) {
       button.setAttribute('aria-label', button.title);
       button.setAttribute('aria-keyshortcuts', operation === 'undo' ? 'Control+z Meta+z' : 'Control+Shift+z Meta+Shift+z');
     });
-    var status = historyStatus.undo;
+    var status = (typeof window.localHistoryStatus === 'function' && window.localHistoryStatus('undo')) || historyStatus.undo;
     document.getElementById('undoMsg').textContent = historyBusy ? 'Updating…' : (status.description || '');
     document.getElementById('undoToast').setAttribute('aria-busy', String(blocked));
   }
@@ -12977,11 +12977,17 @@ function formatDuration(seconds) {
     });
   }
   window.refreshHistoryControls = refreshHistoryControls;
+  // Local editor steps change synchronously and need no server status poll.
+  window.renderHistoryControls = renderHistoryControls;
   window.addEventListener('focus', refreshHistoryControls);
   window.vireoHistoryBusy = function() { return historyBusy; };
 
   async function changeHistory(operation, btn) {
     if (historyBusy || historyPendingWrites) return false;
+    if (typeof window.changeLocalHistory === 'function') {
+      var localResult = window.changeLocalHistory(operation);
+      if (localResult !== null) return localResult;
+    }
     if (typeof window.beforeHistoryChange === 'function' && window.beforeHistoryChange() === false) return false;
     historyBusy = true;
     document.dispatchEvent(new CustomEvent('vireo:edit-history-busy', {detail: {busy: true}}));
