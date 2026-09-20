@@ -125,6 +125,7 @@ def test_tiff_export_has_real_16_bit_samples_and_correct_profile(dng):
         assert pixels.dtype == np.uint16
         assert len(np.unique(pixels[32, :, 0])) > 400
         np.testing.assert_allclose(pixels / 65535, result.pixels, atol=1 / 65535)
+        assert tiff.pages[0].tags[34675].dtype == 7  # ICCProfile requires UNDEFINED.
         assert tiff.pages[0].tags[34675].value[16:20] == b'RGB '
 
 

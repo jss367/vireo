@@ -133,7 +133,7 @@ class FloatImage:
             # Deflate uses Python's zlib and needs no imagecodecs dependency.
             tifffile.imwrite(
                 output, pixels, photometric="rgb", compression="deflate",
-                metadata=None, extratags=[(34675, "B", len(profile), profile, False)],
+                metadata=None, extratags=[(34675, 7, len(profile), profile, False)],
             )
         else:
             with self.to_pil() as image:
