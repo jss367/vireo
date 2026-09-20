@@ -29128,29 +29128,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/culling/apply", methods=["POST"])
     def api_culling_apply():
-        """Apply culling decisions — flag keepers and reject others."""
+        """Apply culling decisions — flag keepers and reject others.
+
+        ``unflag`` carries the photos the user explicitly moved back to
+        Review on the cull page. Without it those photos would keep a stale
+        "flagged"/"rejected" flag from an earlier apply, and the cull page
+        would show that old flag back on the card the moment the decision
+        stopped being a session override — a silently reverted decision.
+        Only ids the client sends are touched, never every REVIEW photo.
+        """
         db = _get_db()
         body = request.get_json(silent=True) or {}
         keepers = body.get("keepers", [])
         rejects = body.get("rejects", [])
+        unflag = body.get("unflag", [])
+
+        for name, value in (("keepers", keepers), ("rejects", rejects),
+                            ("unflag", unflag)):
+            if not isinstance(value, list):
+                return json_error(f"{name} must be a list")
 
         # Pre-validate all photo IDs against workspace before any mutations
-        for pid in keepers + rejects:
+        for pid in keepers + rejects + unflag:
             if not db._photo_in_workspace(pid):
                 return json_error(f"Photo {pid} is not in the active workspace", 403)
 
         # Capture old flags before mutation
         old_flags = {}
-        for pid in keepers + rejects:
+        for pid in keepers + rejects + unflag:
             old = db.get_photo(pid)
             if old:
                 old_flags[pid] = old["flag"] or "none"
+
+        # Clearing a flag that is already "none" would write a no-op history
+        # entry, so only the photos that actually carry a flag are cleared.
+        cleared = [pid for pid in unflag if old_flags.get(pid, "none") != "none"]
 
         try:
             for pid in keepers:
                 db.update_photo_flag(pid, "flagged")
             for pid in rejects:
                 db.update_photo_flag(pid, "rejected")
+            for pid in cleared:
+                db.update_photo_flag(pid, "none")
         except ValueError as e:
             return json_error(str(e), 403)
 
@@ -29162,18 +29182,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for pid in rejects:
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
+        for pid in cleared:
+            flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'none'})
         if flag_items:
             for item in flag_items:
                 db.queue_flag_change_if_enabled(
                     item["photo_id"], item["new_value"], _commit=False
                 )
             db.conn.commit()
-            db.record_edit('flag',
-                           f'Culling: flagged {len(keepers)}, rejected {len(rejects)}',
-                           'culling_apply', flag_items, is_batch=True)
+            summary = f'Culling: flagged {len(keepers)}, rejected {len(rejects)}'
+            if cleared:
+                summary += f', cleared {len(cleared)}'
+            db.record_edit('flag', summary, 'culling_apply', flag_items, is_batch=True)
 
-        log.info("Culling applied: %d keepers, %d rejects", len(keepers), len(rejects))
-        return jsonify({"ok": True, "keepers": len(keepers), "rejects": len(rejects)})
+        log.info(
+            "Culling applied: %d keepers, %d rejects, %d cleared",
+            len(keepers), len(rejects), len(cleared),
+        )
+        return jsonify({
+            "ok": True,
+            "keepers": len(keepers),
+            "rejects": len(rejects),
+            "cleared": len(cleared),
+        })
 
     @app.route("/api/photos/search")
     def api_photo_text_search():
