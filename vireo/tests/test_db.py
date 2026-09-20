@@ -6735,13 +6735,18 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
         width=800,
         height=600,
     )
-    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
 
     det_ids = db.save_detections(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
     )
+    db.upsert_photo_mask(
+        photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(pid, "test")
     # Top-confidence prediction has species but no taxonomy_class/scientific_name.
     db.add_prediction(
         det_ids[0],
@@ -6790,13 +6795,18 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
         width=800,
         height=600,
     )
-    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
 
     det_ids = db.save_detections(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
     )
+    db.upsert_photo_mask(
+        photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(pid, "test")
     db.add_prediction(
         det_ids[0],
         species="Turdus migratorius",
@@ -6833,10 +6843,15 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
     fid = db.add_folder(str(tmp_path), name="photos")
     db.add_workspace_folder(ws_id, fid)
     pid = db.add_photo(fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600)
-    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
     det_id = db.save_detections(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95}
     ], detector_model="MegaDetector")[0]
+    db.upsert_photo_mask(
+        photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0, prompt_y=0, prompt_w=1, prompt_h=1,
+    )
+    db.set_active_mask_variant(pid, "test")
     # Stale fingerprint — high confidence + bird taxonomy.
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
@@ -6885,12 +6900,18 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
         fid, "b.jpg", ".jpg", 1000, 2.0, width=800, height=600,
     )
     for pid in (pid_a, pid_b):
-        db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
         det_ids = db.save_detections(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
             detector_model="MegaDetector",
         )
+        db.upsert_photo_mask(
+            photo_id=pid, variant="test",
+            path=str(tmp_path / "mask.png"),
+            detector_model="MegaDetector",
+            prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+        )
+        db.set_active_mask_variant(pid, "test")
         db.add_prediction(
             det_ids[0], species="Vulpes vulpes", confidence=0.9,
             model="bioclip-2.5", category="match",
@@ -24483,6 +24504,163 @@ def test_set_active_mask_variant_missing_row_raises(tmp_path):
         db.set_active_mask_variant(1, "sam3-small")
 
 
+def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
+    tmp_path,
+):
+    """The bulk /api/pipeline/active-mask-variant route walks every
+    workspace photo and calls set_active_mask_variant. When reclassify
+    wipes every real detection between mask creation and activation,
+    the effective-primary LEFT JOIN yields NULL and the mask's stored
+    prompt matches no surviving detection. Without a mismatch check
+    for that NULL branch, the guard would treat the cached mask as
+    valid and reactivate an obsolete subject, repopulating mask_path
+    plus the mask-derived quality fields for a photo with no eligible
+    subject (Codex r4056687363).
+    """
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        subject_size=999, subject_tenengrad=1.0,
+        bg_tenengrad=0.2, crop_complete=0.9,
+    )
+    # An unrelated detection remains (e.g. reclassify swapped the box):
+    # the mask's prompt no longer matches any real detection, so the
+    # active-mask activation must refuse rather than silently reactivate
+    # a subject that is no longer eligible.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.3, 0.3, 0.2, 0.2, 0.9, 'animal')"
+    )
+    db.conn.commit()
+    with pytest.raises(ValueError, match="another subject"):
+        db.set_active_mask_variant(1, "sam2-large")
+    # The photos row must remain unactivated — no denormalised
+    # mask_path or subject_size from the obsolete mask.
+    row = db.conn.execute(
+        "SELECT mask_path, active_mask_variant, subject_size "
+        "FROM photos WHERE id=1"
+    ).fetchone()
+    assert row["mask_path"] is None
+    assert row["active_mask_variant"] is None
+    assert row["subject_size"] is None
+
+
+def test_set_active_mask_variant_allows_weak_detection_below_floor(
+    tmp_path,
+):
+    """Only explicit contextual rescue may activate an eligible weak mask."""
+    import config as cfg
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        subject_size=42, subject_tenengrad=1.0,
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.1, 0.1, 0.5, 0.5, 0.18, 'animal')"
+    )
+    db.conn.commit()
+    original = cfg.load()
+    try:
+        cfg.save({**original, "detector_confidence": 0.5})
+        import pytest
+        with pytest.raises(ValueError, match="another subject"):
+            db.set_active_mask_variant(1, "sam2-large")
+        with pytest.raises(ValueError, match="another subject"):
+            db.set_active_mask_variant(1, "sam2-large", weak_rescue_min_conf=.19)
+        db.set_active_mask_variant(1, "sam2-large", weak_rescue_min_conf=.12)
+        row = db.conn.execute(
+            "SELECT active_mask_variant, subject_size FROM photos WHERE id=1"
+        ).fetchone()
+        assert row["active_mask_variant"] == "sam2-large"
+        assert row["subject_size"] == 42
+    finally:
+        cfg.save(original)
+
+
+def test_set_active_mask_variant_allows_migration_without_detections(
+    tmp_path,
+):
+    """Photos with literally no non-full-image detections AND no
+    ``detector_runs`` row fall through to activation — the mask was
+    seeded without detection context (pre-detection migration or a
+    unit-test setup), so there is no "obsolete subject" to guard
+    against."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+    )
+    db.set_active_mask_variant(1, "sam2-large")
+    row = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=1"
+    ).fetchone()
+    assert row["active_mask_variant"] == "sam2-large"
+
+
+def test_set_active_mask_variant_rejects_orphaned_zero_detection_reclassify(
+    tmp_path,
+):
+    """When reclassify empties a photo's detections entirely, the
+    ``photo_masks`` row is orphaned: the mask's prompt matches no
+    detection AND no detection remains at all. A bulk
+    ``api_pipeline_active_mask_variant`` sweep would otherwise
+    reactivate the mask and repopulate mask_path plus the
+    mask-derived quality fields for a photo with no eligible subject.
+    The ``detector_runs`` row that reclassify writes (with
+    ``box_count=0`` for an empty scene) proves detection actually
+    ran, distinguishing this from the pre-detection migration case
+    (Codex r4056773217)."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        subject_size=999, subject_tenengrad=1.0,
+    )
+    # Reclassify ran (produced zero detections) — detector_runs.box_count=0.
+    db.conn.execute(
+        "INSERT INTO detector_runs(photo_id, detector_model, box_count) "
+        "VALUES (1, 'megadetector-v6', 0)"
+    )
+    db.conn.commit()
+    with pytest.raises(ValueError, match="another subject"):
+        db.set_active_mask_variant(1, "sam2-large")
+    row = db.conn.execute(
+        "SELECT mask_path, active_mask_variant FROM photos WHERE id=1"
+    ).fetchone()
+    assert row["mask_path"] is None
+    assert row["active_mask_variant"] is None
+
+
 def test_delete_masks_for_variant_removes_files_and_rows(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))
@@ -25594,12 +25772,18 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
     for i in range(2):
         pid = db.add_photo(fid, f"p{i}.jpg", ".jpg", 1000, float(i + 1),
                            width=800, height=600)
-        db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
         det_ids = db.save_detections(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
             detector_model="MegaDetector",
         )
+        db.upsert_photo_mask(
+            photo_id=pid, variant="test",
+            path=str(tmp_path / "mask.png"),
+            detector_model="MegaDetector",
+            prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+        )
+        db.set_active_mask_variant(pid, "test")
         db.add_prediction(
             det_ids[0], species="Vulpes vulpes", confidence=0.9,
             model="bioclip-2.5", category="match",

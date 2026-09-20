@@ -1604,6 +1604,107 @@ def test_culling_apply_undo_restores_flags(app_and_db):
     assert (db.get_photo(pid)['flag'] or 'none') == original_flag
 
 
+def test_culling_apply_unflag_clears_previous_flag(app_and_db):
+    """Moving an applied photo back to Review clears its saved flag."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    client.post('/api/culling/apply', json={'keepers': [pid], 'rejects': []})
+    assert db.get_photo(pid)['flag'] == 'flagged'
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [], 'unflag': [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()['cleared'] == 1
+    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+
+    history = db.get_edit_history()
+    assert history[0]['action_type'] == 'flag'
+    assert 'cleared 1' in history[0]['description']
+
+
+def test_culling_apply_unflag_undo_restores_flag(app_and_db):
+    """Undo puts back the flag a Review decision cleared."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]['id']
+
+    client.post('/api/culling/apply', json={'keepers': [pid], 'rejects': []})
+    client.post('/api/culling/apply',
+                json={'keepers': [], 'rejects': [], 'unflag': [pid]})
+    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    assert db.get_photo(pid)['flag'] == 'flagged'
+
+
+def test_culling_apply_unflag_ignores_unflagged_photos(app_and_db):
+    """Clearing a photo that has no flag is a no-op, not a history entry."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]['id']
+    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [], 'unflag': [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()['cleared'] == 0
+    assert db.get_edit_history() == []
+
+
+def test_culling_apply_rejects_non_list_ids(app_and_db):
+    """A malformed body is a 400, not a 500 from list concatenation."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': 'all', 'rejects': []})
+    assert resp.status_code == 400
+    assert 'keepers' in resp.get_json()['error']
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [], 'unflag': 7})
+    assert resp.status_code == 400
+    assert 'unflag' in resp.get_json()['error']
+
+
+def test_culling_apply_rejects_overlapping_action_lists(app_and_db):
+    """A photo can't be requested for two conflicting flag values at once."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:3]]
+
+    # keepers ∩ rejects
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [pids[0]], 'rejects': [pids[0]]})
+    assert resp.status_code == 400
+    assert 'keepers' in resp.get_json()['error']
+    assert 'rejects' in resp.get_json()['error']
+
+    # keepers ∩ unflag
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [pids[1]], 'rejects': [],
+                             'unflag': [pids[1]]})
+    assert resp.status_code == 400
+    assert 'unflag' in resp.get_json()['error']
+
+    # rejects ∩ unflag
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [pids[2]],
+                             'unflag': [pids[2]]})
+    assert resp.status_code == 400
+    assert 'unflag' in resp.get_json()['error']
+
+    # Nothing was mutated for any of the three requests.
+    for pid in pids:
+        assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+    assert db.get_edit_history() == []
+
+
 def test_encounter_species_records_history(app_and_db):
     """Confirming encounter species records keyword_add in edit history."""
     app, db = app_and_db

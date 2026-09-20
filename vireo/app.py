@@ -47,6 +47,8 @@ from artifact_flight import (
     preview_artifact_flights,
     preview_prefetch_slots,
 )
+from camera_denoise import cache_matches as _camera_cache_matches
+from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from classification_readiness import classification_readiness
 from db import (
     _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE,
@@ -266,6 +268,7 @@ def _paired_render_state_hash(
             "source_state": source_state,
             "recipe": recipe_to_json(recipe) if recipe else None,
             "edit_math_version": EDIT_MATH_VERSION,
+            **_camera_render_cache_fields(photo, recipe),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -4431,6 +4434,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "file_state": file_state,
             "recipe": recipe_to_json(recipe),
             "edit_math_version": EDIT_MATH_VERSION,
+            **_camera_render_cache_fields(photo, recipe),
         }
 
     def _full_resolution_render_path(
@@ -7828,6 +7832,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        from camera_denoise import resolve_profile
+        result["denoise_profile"] = resolve_profile(photo)
         # The shared lightbox normally warms /original after /full settles.
         # In full-resolution preview mode /full already redirects to /original,
         # so tell the client not to repeat that potentially expensive RAW work.
@@ -18711,6 +18717,62 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         dets = db.get_detections(photo_id)
         return jsonify([dict(d) for d in dets])
 
+    @app.route("/api/photos/<int:photo_id>/subjects")
+    def api_photo_subjects(photo_id):
+        from subjects import payload
+        db = _get_db()
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return json_error("not found", 404)
+        return jsonify(payload(db, photo_id))
+
+    @app.route("/api/photos/<int:photo_id>/subjects/analyze", methods=["POST"])
+    @background_job
+    def api_analyze_photo_subjects(ctx, photo_id):
+        db = _get_db()
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return json_error("not found", 404)
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            from image_loader import get_canonical_image_path
+            from subjects import analyze_photo
+            thread_db = ctx.thread_db()
+            try:
+                ctx.checkpoint(job)
+                photo = thread_db.get_photo(photo_id, verify_workspace=True)
+                if photo is None:
+                    raise ValueError("Photo is no longer in this workspace")
+                folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+                path = get_canonical_image_path(photo, vireo_dir, folders)
+                count = analyze_photo(thread_db, photo_id, path,
+                                      checkpoint=lambda: ctx.checkpoint(job))
+                job["result"] = {"photo_id": photo_id, "subjects_analyzed": count}
+            finally:
+                thread_db.close()
+
+        return ctx.start("analyze-subjects", work, config={"photo_id": photo_id})
+
+    @app.route("/api/photos/<int:photo_id>/primary-subject", methods=["PUT"])
+    def api_primary_subject(photo_id):
+        from subjects import payload, select_primary
+        db = _get_db()
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return json_error("not found", 404)
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or "detection_id" not in body:
+            return json_error("detection_id is required; use null for automatic selection")
+        from pipeline_locks import acquire_photo_mask
+        lock = acquire_photo_mask(photo_id)
+        if not lock.acquire(blocking=False):
+            return json_error("Subject analysis is running for this photo. Try again when it finishes.", 409)
+        try:
+            select_primary(db, photo_id, body["detection_id"])
+        except ValueError as exc:
+            return json_error(str(exc))
+        finally:
+            lock.release()
+        return jsonify(payload(db, photo_id))
+
     def _miss_threshold_config_from_body(db, body):
         """Merge Misses-page threshold overrides into effective config."""
         import config as cfg
@@ -20745,7 +20807,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 recipe_to_json,
             )
             from image_loader import (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_DECODE_LINEAR,
                 RAW_EXTENSIONS,
                 load_image,
             )
@@ -20802,6 +20864,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "source_path": source_path,
                     "source_mtime": source_mtime,
                     "edit_math_version": EDIT_MATH_VERSION,
+                    **_camera_render_cache_fields(photo, recipe),
                 }
                 try:
                     if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -20815,14 +20878,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Derive the decode mode from the primary photo's extension
                 # rather than source_path so a future change to source_path
                 # resolution (working copy, companion JPEG fallback, etc.)
-                # cannot silently bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a
+                # cannot silently bypass RAW_DECODE_LINEAR for a
                 # RAW primary.
                 primary_is_raw = (
                     os.path.splitext(photo["filename"])[1].lower()
                     in RAW_EXTENSIONS
                 )
                 raw_decode = (
-                    RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
+                    RAW_DECODE_LINEAR if primary_is_raw else None
                 )
                 load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
                 img = load_image(source_path, max_size=None, **load_kwargs)
@@ -20917,6 +20980,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 rendered = apply_recipe_to_loaded_image(
                     img, recipe,
+                    camera_metadata=photo,
                     native_size=_recipe_source_dimensions(photo),
                     local_mask=_local_masks.load_snapshot(
                         vireo_dir, photo["id"], recipe,
@@ -22969,7 +23033,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         companion_path = photo["companion_path"]
         raw_source_available = os.path.exists(fallback_path)
-        # RAW primaries are decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS later;
+        # RAW primaries are decoded with RAW_DECODE_LINEAR later;
         # only use the clipped camera JPEG when the RAW source is offline.
         if companion_path and (not primary_is_raw or not raw_source_available):
             companion = os.path.join(photo["folder_path"], companion_path)
@@ -22995,7 +23059,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             recipe_to_json,
         )
         from image_loader import (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_DECODE_LINEAR,
             RAW_EXTENSIONS,
             load_image,
         )
@@ -23051,6 +23115,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "source_path": source_path,
                 "source_mtime": source_mtime,
                 "edit_math_version": EDIT_MATH_VERSION,
+                **_camera_render_cache_fields(photo, recipe),
             }
             try:
                 if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -23064,13 +23129,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Derive the decode mode from the primary photo's extension rather
             # than source_path so a future change to source_path resolution
             # (working copy, companion JPEG fallback, etc.) cannot silently
-            # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
+            # bypass RAW_DECODE_LINEAR for a RAW primary.
             primary_is_raw = (
                 os.path.splitext(photo["filename"])[1].lower()
                 in RAW_EXTENSIONS
             )
             raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
+                RAW_DECODE_LINEAR if primary_is_raw else None
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(source_path, max_size=None, **load_kwargs)
@@ -23159,6 +23224,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rendered = apply_recipe_to_loaded_image(
                 img, recipe,
+                camera_metadata=photo,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=_local_masks.load_snapshot(
                     vireo_dir, photo["id"], recipe,
@@ -26976,6 +27042,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         if pair_source and not pair_source_path:
             return "", 404
+        cache_recipe = None if pair_source == "jpeg" else db.get_photo_edit_recipe(photo_id)
         cache_filename = (
             f"{photo_id}_{pair_source}.jpg" if pair_source else filename
         )
@@ -27009,11 +27076,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 selected_source_mtime is None
                 or cached_mtime >= selected_source_mtime
             )
+            fresh = fresh and _camera_cache_matches(thumb_path, photo, cache_recipe)
             if fresh:
                 return _send_cached(thumb_dir, cache_filename)
             log.info(
-                "Thumbnail for photo %s is stale (cached mtime %.0f < "
-                "source file_mtime %.0f) — regenerating",
+                "Thumbnail for photo %s is stale (cached mtime %s, "
+                "source file_mtime %s, or changed camera profile) — regenerating",
                 photo_id, cached_mtime, selected_source_mtime,
             )
             # ``generate_thumbnail`` short-circuits when the destination
@@ -27056,7 +27124,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if sidecar_mtime is not None and (
                     selected_source_mtime is None
                     or sidecar_mtime >= selected_source_mtime
-                ):
+                ) and _camera_cache_matches(thumb_path, photo, cache_recipe):
                     return _send_cached(thumb_dir, cache_filename)
                 # A stale sidecar has to go before we fall through, for
                 # the same reason as the original: ``generate_thumbnail``
@@ -27149,14 +27217,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return "", 404
             # Derive the decode mode from the primary photo's extension
             # rather than source so a future change to render-source
-            # resolution cannot silently bypass RAW_DECODE_PRESERVE_HIGHLIGHTS
+            # resolution cannot silently bypass RAW_DECODE_LINEAR
             # for a RAW primary. Without this, EDIT_MATH_VERSION's cache
             # purge regenerates edited-RAW thumbnails through the default
             # JPEG-first decode and grid thumbnails diverge from previews
             # / exports (which preserve highlights).
-            from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS
+            from image_loader import RAW_DECODE_LINEAR, RAW_EXTENSIONS
             raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                RAW_DECODE_LINEAR
                 if (
                     pair_source == "raw"
                     or (
@@ -27183,6 +27251,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 thumb_dir,
                 size=thumb_size,
                 recipe=render_recipe,
+                camera_metadata=photo,
                 raw_decode=raw_decode,
                 min_source_size=min_source_size,
                 native_size=(
@@ -27235,6 +27304,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             thumb_dir,
                             size=thumb_size,
                             recipe=render_recipe,
+                            camera_metadata=photo,
                             native_size=(
                                 _recipe_source_dimensions(photo)
                                 if render_recipe else None
@@ -27527,6 +27597,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from pipeline_locks import acquire_photo_mask
             from quality import compute_all_quality_features
             from resource_ledger import ResourceWaitCancelled
+            from subjects import primary_order_sql, sync_primary
 
             thread_db = ctx.thread_db()
 
@@ -27581,7 +27652,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # already masked for this variant".
                 ws_id = thread_db._active_workspace_id
                 rows = thread_db.conn.execute(
-                    """SELECT p.id, p.folder_id, p.filename,
+                    f"""SELECT p.id, p.folder_id, p.filename,
                               d.detector_model,
                               d.box_x, d.box_y, d.box_w, d.box_h,
                               d.detector_confidence
@@ -27592,7 +27663,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         WHERE wf.workspace_id = ?
                           AND d.detector_model != 'full-image'
                           AND d.detector_confidence >= ?
-                        ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
+                        ORDER BY p.id, {primary_order_sql("d")}""",
                     (ws_id, min_detector_conf),
                 ).fetchall()
                 seen = set()
@@ -27658,11 +27729,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     break
                 mask_file_stage = None
                 try:
+                    # Sync the primary before deciding whether a cached
+                    # mask still applies. A workspace confidence-floor
+                    # change (or another workspace sharing this photo
+                    # writing photo_subject_state with a different floor)
+                    # can promote a new primary since this job was queued;
+                    # sync_primary clears mask_path, active_mask_variant,
+                    # dino_subject_embedding, and eye_*/eye_kp_fingerprint
+                    # when the primary detection actually changed, so the
+                    # subsequent eye stage recomputes for the newly
+                    # published subject instead of retaining the previous
+                    # subject's eye focus (Codex r4056563009).
+                    sync_primary(thread_db, photo_id, min_conf=min_detector_conf)
+                    commit_with_retry(thread_db.conn)
+                    # A user can change primary after this job was queued.
+                    current = [d for d in thread_db.get_detections(photo_id, min_conf=min_detector_conf)
+                               if d["detector_model"] != "full-image"]
+                    if not current:
+                        skipped += 1
+                        continue
+                    selected = current[0]
+                    photo["detector_model"] = selected["detector_model"]
+                    photo["prompt"] = tuple(selected["box_" + k] for k in "xywh")
+                    photo["detection_box"] = {k: selected["box_" + k] for k in "xywh"}
                     # Cache hit: photo_masks already has a row for
                     # (photo, configured variant) AND its stored prompt
                     # + detector still match the current primary
-                    # detection AND the file is on disk. Skip SAM and
-                    # just (re-)activate the cached mask.
+                    # detection AND the file is on disk AND the photos row
+                    # is already fully consistent for this (sam, dino)
+                    # pair. A subject A→B→A round-trip clears
+                    # dino_subject_embedding via sync_primary while the
+                    # matching photo_masks row for A remains cached; a
+                    # bare cache-hit shortcut would then re-activate the
+                    # mask and skip DINO, leaving dino_subject_embedding
+                    # null even though the job reported the photo
+                    # processed. Mirror the Process pipeline's
+                    # active_mask_variant/dino_embedding_variant guard
+                    # (Codex r4056402007).
                     existing = thread_db.get_photo_mask(
                         photo_id, sam2_variant,
                     )
@@ -27676,27 +27779,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 and cached_prompt == photo["prompt"]
                                 and existing["path"]
                                 and os.path.isfile(existing["path"])):
-                            thread_db.set_active_mask_variant(
-                                photo_id, sam2_variant,
-                            )
-                            masked += 1
-                            ctx.runner.push_event(
-                                job["id"],
-                                "progress",
-                                {
-                                    "current": i + 1,
-                                    "total": total,
-                                    "current_file": photo["filename"],
-                                    "rate": round(
-                                        (i + 1) / max(
-                                            time.time() - job["_start_time"], 0.01,
+                            state = thread_db.conn.execute(
+                                "SELECT active_mask_variant, "
+                                "dino_embedding_variant FROM photos "
+                                "WHERE id = ?",
+                                (photo_id,),
+                            ).fetchone()
+                            if (state is not None
+                                    and state["active_mask_variant"]
+                                    == sam2_variant
+                                    and state["dino_embedding_variant"]
+                                    == dinov2_variant):
+                                masked += 1
+                                ctx.runner.push_event(
+                                    job["id"],
+                                    "progress",
+                                    {
+                                        "current": i + 1,
+                                        "total": total,
+                                        "current_file": photo["filename"],
+                                        "rate": round(
+                                            (i + 1) / max(
+                                                time.time() - job["_start_time"], 0.01,
+                                            ),
+                                            1,
                                         ),
-                                        1,
-                                    ),
-                                    "phase": "Extracting features (SAM2 + DINOv2)",
-                                },
-                            )
-                            continue
+                                        "phase": "Extracting features (SAM2 + DINOv2)",
+                                    },
+                                )
+                                continue
+                            # Denormalised subject state is stale: fall
+                            # through to the full recompute below, which
+                            # writes set_active_mask_variant +
+                            # update_photo_embeddings atomically.
 
                     # Load working-resolution proxy
                     proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
@@ -29128,29 +29243,65 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/culling/apply", methods=["POST"])
     def api_culling_apply():
-        """Apply culling decisions — flag keepers and reject others."""
+        """Apply culling decisions — flag keepers and reject others.
+
+        ``unflag`` carries the photos the user explicitly moved back to
+        Review on the cull page. Without it those photos would keep a stale
+        "flagged"/"rejected" flag from an earlier apply, and the cull page
+        would show that old flag back on the card the moment the decision
+        stopped being a session override — a silently reverted decision.
+        Only ids the client sends are touched, never every REVIEW photo.
+        """
         db = _get_db()
         body = request.get_json(silent=True) or {}
         keepers = body.get("keepers", [])
         rejects = body.get("rejects", [])
+        unflag = body.get("unflag", [])
+
+        for name, value in (("keepers", keepers), ("rejects", rejects),
+                            ("unflag", unflag)):
+            if not isinstance(value, list):
+                return json_error(f"{name} must be a list")
+
+        # A photo listed in more than one action would otherwise land on
+        # whichever mutation ran last (or whichever kept its old flag), so
+        # the endpoint's answer would depend on prior state. Reject the
+        # payload before touching anything.
+        overlaps = (
+            (set(keepers) & set(rejects), "keepers", "rejects"),
+            (set(keepers) & set(unflag), "keepers", "unflag"),
+            (set(rejects) & set(unflag), "rejects", "unflag"),
+        )
+        for shared, a, b in overlaps:
+            if shared:
+                pid = next(iter(sorted(shared)))
+                return json_error(
+                    f"Photo {pid} listed in both {a} and {b}", 400
+                )
 
         # Pre-validate all photo IDs against workspace before any mutations
-        for pid in keepers + rejects:
+        for pid in keepers + rejects + unflag:
             if not db._photo_in_workspace(pid):
                 return json_error(f"Photo {pid} is not in the active workspace", 403)
 
         # Capture old flags before mutation
         old_flags = {}
-        for pid in keepers + rejects:
+        for pid in keepers + rejects + unflag:
             old = db.get_photo(pid)
             if old:
                 old_flags[pid] = old["flag"] or "none"
+
+        # Clearing a flag that is already "none" would write a no-op history
+        # entry, so only the photos that actually carry a flag are cleared.
+        cleared = [pid for pid in unflag if old_flags.get(pid, "none") != "none"]
 
         try:
             for pid in keepers:
                 db.update_photo_flag(pid, "flagged")
             for pid in rejects:
                 db.update_photo_flag(pid, "rejected")
+            for pid in cleared:
+                db.update_photo_flag(pid, "none")
         except ValueError as e:
             return json_error(str(e), 403)
 
@@ -29162,18 +29313,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for pid in rejects:
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
+        for pid in cleared:
+            flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'none'})
         if flag_items:
             for item in flag_items:
                 db.queue_flag_change_if_enabled(
                     item["photo_id"], item["new_value"], _commit=False
                 )
             db.conn.commit()
-            db.record_edit('flag',
-                           f'Culling: flagged {len(keepers)}, rejected {len(rejects)}',
-                           'culling_apply', flag_items, is_batch=True)
+            summary = f'Culling: flagged {len(keepers)}, rejected {len(rejects)}'
+            if cleared:
+                summary += f', cleared {len(cleared)}'
+            db.record_edit('flag', summary, 'culling_apply', flag_items, is_batch=True)
 
-        log.info("Culling applied: %d keepers, %d rejects", len(keepers), len(rejects))
-        return jsonify({"ok": True, "keepers": len(keepers), "rejects": len(rejects)})
+        log.info(
+            "Culling applied: %d keepers, %d rejects, %d cleared",
+            len(keepers), len(rejects), len(cleared),
+        )
+        return jsonify({
+            "ok": True,
+            "keepers": len(keepers),
+            "rejects": len(rejects),
+            "cleared": len(cleared),
+        })
 
     @app.route("/api/photos/search")
     def api_photo_text_search():
@@ -29411,6 +29573,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo:
             return "Not found", 404
 
+        # Get primary detection box — global detections table, threshold
+        # resolved from workspace-effective config in get_detections.
+        dets = db.get_detections(photo_id)
+        requested_detection = request.args.get("detection_id")
+        if requested_detection is not None:
+            try:
+                requested_detection = int(requested_detection)
+            except ValueError:
+                return json_error("Invalid detection_id")
+            dets = [d for d in dets if d["id"] == requested_detection
+                    and d["category"] == "animal" and d["detector_model"] != "full-image"]
+            if not dets:
+                return json_error("Subject not found", 404)
+
         # Try working copy first, fall back to original
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         image_path = None
@@ -29449,7 +29625,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # already exists for precisely this race.
             with working_copy_publication_guard():
                 touch_working_copy_access(image_path)
-        img = load_image(image_path, max_size=None)
+        preview_size = 1024 if request.args.get("detection_id") is not None else None
+        img = load_image(image_path, max_size=preview_size)
         if img is None and using_working_copy:
             # Quota enforcement can unlink the working copy after the
             # existence check above but before Pillow opens it. Re-resolve
@@ -29463,13 +29640,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if folder else None
             )
             if original_path and os.path.isfile(original_path):
-                img = load_image(original_path, max_size=None)
+                img = load_image(original_path, max_size=preview_size)
         if img is None:
             return "Could not load image", 500
 
-        # Get primary detection box — global detections table, threshold
-        # resolved from workspace-effective config in get_detections.
-        dets = db.get_detections(photo_id)
         det_box = None
         if dets:
             det_row = dets[0]
@@ -29477,9 +29651,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "x": det_row["box_x"], "y": det_row["box_y"],
                 "w": det_row["box_w"], "h": det_row["box_h"],
             }
+        if requested_detection is not None:
+            from subjects import suggested_crop
+            det_box = suggested_crop(det_row)
         if det_box:
             iw, ih = img.size
-            padding = cfg.load().get("detection_padding", 0.2)
+            padding = 0 if requested_detection is not None else cfg.load().get("detection_padding", 0.2)
             pad_w = det_box["w"] * padding
             pad_h = det_box["h"] * padding
             x1 = max(0, int((det_box["x"] - pad_w) * iw))
@@ -29487,9 +29664,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             x2 = min(iw, int((det_box["x"] + det_box["w"] + pad_w) * iw))
             y2 = min(ih, int((det_box["y"] + det_box["h"] + pad_h) * ih))
             crop = img.crop((x1, y1, x2, y2))
-            if crop.size[0] >= 50 and crop.size[1] >= 50:
+            if requested_detection is not None or (crop.size[0] >= 50 and crop.size[1] >= 50):
                 img = crop
 
+        if requested_detection is not None and request.args.get("suggested") == "1":
+            analysis = db.conn.execute(
+                "SELECT exposure_ev FROM detection_subjects WHERE detection_id=?",
+                (requested_detection,),
+            ).fetchone()
+            if analysis:
+                from image_edits import apply_recipe
+                img = apply_recipe(img, {"adjustments": {"exposure": analysis["exposure_ev"]}})
         img.thumbnail((800, 800), Image.LANCZOS)
         import io
 
@@ -29497,7 +29682,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=preview_quality)
         buf.seek(0)
-        return Response(buf.read(), mimetype="image/jpeg")
+        response = Response(buf.read(), mimetype="image/jpeg")
+        if requested_detection is not None:
+            # URLs include the analysis source fingerprint. Reusing a crop in
+            # the subject strip or toggling correction can use browser cache.
+            response.cache_control.private = True
+            response.cache_control.max_age = 3600 if request.args.get("v") else 0
+            response.add_etag()
+            response.make_conditional(request)
+        return response
 
     def allowed_preview_sizes():
         """Allowlist for /photos/<id>/preview?size=N.
@@ -29600,6 +29793,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stale_after_failed_invalidation = (
             cache_path in _invalid_preview_cache_paths
             or _is_preview_cache_invalid(db, photo_id, size)
+            or (os.path.exists(cache_path) and not _camera_cache_matches(cache_path, photo, render_recipe))
         )
         if (
             not bypass_cache
@@ -29992,7 +30186,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 normalize_recipe,
             )
             from image_loader import (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_DECODE_LINEAR,
                 RAW_EXTENSIONS,
                 load_image,
             )
@@ -30039,7 +30233,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             photo, recipe, size, vireo_dir,
                         )
                     )
-                    if request.args.get("analysis") == "1" or undersized_wc:
+                    if (
+                        request.args.get("analysis") == "1" or undersized_wc
+                        or os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+                    ):
                         source_recipe = {"version": SCHEMA_VERSION}
                 canonical, using_working_copy = _recipe_render_source(
                     photo, source_recipe, size, vireo_dir,
@@ -30058,7 +30255,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
                 )
                 raw_decode = (
-                    RAW_DECODE_PRESERVE_HIGHLIGHTS
+                    RAW_DECODE_LINEAR
                     if selected_ext in RAW_EXTENSIONS
                     else None
                 )
@@ -30183,7 +30380,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     and not original_failure_current
                 ):
                     fallback_raw_decode = (
-                        RAW_DECODE_PRESERVE_HIGHLIGHTS
+                        RAW_DECODE_LINEAR
                         if original_is_raw else None
                     )
                     fallback_kwargs = (
@@ -30285,6 +30482,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import local_masks
             img = apply_recipe_to_loaded_image(
                 img, recipe_json, max_size=size,
+                camera_metadata=photo,
                 native_size=native_dims,
                 detail_scale=preview_detail_scale,
                 local_mask=local_masks.load_snapshot(
@@ -30360,11 +30558,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 import io
 
                 from image_loader import (
-                    RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                    RAW_DECODE_LINEAR,
                     load_image,
                 )
                 load_kwargs = (
-                    {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+                    {"raw_decode": RAW_DECODE_LINEAR}
                     if pair_source == "raw" else {}
                 )
                 img = load_image(
@@ -30381,6 +30579,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = apply_recipe_to_loaded_image(
                         img,
                         recipe,
+                        camera_metadata=photo,
                         native_size=_recipe_source_dimensions(photo),
                         local_mask=local_masks.load_snapshot(
                             vireo_dir, photo_id, recipe,
@@ -30656,7 +30855,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if recipe:
             from image_loader import (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_DECODE_LINEAR,
                 RAW_EXTENSIONS,
                 load_image,
             )
@@ -30733,7 +30932,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return "Could not load image", 500
             raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                RAW_DECODE_LINEAR
                 if resolved_ext in RAW_EXTENSIONS
                 else None
             )
@@ -30874,7 +31073,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         original_retry_path
                     )[1].lower()
                     retry_kwargs = (
-                        {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+                        {"raw_decode": RAW_DECODE_LINEAR}
                         if retry_ext in RAW_EXTENSIONS
                         else {}
                     )
@@ -30891,6 +31090,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe,
+                camera_metadata=photo,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=local_masks.load_snapshot(
                     vireo_dir, photo_id, recipe,

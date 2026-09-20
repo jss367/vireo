@@ -297,3 +297,30 @@ def test_failed_jpeg_switch_reloads_raw_edit_saved_during_switch(
     expect(source).to_have_text('Viewing RAW · Show JPEG')
     expect(page.locator('#lightboxImg')).to_have_attribute('src', expected_url)
     expect(page.locator('#lightboxAdjustBtn')).to_be_enabled()
+
+
+def test_raw_exposure_uses_full_server_recipe_even_when_webgl_is_available(
+    live_server, page, paired_adjustment_photo,
+):
+    photo_id, raw, _jpeg = paired_adjustment_photo
+    page.route('**/edit-preview?*', lambda route: route.fulfill(body=raw, content_type='image/png'))
+    page.goto(live_server['url'] + '/browse')
+    page.evaluate("id => openLightbox(id, 'gradient.nef')", photo_id)
+    page.wait_for_function('_lbEditRecipeLoaded')
+    source = page.locator('#lightboxSourceControl')
+    expect(source).to_have_text('Viewing JPEG · Show RAW')
+    source.click()
+    expect(source).to_have_text('Viewing RAW · Show JPEG')
+    page.evaluate('''() => {
+        window.rawShaderCalls = 0;
+        VireoToneGL.supported = () => true;
+        VireoToneGL.render = () => { window.rawShaderCalls++; return true; };
+    }''')
+    page.locator('#lightboxAdjustBtn').click()
+    with page.expect_response('**/edit-preview?*') as preview:
+        _set_exposure(page, -2)
+    query = parse_qs(urlparse(preview.value.url).query)
+    assert json.loads(query['recipe'][0])['adjustments']['exposure'] == -2
+    assert 'analysis' not in query
+    assert page.evaluate('window.rawShaderCalls') == 0
+    _wait_saved(page)

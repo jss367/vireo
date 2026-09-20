@@ -16,6 +16,7 @@ dependencies = [
     "opencv-python-headless>=4.13.0.92",
     "onnxruntime>=1.22.0",
     "Pillow>=12.1.1",
+    "tifffile>=2026.1.28",
     "rawpy>=0.26.1",
     "requests>=2.32.0",
     "scipy>=1.17.1",
@@ -63,6 +64,7 @@ include = ["vireo*"]
 [tool.setuptools.package-data]
 vireo = [
     "data/**/*.json",
+    "data/denoise/*.txt",
     "templates/**/*.html",
     "static/**/*",
 ]

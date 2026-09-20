@@ -974,6 +974,12 @@ body {
 
     <div class="panel-band">
       <div class="panel-title">Detail</div>
+      <label for="denoiseModeSelect">Denoise method</label>
+      <select id="denoiseModeSelect" class="advanced-select" onchange="setDenoiseMode(this.value)">
+        <option value="standard">Standard</option>
+        <option value="camera">Camera-aware</option>
+      </select>
+      <p id="denoiseProfileStatus" class="local-unavailable-note" aria-live="polite"></p>
       <div class="control-row">
         <label for="sharpenRange">Sharpen</label>
         <input id="sharpenRange" data-adjustment="sharpen" type="range" min="0" max="100" step="1" value="0" oninput="setAdjustment('sharpen', this.value)">
@@ -1811,6 +1817,7 @@ function recipeForSave(recipe) {
 
   var vals = adjustmentValues(out);
   var adj = {};
+  if ((out.adjustments || {}).denoise_mode === 'camera') adj.denoise_mode = 'camera';
   ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction'].forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) adj[key] = Number(vals[key]);
   });
@@ -1890,6 +1897,7 @@ function updateRecipeSummary() {
     Object.keys(r.adjustments).forEach(function(key) {
       if (key === 'white_balance') parts.push('white balance');
       else if (key === 'sharpen_radius') return; // folded into "sharpen"
+      else if (key === 'denoise_mode') parts.push('camera-aware denoising');
       else if (key === 'noise_reduction') parts.push('noise reduction');
       else if (key === 'tone_curve' || key === 'point_curves') parts.push('tone curve');
       else if (key === 'point_color') parts.push('point color');
@@ -1931,6 +1939,7 @@ function syncControls() {
   set('sharpen', vals.sharpen, false);
   set('sharpen_radius', vals.sharpen_radius, true);
   set('noise_reduction', vals.noise_reduction, false);
+  syncDenoiseControls();
   syncAdvancedColorControls();
   var straight = Number(r.straighten || 0);
   var straightInput = document.getElementById('straightenRange');
@@ -2461,7 +2470,7 @@ function resetAdjustments() {
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   var kept = {};
   [
-    'sharpen', 'sharpen_radius', 'noise_reduction',
+    'sharpen', 'sharpen_radius', 'noise_reduction', 'denoise_mode',
     'tone_curve', 'point_curves', 'point_color', 'hsl', 'color_grading',
   ].forEach(function(key) {
     if (adj[key]) kept[key] = adj[key];
@@ -3033,11 +3042,42 @@ function positionMaskOverlay() {
   overlay.style.height = img.clientHeight + 'px';
 }
 
+function syncDenoiseControls() {
+  var mode = (editorState.recipe.adjustments || {}).denoise_mode || 'standard';
+  document.getElementById('denoiseModeSelect').value = mode;
+  var status = document.getElementById('denoiseProfileStatus');
+  if (mode !== 'camera') {
+    status.textContent = '';
+    return;
+  }
+  var profile = (editorState.photo || {}).denoise_profile || {};
+  var camera = profile.camera_model || profile.camera_make || 'Unknown camera';
+  var iso = profile.iso ? ' · ISO ' + profile.iso : '';
+  var message = profile.source === 'camera'
+    ? 'Camera profile + image noise estimate'
+    : 'No matching camera/ISO profile; using image noise estimate';
+  if (profile.match === 'nearest') message += ' (nearest measured ISO ' + profile.profile_iso[0] + ')';
+  if (profile.match === 'interpolated') message += ' (interpolated ISO)';
+  status.textContent = camera + iso + '. ' + message + '. Adjust Denoise below; inspect at 100% zoom. Larger previews and exports can take longer.';
+}
+
+function setDenoiseMode(mode) {
+  if (editorState.loading || editorState.showBefore) return;
+  var adj = cloneRecipe(editorState.recipe.adjustments || {});
+  if (mode === 'camera') adj.denoise_mode = 'camera';
+  else delete adj.denoise_mode;
+  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
+  else delete editorState.recipe.adjustments;
+  syncDenoiseControls();
+  markChanged(true);
+}
+
 function resetDetail() {
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   delete adj.sharpen;
   delete adj.sharpen_radius;
   delete adj.noise_reduction;
+  delete adj.denoise_mode;
   if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
   else delete editorState.recipe.adjustments;
   syncControls();
@@ -3231,6 +3271,7 @@ async function autoTone() {
     var vals = adjustmentValues(editorState.recipe);
     var existingAdj = cloneRecipe(editorState.recipe.adjustments || {});
     var adj = {};
+    if (existingAdj.denoise_mode === 'camera') adj.denoise_mode = 'camera';
     ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast'].forEach(function(k) {
       if (Math.abs(auto[k]) > 0.000001) adj[k] = auto[k];
     });

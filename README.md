@@ -17,11 +17,14 @@ Vireo helps wildlife photographers triage thousands of photos using machine lear
 - **Species classification** — Multiple models including BioCLIP, BioCLIP-2, BioCLIP-2.5, and an iNat21 fine-tuned classifier covering 10K+ species
 - **Wildlife detection** — MegaDetector v6 for animal/person/vehicle localization
 - **Automated triage pipeline** — Groups photos into encounters and bursts, scores quality (sharpness, exposure, composition, noise), and labels each photo KEEP/REVIEW/REJECT
+- **Selectable subjects** — Each retained animal gets a suggested crop, species predictions, a quality score, and an exposure suggestion. Vireo chooses the best-quality subject; choose another in the lightbox without changing your saved edits.
 - **Subject-aware quality scoring** — Uses SAM2 segmentation masks and DINOv2 embeddings to evaluate the actual subject, not just the frame
 - **iNaturalist integration** — Taxonomy lookup and direct observation uploads
 - **Browse, review, and cull** — Filter, search, rate, keyword, and flag photos in a responsive web UI
 - **[Search across metadata](docs/searching-photos.md)** — Combine words with AND, OR, NOT, parentheses, and quoted phrases across file tags, folders, keywords, camera details, and current predictions
 - **Non-destructive photo editing** — Adjust geometry, tone, white balance, detail, five-point curves, individual color ranges, and shadow/midtone/highlight grading with reusable presets
+- **RAW editing with greater precision** — Keep decoded RAW pixels in floating point through editing, retain highlight detail for exposure adjustments, and export 16-bit TIFFs. See [RAW development](docs/raw-development.md) for processing details and fallback limitations.
+- **[Camera-aware denoising](docs/camera-aware-denoising.md)** — Optional camera/ISO-guided noise reduction with image-based fallback, luminance and color filtering, and support for local subject/background edits
 - **Panorama stitching** — Select 2–12 overlapping photos in Browse, then choose **More → Create Panorama** (also available by right-click). Includes current edits and saves a separate JPEG or PNG without overwriting existing files. Choose an existing output folder or save beside the first selected photo, then rescan that folder to add the result to Browse. Inputs are limited to 2,048 or 4,096 pixels on the long edge; output is 8-bit color and may need cropping to remove black borders. Follow progress or cancel in Jobs; cancellation takes effect after the current stitching stage.
 - **Map view** — Geographic visualization of geotagged photos
 - **Photo location review** — In Review Photo Locations, choose **Missing GPS · group by time** to review suggested outings across all available photos or a collection. Preview examples, inspect and split groups, and assign a saved place or custom name in batches. Also available from Browse’s **Add Locations by Capture Time** menu action.
@@ -44,7 +47,7 @@ For downloads, system requirements, and user documentation, visit [vireo.photo](
 
 AI models are downloaded automatically on first use.
 
-64-bit Windows 11 is available as a public beta with CPU inference support. See
+64-bit Windows 11 is supported with CPU inference. See
 [the Windows support guide](docs/WINDOWS_SUPPORT.md) for optional integrations,
 storage coverage, and troubleshooting.
 

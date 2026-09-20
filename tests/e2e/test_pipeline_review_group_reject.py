@@ -2850,27 +2850,34 @@ def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
         json.dump(cache, cache_file)
     page.goto(f"{live_server['url']}/cull")
     page.on('dialog', lambda dialog: dialog.accept())
+    # ids[0] was flagged before this run. That decision is already applied, so
+    # the page shows it as a keeper instead of the fresh REJECT suggestion,
+    # and applying leaves the flag alone rather than overwriting it.
+    expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\bkeep\b'))
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
-    assert _flags(db, ids) == ['rejected', 'flagged', 'rejected', 'rejected']
+    assert _flags(db, ids) == ['flagged', 'flagged', 'rejected', 'rejected']
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Undone: Culling')
     assert page.url.endswith('/cull')
     assert _flags(db, ids) == ['flagged', 'none', 'none', 'none']
+    # Undo took the flags back off, so every card except the still-flagged
+    # ids[0] falls back to what this run's analysis suggests.
     expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\bkeep\b'))
-    for pid in ids[1:]:
-        expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\breview\b'))
+    expect(page.locator(f'.cull-card[data-photo-id="{ids[1]}"]')).to_have_class(re.compile(r'\bkeep\b'))
+    for pid in ids[2:]:
+        expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\breject\b'))
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
     page.locator('#historyRedoBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Redone: Culling')
-    assert _flags(db, ids) == ['rejected', 'flagged', 'rejected', 'rejected']
+    assert _flags(db, ids) == ['flagged', 'flagged', 'rejected', 'rejected']
 
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Undone: Culling')
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
-    assert _flags(db, ids) == ['flagged', 'none', 'none', 'none']
+    assert _flags(db, ids) == ['flagged', 'flagged', 'rejected', 'rejected']
 
 
 def test_history_panel_undo_labels_the_actual_reversible_edit(live_server, page):
@@ -2983,7 +2990,10 @@ def test_cull_history_preserves_analysis_scope_and_unrelated_suggestions(live_se
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
-    actions = ['keep', 'reject'] if history_action == 'rating' else ['review', 'review']
+    # Undoing an unrelated edit — a rating or one photo's flag — leaves both
+    # cards on this run's suggestion. Neither photo carries a saved flag once
+    # the undo lands, so nothing overrides the analysis.
+    actions = ['keep', 'reject']
     for pid, action in zip(ids[:2], actions, strict=True):
         expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\b' + action + r'\b'))
     assert page.evaluate('JSON.stringify(pipelineResults.encounters) === window.cullAnalysisBefore')
@@ -3021,20 +3031,23 @@ def test_cull_apply_keeps_saved_decisions_after_rating_undo(live_server, page, s
     _write_grouped_pipeline_cache(live_server, ids)
     page.goto(live_server['url'] + '/cull')
     expect(page.locator('.cull-card')).to_have_count(4)
-    page.evaluate('''({ids, scoped}) => {
+    page.evaluate('''({scoped}) => {
       pipelineResults.photos.forEach(photo => { photo.label = 'REJECT'; });
       if (scoped) selectedCollectionId = 123;
       rebuildCullDataFromPipeline();
-      cullData.species_groups.forEach(sg => (sg.scene_groups || sg.pose_groups).forEach(pg => {
-        pg.photos.forEach(photo => { photo.action = photo.photo_id === ids[0] ? 'keep' : 'review'; });
-      }));
-      cullDirty = true;
-      renderCulling();
-    }''', {'ids': ids, 'scoped': scoped})
+    }''', {'scoped': scoped})
+    # Decide by clicking, the way the user does, so the decisions are pinned:
+    # every card starts on REJECT, one click moves it to Keep, two to Review.
+    page.click(f'.cull-card[data-photo-id="{ids[0]}"] .cull-card-action')
+    expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\bkeep\b'))
+    for pid in ids[1:]:
+        page.click(f'.cull-card[data-photo-id="{pid}"] .cull-card-action')
+        page.click(f'.cull-card[data-photo-id="{pid}"] .cull-card-action')
+        expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\breview\b'))
     page.on('dialog', lambda dialog: dialog.accept())
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
-    assert page.evaluate('cullUseSavedFlags') is True
+    assert page.evaluate('cullDirty') is False
     assert page.evaluate('id => pipelineResults.photos.find(p => p.id === id).flag', ids[0]) == 'flagged'
     page.evaluate('''id => safeFetch('/api/photos/' + id + '/rating', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({rating: 1})

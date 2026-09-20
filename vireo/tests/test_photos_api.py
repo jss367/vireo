@@ -4337,7 +4337,7 @@ def test_edit_preview_analysis_keeps_raw_on_recipe_render_path(
     )
 
     assert seen_recipes == [
-        {},
+        {"version": 1},  # Neutral RAW previews must also bypass legacy JPEGs.
         {"version": 1},
         {"version": 1, "rotation": 90},
     ]
@@ -4679,7 +4679,7 @@ def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
-    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    from image_loader import RAW_DECODE_LINEAR
     original_load_image = thumbnails.load_image
     loaded = []
 
@@ -4697,13 +4697,13 @@ def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
     loaded_paths = [path for path, _ in loaded]
     assert loaded_paths == [companion_path]
     # Even though the resolved source is the companion JPEG, the
-    # thumbnail self-heal must request RAW_DECODE_PRESERVE_HIGHLIGHTS so
+    # thumbnail self-heal must request RAW_DECODE_LINEAR so
     # the call would demosaic the RAW with highlight preservation if
     # _recipe_render_source had returned the RAW path instead. Keying
     # the decode mode off the photo's primary extension (not the
     # resolved source) keeps thumbnails in sync with previews/exports.
     _, loaded_kwargs = loaded[0]
-    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_LINEAR
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (267, 400)
 
@@ -5038,7 +5038,7 @@ def test_edited_original_decodes_raw_with_highlight_preservation(
     """Edited RAW+JPEG originals must decode the RAW, not substitute the JPEG.
 
     The companion JPEG is the camera-baked render with highlights already
-    clipped; substituting it bypasses RAW_DECODE_PRESERVE_HIGHLIGHTS and applies
+    clipped; substituting it bypasses RAW_DECODE_LINEAR and applies
     the user's edits to clipped data.
     """
     import io
@@ -5046,7 +5046,7 @@ def test_edited_original_decodes_raw_with_highlight_preservation(
 
     import app as app_module
     import image_loader
-    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    from image_loader import RAW_DECODE_LINEAR
     from PIL import Image
 
     app, db, photo_id = client_with_photo
@@ -5089,7 +5089,7 @@ def test_edited_original_decodes_raw_with_highlight_preservation(
     assert loaded_path.lower().endswith(".nef"), (
         f"endpoint should load RAW primary, got {loaded_path!r}"
     )
-    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_LINEAR
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (600, 800)
 
