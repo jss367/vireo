@@ -349,3 +349,71 @@ def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(
     assert migrated.get_photo_mask(photo, "sam2-large")["quality_input_recipe"] == ra.RECIPE
     assert migrated.get_photo_mask(photo, "sam2-small")["quality_input_recipe"] == "unknown-raw-analysis-recipe"
     migrated.close()
+
+
+@pytest.mark.parametrize("kind", ["pending", "match"])
+def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, kind):
+    from classify_job import _store_match_prediction, _store_pending_detection_prediction
+    from db import Database
+
+    db = Database(str(tmp_path / "refresh.db"))
+    workspace = db._active_workspace_id
+    folder = db.add_folder(str(tmp_path))
+    photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
+    detection = db.save_detections(photo, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.add_prediction(detection, "Robin", 0.2, "model", status="accepted",
+                      taxonomy={"genus": "old"}, labels_fingerprint="labels")
+    original_id = db.conn.execute("SELECT id FROM predictions").fetchone()[0]
+    other_workspace = db.create_workspace("Other")
+    db.add_workspace_folder(other_workspace, folder)
+    db.set_active_workspace(other_workspace)
+    db.add_prediction(detection, "Robin", 0.2, "model", status="rejected", labels_fingerprint="labels")
+    db.set_active_workspace(workspace)
+    db.add_prediction(detection, "Stale species", 0.99, "model", labels_fingerprint="labels")
+    db.add_prediction(detection, "Other labels", 0.7, "model", labels_fingerprint="other-labels")
+    db.add_prediction(detection, "Other model", 0.7, "other-model", labels_fingerprint="labels")
+    db.record_classifier_run(detection, "model", "labels", prediction_count=2)
+    item = {
+        "detection_id": detection, "prediction": "Robin", "confidence": 0.9,
+        "taxonomy": {"genus": "Turdus", "scientific_name": "Turdus migratorius"},
+        "alternatives": [{"species": "Sparrow", "confidence": 0.1}],
+        "_replace_prediction_outputs": True,
+    }
+    if kind == "match":
+        _store_match_prediction(db, item, "model", "labels")
+    else:
+        _store_pending_detection_prediction(db, item, "model", "labels", "new", group_id="new-group")
+    rows = db.conn.execute(
+        "SELECT * FROM predictions WHERE detection_id=? AND classifier_model='model' "
+        "AND labels_fingerprint='labels' ORDER BY confidence DESC", (detection,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Robin", "Sparrow"]
+    assert rows[0]["id"] == original_id
+    assert rows[0]["confidence"] == 0.9
+    assert rows[0]["taxonomy_genus"] == "Turdus"
+    reviews = db.conn.execute(
+        "SELECT workspace_id, status FROM prediction_review WHERE prediction_id=?", (original_id,),
+    ).fetchall()
+    assert {r["workspace_id"]: r["status"] for r in reviews} == {
+        workspace: "accepted", other_workspace: "rejected",
+    }
+    assert db.conn.execute("SELECT count(*) FROM predictions").fetchone()[0] == 4
+    assert db.conn.execute("SELECT count(*) FROM classifier_runs").fetchone()[0] == 1
+    # A previous alternative promoted to top-1 returns to pending.
+    item.update(prediction="Sparrow", confidence=0.95, alternatives=[])
+    _store_pending_detection_prediction(db, item, "model", "labels", "new")
+    assert db.conn.execute(
+        "SELECT status FROM prediction_review r JOIN predictions p ON p.id=r.prediction_id "
+        "WHERE p.species='Sparrow' AND r.workspace_id=?", (workspace,),
+    ).fetchone()[0] == "pending"
+    # A later normal-image reinference can replace the RAW candidates too.
+    item.update(prediction="Warbler", confidence=0.8, alternatives=[], taxonomy=None)
+    _store_pending_detection_prediction(db, item, "model", "labels", "new")
+    rows = db.conn.execute(
+        "SELECT species FROM predictions WHERE classifier_model='model' AND labels_fingerprint='labels'"
+    ).fetchall()
+    assert [r[0] for r in rows] == ["Warbler"]
+    db.close()

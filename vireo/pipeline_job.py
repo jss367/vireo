@@ -6647,6 +6647,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 clear_run_keys=False,
                             )
 
+                    # A cache miss can be a new RAW recipe (or a return to
+                    # normal processing), not just explicit reclassification.
+                    # Replace only outputs that were freshly inferred; cached,
+                    # failed and unreachable detections retain their old data.
+                    for item in raw_results:
+                        if not item.get("_existing"):
+                            item["_replace_prediction_outputs"] = True
                     group_result = _store_grouped_predictions(
                         raw_results, job["id"], model_name,
                         grouping_window, similarity_threshold, tax, thread_db,

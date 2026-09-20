@@ -19022,6 +19022,7 @@ class Database:
         preserve_manual_review=False,
         match_score=None,
         from_fresh_inference=False,
+        refresh_output=False,
     ):
         """Store a classification prediction for a detection.
 
@@ -19054,6 +19055,8 @@ class Database:
                 value it read back from somewhere else — cache
                 materialization, a backfill — in which case an existing score
                 is left alone and only a NULL is filled.
+            refresh_output: replace the output fields of an existing candidate
+                while retaining its row ID and manual review decisions.
         """
         if detection_id is None:
             raise ValueError(
@@ -19118,6 +19121,18 @@ class Database:
                 (detection_id, model, labels_fingerprint, species),
             ).fetchone()
             pred_id = row["id"] if row else None
+            if pred_id is not None and refresh_output:
+                self.conn.execute(
+                    """UPDATE predictions SET confidence=?, category=?,
+                       taxonomy_kingdom=?, taxonomy_phylum=?, taxonomy_class=?,
+                       taxonomy_order=?, taxonomy_family=?, taxonomy_genus=?,
+                       scientific_name=?, source_taxon_id=?, match_score=?
+                       WHERE id=?""",
+                    (confidence, category, tax.get("kingdom"), tax.get("phylum"),
+                     tax.get("class"), tax.get("order"), tax.get("family"),
+                     tax.get("genus"), tax.get("scientific_name"), tax.get("taxon_id"),
+                     match_score, pred_id),
+                )
             if pred_id is not None and labels_fingerprint_full is not None:
                 self.conn.execute(
                     """UPDATE predictions
@@ -19162,9 +19177,11 @@ class Database:
                     )
         # Write workspace-scoped review state only when the caller actually
         # supplied something beyond the defaults. Keeping pending rows out of
-        # prediction_review is intentional: absence == pending.
+        # prediction_review is intentional: absence == pending. A refreshed
+        # candidate must also clear an earlier automatic alternative status.
         has_review_state = (
-            status != "pending"
+            refresh_output
+            or status != "pending"
             or group_id is not None
             or vote_count is not None
             or total_votes is not None
@@ -19172,7 +19189,7 @@ class Database:
         )
         if pred_id is not None and has_review_state:
             ws_id = self._ws_id()
-            if preserve_manual_review:
+            if preserve_manual_review or refresh_output:
                 review = self.conn.execute(
                     """SELECT status, individual FROM prediction_review
                        WHERE prediction_id = ? AND workspace_id = ?""",
@@ -19200,6 +19217,24 @@ class Database:
                 (pred_id, ws_id, status, individual, group_id,
                  vote_count, total_votes),
             )
+        self.conn.commit()
+
+    def retain_prediction_candidates(self, detection_id, model, labels_fingerprint, species):
+        """Remove obsolete candidates after their replacement outputs were stored.
+
+        Matching candidates keep their IDs and reviews in every workspace.
+        Other detections, models, label sets and classifier run keys are untouched.
+        """
+        retained = {normalize_keyword_display(s) or s for s in species}
+        rows = self.conn.execute(
+            "SELECT id, species FROM predictions WHERE detection_id=? "
+            "AND classifier_model=? AND labels_fingerprint=?",
+            (detection_id, model, labels_fingerprint),
+        ).fetchall()
+        self.conn.executemany(
+            "DELETE FROM predictions WHERE id=?",
+            [(row["id"],) for row in rows if row["species"] not in retained],
+        )
         self.conn.commit()
 
     def reconcile_match_review_state(

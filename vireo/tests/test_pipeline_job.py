@@ -4404,6 +4404,65 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     )
 
 
+@pytest.mark.parametrize("species", ["Robin", "Warbler"])
+def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, species):
+    import classifier
+    import classify_job
+    import config as cfg
+    import labels_fingerprint
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    db_path = str(tmp_path / "refresh.db")
+    db = Database(db_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    folder = db.add_folder(folder_path)
+    photo = db.add_photo(folder, "bird.jpg", ".jpg", 1000, 1)
+    _drop_jpeg(folder_path, "bird.jpg")
+    detection = db.save_detections(photo, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.add_prediction(detection, "Robin", 0.2, "BioCLIP", status="accepted")
+    db.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
+    collection = db.add_collection("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
+    model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    monkeypatch.setattr(labels_fingerprint, "compute_fingerprint", lambda *a, **k: "legacy")
+    monkeypatch.setattr(classifier, "Classifier", lambda *a, **k: object())
+    monkeypatch.setattr(classify_job, "_detect_batch", lambda photos, *a, **k: (
+        {p["id"]: [{**dict(d), "confidence": d["detector_confidence"]} for d in db.get_detections(p["id"])] for p in photos}, len(photos), {p["id"] for p in photos},
+    ))
+    monkeypatch.setattr(classify_job, "_prepare_image", lambda *a, **k: (
+        Image.new("RGB", (100, 100)), folder_path, os.path.join(folder_path, "bird.jpg"),
+    ))
+
+    def infer(batch, clf, model_type, model_name, thread_db, results, top_k=1):
+        for entry in batch:
+            results.append({
+                "photo": entry["photo"], "detection_id": entry["detection_id"],
+                "folder_path": folder_path, "image_path": entry["image_path"],
+                "prediction": species, "confidence": 0.9, "timestamp": None,
+                "filename": "bird.jpg", "embedding": None, "taxonomy": {"genus": "New genus"},
+            })
+        return 0
+
+    monkeypatch.setattr(classify_job, "_flush_batch", infer)
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, PipelineParams(
+        collection_id=collection, model_ids=[model], raw_subject_analysis=True,
+        skip_extract_masks=True, skip_regroup=True,
+    ))
+    rows = db.conn.execute("SELECT id, species, confidence, taxonomy_genus FROM predictions").fetchall()
+    assert len(rows) == 1
+    assert (rows[0]["species"], rows[0]["confidence"], rows[0]["taxonomy_genus"]) == (species, 0.9, "New genus")
+    if species == "Robin":
+        assert db.conn.execute("SELECT status FROM prediction_review WHERE prediction_id=?", (rows[0]["id"],)).fetchone()[0] == "accepted"
+    assert db.conn.execute("SELECT count(*) FROM classifier_runs").fetchone()[0] == 1
+    db.close()
+
+
 def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold(
     tmp_path, monkeypatch,
 ):

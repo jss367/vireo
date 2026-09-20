@@ -2495,6 +2495,8 @@ def _store_match_prediction(
     the cached top-1 on later non-reclassify runs.
     """
     species = species or item["prediction"]
+    refresh_output = item.get("_replace_prediction_outputs", False) and not item.get("_existing")
+    retained_species = [species]
     confidence = item["confidence"] if confidence is None else confidence
     tax_hierarchy = _prediction_taxonomy(tax, species, taxonomy or item.get("taxonomy"))
     db.add_prediction(
@@ -2508,6 +2510,7 @@ def _store_match_prediction(
         taxonomy=tax_hierarchy,
         labels_fingerprint=labels_fingerprint,
         preserve_manual_review=True,
+        refresh_output=refresh_output,
         match_score=_row_match_score(item, species),
         from_fresh_inference=True,
     )
@@ -2541,6 +2544,7 @@ def _store_match_prediction(
             if alt_key in seen_species:
                 continue
             seen_species.add(alt_key)
+            retained_species.append(alt["species"])
             alt_tax = _prediction_taxonomy(tax, alt["species"], alt.get("taxonomy"))
             db.add_prediction(
                 detection_id=item["detection_id"],
@@ -2552,6 +2556,7 @@ def _store_match_prediction(
                 taxonomy=alt_tax,
                 labels_fingerprint=labels_fingerprint,
                 preserve_manual_review=True,
+                refresh_output=refresh_output,
                 match_score=alt.get("raw_score"),
                 from_fresh_inference=True,
             )
@@ -2563,6 +2568,8 @@ def _store_match_prediction(
         item["detection_id"], model_name, labels_fingerprint,
         species, "match",
     )
+    if refresh_output:
+        db.retain_prediction_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
 
 
 def _recognized_taxon_keywords(keywords, tax):
@@ -2689,6 +2696,8 @@ def _store_pending_detection_prediction(
                 )
             return
 
+    refresh_output = item.get("_replace_prediction_outputs", False) and not item.get("_existing")
+    retained_species = [item["prediction"]]
     db.add_prediction(
         detection_id=item["detection_id"],
         species=item["prediction"],
@@ -2703,6 +2712,7 @@ def _store_pending_detection_prediction(
         labels_fingerprint=labels_fingerprint,
         match_score=_row_match_score(item, item["prediction"]),
         from_fresh_inference=True,
+        refresh_output=refresh_output,
     )
     db.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
@@ -2723,6 +2733,7 @@ def _store_pending_detection_prediction(
         if alt_key in seen_species:
             continue
         seen_species.add(alt_key)
+        retained_species.append(alt["species"])
         alt_tax = _prediction_taxonomy(tax, alt["species"], alt.get("taxonomy"))
         db.add_prediction(
             detection_id=item["detection_id"],
@@ -2735,7 +2746,10 @@ def _store_pending_detection_prediction(
             labels_fingerprint=labels_fingerprint,
             match_score=alt.get("raw_score"),
             from_fresh_inference=True,
+            refresh_output=refresh_output,
         )
+    if refresh_output:
+        db.retain_prediction_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
 
 
 def _store_grouped_predictions(
