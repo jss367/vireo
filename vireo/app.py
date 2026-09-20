@@ -17297,6 +17297,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         items = []
         keyword_id = None
         species = None
+        species_key = None
         for pid in pred_ids:
             if pid in handled:
                 continue
@@ -17317,13 +17318,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # no keyword was created. Folding it into the check below
                 # would 400 a perfectly uniform batch.
                 continue
-            # One edit row carries one ``new_value`` keyword id, which the
-            # undo handler applies to every item. Accepting a mixed bag of
-            # species through one call would therefore undo incorrectly —
-            # refuse rather than record an entry that cannot be reversed.
+            # Browse groups predictions by species identity, not keyword ID.
+            # Different aliases can legitimately tag different keyword rows
+            # of that species. Record the actual ID on each history item so
+            # undo/redo reverses exactly that tag, while still rejecting a
+            # batch that resolves to genuinely different species.
             if keyword_id is None:
                 keyword_id, species = result["keyword_id"], result["species"]
-            elif result["keyword_id"] != keyword_id:
+                species_key = result["species_key"]
+            elif result["species_key"] != species_key:
                 db.conn.rollback()
                 return json_error(
                     "prediction_ids must all resolve to one species", 400,
@@ -17339,7 +17342,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 items.append({
                     "photo_id": a["photo_id"],
                     "old_value": old_value,
-                    "new_value": str(keyword_id),
+                    "new_value": str(result["keyword_id"]),
                 })
 
         has_accepted_predictions = bool(items)
@@ -17388,16 +17391,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if old_meta.get("no_tag"):
                     continue
                 photo_id = item["photo_id"]
+                item_species = db.conn.execute(
+                    "SELECT name FROM keywords WHERE id = ?", (int(item["new_value"]),),
+                ).fetchone()["name"]
                 flat_removals = [dict(row) for row in db.conn.execute(
                     """SELECT workspace_id, value FROM pending_changes
                        WHERE photo_id = ? AND change_type = 'keyword_remove_flat'
                          AND value = ? COLLATE NOCASE""",
-                    (photo_id, species),
+                    (photo_id, item_species),
                 )]
                 # accept_prediction queues an add directly. Reconcile it
                 # with any pending removal before applying the shared helper.
-                db.remove_pending_changes(photo_id, "keyword_add", species, _commit=False)
-                _queue_keyword_add(photo_id, species, _commit=False)
+                db.remove_pending_changes(photo_id, "keyword_add", item_species, _commit=False)
+                _queue_keyword_add(photo_id, item_species, _commit=False)
                 # Keep the suppression records cleared by the add, including
                 # those in other workspaces sharing this photo's sidecar.
                 old_meta.update(symmetric_keyword_queue=True, flat_removals=flat_removals)
