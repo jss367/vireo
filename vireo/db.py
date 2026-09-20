@@ -1263,6 +1263,7 @@ class Database:
                 labels_fingerprint   TEXT NOT NULL,
                 labels_fingerprint_full TEXT,
                 runtime_fingerprint TEXT NOT NULL DEFAULT 'legacy',
+                input_recipe TEXT,
                 input_fingerprint TEXT,
                 run_at               TEXT DEFAULT (datetime('now')),
                 prediction_count     INTEGER NOT NULL DEFAULT 0,
@@ -2211,6 +2212,15 @@ class Database:
                 "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id) "
                 "AND photo_id IN (SELECT d.photo_id FROM subject_raw_analysis a "
                 "JOIN detections d ON d.id=a.detection_id)"
+            )
+        try:
+            self.conn.execute("SELECT input_recipe FROM classifier_runs LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE classifier_runs ADD COLUMN input_recipe TEXT")
+            # Older experimental runs did not record recipe ownership.
+            self.conn.execute(
+                "UPDATE classifier_runs SET input_recipe='unknown-raw-recipe' "
+                "WHERE detection_id IN (SELECT detection_id FROM subject_raw_analysis)"
             )
         # Quality features belong to the mask/recipe that produced them.
         # Only the active variant can be backfilled from the old photo row.
@@ -21590,23 +21600,25 @@ class Database:
         labels_fingerprint_full=None,
         runtime_fingerprint="legacy",
         input_fingerprint=None,
+        input_recipe=None,
     ):
         self.conn.execute(
             """INSERT INTO classifier_runs
                  (detection_id, classifier_model, labels_fingerprint,
                   labels_fingerprint_full, runtime_fingerprint,
-                  input_fingerprint, prediction_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                  input_fingerprint, prediction_count, input_recipe)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(detection_id, classifier_model, labels_fingerprint)
                DO UPDATE SET labels_fingerprint_full =
                                  excluded.labels_fingerprint_full,
                              runtime_fingerprint = excluded.runtime_fingerprint,
                              input_fingerprint = excluded.input_fingerprint,
                              prediction_count = excluded.prediction_count,
+                             input_recipe = excluded.input_recipe,
                              run_at = datetime('now')""",
             (detection_id, classifier_model, labels_fingerprint,
              labels_fingerprint_full, runtime_fingerprint,
-             input_fingerprint, prediction_count),
+             input_fingerprint, prediction_count, input_recipe),
         )
         commit_with_retry(self.conn)
 
@@ -21788,13 +21800,16 @@ class Database:
         rows = self.conn.execute(
             """SELECT cr.classifier_model, cr.labels_fingerprint
                FROM classifier_runs cr
-               WHERE cr.detection_id = ?""" + runtime_clause,
+               WHERE cr.detection_id = ? AND cr.input_recipe IS NULL""" + runtime_clause,
             params,
         ).fetchall()
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
     def get_classifier_run_key_gate(self, detection_id, runtime_fingerprint):
         """Return ``(accepted, rejected)`` classifier-run key sets for a detection.
+
+        These gates serve normal-image runs. A RAW recipe always requires
+        fresh normal inference, even when a manual decision pins its species.
 
         ``accepted`` mirrors what ``get_classifier_run_keys(detection_id,
         runtime_fingerprint=runtime_fingerprint)`` returns — keys whose row
@@ -21821,7 +21836,7 @@ class Database:
         rows = self.conn.execute(
             """SELECT cr.classifier_model,
                       cr.labels_fingerprint,
-                      cr.runtime_fingerprint,
+                      cr.runtime_fingerprint, cr.input_recipe,
                       EXISTS (
                           SELECT 1 FROM predictions p
                           JOIN prediction_review pr ON pr.prediction_id = p.id
@@ -21838,7 +21853,7 @@ class Database:
         accepted, rejected = set(), set()
         for row in rows:
             key = (row["classifier_model"], row["labels_fingerprint"])
-            if (
+            if row["input_recipe"] is None and (
                 row["runtime_fingerprint"] == runtime_fingerprint
                 or row["runtime_fingerprint"] == "legacy"
                 or row["has_individual_override"]
@@ -22019,6 +22034,9 @@ class Database:
 
             rt_predicate_sql_cr, rt_predicate_params = _runtime_predicate("cr")
             rt_predicate_sql = rt_predicate_sql_cr
+
+        # RAW outputs cannot satisfy a normal-image run, even when reviewed.
+        rt_predicate_sql += " AND cr.input_recipe IS NULL"
 
         # For photos whose detector iteration completed, mirror the runtime's
         # in-memory target selection rather than querying every detection row

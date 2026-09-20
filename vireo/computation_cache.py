@@ -656,6 +656,7 @@ def promote_and_publish_classifier_run(
         "artifact_schema": ARTIFACT_SCHEMA,
         "type": "classification",
         "classifier_model": classifier_model,
+        "input_recipe": model_identity.get("raw_subject_analysis"),
         "detector_model": row["detector_model"],
         "photo_sha256": row["file_hash"],
         "runtime_fingerprint": classifier_runtime,
@@ -2437,8 +2438,8 @@ def materialize_artifacts(
                         """INSERT INTO classifier_runs
                              (detection_id, classifier_model, labels_fingerprint,
                               labels_fingerprint_full, runtime_fingerprint,
-                              input_fingerprint, prediction_count)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)
+                              input_fingerprint, prediction_count, input_recipe)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(detection_id, classifier_model,
                                        labels_fingerprint)
                            DO UPDATE SET
@@ -2446,13 +2447,14 @@ def materialize_artifacts(
                              runtime_fingerprint = excluded.runtime_fingerprint,
                              input_fingerprint = excluded.input_fingerprint,
                              prediction_count = excluded.prediction_count,
+                             input_recipe = excluded.input_recipe,
                              run_at = datetime('now')""",
                         (
                             detection_id, artifact["classifier_model"],
                             labels["short_fingerprint"], labels["fingerprint"],
                             artifact["runtime_fingerprint"],
                             artifact["input_fingerprint"],
-                            len(subject["candidates"]),
+                            len(subject["candidates"]), artifact.get("input_recipe"),
                         ),
                     )
                     applied_subjects += 1

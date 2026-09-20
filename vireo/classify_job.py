@@ -535,7 +535,7 @@ def _all_photos_cache_satisfied(
         return False
     from db import _chunks  # module-level helper, avoids exceeding SQLITE_MAX_VARIABLE_NUMBER
 
-    filter_sql = ""
+    filter_sql = " AND cr.input_recipe IS NULL"
     filter_args = []
     if classifier_model is not None:
         filter_sql += " AND cr.classifier_model = ?"
@@ -2366,6 +2366,7 @@ def _record_batch_classifier_runs(
             did, model_name, labels_fingerprint,
             prediction_count=n,
             labels_fingerprint_full=labels_fingerprint_full,
+            input_recipe=entry.get("input_recipe"),
         )
 
 

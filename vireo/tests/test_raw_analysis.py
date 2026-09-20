@@ -338,6 +338,8 @@ def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")
     db.save_subject_raw_analysis(detections[0], {"recipe": ra.RECIPE})
+    db.record_classifier_run(detections[0], "model", "labels", 1)
+    db.conn.execute("ALTER TABLE classifier_runs DROP COLUMN input_recipe")
     for variant in ("sam2-small", "sam2-large"):
         db.upsert_photo_mask(photo, variant, "/mask.png", "megadetector-v6", 0.1, 0.1, 0.8, 0.8)
     db.set_active_mask_variant(photo, "sam2-large")
@@ -351,6 +353,8 @@ def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(
     db.close()
 
     migrated = Database(path)
+    assert migrated.get_classifier_run_keys(detections[0]) == set()
+    assert migrated.conn.execute("SELECT input_recipe FROM classifier_runs").fetchone()[0] == "unknown-raw-recipe"
     assert migrated.get_photo_mask(photo, "sam2-large")["quality_input_recipe"] == ra.RECIPE
     expected = "unknown-mask-quality-recipe" if old_quality_columns else "unknown-raw-analysis-recipe"
     assert migrated.get_photo_mask(photo, "sam2-small")["quality_input_recipe"] == expected
@@ -457,4 +461,32 @@ def test_reinference_refreshes_burst_metadata(tmp_path, status, new_group):
     assert row["vote_count"] == (2 if new_group else None)
     assert row["total_votes"] == (2 if new_group else None)
     assert row["individual"] == ('{"Robin":2}' if new_group else None)
+    db.close()
+
+
+@pytest.mark.parametrize("status", ["accepted", "rejected"])
+def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
+    from db import Database
+
+    db = Database(str(tmp_path / "recipe.db"))
+    folder = db.add_folder(str(tmp_path))
+    photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
+    detection = db.save_detections(photo, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.add_prediction(detection, "Robin", 0.9, "model", status=status)
+    db.record_classifier_run(detection, "model", "legacy", 1,
+                             runtime_fingerprint="raw-runtime", input_recipe=ra.RECIPE)
+    from classify_job import _all_photos_cache_satisfied
+
+    assert not _all_photos_cache_satisfied(db, [photo], classifier_model="model", labels_fingerprint="legacy")
+    assert db.get_classifier_run_keys(detection) == set()
+    assert db.get_classifier_run_keys(detection, "normal-runtime") == set()
+    assert db.get_classifier_run_key_gate(detection, "normal-runtime") == (set(), {("model", "legacy")})
+    assert db.get_classifier_run_cache_hits([photo], "model", "legacy") == set()
+    # Normal runtime changes keep the existing manual-review exception.
+    db.record_classifier_run(detection, "model", "legacy", 1, runtime_fingerprint="normal-runtime")
+    assert db.get_classifier_run_key_gate(detection, "new-normal-runtime") == ({("model", "legacy")}, set())
+    assert db.get_classifier_run_cache_hits([photo], "model", "legacy") == {photo}
     db.close()

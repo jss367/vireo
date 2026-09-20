@@ -4439,7 +4439,10 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
         Image.new("RGB", (100, 100)), folder_path, os.path.join(folder_path, "bird.jpg"),
     ))
 
+    inferred = []
+
     def infer(batch, clf, model_type, model_name, thread_db, results, top_k=1):
+        inferred.extend(entry["detection_id"] for entry in batch)
         for entry in batch:
             results.append({
                 "photo": entry["photo"], "detection_id": entry["detection_id"],
@@ -4460,6 +4463,17 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
     if species == "Robin":
         assert db.conn.execute("SELECT status FROM prediction_review WHERE prediction_id=?", (rows[0]["id"],)).fetchone()[0] == "accepted"
     assert db.conn.execute("SELECT count(*) FROM classifier_runs").fetchone()[0] == 1
+    assert db.conn.execute("SELECT input_recipe FROM classifier_runs").fetchone()[0] is not None
+    assert inferred == [detection]
+    normal = PipelineParams(collection_id=collection, model_ids=[model],
+                            skip_extract_masks=True, skip_regroup=True)
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, normal)
+    assert inferred == [detection, detection]
+    assert db.conn.execute("SELECT input_recipe FROM classifier_runs").fetchone()[0] is None
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, normal)
+    assert inferred == [detection, detection]
+    if species == "Robin":
+        assert db.conn.execute("SELECT status FROM prediction_review WHERE prediction_id=?", (rows[0]["id"],)).fetchone()[0] == "accepted"
     db.close()
 
 

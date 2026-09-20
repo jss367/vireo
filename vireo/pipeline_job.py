@@ -5108,7 +5108,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 pipeline_cfg = user_cfg.get("pipeline", {})
                 raw_session = None
                 if params.raw_subject_analysis:
-                    from raw_analysis import RawAnalysisSession
+                    from raw_analysis import RECIPE, RawAnalysisSession
 
                     raw_session = RawAnalysisSession(
                         max_size=pipeline_cfg.get("proxy_longest_edge") or 1536,
@@ -6504,6 +6504,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # and understate the ETA (Codex #1468 P2).
                                 inference_seconds += _det_prep_seconds
                                 inference_batch.append({
+                                    "input_recipe": RECIPE if params.raw_subject_analysis else None,
                                     "photo": photo,
                                     "detection_id": detection["id"],
                                     "folder_path": folder_path,
