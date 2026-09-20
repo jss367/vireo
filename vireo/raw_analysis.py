@@ -200,28 +200,43 @@ class RawAnalysisSession:
             return None, None
         from image_loader import load_image
         from masking import ensure_sam2_weights, generate_mask
+        from resource_ledger import ResourceWaitCancelled
 
-        if not self._weights_ready:
-            ensure_sam2_weights(self.sam2_variant)
-            self._weights_ready = True
-
-        # Segment a familiar camera-rendered preview; map its mask to the
-        # oriented RAW frame. Never map across mismatched aspect ratios.
-        preview = load_image(path, max_size=self.max_size)
-        if preview is None:
-            return None, None
         try:
-            h, w = linear.shape[:2]
-            if abs(preview.width / preview.height - w / h) > 0.02:
+            if not self._weights_ready:
+                ensure_sam2_weights(self.sam2_variant)
+                self._weights_ready = True
+
+            # Segment a familiar camera-rendered preview; map its mask to the
+            # oriented RAW frame. Never map across mismatched aspect ratios.
+            preview = load_image(path, max_size=self.max_size)
+            if preview is None:
                 return None, None
-            resized = preview.resize((w, h), Image.Resampling.LANCZOS)
             try:
-                box = {k: detection["box_" + k] for k in ("x", "y", "w", "h")}
-                mask = generate_mask(resized, box, variant=self.sam2_variant)
+                h, w = linear.shape[:2]
+                if abs(preview.width / preview.height - w / h) > 0.02:
+                    return None, None
+                resized = preview.resize((w, h), Image.Resampling.LANCZOS)
+                try:
+                    box = {k: detection["box_" + k] for k in ("x", "y", "w", "h")}
+                    mask = generate_mask(resized, box, variant=self.sam2_variant)
+                finally:
+                    resized.close()
             finally:
-                resized.close()
-        finally:
-            preview.close()
+                preview.close()
+        except ResourceWaitCancelled:
+            # Cooperative shutdown is not a masking failure. Re-raise so the
+            # pipeline stage aborts promptly.
+            raise
+        except Exception:
+            # Unavailable weights, corrupt ONNX, or an inference error must
+            # not abort classification — the documented fallback is the
+            # normal image path.
+            log.warning(
+                "Subject masking unavailable for %s; using normal image path",
+                path, exc_info=True,
+            )
+            return None, None
         if mask is None or not mask.any():
             log.warning("No usable subject mask for %s; using normal image path", path)
             return None, None

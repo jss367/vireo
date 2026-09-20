@@ -237,6 +237,60 @@ def test_session_falls_back_for_empty_mask_or_mismatched_geometry(tmp_path, monk
     assert generate.call_count == (1 if preview_size == (100, 100) else 0)
 
 
+def test_session_falls_back_when_sam2_weights_unavailable(tmp_path, monkeypatch):
+    """A failure downloading SAM2 weights must not abort classification."""
+    path = tmp_path / "bird.nef"
+    path.write_bytes(b"raw")
+    monkeypatch.setattr(ra, "decode_linear", lambda *a: np.ones((100, 100, 3), dtype=np.float32))
+    monkeypatch.setattr("image_loader.load_image", lambda *a, **k: Image.new("RGB", (100, 100)))
+
+    def raise_weights_error(*args, **kwargs):
+        raise RuntimeError("Failed to download SAM2 weights")
+
+    monkeypatch.setattr("masking.ensure_sam2_weights", raise_weights_error)
+    generate = Mock(return_value=np.ones((100, 100), dtype=bool))
+    monkeypatch.setattr("masking.generate_mask", generate)
+    detection = {"box_x": 0.1, "box_y": 0.1, "box_w": 0.8, "box_h": 0.8}
+    session = ra.RawAnalysisSession()
+    assert session.prepare(str(path), detection) == (None, None)
+    assert generate.call_count == 0
+
+
+def test_session_falls_back_when_generate_mask_raises(tmp_path, monkeypatch):
+    """A raised error from generate_mask must be caught (only None means empty)."""
+    path = tmp_path / "bird.nef"
+    path.write_bytes(b"raw")
+    monkeypatch.setattr(ra, "decode_linear", lambda *a: np.ones((100, 100, 3), dtype=np.float32))
+    monkeypatch.setattr("image_loader.load_image", lambda *a, **k: Image.new("RGB", (100, 100)))
+    monkeypatch.setattr("masking.ensure_sam2_weights", lambda *a, **k: None)
+
+    def raise_mask_error(*args, **kwargs):
+        raise FileNotFoundError("SAM2 image encoder not found")
+
+    monkeypatch.setattr("masking.generate_mask", raise_mask_error)
+    detection = {"box_x": 0.1, "box_y": 0.1, "box_w": 0.8, "box_h": 0.8}
+    assert ra.RawAnalysisSession().prepare(str(path), detection) == (None, None)
+
+
+def test_session_preserves_cooperative_cancellation(tmp_path, monkeypatch):
+    """ResourceWaitCancelled must propagate so pipeline shutdown is prompt."""
+    from resource_ledger import ResourceWaitCancelled
+
+    path = tmp_path / "bird.nef"
+    path.write_bytes(b"raw")
+    monkeypatch.setattr(ra, "decode_linear", lambda *a: np.ones((100, 100, 3), dtype=np.float32))
+    monkeypatch.setattr("image_loader.load_image", lambda *a, **k: Image.new("RGB", (100, 100)))
+    monkeypatch.setattr("masking.ensure_sam2_weights", lambda *a, **k: None)
+
+    def cancel(*args, **kwargs):
+        raise ResourceWaitCancelled("shutdown")
+
+    monkeypatch.setattr("masking.generate_mask", cancel)
+    detection = {"box_x": 0.1, "box_y": 0.1, "box_w": 0.8, "box_h": 0.8}
+    with pytest.raises(ResourceWaitCancelled):
+        ra.RawAnalysisSession().prepare(str(path), detection)
+
+
 def test_existing_catalog_gains_analysis_schema(tmp_path):
     from db import Database
 
