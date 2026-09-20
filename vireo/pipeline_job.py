@@ -1055,6 +1055,7 @@ def _retry_thumbnail_with_companion(
             commit_with_retry(thread_db.conn)
     recipe_kwargs = {"recipe": recipe} if recipe else {}
     if recipe:
+        recipe_kwargs["camera_metadata"] = photo
         recipe_kwargs["native_size"] = (
             _recipe_source_dimensions(photo)
         )
@@ -1105,6 +1106,7 @@ def _retry_thumbnail_with_working_copy(
         size=thumb_size,
         recipe=recipe,
         native_size=_recipe_source_dimensions(photo),
+        camera_metadata=photo,
     )
 
 
@@ -3443,6 +3445,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     continue
                         recipe_kwargs = {"recipe": recipe} if recipe else {}
                         if recipe:
+                            recipe_kwargs["camera_metadata"] = detail_photo
                             recipe_kwargs["native_size"] = (
                                 _recipe_source_dimensions(detail_photo)
                             )
@@ -3597,6 +3600,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     continue
                             recipe_kwargs = {"recipe": recipe} if recipe else {}
                             if recipe:
+                                recipe_kwargs["camera_metadata"] = detail_photo
                                 recipe_kwargs["native_size"] = (
                                     _recipe_source_dimensions(detail_photo)
                                 )

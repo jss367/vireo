@@ -269,6 +269,7 @@ def render_preview_bytes(
                 img,
                 recipe,
                 max_size=size,
+                camera_metadata=photo,
                 native_size=recipe_source_dimensions(photo),
                 local_mask=local_masks.load_snapshot(
                     vireo_dir, photo_id, recipe,

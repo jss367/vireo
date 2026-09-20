@@ -63,6 +63,7 @@ include = ["vireo*"]
 [tool.setuptools.package-data]
 vireo = [
     "data/**/*.json",
+    "data/denoise/*.txt",
     "templates/**/*.html",
     "static/**/*",
 ]

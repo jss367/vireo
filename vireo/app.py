@@ -7828,6 +7828,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        from camera_denoise import resolve_profile
+        result["denoise_profile"] = resolve_profile(photo)
         # The shared lightbox normally warms /original after /full settles.
         # In full-resolution preview mode /full already redirects to /original,
         # so tell the client not to repeat that potentially expensive RAW work.
@@ -20911,6 +20913,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 rendered = apply_recipe_to_loaded_image(
                     img, recipe,
+                    camera_metadata=photo,
                     native_size=_recipe_source_dimensions(photo),
                     local_mask=_local_masks.load_snapshot(
                         vireo_dir, photo["id"], recipe,
@@ -23153,6 +23156,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rendered = apply_recipe_to_loaded_image(
                 img, recipe,
+                camera_metadata=photo,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=_local_masks.load_snapshot(
                     vireo_dir, photo["id"], recipe,
@@ -27177,6 +27181,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 thumb_dir,
                 size=thumb_size,
                 recipe=render_recipe,
+                camera_metadata=photo,
                 raw_decode=raw_decode,
                 min_source_size=min_source_size,
                 native_size=(
@@ -27229,6 +27234,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             thumb_dir,
                             size=thumb_size,
                             recipe=render_recipe,
+                            camera_metadata=photo,
                             native_size=(
                                 _recipe_source_dimensions(photo)
                                 if render_recipe else None
@@ -30279,6 +30285,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import local_masks
             img = apply_recipe_to_loaded_image(
                 img, recipe_json, max_size=size,
+                camera_metadata=photo,
                 native_size=native_dims,
                 detail_scale=preview_detail_scale,
                 local_mask=local_masks.load_snapshot(
@@ -30375,6 +30382,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = apply_recipe_to_loaded_image(
                         img,
                         recipe,
+                        camera_metadata=photo,
                         native_size=_recipe_source_dimensions(photo),
                         local_mask=local_masks.load_snapshot(
                             vireo_dir, photo_id, recipe,
@@ -30885,6 +30893,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe,
+                camera_metadata=photo,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=local_masks.load_snapshot(
                     vireo_dir, photo_id, recipe,
