@@ -92,6 +92,7 @@ def test_right_click_copies_and_pastes_development_settings(
     )
     expect(paste_item).not_to_have_class(re.compile(r"vireo-ctx-disabled"))
     paste_item.click()
+    page.get_by_role('dialog').get_by_role('button', name='Apply selected settings').click()
 
     for target_id in target_ids:
         page.wait_for_function(
@@ -239,12 +240,14 @@ def test_development_settings_paste_blocks_overlapping_requests(
         photo_id,
     )
     assert pending_state == {
-        "requestCount": 1,
+        "requestCount": 0,
         "inFlight": True,
         "menuDisabled": True,
         "menuHint": "A development settings paste is already running",
     }
 
+    page.get_by_role('dialog').get_by_role('button', name='Apply selected settings').click()
+    page.wait_for_function('window.__pasteRequestCount === 1')
     page.evaluate(
         """async () => {
           window.__resolvePaste({applied: [], skipped: [], count: 0, recipes: {}});

@@ -78,13 +78,15 @@ def test_presence_presets_reset_and_auto_tone(live_server, page, presence_photo)
     for key, value in values.items():
         _set_range(page, key, value)
     page.locator('#presetNameInput').fill('Soft landscape')
-    page.evaluate('saveCurrentAsPreset()')
+    page.locator('#savePresetBtn').click()
+    page.get_by_role('dialog').get_by_role('button', name='Save preset', exact=True).click()
     expect(page.locator('#applyPresetBtn')).to_be_enabled()
     page.evaluate('resetAdjustments()')
     assert page.evaluate('recipeForSave(editorState.recipe).adjustments || {}') == {}
     for key in values:
         expect(page.locator(f'#{key}Range')).to_have_value('0')
     page.locator('#applyPresetBtn').click()
+    page.get_by_role('dialog').get_by_role('button', name='Apply selected settings').click()
     for key, value in values.items():
         expect(page.locator(f'#{key}Range')).to_have_value(str(value))
     page.evaluate('autoTone()')

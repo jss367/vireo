@@ -1141,6 +1141,8 @@ body {
 
 <script src="/static/vireo-folder-browser.js"></script>
 <script src="/static/vireo-export-presets.js"></script>
+<link rel="stylesheet" href="/static/vireo-batch-edits.css">
+<script src="/static/vireo-batch-edits.js"></script>
 
 <script>
 var editorState = {
@@ -2617,10 +2619,8 @@ function resetColorGrading() {
 }
 
 // --- Presets ---------------------------------------------------------------
-// Reusable adjustments-only looks (tone + white balance + detail). Applying a
-// preset replaces the working recipe's adjustments and leaves geometry alone;
-// nothing persists until the user saves the photo. See
-// docs/plans/2026-07-03-edit-presets-design.md.
+// Presets explicitly select the settings they own; application merges those
+// settings into the working recipe and rebinds local masks to this photo.
 
 async function loadPresets(selectId) {
   try {
@@ -2667,27 +2667,49 @@ function onPresetSelected() {
   if (preset) document.getElementById('presetNameInput').value = preset.name;
 }
 
-function applySelectedPreset() {
+async function applySelectedPreset() {
   var preset = selectedPreset();
-  if (!preset || editorState.loading) return;
-  var adj = cloneRecipe((preset.recipe || {}).adjustments || {});
-  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
-  else delete editorState.recipe.adjustments;
-  syncControls();
-  markChanged(true);
-  if (typeof showToast === 'function') {
+  if (!preset || editorState.loading || editorState.savingPhotoIds[String(editorState.photoId)]) return;
+  var photoId = editorState.photoId;
+  var savedRecipeSeq = editorState.savedRecipeSeq;
+  var startingKey = recipeKey(editorState.recipe);
+  var loadSeq = editorState.loadSeq;
+  var button = document.getElementById('applyPresetBtn');
+  button.disabled = true;
+  try {
+    var defs = await VireoBatchEdits.fields();
+    var available = preset.fields || defs.filter(function(f) {
+      return f.path.indexOf('adjustments.') === 0;
+    }).map(function(f) { return f.path; });
+    var fields = await VireoBatchEdits.selectFields({
+      title: 'Apply preset “' + preset.name + '”', fields: available, available: available,
+    });
+    if (!fields || photoId !== editorState.photoId || loadSeq !== editorState.loadSeq) return;
+    var data = await safeFetch('/api/photos/' + photoId + '/edit-recipe/compose', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({current: recipeForSave(editorState.recipe), recipe: preset.recipe || {}, fields: fields}),
+    }, {toast: false});
+    if (photoId !== editorState.photoId || loadSeq !== editorState.loadSeq ||
+        savedRecipeSeq !== editorState.savedRecipeSeq || editorState.savingPhotoIds[String(photoId)] ||
+        startingKey !== recipeKey(editorState.recipe)) {
+      showToast('The photo changed while applying the preset. Apply it again to the current edits.', 'warning');
+      return;
+    }
+    editorState.localMaskUpdateSeq++;
+    editorState.recipe = cloneRecipe(data.recipe || {});
+    if (fields.indexOf('local') !== -1) editorState.localStale = false;
+    ensureCrop(editorState.recipe);
+    editorState.cropEditing = !recipeForSave(editorState.recipe).crop;
+    syncControls();
+    markChanged(true);
     showToast('Applied preset "' + preset.name + '" (not saved yet)', 'success');
-  }
+  } catch (error) {
+    showToast(error.message || 'Could not apply preset', 'error');
+  } finally { onPresetSelected(); }
 }
 
 async function saveCurrentAsPreset() {
   var current = recipeForSave(editorState.recipe);
-  if (!current.adjustments) {
-    if (typeof showToast === 'function') {
-      showToast('No adjustments to save as a preset', 'error');
-    }
-    return;
-  }
   var name = document.getElementById('presetNameInput').value.trim();
   if (!name) {
     if (typeof showToast === 'function') {
@@ -2703,12 +2725,18 @@ async function saveCurrentAsPreset() {
     return;
   }
   try {
+    var fields = await VireoBatchEdits.selectFields({
+      title: 'Save preset “' + name + '”', action: 'Save preset',
+      hint: 'Choose the settings this preset will change. Unchecked settings stay untouched when applying it. Subject and background settings use each destination photo’s own mask.',
+    });
+    if (!fields) return;
     var data = await safeFetch('/api/edit-presets', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         name: name,
-        recipe: {adjustments: current.adjustments},
+        recipe: current,
+        fields: fields,
       }),
     }, {toast: false});
     await loadPresets(data.preset && data.preset.id);
