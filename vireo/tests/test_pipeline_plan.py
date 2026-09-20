@@ -770,15 +770,22 @@ def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
     db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     # Cache a mask for a *different* prompt than the primary detection
-    # (0.1, 0.1, 0.5, 0.5). set_active_mask_variant is used only for the
-    # variant bookkeeping — the join in the count query enforces the
-    # prompt match.
+    # (0.1, 0.1, 0.5, 0.5). set_active_mask_variant refuses to activate a
+    # prompt-mismatched mask (its guard is exactly what production relies
+    # on), so we simulate the stale state directly — this is precisely
+    # what happens when the effective primary shifts (a detector_confidence
+    # change or a subject-choice override) after an earlier extraction:
+    # the photos row keeps pointing at the old variant, and only the
+    # count query's prompt join catches it.
     db.upsert_photo_mask(
         pid, "sam2-small", "/m/a.png",
         detector_model="megadetector-v6",
         prompt_x=0.9, prompt_y=0.9, prompt_w=0.05, prompt_h=0.05,
     )
-    db.set_active_mask_variant(pid, "sam2-small")
+    db.conn.execute(
+        "UPDATE photos SET active_mask_variant=? WHERE id=?",
+        ("sam2-small", pid),
+    )
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
         "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",

@@ -83,6 +83,23 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
 
+            # Seed an active photo_masks row aligned with the primary
+            # detection's prompt so the tightened eye-stage readiness
+            # counts (count_eye_keypoint_eligible / _attemptable), which
+            # require p.active_mask_variant + a matching mask row, see
+            # this photo as eligible. Skipping this would silently
+            # collapse eye_keypoint_target_photos to zero across every
+            # readiness test that uses this helper.
+            db.upsert_photo_mask(
+                pid, "sam2-small", f"/masks/{pid}.png",
+                detector_model="megadetector",
+                prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+            )
+            db.conn.execute(
+                "UPDATE photos SET active_mask_variant=? WHERE id=?",
+                ("sam2-small", pid),
+            )
+
             # Add a species prediction (references detection, not photo).
             # Stamp taxonomy_class so the prediction routes through the
             # eye-keypoint stage's primary path — without it, attemptable
@@ -1282,6 +1299,19 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
         eye_tenengrad=None,
         eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
     )
+    # Seed an active photo_masks row aligned with the primary detection
+    # so the tightened readiness counts (count_eye_keypoint_eligible /
+    # _attemptable) treat this photo as eligible — without it the target
+    # collapses to zero and the assertions below fail.
+    db.upsert_photo_mask(
+        pid, "sam2-small", f"/masks/{pid}.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+    )
+    db.conn.execute(
+        "UPDATE photos SET active_mask_variant=? WHERE id=?",
+        ("sam2-small", pid),
+    )
     db.update_photo_embeddings(
         pid,
         dino_subject_embedding=embedding_to_blob(emb),
@@ -1311,6 +1341,20 @@ def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
         taxonomy={"class": taxonomy_class} if taxonomy_class else None,
     )
     db.update_photo_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+    # The eye-stage readiness counts (count_eye_keypoint_eligible /
+    # _attemptable) require an active photo_masks row whose prompt
+    # matches the selected primary detection. Seed it so eligible photos
+    # in these tests count toward eye_keypoint_target_photos.
+    db.upsert_photo_mask(
+        pid, "sam2-small", f"/masks/{pid}.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+    )
+    db.conn.execute(
+        "UPDATE photos SET active_mask_variant=? WHERE id=?",
+        ("sam2-small", pid),
+    )
+    db.conn.commit()
     return pid
 
 
