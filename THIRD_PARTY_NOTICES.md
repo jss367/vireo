@@ -1,5 +1,10 @@
 # Third-party notices
 
+Vireo's original code is licensed under the [MIT License](LICENSE). This does
+not replace or override the licenses of third-party code, data, or model
+weights used by Vireo. Those components retain their respective licenses and
+notices, including the components documented below.
+
 ## ExifTool
 
 Vireo desktop builds bundle ExifTool by Phil Harvey.

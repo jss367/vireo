@@ -115,3 +115,11 @@ separate development environment and is excluded from the application bundle.
 ## Scripting & automation
 
 Vireo exposes a small stable HTTP API under `/api/v1` for scripts and agents. A running instance advertises its port and auth token via `~/.vireo/runtime.json`. See [docs/headless-api.md](docs/headless-api.md) for discovery, spawning a headless instance, authentication, and a worked `curl` example.
+
+## License
+
+Vireo's original code is licensed under the [MIT License](LICENSE).
+Third-party code, data, and model weights retain their respective licenses;
+see [Third-party notices](THIRD_PARTY_NOTICES.md) and the applicable upstream
+license terms. In particular, the bundled darktable camera noise measurements
+remain licensed under the GNU General Public License, version 3 or later.
