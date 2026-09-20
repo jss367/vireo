@@ -12103,10 +12103,24 @@ class Database:
             # extract-masks pipeline legitimately activates masks for
             # weak-rescued detections that live below detector_confidence
             # but still exist as rows, so a matching detection at any
-            # confidence is enough to accept. Migration and unit-test
-            # setups that seed a mask without any detection at all also
-            # fall through, since there is no "obsolete subject" to
-            # protect against.
+            # confidence is enough to accept.
+            #
+            # The zero-detection case is also an orphaned reactivation
+            # whenever detection has actually run on this photo:
+            # ``clear_detections`` — the reclassify path — deletes both
+            # ``detections`` AND ``detector_runs`` for the photo, then
+            # ``write_detection_batch`` writes a fresh ``detector_runs``
+            # row (with ``box_count=0`` for an empty scene). So a photo
+            # with a ``detector_runs`` row and zero non-full-image
+            # detections is a reclassified photo whose detections were
+            # replaced or wiped — its ``photo_masks`` row is orphaned,
+            # and a bulk ``api_pipeline_active_mask_variant`` sweep
+            # reactivating it would repopulate ``mask_path`` plus the
+            # mask-derived quality fields for a photo with no eligible
+            # subject (Codex r4056773217). Migration and unit-test
+            # setups that seed a mask without any detection at all
+            # never wrote a ``detector_runs`` row, so they still fall
+            # through — no "obsolete subject" to protect against.
             match = self.conn.execute(
                 "SELECT 1 FROM detections WHERE photo_id=? "
                 "AND detector_model=? "
@@ -12122,7 +12136,16 @@ class Database:
                     "AND detector_model!='full-image' LIMIT 1",
                     (photo_id,),
                 ).fetchone() is not None
-                if has_real_detection:
+                # A detector_runs row for a non-full-image detector proves
+                # detection has actually been run on this photo — a wiped
+                # or replaced detection set is a reclassify orphan, not a
+                # pre-detection migration.
+                has_detector_run = self.conn.execute(
+                    "SELECT 1 FROM detector_runs WHERE photo_id=? "
+                    "AND detector_model!='full-image' LIMIT 1",
+                    (photo_id,),
+                ).fetchone() is not None
+                if has_real_detection or has_detector_run:
                     raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "

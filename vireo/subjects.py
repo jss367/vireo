@@ -100,9 +100,16 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         stale = db.conn.execute(
             "SELECT 1 WHERE EXISTS (SELECT 1 FROM photo_subject_state WHERE photo_id=?) "
             "OR EXISTS (SELECT 1 FROM photos WHERE id=? AND ("
-            "mask_path IS NOT NULL OR quality_score IS NOT NULL "
-            "OR subject_sharpness IS NOT NULL OR subject_size IS NOT NULL "
-            "OR dino_subject_embedding IS NOT NULL OR eye_x IS NOT NULL "
+            "mask_path IS NOT NULL OR active_mask_variant IS NOT NULL "
+            "OR quality_score IS NOT NULL OR subject_sharpness IS NOT NULL "
+            "OR subject_size IS NOT NULL OR subject_clip_high IS NOT NULL "
+            "OR subject_clip_low IS NOT NULL OR subject_y_median IS NOT NULL "
+            "OR subject_tenengrad IS NOT NULL OR bg_tenengrad IS NOT NULL "
+            "OR crop_complete IS NOT NULL OR bg_separation IS NOT NULL "
+            "OR phash_crop IS NOT NULL OR noise_estimate IS NOT NULL "
+            "OR dino_subject_embedding IS NOT NULL "
+            "OR eye_x IS NOT NULL OR eye_y IS NOT NULL "
+            "OR eye_conf IS NOT NULL OR eye_tenengrad IS NOT NULL "
             "OR eye_kp_fingerprint IS NOT NULL))",
             (photo_id, photo_id),
         ).fetchone()

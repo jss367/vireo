@@ -24596,10 +24596,11 @@ def test_set_active_mask_variant_allows_weak_detection_below_floor(
 def test_set_active_mask_variant_allows_migration_without_detections(
     tmp_path,
 ):
-    """Photos with literally no non-full-image detections fall through
-    to activation — the mask was seeded without detection context
-    (pre-detection migration or a unit-test setup), so there is no
-    "obsolete subject" to guard against."""
+    """Photos with literally no non-full-image detections AND no
+    ``detector_runs`` row fall through to activation — the mask was
+    seeded without detection context (pre-detection migration or a
+    unit-test setup), so there is no "obsolete subject" to guard
+    against."""
     from db import Database
     db = Database(str(tmp_path / "v.db"))
     db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
@@ -24615,6 +24616,47 @@ def test_set_active_mask_variant_allows_migration_without_detections(
         "SELECT active_mask_variant FROM photos WHERE id=1"
     ).fetchone()
     assert row["active_mask_variant"] == "sam2-large"
+
+
+def test_set_active_mask_variant_rejects_orphaned_zero_detection_reclassify(
+    tmp_path,
+):
+    """When reclassify empties a photo's detections entirely, the
+    ``photo_masks`` row is orphaned: the mask's prompt matches no
+    detection AND no detection remains at all. A bulk
+    ``api_pipeline_active_mask_variant`` sweep would otherwise
+    reactivate the mask and repopulate mask_path plus the
+    mask-derived quality fields for a photo with no eligible subject.
+    The ``detector_runs`` row that reclassify writes (with
+    ``box_count=0`` for an empty scene) proves detection actually
+    ran, distinguishing this from the pre-detection migration case
+    (Codex r4056773217)."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        subject_size=999, subject_tenengrad=1.0,
+    )
+    # Reclassify ran (produced zero detections) — detector_runs.box_count=0.
+    db.conn.execute(
+        "INSERT INTO detector_runs(photo_id, detector_model, box_count) "
+        "VALUES (1, 'megadetector-v6', 0)"
+    )
+    db.conn.commit()
+    with pytest.raises(ValueError, match="another subject"):
+        db.set_active_mask_variant(1, "sam2-large")
+    row = db.conn.execute(
+        "SELECT mask_path, active_mask_variant FROM photos WHERE id=1"
+    ).fetchone()
+    assert row["mask_path"] is None
+    assert row["active_mask_variant"] is None
 
 
 def test_delete_masks_for_variant_removes_files_and_rows(tmp_path):
