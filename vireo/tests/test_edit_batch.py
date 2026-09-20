@@ -143,3 +143,12 @@ def test_radius_only_preset_preserves_destination_sharpen_strength():
     recipe, fields = decode_preset(raw)
     result = compose_recipe({"adjustments": {"sharpen": 60}}, recipe, fields, "merge")
     assert result["adjustments"] == {"sharpen": 60, "sharpen_radius": 2}
+
+
+def test_denoise_method_survives_selective_presets_and_can_reset():
+    source = {"adjustments": {"denoise_mode": "camera", "noise_reduction": 55}}
+    recipe, fields = decode_preset(encode_preset(source, ["adjustments.denoise_mode"]))
+    result = compose_recipe({"adjustments": {"noise_reduction": 70}}, recipe, fields, "merge")
+    assert result["adjustments"] == {"denoise_mode": "camera", "noise_reduction": 70}
+    reset = compose_recipe(result, {}, fields, "merge")
+    assert reset["adjustments"] == {"noise_reduction": 70}

@@ -703,7 +703,7 @@ def test_failed_rollback_retains_recoverable_backups(tmp_path, monkeypatch):
     options = {'destination': str(destination), 'max_size': 512}
     response = client.post('/api/jobs/publish-site', json=options)
     assert wait_for_job_via_client(client, response.get_json()['job_id'])['status'] == 'completed'
-    previous = {str(p.relative_to(destination)): p.read_bytes()
+    previous = {p.relative_to(destination).as_posix(): p.read_bytes()
                 for p in destination.rglob('*') if p.is_file()}
     original_copy = site_publish.shutil.copyfile
 

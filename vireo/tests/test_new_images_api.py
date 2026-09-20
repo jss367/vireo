@@ -1140,7 +1140,7 @@ def test_new_images_preview_returns_folder_preview_shape(app_and_db):
     _touch_image(str(folder / "sub" / "IMG_002.JPG"))
 
     with app.test_client() as client:
-        post = client.post("/api/workspaces/active/new-images/snapshot")
+        post = _post_snapshot_until_ready(client)
         snap_id = post.get_json()["snapshot_id"]
 
         resp = client.post(

@@ -407,3 +407,34 @@ def test_default_split_registry_is_scoped_to_library_and_workspace(library, tmp_
     assert workspace["sessions"]
     assert len({m["split_registry_path"] for m in (first, other, workspace)}) == 3
     assert json.loads(registry_path.read_text())["days"]["2026-01-01"] == "quarantined"
+
+
+@pytest.mark.parametrize("has_subject_tables", [False, True])
+def test_subject_analysis_compatibility_keeps_library_unchanged(library, has_subject_tables):
+    from pipeline import load_photo_features
+
+    if has_subject_tables:
+        with sqlite3.connect(library) as conn:
+            conn.executescript("""
+                CREATE TABLE detection_subjects(detection_id INTEGER, crop TEXT,
+                    quality_score REAL, exposure_ev REAL);
+                CREATE TABLE photo_subject_choices(photo_id INTEGER, detection_id INTEGER);
+                INSERT INTO detections VALUES(100, 1, 'megadetector-v6', 'runtime',
+                    .6, .1, .2, .2, .7, 'animal');
+                INSERT INTO detection_subjects VALUES(100, '{"x":0.5,"y":0,"w":0.4,"h":0.4}', .8, .5);
+                INSERT INTO photo_subject_choices VALUES(1, 100);
+            """)
+    before = library.read_bytes()
+    conn = open_library(library)
+    try:
+        reader = FeatureReader(conn, 1)
+        features = load_photo_features(reader, photo_ids=[1], effective_config={})
+        subject = features[0]["subjects"][0]
+        assert subject["is_primary"]
+        assert subject["detection_id"] == (100 if has_subject_tables else 1)
+        assert subject["quality_score"] == (.8 if has_subject_tables else None)
+        assert subject["exposure_ev"] == (.5 if has_subject_tables else None)
+        assert reader.get_detections_for_photos([1], .2)[1][0]["id"] == subject["detection_id"]
+    finally:
+        conn.close()
+    assert library.read_bytes() == before

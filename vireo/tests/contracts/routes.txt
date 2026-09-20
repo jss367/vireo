@@ -47,6 +47,7 @@ GET          /api/detection-cache/stats
 GET          /api/detections/<int:photo_id>
 GET          /api/duplicates/disk-cleanup-summary
 GET          /api/duplicates/last-scan
+GET          /api/edit-fields
 GET          /api/edit-history
 GET          /api/embedding-cache
 GET          /api/embedding-matrix
@@ -103,6 +104,7 @@ GET          /api/photos/<int:photo_id>/edit-history
 GET          /api/photos/<int:photo_id>/edit-recipe
 GET          /api/photos/<int:photo_id>/pipeline
 GET          /api/photos/<int:photo_id>/similar
+GET          /api/photos/<int:photo_id>/subjects
 GET          /api/photos/<int:pid>/masks
 GET          /api/photos/calendar
 GET          /api/photos/color_labels
@@ -207,8 +209,10 @@ GET          /thumbnails/<filename>
 GET          /welcome
 GET          /workspace
 GET,POST     /api/edit-presets
+GET,POST     /api/jobs/<job_id>/source-cleanup
 GET,POST     /api/misses
 GET,POST     /api/pipeline/config
+GET,PUT      /api/editor/crop-ratio
 PATCH        /api/settings/global
 PATCH        /api/settings/workspace
 PATCH,POST   /api/species-highlights/order
@@ -336,17 +340,20 @@ POST         /api/move-rules
 POST         /api/move-rules/preview
 POST         /api/photo-preferences
 POST         /api/photos/<int:photo_id>/color_label
+POST         /api/photos/<int:photo_id>/edit-recipe/compose
 POST         /api/photos/<int:photo_id>/flag
 POST         /api/photos/<int:photo_id>/keywords
 POST         /api/photos/<int:photo_id>/local-mask/snapshot
 POST         /api/photos/<int:photo_id>/location
 POST         /api/photos/<int:photo_id>/location/text
 POST         /api/photos/<int:photo_id>/rating
+POST         /api/photos/<int:photo_id>/subjects/analyze
 POST         /api/photos/<int:photo_id>/wildlife_excluded
 POST         /api/photos/best-batch
 POST         /api/photos/by-ids
 POST         /api/photos/companion-count
 POST         /api/photos/edit-recipe/apply
+POST         /api/photos/edit-recipe/summary
 POST         /api/photos/missing/check
 POST         /api/photos/missing/delete-sidecars
 POST         /api/photos/missing/remove
@@ -427,6 +434,7 @@ PUT          /api/collections/<int:collection_id>
 PUT          /api/color-label-descriptions/<color>
 PUT          /api/keywords/<int:keyword_id>
 PUT          /api/move-rules/<int:rule_id>
+PUT          /api/photos/<int:photo_id>/primary-subject
 PUT          /api/processes/<int:process_id>
 PUT          /api/workspaces/<int:ws_id>
 PUT          /api/workspaces/<int:ws_id>/subject-types

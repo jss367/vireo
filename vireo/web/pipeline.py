@@ -321,7 +321,10 @@ def create_pipeline_blueprint(
         err = reject_visual_collection(db, collection_id)
         if err is not None:
             return err
+        if not isinstance(body.get("raw_subject_analysis", False), bool):
+            return json_error("raw_subject_analysis must be a boolean", 400)
         params = PipelinePlanParams(
+            raw_subject_analysis=body.get("raw_subject_analysis", False),
             collection_id=collection_id,
             photo_ids=scope_photo_ids,
             exclude_photo_ids=body.get("exclude_photo_ids") or [],
@@ -1022,6 +1025,8 @@ def create_pipeline_blueprint(
         # gets edited to while another pipeline holds the slot. Mirrors how the
         # move-folder endpoint captures its remote spec at enqueue rather than
         # re-reading Settings at execution.
+        if not isinstance(body.get("raw_subject_analysis", False), bool):
+            return json_error("raw_subject_analysis must be a boolean")
         remote_target_snapshot = (
             dict(remote_archive_config["target"])
             if remote_archive_config is not None else None
@@ -1045,6 +1050,7 @@ def create_pipeline_blueprint(
             model_id=body.get("model_id"),
             model_ids=body.get("model_ids"),
             reclassify=body.get("reclassify", False),
+            raw_subject_analysis=body.get("raw_subject_analysis", False),
             skip_classify=body.get("skip_classify", False),
             download_taxonomy=body.get("download_taxonomy", True),
             skip_extract_masks=body.get("skip_extract_masks", False),
@@ -1167,6 +1173,7 @@ def create_pipeline_blueprint(
         # same {"job_id": ...} response either way; clients learn about
         # the queued state via /api/jobs/<id> polling or the SSE stream.
         job_config = {
+            "raw_subject_analysis": params.raw_subject_analysis,
             "source": source,
             "sources": sources,
             "collection_id": collection_id,
@@ -2414,7 +2421,7 @@ def create_pipeline_blueprint(
         dets = [d for d in raw_dets if d["detector_confidence"] >= min_conf]
         result["detections"] = [dict(d) for d in dets]
 
-        # Primary detection = highest-confidence above threshold.
+        # The shared reader orders the chosen primary first, above threshold.
         if dets:
             primary = dets[0]
             result["detection_box"] = {

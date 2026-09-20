@@ -2,6 +2,7 @@ import os
 from types import SimpleNamespace
 
 import platform_support
+import pytest
 
 
 def test_dependency_readiness_requires_both_remote_tools(monkeypatch):
@@ -46,10 +47,18 @@ def test_program_files_candidates_are_deduplicated(monkeypatch, tmp_path):
     ]
 
 
-def test_windows_11_build_is_public_beta(monkeypatch):
+@pytest.mark.parametrize(
+    ("release", "build", "expected_tier"),
+    [
+        ("11", "10.0.26100", "supported"),
+        ("10", "10.0.22000", "supported"),
+        ("10", "10.0.19045", "unsupported"),
+    ],
+)
+def test_windows_support_tier(monkeypatch, release, build, expected_tier):
     monkeypatch.setattr(platform_support.os, "name", "nt")
-    monkeypatch.setattr(platform_support.platform, "release", lambda: "11")
-    monkeypatch.setattr(platform_support.platform, "version", lambda: "10.0.26100")
+    monkeypatch.setattr(platform_support.platform, "release", lambda: release)
+    monkeypatch.setattr(platform_support.platform, "version", lambda: build)
     monkeypatch.setattr(platform_support.platform, "machine", lambda: "AMD64")
     monkeypatch.setattr(platform_support, "dependency_readiness", lambda _config: {})
     monkeypatch.setattr(platform_support, "webview2_version", lambda: "1.0")
@@ -61,5 +70,5 @@ def test_windows_11_build_is_public_beta(monkeypatch):
 
     info = platform_support.platform_support_info({})
 
-    assert info["support_tier"] == "public_beta"
+    assert info["support_tier"] == expected_tier
     assert info["guaranteed_inference"] == "CPUExecutionProvider"

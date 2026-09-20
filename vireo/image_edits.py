@@ -9,9 +9,14 @@ import re
 
 from PIL import Image
 
+try:
+    from .float_image import FloatImage
+except ImportError:
+    from float_image import FloatImage
+
 SCHEMA_VERSION = 1
 
-# Bump whenever the per-pixel rendering math in this module or `tone.py` changes
+# Bump whenever the rendering math in this module or `tone.py` changes
 # in a way that produces different output bytes for the same recipe. Cached
 # previews/thumbnails are keyed by (photo_id, size) — they have no recipe hash,
 # so without this version a deploy that changes the math keeps serving the old
@@ -25,7 +30,9 @@ SCHEMA_VERSION = 1
 #   3 — expanded tone controls: highlights/shadows/whites/blacks/vibrance.
 #   4 — RAW edit renders demosaic with auto-bright off + highlight blending.
 #   5 — monotonic, linear-luminance range curves with chroma preservation.
-EDIT_MATH_VERSION = 5
+#   6 — scene-linear RAW decode and floating-point render/export buffers.
+#   7 — edge-aware Shadows/Highlights with local contrast preservation.
+EDIT_MATH_VERSION = 7
 
 _ADJUSTMENT_RANGES = {
     "exposure": (-5.0, 5.0),
@@ -51,7 +58,7 @@ SHARPEN_RADIUS_DEFAULT = 1.0
 # Adjustment keys handled by the neighborhood pass in detail.py, not the
 # per-pixel tone pipeline. A recipe containing only these must not run the
 # tone pass at all (so a detail-only edit stays byte-exact outside detail).
-_DETAIL_KEYS = frozenset({"sharpen", "sharpen_radius", "noise_reduction"})
+_DETAIL_KEYS = frozenset({"sharpen", "sharpen_radius", "noise_reduction", "denoise_mode"})
 # Global spatial controls run in presence.py before local detail branches.
 _PRESENCE_KEYS = frozenset({"texture", "clarity", "dehaze"})
 
@@ -403,6 +410,11 @@ def normalize_recipe(recipe):
     normalized_adjustments = _normalize_ranged(
         adjustments, _ADJUSTMENT_RANGES, "{name} adjustment",
     )
+    denoise_mode = adjustments.get("denoise_mode", "standard")
+    if denoise_mode not in ("standard", "camera"):
+        raise RecipeError("denoise_mode must be standard or camera")
+    if denoise_mode == "camera":
+        normalized_adjustments["denoise_mode"] = denoise_mode
 
     # The USM radius only means something while sharpening is on, and its
     # default (1.0) is canonicalized to absence so an untouched radius slider
@@ -570,25 +582,21 @@ _ADVANCED_COLOR_TILE_PIXELS = 1_000_000
 
 def _apply_adjustments(
     img, adjustments, local_weight=None, local_subject=None,
-    local_background=None,
+    local_background=None, range_scale=1.0,
 ):
     """Apply tonal adjustments to a PIL image via the linear tone pipeline.
 
-    Bridges PIL <-> numpy: promotes the image to RGB(A), runs the shared
-    per-pixel pipeline in :mod:`tone` (linear-light exposure/white balance with
-    a highlight shoulder, then display-space tonal/color controls), and merges
-    any alpha channel back unchanged. ``local_weight`` (a full-frame float
-    subject-weight array) plus per-region delta dicts route through the
-    weighted tone branch; the weight is sliced along the same row tiles as
-    the image, which keeps tiling numerically identical to a whole-frame
-    pass (the pipeline stays strictly per-pixel).
+    Promotes the image to RGB(A), runs the shared tone pipeline, and merges
+    alpha back unchanged. Overlapping row tiles provide full neighborhood
+    support for Shadows/Highlights. Local weights use the same overlap;
+    ``range_scale`` converts the range-filter radius from native pixels.
     """
     import numpy as np
 
     try:
-        from .tone import apply_adjustments
+        from .tone import RANGE_RADIUS, apply_adjustments
     except ImportError:
-        from tone import apply_adjustments
+        from tone import RANGE_RADIUS, apply_adjustments
 
     has_alpha = "A" in img.getbands() or "transparency" in img.info
     if img.mode not in ("RGB", "RGBA"):
@@ -611,16 +619,27 @@ def _apply_adjustments(
     hsl = adjustments.get("hsl")
     color_grading = adjustments.get("color_grading")
 
-    src = np.asarray(img)  # uint8, view onto the PIL buffer (no copy)
+    spatial = highlights or shadows or (
+        local_weight is not None and any(
+            region.get("shadows") or region.get("highlights")
+            for region in (local_subject or {}, local_background or {})
+        )
+    )
+    range_radius = max(1, int(round(RANGE_RADIUS * range_scale))) if spatial else 0
+    halo = 2 * range_radius
+
+    floating = isinstance(img, FloatImage)
+    src = np.asarray(img)  # view onto the source buffer
     height, width = src.shape[:2]
     channels = src.shape[2]
-    out8 = np.empty((height, width, channels), dtype=np.uint8)
+    output = np.empty((height, width, channels), dtype=np.float32 if floating else np.uint8)
 
     # Process in row blocks so peak memory stays bounded on full-resolution
-    # originals/exports (45MP+). The tone pass is strictly per-pixel, so tiling
-    # is numerically identical to a single whole-frame pass. ~4M pixels per tile
-    # keeps the transient float arrays to a few hundred MB.
+    # originals/exports (45MP+). The guided range filter needs overlapping
+    # rows; all remaining tone/color operations are per-pixel.
     tile_budget = _ADJUST_TILE_PIXELS
+    if spatial:
+        tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
     if tone_curve or point_curves or point_color or hsl or color_grading:
         # HSL conversion and curve indexing keep several additional float
         # planes alive. Smaller tiles bound peak memory on 45MP+ exports while
@@ -629,7 +648,10 @@ def _apply_adjustments(
     rows_per_tile = max(1, tile_budget // max(1, width))
     for top in range(0, height, rows_per_tile):
         bottom = min(top + rows_per_tile, height)
-        tile = src[top:bottom].astype(np.float32) / 255.0
+        start, end = max(0, top - halo), min(height, bottom + halo)
+        tile = src[start:end].astype(np.float32)
+        if not floating:
+            tile /= 255.0
         adj = apply_adjustments(
             tile[..., :3],
             exposure=exposure,
@@ -647,22 +669,27 @@ def _apply_adjustments(
             hsl=hsl,
             color_grading=color_grading,
             local_weight=(
-                local_weight[top:bottom] if local_weight is not None else None
+                local_weight[start:end] if local_weight is not None else None
             ),
             local_subject=local_subject,
             local_background=local_background,
+            input_linear=floating and img.encoding == "linear",
+            range_radius=range_radius,
         )
-        out8[top:bottom, :, :3] = np.clip(adj * 255.0 + 0.5, 0, 255).astype(
-            np.uint8
+        adj = adj[top - start:bottom - start]
+        output[top:bottom, :, :3] = (
+            adj if floating else np.clip(adj * 255.0 + 0.5, 0, 255).astype(np.uint8)
         )
         if channels == 4:
             # Alpha passes through unchanged (round-trip uint8->float->uint8 is
             # identity for 8-bit values).
-            out8[top:bottom, :, 3] = src[top:bottom, :, 3]
+            output[top:bottom, :, 3] = src[top:bottom, :, 3]
 
+    if floating:
+        return FloatImage(output, encoding="srgb")
     if img.mode == "RGBA":
-        return Image.fromarray(out8, "RGBA")
-    return Image.fromarray(out8, "RGB")
+        return Image.fromarray(output, "RGBA")
+    return Image.fromarray(output, "RGB")
 
 
 def _apply_geometry(image, normalized):
@@ -793,7 +820,9 @@ def _apply_recipe_impl(
                 img.size, local_mask.size,
             )
 
-    result = _apply_geometry(img.copy(), normalized)
+    # Float geometry returns new buffers/views and the tone pass allocates its
+    # output; avoid copying a 500+ MB source only to immediately replace it.
+    result = _apply_geometry(img if isinstance(img, FloatImage) else img.copy(), normalized)
     mask_geo = _apply_geometry(fitted, normalized) if fitted is not None else None
 
     adjustments = normalized.get("adjustments") or {}
@@ -805,12 +834,15 @@ def _apply_recipe_impl(
         _local_region_deltas(local, _LOCAL_TONE_KEYS)
         if mask_geo is not None else ({}, {})
     )
+    # Tone runs at loaded resolution, before the final output resize. The
+    # detail override describes output pixels and must not shrink this radius.
+    range_scale = detail_render_scale(result.size, native_size, normalized)
+    scale = (
+        detail_scale
+        if detail_scale is not None
+        else detail_render_scale(result.size, native_size, normalized)
+    )
     if subject_tone or background_tone:
-        scale = (
-            detail_scale
-            if detail_scale is not None
-            else detail_render_scale(result.size, native_size, normalized)
-        )
         feather = (local["mask"].get("feather") or 0.0) * scale
         weight = _feathered_weight(mask_geo, feather)
         result = _apply_adjustments(
@@ -818,9 +850,10 @@ def _apply_recipe_impl(
             local_weight=weight,
             local_subject=subject_tone,
             local_background=background_tone,
+            range_scale=range_scale,
         )
-    elif tone_adjustments:
-        result = _apply_adjustments(result, tone_adjustments)
+    elif tone_adjustments or isinstance(result, FloatImage):
+        result = _apply_adjustments(result, tone_adjustments, range_scale=range_scale)
 
     return result, mask_geo
 
@@ -835,7 +868,7 @@ def apply_recipe(img, recipe, local_mask=None, native_size=None):
     """
     normalized = normalize_recipe(recipe)
     if normalized is None:
-        return img
+        return _apply_adjustments(img, {}) if isinstance(img, FloatImage) else img
     result, _ = _apply_recipe_impl(img, normalized, local_mask, native_size)
     return result
 
@@ -897,7 +930,7 @@ def _combine_detail(adjustments, region):
 
 def apply_recipe_to_loaded_image(
     img, recipe, max_size=None, native_size=None, detail_scale=None,
-    local_mask=None,
+    local_mask=None, camera_metadata=None,
 ):
     """Apply edits, constrain the long edge, then run presence and detail.
 
@@ -909,6 +942,11 @@ def apply_recipe_to_loaded_image(
     rendering a recipe with local regions pass the loaded snapshot via
     ``local_mask`` (see local_masks.load_snapshot) — without it any local
     regions are skipped entirely.
+
+    ``camera_metadata`` is the destination photo row (or promoted camera
+    fields/grouped EXIF), kept separate from the reusable recipe. Camera-aware
+    denoising resolves camera and ISO on each render; missing metadata uses
+    the image-only estimate.
 
     ``detail_scale`` overrides the scale computed from this call's recipe.
     Use it when rendering a modified recipe (e.g. the edit-preview endpoint
@@ -926,7 +964,8 @@ def apply_recipe_to_loaded_image(
     """
     normalized = normalize_recipe(recipe)
     if normalized is None:
-        result, mask_geo = img, None
+        result = _apply_adjustments(img, {}) if isinstance(img, FloatImage) else img
+        mask_geo = None
     else:
         result, mask_geo = _apply_recipe_impl(
             img, normalized, local_mask, native_size,
@@ -942,6 +981,13 @@ def apply_recipe_to_loaded_image(
         if detail_scale is not None
         else detail_render_scale(result.size, native_size, normalized)
     )
+    denoise_kwargs = {}
+    if adjustments.get("denoise_mode") == "camera":
+        try:
+            from .camera_denoise import resolve_profile
+        except ImportError:
+            from camera_denoise import resolve_profile
+        denoise_kwargs = {"denoise_mode": "camera", "noise_profile": resolve_profile(camera_metadata)}
 
     # Global presence runs before the two local detail branches so neither
     # branch can discard it when subject/background sharpening is active.
@@ -969,10 +1015,10 @@ def apply_recipe_to_loaded_image(
         background_params = _combine_detail(adjustments, background_detail)
         if subject_params == background_params:
             if subject_params["sharpen"] or subject_params["noise_reduction"]:
-                result = apply_detail(result, scale=scale, **subject_params)
+                result = apply_detail(result, scale=scale, **subject_params, **denoise_kwargs)
             return result
-        subject_out = apply_detail(result, scale=scale, **subject_params)
-        background_out = apply_detail(result, scale=scale, **background_params)
+        subject_out = apply_detail(result, scale=scale, **subject_params, **denoise_kwargs)
+        background_out = apply_detail(result, scale=scale, **background_params, **denoise_kwargs)
         feather = (local["mask"].get("feather") or 0.0) * scale
         weight = _feathered_weight(
             mask_geo.resize(subject_out.size, Image.Resampling.BILINEAR),
@@ -985,6 +1031,8 @@ def apply_recipe_to_loaded_image(
             subject_arr[..., :3] * weight
             + background_arr[..., :3] * (1.0 - weight)
         )
+        if isinstance(subject_out, FloatImage):
+            return FloatImage(blended, encoding="srgb")
         out8 = np.clip(blended + 0.5, 0, 255).astype(np.uint8)
         if out8.shape[-1] == 4:
             # Alpha passes through unchanged (identical in both branches).
@@ -1007,6 +1055,7 @@ def apply_recipe_to_loaded_image(
             ),
             noise_reduction=noise_reduction,
             scale=scale,
+            **denoise_kwargs,
         )
     return result
 

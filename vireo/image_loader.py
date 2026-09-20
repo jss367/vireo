@@ -25,6 +25,9 @@ RAW strategy:
 - Edit-quality working copies use RAW_DECODE_PRESERVE_HIGHLIGHTS: demosaic the
   RAW with auto-bright disabled and highlight blending enabled, falling back to
   the embedded JPEG only when libraw cannot decode the file.
+- RAW edit renders use RAW_DECODE_LINEAR: full-resolution demosaic to 16-bit
+  linear XYZ, then floating-point RGB for the editor. Display JPEGs are created
+  only after editing. Sized sources have a bounded, source-versioned RAM cache.
 """
 
 import contextlib
@@ -32,6 +35,8 @@ import io
 import logging
 import os
 import tempfile
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -53,11 +58,48 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 RAW_DECODE_JPEG_FIRST = "jpeg_first"
 RAW_DECODE_CAMERA_RENDERED = "camera_rendered"
 RAW_DECODE_PRESERVE_HIGHLIGHTS = "preserve_highlights"
+RAW_DECODE_LINEAR = "linear"
 _RAW_DECODE_MODES = {
     RAW_DECODE_JPEG_FIRST,
     RAW_DECODE_CAMERA_RENDERED,
     RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    RAW_DECODE_LINEAR,
 }
+
+# Sized editor sources only: a 45MP float original alone is over 500 MB.
+# Cache decoded radiance, never recipe output. Every reader gets its own image
+# object; geometry/tone rendering must not modify another request's source.
+_LINEAR_CACHE_BYTES = 128 * 1024 * 1024
+_linear_cache = OrderedDict()
+_linear_cache_lock = threading.Lock()
+
+
+def _load_linear_cached(path, max_size):
+    if not max_size or max_size <= 0:
+        return _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_LINEAR)
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, max_size)
+    with _linear_cache_lock:
+        cached = _linear_cache.get(key)
+        if cached is not None:
+            _linear_cache.move_to_end(key)
+            return cached.copy()
+    image = _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_LINEAR)
+    if image is None:
+        return None
+    if max(image.size) > max_size:
+        image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    # Never cache a JPEG fallback as though the RAW decoded successfully.
+    try:
+        from .float_image import FloatImage
+    except ImportError:
+        from float_image import FloatImage
+    if isinstance(image, FloatImage) and image.pixels.nbytes <= _LINEAR_CACHE_BYTES:
+        with _linear_cache_lock:
+            _linear_cache[key] = image.copy()
+            while sum(item.pixels.nbytes for item in _linear_cache.values()) > _LINEAR_CACHE_BYTES:
+                _linear_cache.popitem(last=False)
+    return image
 
 # macOS "package" directories that hold OTHER apps' managed data. Walking
 # into them triggers Sequoia's "<app> would like to access data from other
@@ -430,7 +472,7 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
 
 
 def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
-    """Load an image file and return a PIL Image, resized to max_size.
+    """Load an image file, resized to max_size (Pillow or a float RAW buffer).
 
     Supports JPEG, PNG, TIFF, and RAW formats (NEF, CR2, ARW, etc.).
     For RAW files, ``raw_decode`` controls whether browsing gets the fast
@@ -448,10 +490,11 @@ def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
         file_path: Path to the image file
         max_size: Maximum dimension (longest side). None or 0 for full resolution.
         raw_decode: RAW_DECODE_JPEG_FIRST (default),
-            RAW_DECODE_CAMERA_RENDERED, or RAW_DECODE_PRESERVE_HIGHLIGHTS.
+            RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            or RAW_DECODE_LINEAR (float32 scene-linear RGB for editing).
 
     Returns:
-        PIL.Image.Image or None
+        PIL.Image.Image, FloatImage (linear RAW mode), or None
     """
     path = Path(file_path)
     ext = path.suffix.lower()
@@ -463,7 +506,11 @@ def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
 
     try:
         if ext in RAW_EXTENSIONS:
-            img = _load_raw_with_retry(path, max_size, raw_decode=raw_decode)
+            img = (
+                _load_linear_cached(path, max_size)
+                if raw_decode == RAW_DECODE_LINEAR
+                else _load_raw_with_retry(path, max_size, raw_decode=raw_decode)
+            )
         else:
             with Image.open(str(path)) as opened:
                 img = ImageOps.exif_transpose(opened)
@@ -831,7 +878,12 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
     import rawpy
 
     with rawpy.imread(str(path)) as raw:
-        embedded = _extract_embedded_jpeg(raw)
+        # Linear editing never uses the camera JPEG unless decoding fails.
+        # Defer extracting it so a full-size preview does not occupy another
+        # frame buffer alongside the sensor and floating-point image.
+        embedded = (
+            None if raw_decode == RAW_DECODE_LINEAR else _extract_embedded_jpeg(raw)
+        )
 
         # JPEG-first browsing uses the embedded preview when it covers the
         # requested size. Full-resolution camera-rendered browsing also accepts
@@ -871,12 +923,16 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
         # Otherwise demosaic the sensor data, falling back to the embedded
         # JPEG if libraw can't decode this RAW variant.
         try:
+            if raw_decode == RAW_DECODE_LINEAR:
+                return _postprocess_raw_linear(raw)
             return _postprocess_raw(
                 raw,
                 max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
         except Exception as e:
+            if raw_decode == RAW_DECODE_LINEAR:
+                embedded = _extract_embedded_jpeg(raw)
             if embedded is not None:
                 # Only claim "full camera output" when the embedded JPEG
                 # actually matches the sensor's active dimensions on both
@@ -978,3 +1034,42 @@ def _postprocess_raw(raw, max_size, preserve_highlights=False):
         })
     rgb = raw.postprocess(**kwargs)
     return Image.fromarray(rgb)
+
+
+def _postprocess_raw_linear(raw):
+    """Decode an edit source without an 8-bit or gamma-encoded intermediate.
+
+    Reserve two stops in LibRaw's integer pipeline before demosaicing/color
+    conversion, then restore that scale in float. Decode to XYZ, whose positive
+    primaries avoid clipping out-of-sRGB colors in LibRaw's integer RGB output.
+    Convert XYZ to linear sRGB in float, retaining negative and above-white
+    channels until the display transform. This cannot recover saturated sensels.
+    Always demosaic at full resolution: half-size binning makes fine detail
+    change between fitted previews and exports. Browsing keeps its fast path.
+    """
+    import numpy as np
+    import rawpy
+
+    try:
+        from .float_image import FloatImage
+    except ImportError:
+        from float_image import FloatImage
+
+    rgb = raw.postprocess(
+        output_bps=16, gamma=(1, 1), output_color=rawpy.ColorSpace.XYZ,
+        use_camera_wb=True, no_auto_bright=True, bright=1.0,
+        highlight_mode=rawpy.HighlightMode.Ignore, exp_shift=0.25,
+        half_size=False,
+    )
+    xyz_to_rgb = np.array([
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ], dtype=np.float32)
+    # Convert rows in bounded blocks; avoid two full-frame float temporaries.
+    pixels = np.empty(rgb.shape, dtype=np.float32)
+    rows = max(1, 1_000_000 // max(1, rgb.shape[1]))
+    for top in range(0, rgb.shape[0], rows):
+        xyz = rgb[top:top + rows].astype(np.float32) * np.float32(4.0 / 65535.0)
+        pixels[top:top + rows] = xyz @ xyz_to_rgb.T
+    return FloatImage(pixels)

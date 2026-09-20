@@ -377,6 +377,384 @@ def test_photo_editor_aspect_uses_current_crop(live_server, page):
         assert (minimum_crop["w"] / minimum_crop["h"]) == pytest.approx(1.5)
 
 
+def test_photo_editor_remembers_crop_ratio_across_photos_and_reload(live_server, page):
+    """Opting in restores the resizing lock without changing the next photo."""
+    url = live_server["url"]
+    first_id, second_id = live_server["data"]["photos"][:2]
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{first_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    remember = page.get_by_label("Remember crop ratio")
+    expect(remember).not_to_be_checked()
+    page.locator("#aspect32Btn").click()
+    remember.check()
+
+    # Navigation inside the editor must restore the preference, too.
+    page.evaluate("photoId => loadPhoto(photoId)", second_id)
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    expect(page.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator("#saveBtn")).to_be_disabled()
+    assert page.evaluate("() => editorState.recipe.crop") == {"x": 0, "y": 0, "w": 1, "h": 1}
+
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    page.wait_for_function("() => !editorState.loading && document.getElementById('editorImg').naturalWidth > 0")
+    expect(remember).to_be_checked()
+    expect(page.locator("#aspectLockBtn")).to_have_class(re.compile(r"\bactive\b"))
+    page.locator("#cropW").fill("60")
+    page.locator("#cropW").press("Tab")
+    assert page.evaluate("() => currentCropAspect()") == pytest.approx(1.5)
+
+    # Subsequent choices replace the remembered ratio, including custom locks.
+    page.locator("#aspect43Btn").click()
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#aspect43Btn")).to_have_class(re.compile(r"\bactive\b"))
+    page.wait_for_function("() => !editorState.loading && document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspectLockBtn").click()
+    page.locator("#cropW").fill("70")
+    page.locator("#cropW").press("Tab")
+    page.locator("#aspectLockBtn").click()
+    custom_aspect = page.evaluate("() => currentCropAspect()")
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    assert page.evaluate("() => editorState.cropAspect") == pytest.approx(custom_aspect)
+
+    # Explicitly unlocking is remembered; opting out keeps this photo's lock
+    # but makes subsequent visits start unlocked again.
+    page.locator("#aspectLockBtn").click()
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    expect(remember).to_be_checked()
+    expect(page.locator("#aspectLockBtn")).not_to_have_class(re.compile(r"\bactive\b"))
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspect11Btn").click()
+    remember.uncheck()
+    expect(page.locator("#aspect11Btn")).to_have_class(re.compile(r"\bactive\b"))
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    expect(remember).not_to_be_checked()
+    expect(page.locator("#aspectLockBtn")).not_to_have_class(re.compile(r"\bactive\b"))
+
+
+def test_photo_editor_issues_latest_ratio_while_previous_save_is_pending(live_server, page):
+    """A slow preference save cannot strand newer choices in a JS callback."""
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{photo_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    pending = []
+
+    def hold_first_save(route):
+        if route.request.method == "PUT" and not pending:
+            pending.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/editor/crop-ratio", hold_first_save)
+    with page.expect_request(lambda request: request.method == "PUT"):
+        page.get_by_label("Remember crop ratio").check()
+    # The first PUT has not reached the server. The second must start now,
+    # so keepalive can finish it even if the page closes immediately.
+    with page.expect_response(lambda response: response.request.method == "PUT"):
+        page.locator("#aspect32Btn").click()
+    assert pending
+    pending[0].continue_()
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.get_by_label("Remember crop ratio")).to_be_checked()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_photo_editor_restores_pending_ratio_on_immediate_reload(live_server, page, enabled):
+    """Reload restores the latest choice even before its PUT reaches the server."""
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    if not enabled:
+        assert page.request.put(
+            f"{url}/api/editor/crop-ratio", data={"enabled": True, "aspect": 1.5},
+        ).ok
+    page.goto(f"{url}/edit/{photo_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    if enabled:
+        page.locator("#aspect32Btn").click()
+    pending = []
+
+    def hold_first_save(route):
+        if route.request.method == "PUT" and not pending:
+            pending.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/editor/crop-ratio", hold_first_save)
+    with page.expect_request(lambda request: request.method == "PUT"):
+        page.get_by_label("Remember crop ratio").set_checked(enabled)
+    # Deliberately reload without waiting for cropRatioSave. The fresh GET
+    # returns the old server value; the pending local choice must win.
+    page.reload()
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    expect(page.get_by_label("Remember crop ratio")).to_be_checked(checked=enabled)
+    if enabled:
+        expect(page.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    else:
+        expect(page.locator("#aspectLockBtn")).not_to_have_class(re.compile(r"\bactive\b"))
+    page.evaluate("() => cropRatioSave")
+    saved = page.request.get(f"{url}/api/editor/crop-ratio").json()
+    assert saved["enabled"] == enabled
+    assert saved["aspect"] == (1.5 if enabled else None)
+
+
+def test_photo_editor_keeps_pending_snapshot_when_another_tab_acknowledges(live_server, page):
+    """A stale GET cannot win when another tab clears the pending save slot."""
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    page.context.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{photo_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspect32Btn").click()
+    pending = []
+    page.route("**/api/editor/crop-ratio", lambda route: pending.append(route))
+    with page.expect_request(lambda request: request.method == "PUT"):
+        page.get_by_label("Remember crop ratio").check()
+
+    other = page.context.new_page()
+
+    def stale_get_after_acknowledgement(route):
+        if route.request.method != "GET":
+            route.continue_()
+            return
+        response = route.fetch()
+        pending[0].continue_()
+        page.evaluate("() => cropRatioSave")
+        assert page.evaluate("() => pendingCropRatioPreference()") is None
+        route.fulfill(response=response)
+
+    other.route("**/api/editor/crop-ratio", stale_get_after_acknowledgement)
+    other.goto(f"{url}/edit/{photo_id}")
+    expect(other.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    expect(other.get_by_label("Remember crop ratio")).to_be_checked()
+    expect(other.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    other.close()
+
+
+def test_photo_editor_acknowledgement_keeps_a_concurrent_pending_write(live_server, page):
+    """A write inserted between the acknowledgement's read and removal survives."""
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    remaining = page.evaluate("""() => {
+        const oldKey = 'vireo_pending_crop_ratio:old';
+        const newKey = 'vireo_pending_crop_ratio:new';
+        const older = {enabled: true, aspect: 1, revision: 100};
+        const newer = {enabled: true, aspect: 1.5, revision: 200};
+        localStorage.setItem(oldKey, JSON.stringify(older));
+        const originalGet = Storage.prototype.getItem;
+        Storage.prototype.getItem = function(key) {
+            const value = originalGet.call(this, key);
+            // Model another tab writing after the old snapshot is read.
+            if (key === oldKey) this.setItem(newKey, JSON.stringify(newer));
+            return value;
+        };
+        try { acknowledgeCropRatioPreference(100); }
+        finally { Storage.prototype.getItem = originalGet; }
+        return {old: localStorage.getItem(oldKey), pending: pendingCropRatioPreference()};
+    }""")
+    assert remaining["old"] is None
+    assert remaining["pending"] == {"enabled": True, "aspect": 1.5, "revision": 200}
+
+
+@pytest.mark.parametrize("revision_delta", [0, 1])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_photo_editor_adopts_the_server_winner_after_a_concurrent_save(
+    live_server, page, revision_delta, enabled,
+):
+    """Future photos use the persisted winner, including equal-revision ties."""
+    url = live_server["url"]
+    first_id, second_id = live_server["data"]["photos"][:2]
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{first_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspect32Btn").click()
+    crop = page.evaluate("() => editorState.recipe.crop")
+
+    def another_tab_writes_first(route):
+        preference = route.request.post_data_json
+        winner = {
+            "enabled": enabled, "aspect": 1 if enabled else None,
+            "revision": preference["revision"] + revision_delta,
+        }
+        assert page.request.put(f"{url}/api/editor/crop-ratio", data=winner).ok
+        route.continue_()
+
+    page.route("**/api/editor/crop-ratio", another_tab_writes_first)
+    page.get_by_label("Remember crop ratio").click()
+    page.evaluate("() => cropRatioSave")
+    expect(page.get_by_label("Remember crop ratio")).to_be_checked(checked=enabled)
+    assert page.evaluate("() => editorState.recipe.crop") == crop
+    page.evaluate("photoId => loadPhoto(photoId)", second_id)
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    assert page.evaluate("() => editorState.cropAspect") == (1 if enabled else None)
+
+
+def test_photo_editor_navigation_adopts_sibling_tab_preference(live_server, page):
+    """A tab whose own PUT has already resolved still opens later photos with
+    the newer preference persisted by another tab."""
+    url = live_server["url"]
+    first_id, second_id = live_server["data"]["photos"][:2]
+    page.context.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{first_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspect32Btn").click()
+    page.get_by_label("Remember crop ratio").check()
+    page.evaluate("() => cropRatioSave")
+
+    other = page.context.new_page()
+    other.goto(f"{url}/edit/{first_id}")
+    other.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    expect(other.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    other.locator("#aspect43Btn").click()
+    other.evaluate("() => cropRatioSave")
+    other.close()
+
+    page.evaluate("photoId => loadPhoto(photoId)", second_id)
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    expect(page.locator("#aspect43Btn")).to_have_class(re.compile(r"\bactive\b"))
+    assert page.evaluate("() => editorState.cropAspect") == pytest.approx(1.3333333333)
+
+
+def test_photo_editor_next_revision_outranks_sibling_tab_pending_write(live_server, page):
+    """A sibling tab's pending revision must never equal this tab's next one.
+
+    Two editors starting from the same stored revision and toggling the
+    preference in the same ``Date.now()`` tick would otherwise compute the
+    same next revision, so the server rejects one and the shared
+    acknowledgement clears both pending records — losing one user's choice
+    silently (Codex review, PR #1729).
+    """
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    ceiling = page.evaluate("""() => Date.now() + 1_000_000""")
+    outcome = page.evaluate(
+        """(sibling) => {
+            const key = 'vireo_pending_crop_ratio:sibling';
+            const record = {enabled: true, aspect: 1.5, revision: sibling};
+            localStorage.setItem(key, JSON.stringify(record));
+            try {
+                return nextCropRatioRevision(sibling - 10);
+            } finally {
+                localStorage.removeItem(key);
+            }
+        }""",
+        ceiling,
+    )
+    assert outcome > ceiling
+
+
+def test_photo_editor_replaces_cached_snapshot_after_revision_rollover(live_server, page):
+    """A committed snapshot at Number.MAX_SAFE_INTEGER must not outrank the
+    lower rollover revision the server has already accepted.
+
+    Without the ceiling-aware guard, ``writeCommittedCropRatioPreference``
+    refuses to overwrite the stale MAX_SAFE_INTEGER entry with the new
+    Date.now() revision, and ``adoptCommittedCropRatioPreference`` then
+    treats the stale entry as newer on the next navigation, reverting the
+    aspect (Codex review, PR #1729).
+    """
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    outcome = page.evaluate(
+        """() => {
+            const ceiling = Number.MAX_SAFE_INTEGER;
+            localStorage.setItem('vireo_committed_crop_ratio', JSON.stringify(
+                {enabled: true, aspect: 1.5, revision: ceiling}));
+            cropRatioPreference = {enabled: true, aspect: 1.5, revision: ceiling};
+            const rolled = {enabled: true, aspect: 1.3333333333, revision: 42};
+            writeCommittedCropRatioPreference(rolled);
+            const stored = JSON.parse(
+                localStorage.getItem('vireo_committed_crop_ratio'));
+            // A sibling tab still at the ceiling must adopt the rollover
+            // written by the tab that just committed it.
+            cropRatioPreference = {enabled: true, aspect: 1.5, revision: ceiling};
+            const adopted = adoptCommittedCropRatioPreference();
+            return {stored: stored, adopted: adopted,
+                    inMemory: cropRatioPreference};
+        }"""
+    )
+    assert outcome["stored"] == {"enabled": True, "aspect": 1.3333333333, "revision": 42}
+    assert outcome["adopted"] is True
+    assert outcome["inMemory"] == {
+        "enabled": True, "aspect": 1.3333333333, "revision": 42,
+    }
+
+
+def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
+    """A remembered ratio must not recrop an existing edit just by opening it."""
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    saved_crop = {"x": 0.1, "y": 0.2, "w": 0.5, "h": 0.5}
+
+    def photo_with_crop(route):
+        response = route.fetch()
+        photo = response.json()
+        photo["edit_recipe"] = {"crop": saved_crop}
+        route.fulfill(response=response, json=photo)
+
+    page.route(f"**/api/photos/{photo_id}", photo_with_crop)
+    response = page.request.put(
+        f"{url}/api/editor/crop-ratio", data={"enabled": True, "aspect": 1.5},
+    )
+    assert response.ok
+    page.goto(f"{url}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    expect(page.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator("#saveBtn")).to_be_disabled()
+    assert page.evaluate("() => editorState.recipe.crop") == saved_crop
+
+
 def test_photo_editor_continuous_zoom_has_fit_and_native_stops(live_server, page):
     """The editor zoom slider scales continuously and keeps exact Fit/100% actions."""
     url = live_server["url"]

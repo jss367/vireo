@@ -511,6 +511,15 @@ body {
   font-size: 11px;
   line-height: 1.35;
 }
+.crop-remember {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
 .crop-meta {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -618,6 +627,7 @@ body {
   }
 }
 </style>
+<link rel="stylesheet" href="/static/vireo-export.css">
 <link rel="stylesheet" href="/static/photo_editor_color.css">
 </head>
 <body>
@@ -703,6 +713,10 @@ body {
         <button class="editor-btn" type="button" id="aspect43Btn" onclick="setAspect(1.3333333333)" title="Set a 4:3 crop and lock the ratio; click again to unlock">4:3</button>
         <button class="editor-btn" type="button" id="aspect11Btn" onclick="setAspect(1)" title="Set a 1:1 crop and lock the ratio; click again to unlock">1:1</button>
       </div>
+      <label class="crop-remember" title="Start each photo with your last ratio lock. Saved crops stay unchanged until you resize them.">
+        <input id="rememberCropRatio" type="checkbox" onchange="setRememberCropRatio(this.checked)">
+        Remember crop ratio
+      </label>
       <div class="crop-meta">
         <div><label for="cropX">x</label><input id="cropX" type="number" min="0" max="100" step="0.1" value="0" onfocus="beginCropEdit()" onchange="setCropField('x', this.value)" aria-label="Crop x (percent)"></div>
         <div><label for="cropY">y</label><input id="cropY" type="number" min="0" max="100" step="0.1" value="0" onfocus="beginCropEdit()" onchange="setCropField('y', this.value)" aria-label="Crop y (percent)"></div>
@@ -974,6 +988,12 @@ body {
 
     <div class="panel-band">
       <div class="panel-title">Detail</div>
+      <label for="denoiseModeSelect">Denoise method</label>
+      <select id="denoiseModeSelect" class="advanced-select" onchange="setDenoiseMode(this.value)">
+        <option value="standard">Standard</option>
+        <option value="camera">Camera-aware</option>
+      </select>
+      <p id="denoiseProfileStatus" class="local-unavailable-note" aria-live="polite"></p>
       <div class="control-row">
         <label for="sharpenRange">Sharpen</label>
         <input id="sharpenRange" data-adjustment="sharpen" type="range" min="0" max="100" step="1" value="0" oninput="setAdjustment('sharpen', this.value)">
@@ -1033,102 +1053,111 @@ body {
 </main>
 
 <div id="exportOverlay" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
-  <div class="modal">
+  <div class="modal export-modal">
     <h3 id="exportTitle">Export Photo</h3>
+    <div class="export-layout">
+      <aside class="export-summary" aria-labelledby="exportSummaryTitle">
+        <h4 id="exportSummaryTitle">Output preview</h4>
+        <div id="exportPreview" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;font-family:monospace;"></div>
+        <div id="exportCollisionPolicy" style="font-size:11px;color:var(--text-secondary);margin-bottom:12px;padding:8px 10px;border:1px solid var(--border-secondary);border-radius:4px;background:var(--bg-tertiary);line-height:1.45;">
+          Existing files are never overwritten. If an export name is already in use, Vireo adds a number such as <code>_2</code>. You&rsquo;ll be shown the filename change before export starts.
+        </div>
+      </aside>
+      <section class="export-settings" aria-label="Export settings">
+        <label for="exportPreset" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Preset</label>
+        <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:12px;">
+          <select id="exportPreset" class="modal-input" style="cursor:pointer;flex:1;min-width:0;margin-bottom:0;">
+            <option value="original-jpg">Full-size JPEG</option>
+            <option value="web-jpg">Web JPEG, 2048 px</option>
+            <option value="small-jpg">Small JPEG, 1080 px</option>
+            <option value="archive-tiff">Full-size TIFF</option>
+            <option value="png">Full-size PNG</option>
+            <option value="custom">Custom</option>
+          </select>
+          <button id="exportPresetSaveBtn" class="modal-btn modal-btn-cancel" type="button"
+                  title="Save every setting in this dialog as a named preset">Save&hellip;</button>
+          <button id="exportPresetDeleteBtn" class="modal-btn modal-btn-cancel" type="button"
+                  title="Delete the selected saved preset" disabled>Delete</button>
+        </div>
+        <div class="export-settings-grid">
+          <div class="export-settings-group">
+            <h4>Files &amp; destination</h4>
+            <label for="exportDest" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Custom destination folder <span style="font-weight:400;color:var(--text-faint);">(optional)</span></label>
+            <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:4px;">
+              <input id="exportDest" class="modal-input" type="text"
+                     placeholder="Same folder as the original"
+                     style="flex:1;min-width:0;margin-bottom:0;">
+              <button class="modal-btn modal-btn-cancel" type="button"
+                      onclick="browseForExportDestination()">Browse&hellip;</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+              Leave blank to export the photo beside its original.
+            </div>
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-bottom:12px;">
+              <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input id="exportSubfolder" type="checkbox">
+                Put the export in a subfolder named
+              </label>
+              <input id="exportSubfolderName" aria-label="Subfolder name" class="modal-input" type="text" value="exported"
+                     placeholder="exported" maxlength="120"
+                     style="flex:1;min-width:0;margin-bottom:0;padding:4px 8px;font-size:12px;">
+            </div>
 
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Custom destination folder <span style="font-weight:400;color:var(--text-faint);">(optional)</span></label>
-    <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:4px;">
-      <input id="exportDest" class="modal-input" type="text"
-             placeholder="Same folder as the original"
-             style="flex:1;min-width:0;margin-bottom:0;">
-      <button class="modal-btn modal-btn-cancel" type="button"
-              onclick="browseForExportDestination()">Browse&hellip;</button>
+            <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:12px;cursor:pointer;">
+              <input id="exportRevealAfter" type="checkbox">
+              Show the exported file in the file manager when finished
+            </label>
+            <label for="exportTemplate" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Naming template</label>
+            <input id="exportTemplate" class="modal-input" type="text" value="{original}">
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{original}')">{original}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{date}')">{date}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{datetime}')">{datetime}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{species}')">{species}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{rating}')">{rating}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{seq}')">{seq}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{folder}')">{folder}</button>
+            </div>
+          </div>
+          <div class="export-settings-group">
+            <h4>Image &amp; metadata</h4>
+            <label for="exportFormat" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Format</label>
+            <select id="exportFormat" class="modal-input" style="cursor:pointer;">
+              <option value="jpg">JPEG</option>
+              <option value="png">PNG</option>
+              <option value="tiff">TIFF</option>
+            </select>
+
+            <label for="exportResize" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Resize (max long edge)</label>
+            <select id="exportResize" class="modal-input" style="cursor:pointer;">
+              <option value="">Original size</option>
+              <option value="4096">4096 px</option>
+              <option value="2048">2048 px</option>
+              <option value="1920">1920 px</option>
+              <option value="1080">1080 px</option>
+              <option value="custom">Custom&hellip;</option>
+            </select>
+            <input id="exportResizeCustom" aria-label="Custom maximum long edge in pixels" class="modal-input" type="number" placeholder="Max pixels (long edge)" min="100" max="20000" style="display:none;">
+
+            <label for="exportQuality" id="exportQualityLabel" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Quality</label>
+            <div id="exportQualityRow" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+              <input id="exportQuality" type="range" min="1" max="100" value="92" style="flex:1;">
+              <span id="exportQualityVal" style="font-size:13px;color:var(--text-secondary);min-width:32px;">92</span>
+            </div>
+            <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:7px;">Include metadata in exported file</label>
+            <div class="export-metadata-options">
+              <label class="export-metadata-option"><input id="exportMetadataSpecies" type="checkbox" value="species"> Species</label>
+              <label class="export-metadata-option"><input id="exportMetadataCaptureDate" type="checkbox" value="capture_date"> Capture date</label>
+              <label class="export-metadata-option"><input id="exportMetadataCaptureTime" type="checkbox" value="capture_time"> Capture time</label>
+              <label class="export-metadata-option"><input id="exportMetadataRating" type="checkbox" value="rating"> Rating</label>
+              <label class="export-metadata-option"><input id="exportMetadataLocation" type="checkbox" value="location"> Location</label>
+              <label class="export-metadata-option"><input id="exportMetadataCamera" type="checkbox" value="camera"> Camera &amp; exposure</label>
+            </div>
+            <p class="export-metadata-help">Unchecked details are left out.</p>
+          </div>
+        </div>
+      </section>
     </div>
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
-      Leave blank to export the photo beside its original.
-    </div>
-    <div style="display:flex;align-items:center;gap:7px;margin-bottom:12px;">
-      <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);cursor:pointer;white-space:nowrap;">
-        <input id="exportSubfolder" type="checkbox">
-        Put the export in a subfolder named
-      </label>
-      <input id="exportSubfolderName" class="modal-input" type="text" value="exported"
-             placeholder="exported" maxlength="120"
-             style="flex:1;min-width:0;margin-bottom:0;padding:4px 8px;font-size:12px;">
-    </div>
-
-    <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:12px;cursor:pointer;">
-      <input id="exportRevealAfter" type="checkbox">
-      Show the exported file in the file manager when finished
-    </label>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Preset</label>
-    <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:12px;">
-      <select id="exportPreset" class="modal-input" style="cursor:pointer;flex:1;min-width:0;margin-bottom:0;">
-        <option value="original-jpg">Full-size JPEG</option>
-        <option value="web-jpg">Web JPEG, 2048 px</option>
-        <option value="small-jpg">Small JPEG, 1080 px</option>
-        <option value="archive-tiff">Full-size TIFF</option>
-        <option value="png">Full-size PNG</option>
-        <option value="custom">Custom</option>
-      </select>
-      <button id="exportPresetSaveBtn" class="modal-btn modal-btn-cancel" type="button"
-              title="Save every setting in this dialog as a named preset">Save&hellip;</button>
-      <button id="exportPresetDeleteBtn" class="modal-btn modal-btn-cancel" type="button"
-              title="Delete the selected saved preset" disabled>Delete</button>
-    </div>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Format</label>
-    <select id="exportFormat" class="modal-input" style="cursor:pointer;">
-      <option value="jpg">JPEG</option>
-      <option value="png">PNG</option>
-      <option value="tiff">TIFF</option>
-    </select>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Resize (max long edge)</label>
-    <select id="exportResize" class="modal-input" style="cursor:pointer;">
-      <option value="">Original size</option>
-      <option value="4096">4096 px</option>
-      <option value="2048">2048 px</option>
-      <option value="1920">1920 px</option>
-      <option value="1080">1080 px</option>
-      <option value="custom">Custom&hellip;</option>
-    </select>
-    <input id="exportResizeCustom" class="modal-input" type="number" placeholder="Max pixels (long edge)" min="100" max="20000" style="display:none;">
-
-    <label id="exportQualityLabel" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Quality</label>
-    <div id="exportQualityRow" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
-      <input id="exportQuality" type="range" min="1" max="100" value="92" style="flex:1;">
-      <span id="exportQualityVal" style="font-size:13px;color:var(--text-secondary);min-width:32px;">92</span>
-    </div>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Naming template</label>
-    <input id="exportTemplate" class="modal-input" type="text" value="{original}">
-    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{original}')">{original}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{date}')">{date}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{datetime}')">{datetime}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{species}')">{species}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{rating}')">{rating}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{seq}')">{seq}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{folder}')">{folder}</button>
-    </div>
-    <div id="exportPreview" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;font-family:monospace;"></div>
-    <div id="exportCollisionPolicy" style="font-size:11px;color:var(--text-secondary);margin-bottom:12px;padding:8px 10px;border:1px solid var(--border-secondary);border-radius:4px;background:var(--bg-tertiary);line-height:1.45;">
-      Existing files are never overwritten. If an export name is already in use, Vireo adds a number such as <code>_2</code>. You&rsquo;ll be shown the filename change before export starts.
-    </div>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:7px;">Include metadata in exported file</label>
-    <div class="export-metadata-options">
-      <label class="export-metadata-option"><input id="exportMetadataSpecies" type="checkbox" value="species"> Species</label>
-      <label class="export-metadata-option"><input id="exportMetadataCaptureDate" type="checkbox" value="capture_date"> Capture date</label>
-      <label class="export-metadata-option"><input id="exportMetadataCaptureTime" type="checkbox" value="capture_time"> Capture time</label>
-      <label class="export-metadata-option"><input id="exportMetadataRating" type="checkbox" value="rating"> Rating</label>
-      <label class="export-metadata-option"><input id="exportMetadataLocation" type="checkbox" value="location"> Location</label>
-      <label class="export-metadata-option"><input id="exportMetadataCamera" type="checkbox" value="camera"> Camera &amp; exposure</label>
-    </div>
-    <p class="export-metadata-help">Unchecked details are left out.</p>
-
     <div class="modal-actions">
       <button id="exportSubmitBtn" class="modal-btn modal-btn-primary" type="button" onclick="startExport()">Export Photo</button>
       <button class="modal-btn modal-btn-cancel" type="button" data-export-cancel onclick="closeExportModal()">Cancel</button>
@@ -1145,6 +1174,8 @@ body {
 <script src="/static/vireo-batch-edits.js"></script>
 
 <script>
+var cropRatioPreference = {enabled: false, aspect: null};
+var cropRatioSave = Promise.resolve();
 var editorState = {
   photoId: null,
   photo: null,
@@ -1209,6 +1240,7 @@ function setEditorLoading(loading) {
   if (exportBtn) exportBtn.disabled = !!loading || !editorState.photoId;
   updateEditorZoomControl();
   updateAspectButtons();
+  if (window.renderHistoryControls) window.renderHistoryControls();
 }
 
 window.beforeHistoryChange = function() {
@@ -1813,6 +1845,7 @@ function recipeForSave(recipe) {
 
   var vals = adjustmentValues(out);
   var adj = {};
+  if ((out.adjustments || {}).denoise_mode === 'camera') adj.denoise_mode = 'camera';
   ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction'].forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) adj[key] = Number(vals[key]);
   });
@@ -1892,6 +1925,7 @@ function updateRecipeSummary() {
     Object.keys(r.adjustments).forEach(function(key) {
       if (key === 'white_balance') parts.push('white balance');
       else if (key === 'sharpen_radius') return; // folded into "sharpen"
+      else if (key === 'denoise_mode') parts.push('camera-aware denoising');
       else if (key === 'noise_reduction') parts.push('noise reduction');
       else if (key === 'tone_curve' || key === 'point_curves') parts.push('tone curve');
       else if (key === 'point_color') parts.push('point color');
@@ -1933,6 +1967,7 @@ function syncControls() {
   set('sharpen', vals.sharpen, false);
   set('sharpen_radius', vals.sharpen_radius, true);
   set('noise_reduction', vals.noise_reduction, false);
+  syncDenoiseControls();
   syncAdvancedColorControls();
   var straight = Number(r.straighten || 0);
   var straightInput = document.getElementById('straightenRange');
@@ -2325,6 +2360,7 @@ function cropBoxForAspect(crop, normalizedRatio) {
 
 function markChanged(render) {
   if (editorState.loading) return;
+  recordEditorHistory();
   var wasShowingBefore = editorState.showBefore;
   if (wasShowingBefore) editorState.showBefore = false;
   updateFeedbackControls();
@@ -2375,7 +2411,164 @@ function setStraighten(value) {
   markChanged(true);
 }
 
+var COMMITTED_CROP_RATIO_KEY = 'vireo_committed_crop_ratio';
+var MAX_CROP_RATIO_REVISION = Number.MAX_SAFE_INTEGER;
+
+function isValidCropRatioPreference(value) {
+  return value && typeof value.enabled === 'boolean' &&
+    Number.isSafeInteger(value.revision) && value.revision > 0 &&
+    (value.aspect === null || (Number.isFinite(value.aspect) && value.aspect > 0));
+}
+
+function cropRatioRevisionAtCeiling(revision) {
+  // The server accepts a lower rollover write once the stored counter reaches
+  // the safe-integer ceiling; the client's monotonic guards must match, or a
+  // stale cached snapshot outranks the freshly saved rollover value and
+  // reverts the preference on the next navigation.
+  return Number(revision) >= MAX_CROP_RATIO_REVISION;
+}
+
+function pendingCropRatioRecords() {
+  var records = [];
+  try {
+    Object.keys(localStorage).filter(function(key) {
+      return key.indexOf('vireo_pending_crop_ratio:') === 0;
+    }).forEach(function(key) {
+      try {
+        var pending = JSON.parse(VireoViewPreferences.read(key));
+        if (isValidCropRatioPreference(pending)) {
+          records.push({key: key, preference: pending});
+        }
+      } catch (_) {}
+    });
+  } catch (_) {}
+  return records;
+}
+
+function readCommittedCropRatioPreference() {
+  try {
+    var raw = VireoViewPreferences.read(COMMITTED_CROP_RATIO_KEY);
+    if (!raw) return null;
+    var committed = JSON.parse(raw);
+    return isValidCropRatioPreference(committed) ? committed : null;
+  } catch (_) { return null; }
+}
+
+function writeCommittedCropRatioPreference(preference) {
+  if (!isValidCropRatioPreference(preference)) return;
+  var existing = readCommittedCropRatioPreference();
+  // Once the cached revision reaches the ceiling, any subsequent write is a
+  // rollover the server has already accepted; the previous snapshot is stale
+  // regardless of its numeric revision, so replace it.
+  if (existing && existing.revision >= preference.revision &&
+      !cropRatioRevisionAtCeiling(existing.revision)) return;
+  try {
+    VireoViewPreferences.write(COMMITTED_CROP_RATIO_KEY, JSON.stringify({
+      enabled: !!preference.enabled,
+      aspect: preference.aspect === null ? null : Number(preference.aspect),
+      revision: preference.revision,
+    }));
+  } catch (_) {}
+}
+
+function adoptCommittedCropRatioPreference() {
+  // Another tab may have persisted a newer preference after this tab's last
+  // PUT resolved; that write leaves no callback in this tab, so line-of-sight
+  // navigation would otherwise keep applying the stale in-memory value.
+  var committed = readCommittedCropRatioPreference();
+  if (!committed) return false;
+  var current = cropRatioPreference.revision || 0;
+  // The server accepts a lower rollover revision once the counter hits the
+  // ceiling. When the in-memory revision is at the ceiling, treat any valid
+  // committed snapshot as authoritative so a sibling tab's rollover writes
+  // — or a settings-import restoration — are not ignored as older.
+  var accept = committed.revision > current || cropRatioRevisionAtCeiling(current);
+  if (!accept) return false;
+  cropRatioPreference = committed;
+  updateAspectButtons();
+  return true;
+}
+
+function pendingCropRatioPreference() {
+  return pendingCropRatioRecords().reduce(function(latest, record) {
+    return !latest || record.preference.revision > latest.revision ? record.preference : latest;
+  }, null);
+}
+
+function acknowledgeCropRatioPreference(revision) {
+  // Each write owns an immutable key. Another tab can add a newer record
+  // between this read and removal without having its pending value erased.
+  pendingCropRatioRecords().forEach(function(record) {
+    if (record.preference.revision <= revision) {
+      try { localStorage.removeItem(record.key); } catch (_) {}
+    }
+  });
+}
+
+function saveCropRatioPreference(preference) {
+  // Issue every write before teardown can discard JavaScript callbacks.
+  // The server compares revisions so a slow older request cannot win.
+  var request = safeFetch('/api/editor/crop-ratio', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(preference),
+    keepalive: true,
+  }, {toast: false}).then(function(saved) {
+    // Another tab may have won with a newer (or tied) revision. Adopt the
+    // persisted preference for future photos without recropping this one.
+    if (saved.revision >= (cropRatioPreference.revision || 0)) {
+      cropRatioPreference = saved;
+      updateAspectButtons();
+    }
+    // Publish the accepted revision so other editor tabs adopt it via the
+    // storage event instead of relying on their own PUT responses.
+    writeCommittedCropRatioPreference(saved);
+    acknowledgeCropRatioPreference(saved.revision);
+  }).catch(function() {
+    showToast('Could not remember the crop ratio. Please try again.', 'error');
+  });
+  cropRatioSave = Promise.all([cropRatioSave, request]);
+}
+
+function nextCropRatioRevision(previous) {
+  // A previous revision at Number.MAX_SAFE_INTEGER has no safe successor.
+  // Fall back to Date.now() so future writes stay within safe-integer
+  // range; the server accepts this rollover instead of rejecting it as
+  // stale.
+  var current = Number(previous) || 0;
+  // Sibling tabs starting from the same server revision in this Date.now()
+  // tick would otherwise compute the same next revision. Their pending
+  // records live in shared localStorage; take the max so this write
+  // outranks whatever they queued instead of colliding on equal revisions.
+  pendingCropRatioRecords().forEach(function(record) {
+    if (record.preference.revision > current) current = record.preference.revision;
+  });
+  var candidate = current + 1;
+  if (!Number.isSafeInteger(candidate)) candidate = Date.now();
+  var next = Math.max(Date.now(), candidate);
+  return Number.isSafeInteger(next) ? next : candidate;
+}
+
+function rememberCropRatio(force) {
+  if (!cropRatioPreference.enabled && !force) return;
+  cropRatioPreference.aspect = cropRatioPreference.enabled ? editorState.cropAspect : null;
+  cropRatioPreference.revision = nextCropRatioRevision(cropRatioPreference.revision);
+  // A reloaded page can issue its GET before this PUT reaches the server.
+  // Keep the pending value synchronously until its revision is acknowledged.
+  var writeId = window.crypto && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID() : Date.now() + ':' + Math.random().toString(36).slice(2);
+  VireoViewPreferences.write('vireo_pending_crop_ratio:' + writeId,
+    JSON.stringify(cropRatioPreference));
+  saveCropRatioPreference(cropRatioPreference);
+}
+
+function setRememberCropRatio(enabled) {
+  cropRatioPreference.enabled = enabled;
+  rememberCropRatio(true);
+}
+
 function updateAspectButtons() {
+  document.getElementById('rememberCropRatio').checked = cropRatioPreference.enabled;
   var map = { aspect32Btn: 1.5, aspect43Btn: 1.3333333333, aspect11Btn: 1 };
   setButtonActive('aspectLockBtn', !!editorState.cropAspect);
   setButtonDisabled('aspectLockBtn', !!editorState.showBefore || !!editorState.loading);
@@ -2388,6 +2581,7 @@ function updateAspectButtons() {
 function resetCrop() {
   var reopenedCrop = activateCropEditing();
   editorState.cropAspect = null;
+  rememberCropRatio();
   updateAspectButtons();
   editorState.recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
   markChanged(reopenedCrop);
@@ -2406,11 +2600,13 @@ function setAspect(aspect) {
   if (Math.abs(Number(editorState.cropAspect || 0) - aspect) < 0.0001) {
     // Second click on the active ratio unlocks it and leaves the crop alone.
     editorState.cropAspect = null;
+    rememberCropRatio();
     updateAspectButtons();
     if (reopenedCrop) updatePreview();
     return;
   }
   editorState.cropAspect = aspect;
+  rememberCropRatio();
   updateAspectButtons();
   var imageAspect = imageWidth / imageHeight;
   var normalizedRatio = aspect / imageAspect;
@@ -2430,6 +2626,7 @@ function toggleAspectLock() {
     if (!aspect) return;
     editorState.cropAspect = aspect;
   }
+  rememberCropRatio();
   updateAspectButtons();
   if (reopenedCrop) updatePreview();
 }
@@ -2463,7 +2660,7 @@ function resetAdjustments() {
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   var kept = {};
   [
-    'sharpen', 'sharpen_radius', 'noise_reduction',
+    'sharpen', 'sharpen_radius', 'noise_reduction', 'denoise_mode',
     'tone_curve', 'point_curves', 'point_color', 'hsl', 'color_grading',
   ].forEach(function(key) {
     if (adj[key]) kept[key] = adj[key];
@@ -2913,6 +3110,7 @@ function ensureLocalMask() {
       if (editorState.photoId === photoId && editorState.localMaskPromise === pending) {
         editorState.localMaskPromise = null;
         editorState.localAvailable = false;
+        if (window.renderHistoryControls) window.renderHistoryControls();
         updateLocalBandVisibility();
         if (typeof showToast === 'function') {
           showToast(e.message || 'Could not snapshot the subject mask', 'error');
@@ -2921,6 +3119,7 @@ function ensureLocalMask() {
       throw e;
     });
     editorState.localMaskPromise = pending;
+    if (window.renderHistoryControls) window.renderHistoryControls();
   }
   return editorState.localMaskPromise;
 }
@@ -2938,7 +3137,10 @@ function setLocalAdjustment(region, key, raw, fixed) {
     // First touch: freeze the active mask into a snapshot, then attach the
     // pending slider state. The snapshot is content-addressed, so repeat
     // calls are idempotent.
+    var photoId = editorState.photoId;
+    var updateSeq = editorState.localMaskUpdateSeq;
     ensureLocalMask().then(function() {
+      if (editorState.photoId !== photoId || editorState.localMaskUpdateSeq !== updateSeq) return;
       rebuildLocalSection();
       markChanged(true);
     }).catch(function() {});
@@ -2955,7 +3157,10 @@ function setLocalFeather(raw) {
     rebuildLocalSection();
     markChanged(true);
   } else {
+    var photoId = editorState.photoId;
+    var updateSeq = editorState.localMaskUpdateSeq;
     ensureLocalMask().then(function() {
+      if (editorState.photoId !== photoId || editorState.localMaskUpdateSeq !== updateSeq) return;
       rebuildLocalSection();
       markChanged(true);
     }).catch(function() {});
@@ -2963,6 +3168,7 @@ function setLocalFeather(raw) {
 }
 
 function resetLocal() {
+  editorState.localMaskUpdateSeq++;
   editorState.localDraft = {subject: {}, background: {}, feather: 0};
   delete editorState.recipe.local;
   syncLocalControls();
@@ -3061,11 +3267,42 @@ function positionMaskOverlay() {
   overlay.style.height = img.clientHeight + 'px';
 }
 
+function syncDenoiseControls() {
+  var mode = (editorState.recipe.adjustments || {}).denoise_mode || 'standard';
+  document.getElementById('denoiseModeSelect').value = mode;
+  var status = document.getElementById('denoiseProfileStatus');
+  if (mode !== 'camera') {
+    status.textContent = '';
+    return;
+  }
+  var profile = (editorState.photo || {}).denoise_profile || {};
+  var camera = profile.camera_model || profile.camera_make || 'Unknown camera';
+  var iso = profile.iso ? ' · ISO ' + profile.iso : '';
+  var message = profile.source === 'camera'
+    ? 'Camera profile + image noise estimate'
+    : 'No matching camera/ISO profile; using image noise estimate';
+  if (profile.match === 'nearest') message += ' (nearest measured ISO ' + profile.profile_iso[0] + ')';
+  if (profile.match === 'interpolated') message += ' (interpolated ISO)';
+  status.textContent = camera + iso + '. ' + message + '. Adjust Denoise below; inspect at 100% zoom. Larger previews and exports can take longer.';
+}
+
+function setDenoiseMode(mode) {
+  if (editorState.loading || editorState.showBefore) return;
+  var adj = cloneRecipe(editorState.recipe.adjustments || {});
+  if (mode === 'camera') adj.denoise_mode = 'camera';
+  else delete adj.denoise_mode;
+  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
+  else delete editorState.recipe.adjustments;
+  syncDenoiseControls();
+  markChanged(true);
+}
+
 function resetDetail() {
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   delete adj.sharpen;
   delete adj.sharpen_radius;
   delete adj.noise_reduction;
+  delete adj.denoise_mode;
   if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
   else delete editorState.recipe.adjustments;
   syncControls();
@@ -3259,6 +3496,7 @@ async function autoTone() {
     var vals = adjustmentValues(editorState.recipe);
     var existingAdj = cloneRecipe(editorState.recipe.adjustments || {});
     var adj = {};
+    if (existingAdj.denoise_mode === 'camera') adj.denoise_mode = 'camera';
     ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast'].forEach(function(k) {
       if (Math.abs(auto[k]) > 0.000001) adj[k] = auto[k];
     });
@@ -3313,6 +3551,8 @@ async function saveRecipe(description) {
   // a different photo (or refresh the cache under the wrong photoId).
   var savedPhotoId = editorState.photoId;
   editorState.savingPhotoIds[String(savedPhotoId)] = true;
+  finishEditorHistoryGesture();
+  if (window.renderHistoryControls) window.renderHistoryControls();
   var acceptingCropEdit = editorState.cropEditing &&
     !!recipeForSave(editorState.recipe).crop;
   var btn = document.getElementById('saveBtn');
@@ -3346,6 +3586,7 @@ async function saveRecipe(description) {
     editorState.localStale = editorState.savedLocalStale;
     ensureCrop(editorState.recipe);
     editorState.cropEditing = !recipeForSave(editorState.recipe).crop;
+    resetEditorHistory();
     if (acceptingCropEdit && !editorState.cropEditing) {
       editorState.zoomMode = 'fit';
     }
@@ -3364,6 +3605,7 @@ async function saveRecipe(description) {
     return false;
   } finally {
     delete editorState.savingPhotoIds[String(savedPhotoId)];
+    if (window.renderHistoryControls) window.renderHistoryControls();
   }
 }
 
@@ -4163,6 +4405,7 @@ function revertUnsavedEdits() {
   editorState.cropAspect = null;
   editorState.zoomMode = 'fit';
   updateAspectButtons();
+  recordEditorHistory();
   syncControls();
   updatePreview();
   if (typeof showToast === 'function') showToast('Unsaved edits discarded', 'success');
@@ -4359,8 +4602,8 @@ function editorEmptyState() {
 function applyLoadedLocalStaleness(photoId, loadSeq, savedRecipeSeq, data) {
   if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq ||
       editorState.savedRecipeSeq !== savedRecipeSeq) return false;
-  editorState.localStale = !!data.local_mask_stale;
-  editorState.savedLocalStale = editorState.localStale;
+  editorState.savedLocalStale = !!data.local_mask_stale;
+  refreshEditorHistoryLocalStaleness();
   updateLocalBandVisibility();
   return true;
 }
@@ -4382,6 +4625,7 @@ async function loadPhoto(photoId, opts) {
   editorState.savedRecipe = {};
   editorState.savedRecipeSeq++;
   editorState.recipe = {};
+  resetEditorHistory();
   var saveBtn = document.getElementById('saveBtn');
   if (saveBtn) saveBtn.disabled = true;
   ['copySettingsBtn', 'beforeBtn', 'fitBtn', 'actualBtn', 'editorZoomOut',
@@ -4391,7 +4635,12 @@ async function loadPhoto(photoId, opts) {
   });
   editorState.showBefore = false;
   editorState.cropEditing = true;
-  editorState.cropAspect = null;
+  // Restore only the resizing constraint; opening a photo must not change
+  // its saved crop or create an unsaved edit. Sync the last committed
+  // preference first so navigation adopts a newer choice made in another tab
+  // even before its storage event has been delivered.
+  adoptCommittedCropRatioPreference();
+  editorState.cropAspect = cropRatioPreference.enabled ? cropRatioPreference.aspect : null;
   updateAspectButtons();
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   // Keep the URL in sync so refresh / bookmark / Back behave sensibly.
@@ -4419,6 +4668,7 @@ async function loadPhoto(photoId, opts) {
     editorState.localAvailable = false;
     editorState.localStale = false;
     editorState.savedLocalStale = false;
+    resetEditorHistory();
     editorState.maskOverlay = false;
     setButtonActive('maskOverlayBtn', false);
     refreshMaskOverlay();
@@ -4530,6 +4780,41 @@ function initEditorKeyboard() {
 }
 
 async function initEditor() {
+  setEditorLoading(true);
+  var pending = pendingCropRatioPreference();
+  if (pending) cropRatioPreference = pending;
+  try {
+    var saved = await safeFetch('/api/editor/crop-ratio', {}, {toast: false});
+    // Another tab can acknowledge and clear the shared pending slot while
+    // this GET is in flight. Keep the newer evidence captured before it.
+    var latestPending = pendingCropRatioPreference();
+    if (latestPending && (!pending || latestPending.revision > pending.revision)) {
+      pending = latestPending;
+    }
+    if (pending && pending.revision > (saved.revision || 0)) {
+      cropRatioPreference = pending;
+      saveCropRatioPreference(pending);
+    } else {
+      cropRatioPreference = saved;
+      acknowledgeCropRatioPreference(saved.revision || 0);
+    }
+    // Seed the shared committed key so any other tab open on this origin can
+    // see the authoritative revision even before its next PUT round-trips.
+    writeCommittedCropRatioPreference(cropRatioPreference);
+    // Then adopt any newer committed value that arrived from another tab
+    // while this GET was in flight.
+    adoptCommittedCropRatioPreference();
+  } catch (_) {
+    showToast('Could not load your remembered crop ratio.', 'error');
+  }
+  window.addEventListener('storage', function(event) {
+    if (event.key !== COMMITTED_CROP_RATIO_KEY) return;
+    // A sibling editor tab persisted a newer preference. Reflect it in
+    // memory so subsequent Next/Prev navigation opens photos with the
+    // updated resizing constraint without needing a reload.
+    adoptCommittedCropRatioPreference();
+  });
+  setEditorLoading(false);
   initCropDrag();
   initEditorKeyboard();
   initEditorContextMenu();
@@ -4554,5 +4839,6 @@ async function initEditor() {
 document.addEventListener('DOMContentLoaded', initEditor);
 </script>
 <script src="/static/photo_editor_color.js"></script>
+<script src="/static/photo_editor_history.js"></script>
 </body>
 </html>

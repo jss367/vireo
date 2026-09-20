@@ -4,7 +4,50 @@ import contextlib
 import os
 import shutil
 import tempfile
+import threading
 import time
+import weakref
+
+# Weak values release idle locks without losing a lock held by a waiter.
+_original_locks = weakref.WeakValueDictionary()
+_original_locks_guard = threading.Lock()
+
+
+def original_preparation_guard(vireo_dir, photo_id):
+    """Serialize a photo's preparation and offline-cache writes through cleanup.
+
+    A database transaction alone cannot guard files published before their
+    cache row is inserted. Reentrant so a preparation job can hold this across
+    copying, rendering, and cleanup while cache_photo_original uses it too.
+    """
+    key = (os.path.realpath(vireo_dir), int(photo_id))
+    with _original_locks_guard:
+        lock = _original_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _original_locks[key] = lock
+        return lock
+
+
+def photo_source_matches(selected, current):
+    """Whether a catalog row still describes the selected source asset."""
+    return selected is not None and current is not None and all(
+        selected[key] == current[key]
+        for key in ("folder_id", "filename", "file_size", "file_mtime", "companion_path")
+    )
+
+
+def cleanup_preparation_offline_files(vireo_dir, photo_id):
+    """Remove offline assets while holding original_preparation_guard.
+
+    Unlike full photo-deletion cleanup, this never touches artifacts owned
+    by independent thumbnail, preview, mask, or interactive render producers.
+    """
+    import glob
+
+    for family in ("originals", "xmp", "companions"):
+        for path in glob.glob(os.path.join(vireo_dir, "offline", family, f"{photo_id}.*")):
+            _unlink_cached_rel(vireo_dir, os.path.relpath(path, vireo_dir))
 
 
 def _copy_atomic(src, dst):
@@ -140,6 +183,11 @@ def resolve_original_path(
 
 def cache_photo_original(db, photo, vireo_dir, folders):
     """Copy one photo's original and sidecar metadata into the offline cache."""
+    with original_preparation_guard(vireo_dir, photo["id"]):
+        return _cache_photo_original(db, photo, vireo_dir, folders)
+
+
+def _cache_photo_original(db, photo, vireo_dir, folders):
     folder_id = photo["folder_id"]
     now = time.time()
     existing = db.offline_original_get(photo["id"])

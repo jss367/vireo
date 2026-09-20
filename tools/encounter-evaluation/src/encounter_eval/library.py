@@ -86,7 +86,8 @@ class FeatureReader:
             if detector_model is not None:
                 sql += " AND detector_model = ?"
                 params.append(detector_model)
-            for r in self.conn.execute(sql + " ORDER BY photo_id, detector_confidence DESC", params):
+            from subjects import primary_order_sql
+            for r in self.conn.execute(sql + " ORDER BY photo_id, " + primary_order_sql(), params):
                 result[r["photo_id"]].append({
                     "id": r["id"], "x": r["box_x"], "y": r["box_y"], "w": r["box_w"], "h": r["box_h"],
                     "confidence": r["detector_confidence"], "category": r["category"],
@@ -185,6 +186,16 @@ def open_library(path):
         columns = {r["name"] for r in conn.execute(f"PRAGMA main.table_info({table})")}
         if columns and "source_taxon_id" not in columns:
             conn.execute(f"CREATE TEMP VIEW {table} AS SELECT *, NULL AS source_taxon_id FROM main.{table}")
+    # Subject analysis was added after older evaluation catalogs were captured.
+    # Empty TEMP views preserve their confidence ordering and absent suggestions,
+    # while current catalogs retain their real analysis and manual choices.
+    for table, columns in {
+        "detection_subjects": ("detection_id", "crop", "quality_score", "exposure_ev"),
+        "photo_subject_choices": ("photo_id", "detection_id"),
+    }.items():
+        if not conn.execute(f"PRAGMA main.table_info({table})").fetchone():
+            projection = ", ".join(f"NULL AS {column}" for column in columns)
+            conn.execute(f"CREATE TEMP VIEW {table} AS SELECT {projection} WHERE 0")
     return conn
 
 

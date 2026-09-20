@@ -1,6 +1,7 @@
 import json
 import re
 
+import pytest
 from playwright.sync_api import expect
 
 from e2e.stack_seed import seed_browse_stack
@@ -1370,7 +1371,16 @@ def test_prepare_full_resolution_surfaces_fatal_job_failure(live_server, page):
     )
 
 
-def test_prepare_full_resolution_summarizes_partial_failure(live_server, page):
+@pytest.mark.parametrize(
+    "status, failed, skipped_deleted, ending",
+    [
+        ("failed", 1, 0, "1 failed"),
+        ("completed", 0, 1, "1 skipped (deleted during preparation)"),
+    ],
+)
+def test_prepare_full_resolution_summarizes_result(
+    live_server, page, status, failed, skipped_deleted, ending,
+):
     page.route(
         "**/api/jobs/prepare-full-resolution",
         lambda route: route.fulfill(
@@ -1386,9 +1396,12 @@ def test_prepare_full_resolution_summarizes_partial_failure(live_server, page):
             content_type="text/event-stream",
             body=(
                 "event: complete\n"
-                "data: {\"status\":\"failed\",\"result\":{"
-                "\"ready\":2,\"copied\":2,\"failed\":1},"
-                "\"errors\":[\"one source was unavailable\"]}\n\n"
+                "data: " + json.dumps({
+                    "status": status,
+                    "result": {"ready": 2, "copied": 2, "failed": failed,
+                               "skipped_deleted": skipped_deleted},
+                    "errors": ["one source was unavailable"] if failed else [],
+                }) + "\n\n"
             ),
         ),
     )
@@ -1403,7 +1416,7 @@ def test_prepare_full_resolution_summarizes_partial_failure(live_server, page):
     )
     expect(page.locator("#toastContainer > div").last).to_have_text(
         "Full-resolution preparation complete: 2 ready, 2 copied locally, "
-        "1 failed"
+        + ending
     )
 
 

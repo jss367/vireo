@@ -3618,7 +3618,7 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det = {
             "id": raw_detection_id,
             "box_x": raw_detection["box"]["x"],
@@ -3735,7 +3735,7 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det = {
             "id": person_det_id,
             "box_x": person_det["box"]["x"],
@@ -3859,7 +3859,7 @@ def test_pipeline_precreates_full_image_anchor_for_noise_only_photo(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det = {
             "id": raw_detection_id,
             "box_x": raw_detection["box"]["x"],
@@ -4140,7 +4140,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         detect_calls.append({
             "already_detected_ids": frozenset(already_detected_ids or set()),
             "cached_detections": dict(cached_detections) if cached_detections else {},
@@ -4261,8 +4261,9 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     assert 42 in processed
 
 
+@pytest.mark.parametrize("raw_subject_analysis", [False, True])
 def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, raw_subject_analysis,
 ):
     """classify_stage must pass every qualifying detection dict (with
     box_x/y/w/h keys) to _prepare_image, not the raw {photo_id: [dets]}
@@ -4319,7 +4320,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {
             p["id"]: [primary_det, secondary_det, below_threshold_det]
             for p in batch
@@ -4330,7 +4331,8 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
 
     captured = []
 
-    def capturing_prepare_image(photo, folders, detection, vireo_dir=None):
+    def capturing_prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None):
+        assert (raw_analysis is not None) == raw_subject_analysis
         captured.append(detection)
         # Returning (None, ...) tells the caller this photo failed to load,
         # which short-circuits _flush_batch.  We only care about the
@@ -4368,6 +4370,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
         model_ids=[model_id],
         skip_extract_masks=True,
         skip_regroup=True,
+        raw_subject_analysis=raw_subject_analysis,
     )
 
     runner = FakeRunner()
@@ -4399,6 +4402,79 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     assert not any("'box_w'" in e for e in job["errors"]), (
         f"KeyError 'box_w' leaked into job errors: {job['errors']}"
     )
+
+
+@pytest.mark.parametrize("species", ["Robin", "Warbler"])
+def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, species):
+    import classifier
+    import classify_job
+    import config as cfg
+    import labels_fingerprint
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    db_path = str(tmp_path / "refresh.db")
+    db = Database(db_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    folder = db.add_folder(folder_path)
+    photo = db.add_photo(folder, "bird.jpg", ".jpg", 1000, 1)
+    _drop_jpeg(folder_path, "bird.jpg")
+    detection = db.save_detections(photo, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.add_prediction(detection, "Robin", 0.2, "BioCLIP", status="accepted")
+    db.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
+    collection = db.add_collection("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
+    model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    monkeypatch.setattr(labels_fingerprint, "compute_fingerprint", lambda *a, **k: "legacy")
+    monkeypatch.setattr(classifier, "Classifier", lambda *a, **k: object())
+    monkeypatch.setattr(classify_job, "_detect_batch", lambda photos, *a, **k: (
+        {p["id"]: [{**dict(d), "confidence": d["detector_confidence"]} for d in db.get_detections(p["id"])] for p in photos}, len(photos), {p["id"] for p in photos},
+    ))
+    monkeypatch.setattr(classify_job, "_prepare_image", lambda *a, **k: (
+        Image.new("RGB", (100, 100)), folder_path, os.path.join(folder_path, "bird.jpg"),
+    ))
+
+    inferred = []
+
+    def infer(batch, clf, model_type, model_name, thread_db, results, top_k=1):
+        inferred.extend(entry["detection_id"] for entry in batch)
+        for entry in batch:
+            results.append({
+                "photo": entry["photo"], "detection_id": entry["detection_id"],
+                "folder_path": folder_path, "image_path": entry["image_path"],
+                "prediction": species, "confidence": 0.9, "timestamp": None,
+                "filename": "bird.jpg", "embedding": None, "taxonomy": {"genus": "New genus"},
+            })
+        return 0
+
+    monkeypatch.setattr(classify_job, "_flush_batch", infer)
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, PipelineParams(
+        collection_id=collection, model_ids=[model], raw_subject_analysis=True,
+        skip_extract_masks=True, skip_regroup=True,
+    ))
+    rows = db.conn.execute("SELECT id, species, confidence, taxonomy_genus FROM predictions").fetchall()
+    assert len(rows) == 1
+    assert (rows[0]["species"], rows[0]["confidence"], rows[0]["taxonomy_genus"]) == (species, 0.9, "New genus")
+    if species == "Robin":
+        assert db.conn.execute("SELECT status FROM prediction_review WHERE prediction_id=?", (rows[0]["id"],)).fetchone()[0] == "accepted"
+    assert db.conn.execute("SELECT count(*) FROM classifier_runs").fetchone()[0] == 1
+    assert db.conn.execute("SELECT input_recipe FROM classifier_runs").fetchone()[0] is not None
+    assert inferred == [detection]
+    normal = PipelineParams(collection_id=collection, model_ids=[model],
+                            skip_extract_masks=True, skip_regroup=True)
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, normal)
+    assert inferred == [detection, detection]
+    assert db.conn.execute("SELECT input_recipe FROM classifier_runs").fetchone()[0] is None
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, normal)
+    assert inferred == [detection, detection]
+    if species == "Robin":
+        assert db.conn.execute("SELECT status FROM prediction_review WHERE prediction_id=?", (rows[0]["id"],)).fetchone()[0] == "accepted"
+    db.close()
 
 
 def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold(
@@ -4532,7 +4608,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     # _detect_batch stub: reclassify finds no animals this time (false pos fixed).
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -4638,7 +4714,7 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
     # Reclassify re-detects the SAME box → content-addressed id == prior_id.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         dmap = {}
         for p in batch:
             ids = db_.write_detection_batch(
@@ -4749,7 +4825,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         detect_calls.append({
             "already_detected_ids": frozenset(already_detected_ids or set()),
             "batch_ids": [p["id"] for p in batch],
@@ -4899,7 +4975,7 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         detect_call_count[0] += 1
         return {}, 0, {p["id"] for p in batch}
 
@@ -5038,7 +5114,7 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
     # it into processed_ids.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {photo1_id}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -5155,7 +5231,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
     # has a FK to detections.id).
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -5362,7 +5438,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -5511,7 +5587,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -5685,7 +5761,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -5834,7 +5910,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -6362,7 +6438,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             if p["id"] == photo_with_det:
@@ -6529,7 +6605,7 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     # No real MegaDetector hits in this pipeline pass, either.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -6641,7 +6717,7 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -6750,7 +6826,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -6863,7 +6939,7 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {p["id"]: det_rows[p["id"]] for p in batch}
         return det_map, len(det_map), {p["id"] for p in batch}
 
@@ -7173,7 +7249,7 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         events.append(("detect", [p["id"] for p in batch]))
         det_map = {}
         for p in batch:
@@ -8071,7 +8147,7 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
     # photo fed to classify so _flush_batch has a valid FK to bind to.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         processed = set()
         for p in batch:
@@ -9252,6 +9328,13 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
         photo_ids.append(photo_id)
         detection_ids.append(detection_id)
 
+    # The foreign detector outranks MDv6 at the weak floor, but is not
+    # eligible for contextual rescue. State must follow the extracted MDv6 box.
+    db.write_detection_batch(photo_ids[1], "other-detector", [{
+        "box": {"x": .6, "y": .2, "w": .2, "h": .3},
+        "confidence": .19, "category": "animal",
+    }])
+
     db.add_prediction(
         detection_ids[0], "Great-tailed Grackle", 0.9, "inat21",
     )
@@ -9275,6 +9358,12 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
     run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
 
     assert state["proxy_calls"] == expected_proxy_calls
+    if expected_proxy_calls == 3:
+        primary = db.conn.execute(
+            "SELECT detection_id FROM photo_subject_state WHERE photo_id=?",
+            (photo_ids[1],),
+        ).fetchone()
+        assert primary["detection_id"] == detection_ids[1]
 
 
 def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
@@ -10082,6 +10171,73 @@ def _run_extract_masks_for_test(
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
     return db, runner, generate_mask_calls, photo_ids
+
+
+@pytest.mark.parametrize("switch_variant", [False, True])
+def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, monkeypatch, switch_variant):
+    """Opting in and back out cannot silently reuse the opposite quality recipe."""
+    import masking
+    import numpy as np
+    import quality
+    import raw_analysis
+    from PIL import Image
+
+    real_quality = quality.compute_all_quality_features
+    db, _, calls, ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small",
+        [{"filename": "bird.jpg", "box": (0.1, 0.1, 0.8, 0.8), "model": "megadetector-v6"}],
+    )
+    monkeypatch.setattr(quality, "compute_all_quality_features", real_quality)
+    monkeypatch.setattr(masking, "render_proxy", lambda *a, **k: Image.new("RGB", (64, 64), (30, 30, 30)))
+    monkeypatch.setattr(masking, "generate_mask", lambda *a, **k: np.ones((64, 64), dtype=bool))
+    linear = np.random.default_rng(7).uniform(0.005, 0.02, (64, 64, 3)).astype(np.float32)
+    monkeypatch.setattr(raw_analysis, "decode_linear", lambda *a: linear)
+    collection_id = db.get_collections()[0]["id"]
+
+    def run(enabled):
+        run_pipeline_job(_make_job(), FakeRunner(), str(tmp_path / "test.db"), db._active_workspace_id,
+                         PipelineParams(collection_id=collection_id, skip_classify=True,
+                                        skip_regroup=True, raw_subject_analysis=enabled))
+        return db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
+
+    corrected = run(True)
+    assert corrected["quality_input_recipe"] == raw_analysis.RECIPE
+    report_row = db.conn.execute("SELECT report_json FROM subject_raw_analysis").fetchone()
+    report = json.loads(report_row[0])
+    assert report["exposure_ev"] == 2
+    assert corrected["subject_tenengrad"] == report["corrected_quality"]["subject_tenengrad"]
+    assert corrected["subject_y_median"] == report["original_quality"]["subject_y_median"]
+    if switch_variant:
+        import config as cfg
+
+        settings = cfg.load()
+        settings["pipeline"]["sam2_variant"] = "sam2-large"
+        cfg.save(settings)
+        assert run(False)["quality_input_recipe"] is None
+        db.set_active_mask_variant(ids[0], "sam2-small")
+        restored = db.conn.execute("SELECT quality_input_recipe FROM photos WHERE id=?", (ids[0],)).fetchone()
+        assert restored[0] == raw_analysis.RECIPE
+        restored_features = db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
+        for field in report["corrected_quality"]:
+            assert restored_features[field] == corrected[field]
+        settings["pipeline"]["sam2_variant"] = "sam2-small"
+        cfg.save(settings)
+    normal = run(False)
+    assert normal["quality_input_recipe"] is None
+    assert normal["subject_tenengrad"] == 0
+    assert normal["subject_y_median"] == 30
+    if switch_variant:
+        settings["pipeline"]["sam2_variant"] = "sam2-large"
+        cfg.save(settings)
+        run(True)
+        db.set_active_mask_variant(ids[0], "sam2-small")
+        settings["pipeline"]["sam2_variant"] = "sam2-small"
+        cfg.save(settings)
+        restored_normal = run(False)
+        for field in report["corrected_quality"]:
+            assert restored_normal[field] == normal[field]
+        assert restored_normal["quality_input_recipe"] is None
+    db.close()
 
 
 def test_extract_masks_rolls_back_failed_photo_before_continuing(
@@ -14066,7 +14222,7 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -14332,7 +14488,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             # The classify loop expects plain dicts (the real _detect_batch
@@ -15281,7 +15437,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -15463,7 +15619,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -15669,7 +15825,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -15860,7 +16016,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -15972,7 +16128,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16134,7 +16290,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16361,7 +16517,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16556,7 +16712,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16693,7 +16849,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16824,7 +16980,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -17035,7 +17191,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -17244,7 +17400,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -17481,7 +17637,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             if p["id"] == gone_photo_id:
@@ -17667,7 +17823,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -17863,7 +18019,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -18092,7 +18248,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -18271,7 +18427,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -18406,7 +18562,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -19140,17 +19296,24 @@ def test_extract_masks_preflight_error_denominator_matches_stage_total(
 
 def _seed_cached_mask(db, tmp_path, photo_id, sam2_variant, dinov2_variant,
                       prompt=(0.1, 0.1, 0.5, 0.5), detector="MegaDetector"):
-    """Give `photo_id` a complete, active mask for the configured variant."""
+    """Give `photo_id` a complete, active mask for the configured variant.
+
+    Writes ``photos.active_mask_variant`` directly so callers can seed a
+    stale-prompt scenario without tripping ``set_active_mask_variant``'s
+    guard against activating a mask that doesn't match the current
+    primary — the stale state this helper simulates is exactly what the
+    guard is there to prevent.
+    """
     from PIL import Image
     mask_dir = tmp_path / ".vireo" / "masks"
     os.makedirs(mask_dir, exist_ok=True)
     mask_file = str(mask_dir / f"{photo_id}.{sam2_variant}.png")
     Image.new("L", (4, 4), 255).save(mask_file)
     db.upsert_photo_mask(photo_id, sam2_variant, mask_file, detector, *prompt)
-    db.set_active_mask_variant(photo_id, sam2_variant)
     db.conn.execute(
-        "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
-        (dinov2_variant, photo_id),
+        "UPDATE photos SET mask_path=?, active_mask_variant=?, "
+        "dino_embedding_variant=? WHERE id=?",
+        (mask_file, sam2_variant, dinov2_variant, photo_id),
     )
     db.conn.commit()
     return mask_file

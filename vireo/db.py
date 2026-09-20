@@ -1210,7 +1210,38 @@ class Database:
                 subject_tenengrad REAL,
                 bg_tenengrad      REAL,
                 crop_complete     REAL,
+                quality_input_recipe TEXT,
+                subject_clip_high REAL,
+                subject_clip_low REAL,
+                subject_y_median REAL,
+                bg_separation REAL,
+                phash_crop TEXT,
+                noise_estimate REAL,
                 PRIMARY KEY (photo_id, variant)
+            );
+
+            CREATE TABLE IF NOT EXISTS subject_raw_analysis (
+                detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+                recipe TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS detection_subjects (
+                detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+                source_key TEXT NOT NULL,
+                crop TEXT NOT NULL,
+                quality_score REAL NOT NULL,
+                exposure_ev REAL NOT NULL,
+                features TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS photo_subject_choices (
+                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+                detection_id INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS photo_subject_state (
+                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+                detection_id INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS predictions (
@@ -1249,6 +1280,7 @@ class Database:
                 labels_fingerprint   TEXT NOT NULL,
                 labels_fingerprint_full TEXT,
                 runtime_fingerprint TEXT NOT NULL DEFAULT 'legacy',
+                input_recipe TEXT,
                 input_fingerprint TEXT,
                 run_at               TEXT DEFAULT (datetime('now')),
                 prediction_count     INTEGER NOT NULL DEFAULT 0,
@@ -2163,11 +2195,12 @@ class Database:
                 "ALTER TABLE photos "
                 "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
             )
-        # Migration: miss-classifier columns. PHOTO_COLS/get_collection_photos
+        # Migration: quality recipe and miss-classifier columns. PHOTO_COLS/get_collection_photos
         # and misses.py both reference these; without the fallback ALTER, any
         # DB created before the miss-classifier feature fails every photo-list
         # query with "no such column".
         for column, column_type in (
+            ("quality_input_recipe", "TEXT"),
             ("miss_no_subject", "INTEGER"),
             ("miss_clipped", "INTEGER"),
             ("miss_oof", "INTEGER"),
@@ -2178,6 +2211,54 @@ class Database:
             except sqlite3.OperationalError:
                 self.conn.execute(
                     f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
+                )
+        try:
+            self.conn.execute("SELECT quality_input_recipe FROM photo_masks LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE photo_masks ADD COLUMN quality_input_recipe TEXT")
+            self.conn.execute(
+                "UPDATE photo_masks SET quality_input_recipe = ("
+                "SELECT p.quality_input_recipe FROM photos p WHERE p.id=photo_masks.photo_id) "
+                "WHERE variant = (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id)"
+            )
+            # Earlier experimental builds recorded only the active recipe.
+            # Inactive masks on RAW-analyzed photos have unknown provenance;
+            # force a refresh when selected instead of assuming normal scores.
+            self.conn.execute(
+                "UPDATE photo_masks SET quality_input_recipe='unknown-raw-analysis-recipe' "
+                "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id) "
+                "AND photo_id IN (SELECT d.photo_id FROM subject_raw_analysis a "
+                "JOIN detections d ON d.id=a.detection_id)"
+            )
+        try:
+            self.conn.execute("SELECT input_recipe FROM classifier_runs LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE classifier_runs ADD COLUMN input_recipe TEXT")
+            # Older experimental runs did not record recipe ownership.
+            self.conn.execute(
+                "UPDATE classifier_runs SET input_recipe='unknown-raw-recipe' "
+                "WHERE detection_id IN (SELECT detection_id FROM subject_raw_analysis)"
+            )
+        # Quality features belong to the mask/recipe that produced them.
+        # Only the active variant can be backfilled from the old photo row.
+        for column, column_type in (
+            ("subject_clip_high", "REAL"), ("subject_clip_low", "REAL"),
+            ("subject_y_median", "REAL"), ("bg_separation", "REAL"),
+            ("phash_crop", "TEXT"), ("noise_estimate", "REAL"),
+        ):
+            try:
+                self.conn.execute(f"SELECT {column} FROM photo_masks LIMIT 0")
+            except sqlite3.OperationalError:
+                self.conn.execute(f"ALTER TABLE photo_masks ADD COLUMN {column} {column_type}")
+                self.conn.execute(
+                    f"UPDATE photo_masks SET {column}=(SELECT p.{column} FROM photos p "
+                    "WHERE p.id=photo_masks.photo_id) WHERE variant=(SELECT p.active_mask_variant "
+                    "FROM photos p WHERE p.id=photo_masks.photo_id)"
+                )
+                self.conn.execute(
+                    "UPDATE photo_masks SET quality_input_recipe='unknown-mask-quality-recipe' "
+                    "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p "
+                    "WHERE p.id=photo_masks.photo_id)"
                 )
         # Migration: integrity-verification markers. hash_checked_at is when
         # the file's content was last re-hashed against photos.file_hash;
@@ -8130,7 +8211,8 @@ class Database:
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     subject_sharpness, subject_size, quality_score,
                     latitude, longitude, companion_path, working_copy_path,
-                    wildlife_excluded, miss_no_subject, miss_clipped, miss_oof"""
+                    wildlife_excluded, miss_no_subject, miss_clipped, miss_oof,
+                    camera_make, camera_model, iso"""
 
     # Columns for single-photo detail queries (includes exif_data JSON +
     # eye-focus fields consumed by the review lightbox's crosshair overlay)
@@ -8863,6 +8945,7 @@ class Database:
                   ON cr.detection_id = d.id
                  AND cr.classifier_model = ?
                  AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                 WHERE d.detector_model != 'full-image'
                   AND d.detector_confidence >= ?
                   AND cr.detection_id IS NULL{scope_sql}""",
@@ -8907,6 +8990,7 @@ class Database:
                     ON cr.detection_id = d.id
                    AND cr.classifier_model = ?
                    AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                  WHERE d.rn = 1
                    AND cr.detection_id IS NULL""",
             (ws, min_conf, *scope_params, classifier_model, labels_fingerprint),
@@ -9093,6 +9177,7 @@ class Database:
                     ON cr.detection_id = f.detection_id
                    AND cr.classifier_model = ?
                    AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                  WHERE f.detection_id IS NULL
                     OR cr.detection_id IS NULL""",
             (
@@ -9523,7 +9608,7 @@ class Database:
 
         Reuses the staleness predicate from ``find_stale_masks`` — a
         mask is fresh only when its stored ``(detector_model,
-        prompt_xywh)`` equals the highest-confidence non-full-image
+        prompt_xywh)`` equals the selected non-full-image
         detection on the same photo (with optional ``detector_confidence``
         floor). Filtered by ``sam2_variant`` so a stale mask under a
         different variant doesn't pollute the count for the currently
@@ -9547,6 +9632,7 @@ class Database:
         """
         import config as cfg
         ws = self._ws_id()
+        from subjects import primary_order_sql
         if detector_confidence is None:
             detector_confidence = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
@@ -9576,7 +9662,7 @@ class Database:
                             WHERE d2.photo_id = pm.photo_id
                               AND d2.detector_model != 'full-image'
                               AND d2.detector_confidence >= ?
-                            ORDER BY d2.detector_confidence DESC, d2.id ASC
+                            ORDER BY {primary_order_sql("d2")}
                             LIMIT 1
                        )
                        AND d.detector_model = pm.detector_model
@@ -9594,13 +9680,20 @@ class Database:
         """Count photos eligible for the eye-keypoint stage, ignoring the
         ``eye_tenengrad IS NULL`` idempotency gate.
 
-        Eligibility = mask present + at least one non-synthetic detection
-        above min_conf + at least one prediction on that detection. Matches
-        the join shape of ``list_photos_for_eye_keypoint_stage`` minus the
-        "not yet processed" filter, so the plan can distinguish "no
-        eligible photos" from "all eligible photos already processed".
+        Eligibility = active mask present for the currently-selected
+        primary detection + at least one prediction on that detection.
+        Mirrors ``list_photos_for_eye_keypoint_stage``'s selected-primary
+        + active-mask predicates minus the "not yet processed" filter,
+        so the plan can distinguish "no eligible photos" from "all
+        eligible photos already processed". Counting on the loose
+        mask+detection+prediction join would include photos whose only
+        prediction sits on a non-primary detection — the stage cannot
+        produce eye keypoints for those, so review readiness would
+        repeatedly flag missing keypoints while the plan reported the
+        stage complete (Codex r4056621190).
         """
         import config as cfg
+        from subjects import primary_order_sql
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
@@ -9616,16 +9709,33 @@ class Database:
                  AND d.detector_model != 'full-image'
                  AND d.detector_confidence >= ?
                 JOIN predictions pr ON pr.detection_id = d.id
-                WHERE p.mask_path IS NOT NULL{scope_sql}""",
-            (ws, min_conf, *scope_params),
+                JOIN photo_masks pm
+                  ON pm.photo_id = p.id
+                 AND pm.variant = p.active_mask_variant
+                 AND pm.detector_model = d.detector_model
+                 AND pm.prompt_x = d.box_x
+                 AND pm.prompt_y = d.box_y
+                 AND pm.prompt_w = d.box_w
+                 AND pm.prompt_h = d.box_h
+                WHERE p.mask_path IS NOT NULL
+                  AND p.active_mask_variant IS NOT NULL
+                  AND d.id = (
+                      SELECT d2.id FROM detections d2
+                      WHERE d2.photo_id = p.id
+                        AND d2.detector_confidence >= ?
+                        AND d2.detector_model != 'full-image'
+                      ORDER BY {primary_order_sql("d2")}
+                      LIMIT 1
+                  ){scope_sql}""",
+            (ws, min_conf, min_conf, *scope_params),
         ).fetchone()
         return row["n"] or 0
 
     def count_eye_keypoint_stale(self, photo_ids=None):
         """Count photos in scope whose eye_tenengrad is set under a
         non-current eye_kp_fingerprint. Mirrors
-        ``count_eye_keypoint_eligible``'s join shape (workspace + mask +
-        detection + prediction) and adds the staleness predicate.
+        ``count_eye_keypoint_eligible``'s selected-primary + active-mask
+        join shape and adds the staleness predicate.
 
         A NULL fingerprint on a row with eye_tenengrad set is treated as
         stale — only the migration backfill should produce that state,
@@ -9634,6 +9744,7 @@ class Database:
         """
         import config as cfg
         from pipeline import EYE_KP_FINGERPRINT_VERSION
+        from subjects import primary_order_sql
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
@@ -9649,11 +9760,28 @@ class Database:
                  AND d.detector_model != 'full-image'
                  AND d.detector_confidence >= ?
                 JOIN predictions pr ON pr.detection_id = d.id
+                JOIN photo_masks pm
+                  ON pm.photo_id = p.id
+                 AND pm.variant = p.active_mask_variant
+                 AND pm.detector_model = d.detector_model
+                 AND pm.prompt_x = d.box_x
+                 AND pm.prompt_y = d.box_y
+                 AND pm.prompt_w = d.box_w
+                 AND pm.prompt_h = d.box_h
                 WHERE p.mask_path IS NOT NULL
+                  AND p.active_mask_variant IS NOT NULL
                   AND p.eye_tenengrad IS NOT NULL
                   AND (p.eye_kp_fingerprint IS NULL
-                       OR p.eye_kp_fingerprint != ?){scope_sql}""",
-            (ws, min_conf, EYE_KP_FINGERPRINT_VERSION, *scope_params),
+                       OR p.eye_kp_fingerprint != ?)
+                  AND d.id = (
+                      SELECT d2.id FROM detections d2
+                      WHERE d2.photo_id = p.id
+                        AND d2.detector_confidence >= ?
+                        AND d2.detector_model != 'full-image'
+                      ORDER BY {primary_order_sql("d2")}
+                      LIMIT 1
+                  ){scope_sql}""",
+            (ws, min_conf, EYE_KP_FINGERPRINT_VERSION, min_conf, *scope_params),
         ).fetchone()
         return row["n"] or 0
 
@@ -9661,26 +9789,29 @@ class Database:
         """Count photos whose top-routable prediction would actually be
         attempted by the eye-keypoint stage under the current config.
 
-        Tighter than ``count_eye_keypoint_eligible``: that one matches the
-        loose mask+detection+prediction join, which includes photos whose
-        top prediction will be skipped at Gate 1 (classifier confidence
-        below ``min_species_conf``) or fail taxonomy routing (anything
-        outside the keys of ``pipeline._EYE_KEYPOINT_MODEL_FOR_CLASS``).
-        Those photos never get an ``eye_kp_fingerprint`` stamped — by
-        design, so a future config change can retry them — so they would
-        permanently inflate ``eye_target`` and trip the "computed without
-        eye keypoints" banner on every run.
+        Tighter than ``count_eye_keypoint_eligible``: eligible photos
+        include ones whose selected primary detection's top prediction
+        will be skipped at Gate 1 (classifier confidence below
+        ``min_species_conf``) or fail taxonomy routing (anything outside
+        the keys of ``pipeline._EYE_KEYPOINT_MODEL_FOR_CLASS``). Those
+        photos never get an ``eye_kp_fingerprint`` stamped — by design,
+        so a future config change can retry them — so they would
+        permanently inflate ``eye_target`` and trip the "computed
+        without eye keypoints" banner on every run.
 
-        Match ``list_photos_for_eye_keypoint_stage``'s "best routable row
-        per photo" selection so a taxonomy-bearing prediction wins over a
-        taxonomy-less one. Predictions that route only via the scientific
-        name → taxa-table fallback are *not* counted here (the SQL filter
-        is taxonomy_class-only); those photos will still be attempted by
-        the stage but will be undercounted in the target, which keeps
-        ``attempts >= target`` and means the banner won't lie — at worst
-        it stays quiet when it could have surfaced.
+        Match ``list_photos_for_eye_keypoint_stage``'s selected-primary
+        + active-mask predicates and its "best routable row per photo"
+        selection so a taxonomy-bearing prediction wins over a
+        taxonomy-less one on the *same* selected detection (Codex
+        r4056621190). Predictions that route only via the scientific
+        name → taxa-table fallback are *not* counted here (the SQL
+        filter is taxonomy_class-only); those photos will still be
+        attempted by the stage but will be undercounted in the target,
+        which keeps ``attempts >= target`` and means the banner won't
+        lie — at worst it stays quiet when it could have surfaced.
         """
         import config as cfg
+        from subjects import primary_order_sql
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
@@ -9692,7 +9823,11 @@ class Database:
         # the *winner*, not to any prediction the photo happens to carry.
         # The labels_fingerprint subquery mirrors
         # list_photos_for_eye_keypoint_stage so re-classified detections
-        # only contribute their latest prediction set.
+        # only contribute their latest prediction set. The selected-
+        # primary and active-mask predicates mirror
+        # list_photos_for_eye_keypoint_stage so predictions on non-primary
+        # detections and photos with a stale mask are excluded from the
+        # target — the stage cannot produce keypoints for those.
         row = self.conn.execute(
             f"""WITH ranked AS (
                     SELECT p.id AS photo_id,
@@ -9718,7 +9853,24 @@ class Database:
                      AND d.detector_model != 'full-image'
                      AND d.detector_confidence >= ?
                     JOIN predictions pr ON pr.detection_id = d.id
+                    JOIN photo_masks pm
+                      ON pm.photo_id = p.id
+                     AND pm.variant = p.active_mask_variant
+                     AND pm.detector_model = d.detector_model
+                     AND pm.prompt_x = d.box_x
+                     AND pm.prompt_y = d.box_y
+                     AND pm.prompt_w = d.box_w
+                     AND pm.prompt_h = d.box_h
                     WHERE p.mask_path IS NOT NULL
+                      AND p.active_mask_variant IS NOT NULL
+                      AND d.id = (
+                          SELECT d2.id FROM detections d2
+                          WHERE d2.photo_id = p.id
+                            AND d2.detector_confidence >= ?
+                            AND d2.detector_model != 'full-image'
+                          ORDER BY {primary_order_sql("d2")}
+                          LIMIT 1
+                      )
                       AND pr.labels_fingerprint = (
                           SELECT pr2.labels_fingerprint FROM predictions pr2
                           WHERE pr2.detection_id = pr.detection_id
@@ -9731,7 +9883,7 @@ class Database:
                 WHERE rn = 1
                   AND taxonomy_class IN ('Aves', 'Mammalia')
                   AND species_conf >= ?""",
-            (ws, min_conf, *scope_params, min_species_conf),
+            (ws, min_conf, min_conf, *scope_params, min_species_conf),
         ).fetchone()
         return row["n"] or 0
 
@@ -11972,7 +12124,7 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def set_active_mask_variant(self, photo_id, variant, _commit=True):
+    def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
         """Mark `variant` as active for `photo_id` and denormalize its
         fields into the photos row (mask_path + per-mask features) so
         downstream readers (scoring, pipeline) see the active mask.
@@ -11983,22 +12135,68 @@ class Database:
         fsync per photo. Bulk callers MUST call ``commit_with_retry``
         themselves once the loop completes.
         """
+        # Resolve the effective primary detection the same way both
+        # mask-extraction paths do: the top-ordered non-full-image
+        # detection above the workspace's current detector_confidence
+        # floor. ``photo_subject_state.detection_id`` can lag when the
+        # floor changes (workspace override, or another workspace
+        # sharing this photo runs with a different floor), so checking
+        # the mask's prompt against the cached state would reject a
+        # mask that extraction just produced from the current primary.
+        import config as cfg
+        from subjects import primary_order_sql
+        effective = self.get_effective_config(cfg.load())
+        min_conf = effective.get("detector_confidence", 0.2)
+        detector_filter = ""
+        if weak_rescue_min_conf is not None:
+            # Only the pipeline's validated contextual rescue may lower the
+            # floor. Bulk activation has no such context and rejects by default.
+            min_conf = weak_rescue_min_conf
+            detector_filter = "AND detector_model='megadetector-v6' "
         row = self.conn.execute(
-            "SELECT path, subject_size, subject_tenengrad, bg_tenengrad, "
-            "crop_complete FROM photo_masks WHERE photo_id=? AND variant=?",
-            (photo_id, variant),
+            f"SELECT pm.*, d.detector_model AS primary_model, "
+            f"d.box_x AS primary_x, d.box_y AS primary_y, "
+            f"d.box_w AS primary_w, d.box_h AS primary_h "
+            f"FROM photo_masks pm LEFT JOIN detections d ON d.id=("
+            f"SELECT id FROM detections WHERE photo_id=pm.photo_id "
+            f"AND detector_confidence>=? AND detector_model!='full-image' "
+            f"AND category='animal' {detector_filter} "
+            f"ORDER BY {primary_order_sql()} LIMIT 1) "
+            f"WHERE pm.photo_id=? AND pm.variant=?",
+            (min_conf, photo_id, variant),
         ).fetchone()
         if row is None:
             raise ValueError(
                 f"No photo_masks row for photo {photo_id} variant {variant!r}"
             )
+        if row["primary_model"] is not None:
+            # A primary detection sits above the workspace's current floor:
+            # it must match the mask exactly, otherwise the mask represents
+            # a different subject.
+            if (row["detector_model"] != row["primary_model"]
+                    or any(row["prompt_" + k] != row["primary_" + k] for k in "xywh")):
+                raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
+        else:
+            # Preserve pre-detection migration rows, but never reactivate an
+            # orphan or a below-floor detection without explicit rescue context.
+            has_detection_context = self.conn.execute(
+                "SELECT 1 WHERE EXISTS (SELECT 1 FROM detections WHERE photo_id=? "
+                "AND detector_model!='full-image') OR EXISTS (SELECT 1 FROM detector_runs "
+                "WHERE photo_id=? AND detector_model!='full-image')",
+                (photo_id, photo_id),
+            ).fetchone()
+            if has_detection_context:
+                raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
-            "crop_complete=? WHERE id=?",
+            "crop_complete=?, quality_input_recipe=?, subject_clip_high=?, subject_clip_low=?, "
+            "subject_y_median=?, bg_separation=?, phash_crop=?, noise_estimate=? WHERE id=?",
             (row["path"], variant, row["subject_size"],
              row["subject_tenengrad"], row["bg_tenengrad"],
-             row["crop_complete"], photo_id),
+             row["crop_complete"], row["quality_input_recipe"],
+             row["subject_clip_high"], row["subject_clip_low"], row["subject_y_median"],
+             row["bg_separation"], row["phash_crop"], row["noise_estimate"], photo_id),
         )
         if _commit:
             commit_with_retry(self.conn)
@@ -12101,39 +12299,15 @@ class Database:
         return len(rows)
 
     def find_stale_masks(self, detector_confidence=None):
-        """Return photo_masks rows whose stored prompt no longer matches
-        the photo's current primary detection (highest-confidence,
-        non full-image).
+        """Return masks whose prompts differ from the selected primary.
 
-        A mask is fresh only if its stored ``(detector_model, prompt_*)``
-        equals the photo's primary detection — the single
-        highest-confidence non-``full-image`` row. Matching against any
-        detection (e.g., a low-confidence secondary box still carrying
-        the old coordinates, or another retained model's row) would
-        leave stale cache entries lingering after detector/model
-        changes, so we pick exactly one primary row per photo and
-        require the prompt to equal that row.
-
-        Tie-break: when multiple detections share the maximum
-        confidence, both this query and the extraction code in
-        ``api_job_extract_masks`` / ``get_detections`` resolve to the
-        smallest ``detections.id`` (insertion order). Using
-        ``MAX(detector_confidence)`` here would leave the primary
-        ambiguous on ties — a mask matching either tied row could be
-        treated as fresh even though extraction is now using the other
-        one. ``ORDER BY detector_confidence DESC, id ASC LIMIT 1`` keeps
-        stale-detection and extraction in sync.
-
-        ``detector_confidence`` is an optional workspace floor (the same
-        threshold both extraction paths apply when picking detections to
-        run SAM on). When provided, detections below the floor are
-        invisible to this query, so masks whose prompt only matches a
-        below-threshold box — i.e. masks the pipeline would no longer
-        regenerate from that detection — are correctly flagged stale.
-        Without this filter, raising ``detector_confidence`` left the
-        storage card under-counting stale masks and ``delete_stale_masks``
-        leaving them on disk.
+        Selection uses the same manual-choice, quality, confidence, and ID
+        ordering as extraction. When supplied, ``detector_confidence`` hides
+        boxes below the workspace floor before selection. A mask matching a
+        secondary or now-hidden detection is stale even if its row remains
+        cached for later reuse.
         """
+        from subjects import primary_order_sql
         if detector_confidence is None:
             conf_pred = ""
             params = ()
@@ -12154,7 +12328,7 @@ class Database:
                         WHERE d2.photo_id = pm.photo_id
                           AND d2.detector_model != 'full-image'
                           {conf_pred}
-                        ORDER BY d2.detector_confidence DESC, d2.id ASC
+                        ORDER BY {primary_order_sql("d2")}
                         LIMIT 1
                    )
                    AND d.detector_model = pm.detector_model
@@ -12369,6 +12543,9 @@ class Database:
         detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
         subject_size=None, subject_tenengrad=None,
         bg_tenengrad=None, crop_complete=None, _commit=True,
+        quality_input_recipe=None,
+        subject_clip_high=None, subject_clip_low=None, subject_y_median=None,
+        bg_separation=None, phash_crop=None, noise_estimate=None,
     ):
         """Insert or replace a mask row for (photo_id, variant).
 
@@ -12380,9 +12557,10 @@ class Database:
             INSERT INTO photo_masks (
                 photo_id, variant, path, created_at,
                 detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-                subject_size, subject_tenengrad, bg_tenengrad, crop_complete
+                subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
+                subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(photo_id, variant) DO UPDATE SET
                 path=excluded.path,
                 created_at=excluded.created_at,
@@ -12394,11 +12572,30 @@ class Database:
                 subject_size=excluded.subject_size,
                 subject_tenengrad=excluded.subject_tenengrad,
                 bg_tenengrad=excluded.bg_tenengrad,
-                crop_complete=excluded.crop_complete
+                crop_complete=excluded.crop_complete,
+                quality_input_recipe=excluded.quality_input_recipe,
+                subject_clip_high=excluded.subject_clip_high,
+                subject_clip_low=excluded.subject_clip_low,
+                subject_y_median=excluded.subject_y_median,
+                bg_separation=excluded.bg_separation,
+                phash_crop=excluded.phash_crop,
+                noise_estimate=excluded.noise_estimate
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-             subject_size, subject_tenengrad, bg_tenengrad, crop_complete),
+             subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
+             subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate),
+        )
+        if _commit:
+            commit_with_retry(self.conn)
+
+    def save_subject_raw_analysis(self, detection_id, report, _commit=True):
+        """Keep original and corrected measurements together for each detection."""
+        self.conn.execute(
+            "INSERT INTO subject_raw_analysis(detection_id, recipe, report_json, created_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(detection_id) DO UPDATE SET "
+            "recipe=excluded.recipe, report_json=excluded.report_json, created_at=excluded.created_at",
+            (detection_id, report["recipe"], json.dumps(report, allow_nan=False), int(time.time())),
         )
         if _commit:
             commit_with_retry(self.conn)
@@ -12421,6 +12618,7 @@ class Database:
         eye_conf=_UNSET,
         eye_tenengrad=_UNSET,
         eye_kp_fingerprint=_UNSET,
+        quality_input_recipe=_UNSET,
         _commit=True,
     ):
         """Update pipeline feature columns for a photo.
@@ -12445,6 +12643,7 @@ class Database:
             "eye_conf": eye_conf,
             "eye_tenengrad": eye_tenengrad,
             "eye_kp_fingerprint": eye_kp_fingerprint,
+            "quality_input_recipe": quality_input_recipe,
         }
         # Filter to only provided values
         updates = {k: v for k, v in cols.items() if v is not _UNSET}
@@ -12462,7 +12661,7 @@ class Database:
         """Get photos that have detections but no masks yet.
 
         Returns photos that have at least one detection in the current workspace
-        but no mask_path set. Each row includes the primary (highest-confidence)
+        but no mask_path set. Each row includes the selected primary
         detection box.
 
         Args:
@@ -12472,6 +12671,7 @@ class Database:
             list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
         """
         import config as cfg
+        from subjects import primary_order_sql
         ws_id = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -12493,12 +12693,12 @@ class Database:
                     WHERE p.folder_id IN ({placeholders})
                       AND p.mask_path IS NULL
                       AND d.detector_confidence >= ?
-                    ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
+                    ORDER BY p.id, {primary_order_sql("d")}""",
                 [ws_id, *folder_ids, min_conf],
             ).fetchall()
         else:
             rows = self.conn.execute(
-                """SELECT p.id, p.folder_id, p.filename,
+                f"""SELECT p.id, p.folder_id, p.filename,
                           d.box_x, d.box_y, d.box_w, d.box_h,
                           d.detector_confidence
                    FROM photos p
@@ -12507,11 +12707,11 @@ class Database:
                    WHERE wf.workspace_id = ?
                      AND p.mask_path IS NULL
                      AND d.detector_confidence >= ?
-                   ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
+                   ORDER BY p.id, {primary_order_sql("d")}""",
                 (ws_id, min_conf),
             ).fetchall()
 
-        # Deduplicate to one row per photo (primary detection = highest confidence)
+        # Deduplicate to one row per photo (selected primary first)
         import json as _json
         seen = set()
         result = []
@@ -12547,20 +12747,28 @@ class Database:
             caller scope the stage to a collection so a pipeline run doesn't
             touch unrelated photos elsewhere in the workspace
 
-        Returns one row per photo. The row chosen is the highest-confidence
-        prediction on the highest-confidence real detection **among
-        predictions that carry routable taxonomy info** (taxonomy_class or
-        scientific_name set); predictions missing both fields are only
-        chosen when nothing else is available. This prevents a top-ranked
-        but taxonomy-less prediction from masking a lower-ranked prediction
-        that ``_resolve_keypoint_model`` could actually route. Each row is
-        a dict with the fields the eye stage needs to run without further
+        Returns one row per photo. Only the effective primary detection
+        can supply eye predictions, resolved with the same
+        threshold-aware ordering (``subjects.primary_order_sql``) that
+        mask extraction and ``set_active_mask_variant`` use: user
+        override in ``photo_subject_choices`` → subject-analysis quality
+        score → detector confidence. Anchoring on the current floor
+        (not the cached ``photo_subject_state``) means a workspace
+        raising ``detector_confidence`` above the previously stored
+        subject still surfaces the new primary for the eye stage.
+        Within the chosen detection, predictions carrying routable
+        taxonomy info (``taxonomy_class`` or ``scientific_name`` set)
+        rank ahead of predictions missing both, so a top-confidence but
+        taxonomy-less prediction never masks a routable one that
+        ``_resolve_keypoint_model`` could actually run. Each row is a
+        dict with the fields the eye stage needs to run without further
         DB calls: id, folder_id, filename, width, height, mask_path,
         box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
         scientific_name, species.
         """
         import config as cfg
         from pipeline import EYE_KP_FINGERPRINT_VERSION
+        from subjects import primary_order_sql
         ws_id = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -12570,11 +12778,36 @@ class Database:
             if not photo_ids:
                 return []
         extra_where, scope_params = self._scope_clause(photo_ids)
-        params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION, *scope_params)
+        # Resolve the effective primary the same way mask extraction and
+        # ``set_active_mask_variant`` do: the top-ordered non-full-image
+        # detection above the workspace's current detector_confidence.
+        # ``photo_subject_state.detection_id`` can lag when the floor
+        # changes (workspace override, or a peer workspace sharing this
+        # photo runs with a different floor), so joining against the
+        # cached state would exclude every detection — the stored
+        # subject fails the confidence join while the current above-
+        # floor primary fails the state-ID check — and the photo would
+        # never advance to the eye stage until analysis or selection
+        # happened to refresh the cache.
+        params = (
+            ws_id, min_conf, min_conf, EYE_KP_FINGERPRINT_VERSION,
+            *scope_params,
+        )
+        # ``set_active_mask_variant`` refuses to activate a mask whose stored
+        # prompt no longer matches the primary detection. The eye stage does
+        # not extract masks — it consumes ``photos.mask_path`` directly — so
+        # filter stale masks here too: the active mask row must have been
+        # generated from the currently-selected primary (same detector_model
+        # AND same prompt_x/y/w/h). Without this predicate, after a
+        # ``detector_confidence`` change the eye stage would run keypoint
+        # inference over a mask cropped from the previous primary and stamp
+        # the fingerprint on a wrong-subject result. The full Process
+        # pipeline regenerates stale masks first, so this only matters for
+        # the standalone eye stage where mask extraction is skipped.
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
-                      d.box_x, d.box_y, d.box_w, d.box_h,
+                      d.id AS detection_id, d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence,
                       pr.confidence AS species_conf,
                       pr.taxonomy_class,
@@ -12588,7 +12821,24 @@ class Database:
                 AND d.detector_model != 'full-image'
                 AND d.detector_confidence >= ?
                JOIN predictions pr ON pr.detection_id = d.id
+               JOIN photo_masks pm
+                 ON pm.photo_id = p.id
+                AND pm.variant = p.active_mask_variant
+                AND pm.detector_model = d.detector_model
+                AND pm.prompt_x = d.box_x
+                AND pm.prompt_y = d.box_y
+                AND pm.prompt_w = d.box_w
+                AND pm.prompt_h = d.box_h
                WHERE p.mask_path IS NOT NULL
+                 AND p.active_mask_variant IS NOT NULL
+                 AND d.id = (
+                    SELECT d2.id FROM detections d2
+                    WHERE d2.photo_id = p.id
+                      AND d2.detector_confidence >= ?
+                      AND d2.detector_model != 'full-image'
+                    ORDER BY {primary_order_sql("d2")}
+                    LIMIT 1
+                 )
                  AND (p.eye_kp_fingerprint IS NULL
                       OR p.eye_kp_fingerprint != ?){extra_where}
                  AND pr.labels_fingerprint = (
@@ -12622,6 +12872,7 @@ class Database:
                 "width": r["width"],
                 "height": r["height"],
                 "mask_path": r["mask_path"],
+                "detection_id": r["detection_id"],
                 "box_x": r["box_x"],
                 "box_y": r["box_y"],
                 "box_w": r["box_w"],
@@ -13011,11 +13262,17 @@ class Database:
             raise ValueError("source_taxon_id must be a positive SQLite integer")
         taxon = self.conn.execute("SELECT id FROM taxa WHERE inat_id = ?", (source_taxon_id,)).fetchone()
         local_id = taxon["id"] if taxon else None
+        # Imported catalogs can have several keyword spellings linked to one
+        # taxon. Prefer the requested name among those matches, just as the
+        # legacy name-only accept does. This keeps the tagged name aligned
+        # with the prediction when possible, rather than choosing an older
+        # alias (e.g. "Red-eared slider" instead of "Pond slider").
+        # The identity predicate still excludes same-name, different taxa.
         existing = self.conn.execute(
             "SELECT id FROM keywords WHERE parent_id IS ? AND type IN ('taxonomy', 'general') "
             "AND (source_taxon_id = ? OR (source_taxon_id IS NULL AND taxon_id = ?)) "
-            "ORDER BY (type = 'taxonomy') DESC, id LIMIT 1",
-            (parent_id, source_taxon_id, local_id),
+            "ORDER BY (name = ? COLLATE NOCASE) DESC, (type = 'taxonomy') DESC, id LIMIT 1",
+            (parent_id, source_taxon_id, local_id, name),
         ).fetchone()
         if existing:
             kid = existing["id"]
@@ -15409,12 +15666,12 @@ class Database:
                 removed_count += len(remove_ids)
 
                 # Drop this photo's undo/redo items that reference a root tag
-                # the repair detached. The keyword_add, keyword_remove, and
-                # prediction_accept handlers read the shared parent
-                # edit_history.new_value rather than the per-photo value, so
-                # merely retargeting edit_history_items would let redo attach
-                # the redundant root again. Deleting only the affected item
-                # preserves other photos in a batch; empty parent edits are
+                # the repair detached. Keyword add/remove handlers read the
+                # shared parent edit_history.new_value, so merely retargeting
+                # edit_history_items would let redo attach the redundant root
+                # again. Prediction accepts record each actual tag per item.
+                # Deleting only the affected item preserves other photos in
+                # a batch; empty parent edits are
                 # removed below. Scope by action/column so an unrelated rating
                 # or prediction id with the same numeric value is untouched.
                 # ``no_tag`` prediction_accept items (JSON old_value carrying
@@ -16363,15 +16620,9 @@ class Database:
         #   * `keyword_add`: undo calls untag_photo(pid, entry.new_value)
         #     per item; the retargeted entry.new_value = dst_id would
         #     remove the survivor.
-        #   * `prediction_accept`: shares the keyword_add branch in
-        #     _apply_undo — the same untag_photo(pid, entry.new_value)
-        #     runs. Trade-off: dropping the item also loses that item's
-        #     prediction-status restoration on undo. Accepted because the
-        #     alternative silently removes a legitimate user tag; the
-        #     prediction row itself remains and the user can re-manage
-        #     it. Only affects the narrow case of a legacy DB merging a
-        #     src that was ever prediction-accepted onto a photo that
-        #     already held the survivor.
+        #   * `prediction_accept`: undo uses item.new_value for the tag.
+        #     Retire only that tag mutation by converting the item to
+        #     ``no_tag``; its prediction-status history remains undoable.
         #   * `keyword_remove`: undo tags on the survivor (INSERT OR
         #     IGNORE — no-op if dst pre-existed), BUT redo calls
         #     untag_photo(pid, entry.new_value); the retargeted
@@ -16387,6 +16638,27 @@ class Database:
         #     — a src→dst retarget of those references would strip the
         #     pre-existing survivor. Drop those items too (bare-string in
         #     the second DELETE below, JSON in the payload rewrite pass).
+        def _retire_tag_mutations(rows):
+            # A prediction accept has two effects: the tag and review status.
+            # When a merge makes its tag redundant, retain the status effect
+            # and metadata so undo/redo still restores every prediction.
+            for row in rows:
+                if row["action_type"] != "prediction_accept":
+                    self.conn.execute("DELETE FROM edit_history_items WHERE id = ?", (row["id"],))
+                    continue
+                try:
+                    meta = json.loads(row["old_value"] or "{}")
+                except (TypeError, ValueError):
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["prediction_ids"] = self._edit_prediction_ids(meta, row["old_value"])
+                meta["no_tag"] = True
+                self.conn.execute(
+                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+                    (json.dumps(meta), row["id"]),
+                )
+
         preexisting_dst_photos = [
             r["photo_id"] for r in self.conn.execute(
                 "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
@@ -16399,19 +16671,36 @@ class Database:
             # item.new_value = str(kid). Deleting a species_replace item
             # here loses the retag-old-species side of that per-photo swap
             # on undo/redo, but leaving it retargeted would silently
-            # untag the user's pre-existing survivor — the tradeoff
-            # mirrors the prediction_accept case above.
-            self.conn.execute(
-                f"""DELETE FROM edit_history_items
+            # untag the user's pre-existing survivor. Prediction accepts
+            # instead keep a status-only record.
+            # Identity is per item: for a mixed-alias prediction_accept
+            # batch (see api_accept_predictions), the parent edit's
+            # ``new_value`` records only the first alias, while each item's
+            # ``new_value`` records its own resolved keyword id. Requiring
+            # the parent to also equal ``src`` would miss items in that
+            # batch whose alias is the one being merged, and the survivor
+            # retarget below would then silently untag a pre-existing
+            # ``dst`` tag on undo. For ``keyword_add`` and
+            # ``species_replace`` the parent and item always agree, so
+            # dropping the parent match only widens coverage where it was
+            # under-matching before.
+            # Status-only accepts must retain their prediction undo record,
+            # and do not count as earlier/later tag additions in these checks.
+            _retire_tag_mutations(self.conn.execute(
+                f"""SELECT id, old_value,
+                           (SELECT action_type FROM edit_history
+                            WHERE id = edit_history_items.edit_id) AS action_type
+                    FROM edit_history_items
                     WHERE new_value = ?
                       AND photo_id IN ({ph})
                       AND edit_id IN (
                           SELECT id FROM edit_history
-                          WHERE new_value = ?
-                            AND action_type IN (
-                                'keyword_add', 'prediction_accept',
-                                'species_replace'
-                            )
+                          WHERE action_type IN (
+                              'keyword_add', 'species_replace'
+                          ) OR (
+                              action_type = 'prediction_accept'
+                              AND COALESCE(edit_history_items.old_value, '') NOT LIKE '%"no_tag"%'
+                          )
                       )
                       AND NOT EXISTS (
                           SELECT 1
@@ -16425,27 +16714,38 @@ class Database:
                                 'prediction_accept',
                                 'species_replace'
                             )
+                            AND (eh2.action_type != 'prediction_accept'
+                                 OR COALESCE(ehi2.old_value, '') NOT LIKE '%"no_tag"%')
                             AND ehi2.id > edit_history_items.id
                       )""",
-                [src_str, *chunk, src_str, src_str, dst_str],
-            )
+                [src_str, *chunk, src_str, dst_str],
+            ).fetchall())
             # When the source add happened first and a later add created
             # the current survivor association, the later add becomes the
             # redundant operation after src and dst converge. The guarded
-            # DELETE above deliberately preserves the earlier source item;
-            # drop the later add item instead so latest-first undo leaves
+            # cleanup above deliberately preserves the earlier source item;
+            # retire the later tag mutation instead so latest-first undo leaves
             # the merged tag in place until the original source add is
             # itself undone. Restrict this to add-like actions whose whole
             # per-photo effect is the tag association; species_replace has
             # an old-species restoration side that cannot be discarded.
-            self.conn.execute(
-                f"""DELETE FROM edit_history_items
+            # The earlier-source lookup matches on the item's own
+            # ``new_value`` alone, not the parent edit's, so a mixed-alias
+            # prediction_accept batch (whose parent records only the first
+            # alias) still counts as the earlier source add for a later
+            # redundant item.
+            _retire_tag_mutations(self.conn.execute(
+                f"""SELECT id, old_value,
+                           (SELECT action_type FROM edit_history
+                            WHERE id = edit_history_items.edit_id) AS action_type
+                    FROM edit_history_items
                     WHERE photo_id IN ({ph})
                       AND new_value IN (?, ?)
                       AND edit_id IN (
                           SELECT id FROM edit_history
-                          WHERE action_type IN (
-                              'keyword_add', 'prediction_accept'
+                          WHERE action_type = 'keyword_add' OR (
+                              action_type = 'prediction_accept'
+                              AND COALESCE(edit_history_items.old_value, '') NOT LIKE '%"no_tag"%'
                           )
                       )
                       AND EXISTS (
@@ -16455,14 +16755,15 @@ class Database:
                             ON eh1.id = ehi1.edit_id
                           WHERE ehi1.photo_id = edit_history_items.photo_id
                             AND ehi1.new_value = ?
-                            AND eh1.new_value = ?
                             AND eh1.action_type IN (
                                 'keyword_add', 'prediction_accept'
                             )
+                            AND (eh1.action_type != 'prediction_accept'
+                                 OR COALESCE(ehi1.old_value, '') NOT LIKE '%"no_tag"%')
                             AND ehi1.id < edit_history_items.id
                       )""",
-                [*chunk, src_str, dst_str, src_str, src_str],
-            )
+                [*chunk, src_str, dst_str, src_str],
+            ).fetchall())
             # keyword_remove: item.new_value is '' by convention (see
             # record_edit call sites in app.py); the keyword id lives in
             # item.old_value. Drop the item ONLY when the survivor
@@ -16505,6 +16806,8 @@ class Database:
                                 'prediction_accept',
                                 'species_replace'
                             )
+                            AND (eh2.action_type != 'prediction_accept'
+                                 OR COALESCE(ehi2.old_value, '') NOT LIKE '%"no_tag"%')
                             AND ehi2.id > edit_history_items.id
                       )""",
                 [src_str, *chunk, src_str, src_str, dst_str],
@@ -18936,6 +19239,7 @@ class Database:
         preserve_manual_review=False,
         match_score=None,
         from_fresh_inference=False,
+        refresh_output=False,
     ):
         """Store a classification prediction for a detection.
 
@@ -18968,6 +19272,8 @@ class Database:
                 value it read back from somewhere else — cache
                 materialization, a backfill — in which case an existing score
                 is left alone and only a NULL is filled.
+            refresh_output: replace the output fields of an existing candidate
+                while retaining its row ID and manual review decisions.
         """
         if detection_id is None:
             raise ValueError(
@@ -19032,6 +19338,18 @@ class Database:
                 (detection_id, model, labels_fingerprint, species),
             ).fetchone()
             pred_id = row["id"] if row else None
+            if pred_id is not None and refresh_output:
+                self.conn.execute(
+                    """UPDATE predictions SET confidence=?, category=?,
+                       taxonomy_kingdom=?, taxonomy_phylum=?, taxonomy_class=?,
+                       taxonomy_order=?, taxonomy_family=?, taxonomy_genus=?,
+                       scientific_name=?, source_taxon_id=?, match_score=?
+                       WHERE id=?""",
+                    (confidence, category, tax.get("kingdom"), tax.get("phylum"),
+                     tax.get("class"), tax.get("order"), tax.get("family"),
+                     tax.get("genus"), tax.get("scientific_name"), tax.get("taxon_id"),
+                     match_score, pred_id),
+                )
             if pred_id is not None and labels_fingerprint_full is not None:
                 self.conn.execute(
                     """UPDATE predictions
@@ -19076,9 +19394,11 @@ class Database:
                     )
         # Write workspace-scoped review state only when the caller actually
         # supplied something beyond the defaults. Keeping pending rows out of
-        # prediction_review is intentional: absence == pending.
+        # prediction_review is intentional: absence == pending. A refreshed
+        # candidate must also clear an earlier automatic alternative status.
         has_review_state = (
-            status != "pending"
+            refresh_output
+            or status != "pending"
             or group_id is not None
             or vote_count is not None
             or total_votes is not None
@@ -19086,7 +19406,7 @@ class Database:
         )
         if pred_id is not None and has_review_state:
             ws_id = self._ws_id()
-            if preserve_manual_review:
+            if preserve_manual_review or refresh_output:
                 review = self.conn.execute(
                     """SELECT status, individual FROM prediction_review
                        WHERE prediction_id = ? AND workspace_id = ?""",
@@ -19097,23 +19417,54 @@ class Database:
                     and review["status"] in {"accepted", "rejected"}
                     and review["individual"] != AUTO_MATCH_REVIEW_MARKER
                 ):
+                    if refresh_output:
+                        # Review decisions survive reinference, but burst
+                        # membership is recomputed for the active workspace.
+                        self.conn.execute(
+                            """UPDATE prediction_review SET group_id=?, vote_count=?,
+                               total_votes=?, individual=?
+                               WHERE prediction_id=? AND workspace_id=?""",
+                            (group_id, vote_count, total_votes,
+                             None if individual == AUTO_MATCH_REVIEW_MARKER else individual,
+                             pred_id, ws_id),
+                        )
                     self.conn.commit()
                     return
+            metadata_updates = ", ".join(
+                f"{field} = excluded.{field}" if refresh_output
+                else f"{field} = COALESCE(excluded.{field}, {field})"
+                for field in ("individual", "group_id", "vote_count", "total_votes")
+            )
             self.conn.execute(
-                """INSERT INTO prediction_review
+                f"""INSERT INTO prediction_review
                      (prediction_id, workspace_id, status, reviewed_at,
                       individual, group_id, vote_count, total_votes)
                    VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)
                    ON CONFLICT(prediction_id, workspace_id)
                    DO UPDATE SET status      = excluded.status,
                                  reviewed_at = excluded.reviewed_at,
-                                 individual  = COALESCE(excluded.individual, individual),
-                                 group_id    = COALESCE(excluded.group_id,   group_id),
-                                 vote_count  = COALESCE(excluded.vote_count, vote_count),
-                                 total_votes = COALESCE(excluded.total_votes,total_votes)""",
+                                 {metadata_updates}""",
                 (pred_id, ws_id, status, individual, group_id,
                  vote_count, total_votes),
             )
+        self.conn.commit()
+
+    def retain_prediction_candidates(self, detection_id, model, labels_fingerprint, species):
+        """Remove obsolete candidates after their replacement outputs were stored.
+
+        Matching candidates keep their IDs and reviews in every workspace.
+        Other detections, models, label sets and classifier run keys are untouched.
+        """
+        retained = {normalize_keyword_display(s) or s for s in species}
+        rows = self.conn.execute(
+            "SELECT id, species FROM predictions WHERE detection_id=? "
+            "AND classifier_model=? AND labels_fingerprint=?",
+            (detection_id, model, labels_fingerprint),
+        ).fetchall()
+        self.conn.executemany(
+            "DELETE FROM predictions WHERE id=?",
+            [(row["id"],) for row in rows if row["species"] not in retained],
+        )
         self.conn.commit()
 
     def reconcile_match_review_state(
@@ -20606,6 +20957,11 @@ class Database:
         can skip rows a previous grouped accept already covered instead of
         re-accepting them into duplicate history items.
 
+        ``species_key`` is the resolved consensus identity, independent of
+        the particular keyword alias used to tag the photos. Batch callers
+        compare this key and record each result's actual ``keyword_id`` for
+        undo/redo rather than requiring equivalent aliases to share an ID.
+
         All database changes are performed atomically in a single transaction
         unless ``_commit`` is False and the caller owns the transaction.
         """
@@ -20833,6 +21189,7 @@ class Database:
                 ).fetchone()
                 return {
                     "species": existing["name"] if existing else display,
+                    "species_key": identity.key,
                     "keyword_id": existing["id"] if existing else None,
                     "affected": [],
                     "accepted_prediction_ids": [],
@@ -21185,6 +21542,7 @@ class Database:
                 self.conn.commit()
             return {
                 "species": species,
+                "species_key": identity.key,
                 "keyword_id": kid,
                 "affected": affected,
                 "accepted_prediction_ids": accepted_pred_ids,
@@ -21407,23 +21765,25 @@ class Database:
         labels_fingerprint_full=None,
         runtime_fingerprint="legacy",
         input_fingerprint=None,
+        input_recipe=None,
     ):
         self.conn.execute(
             """INSERT INTO classifier_runs
                  (detection_id, classifier_model, labels_fingerprint,
                   labels_fingerprint_full, runtime_fingerprint,
-                  input_fingerprint, prediction_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                  input_fingerprint, prediction_count, input_recipe)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(detection_id, classifier_model, labels_fingerprint)
                DO UPDATE SET labels_fingerprint_full =
                                  excluded.labels_fingerprint_full,
                              runtime_fingerprint = excluded.runtime_fingerprint,
                              input_fingerprint = excluded.input_fingerprint,
                              prediction_count = excluded.prediction_count,
+                             input_recipe = excluded.input_recipe,
                              run_at = datetime('now')""",
             (detection_id, classifier_model, labels_fingerprint,
              labels_fingerprint_full, runtime_fingerprint,
-             input_fingerprint, prediction_count),
+             input_fingerprint, prediction_count, input_recipe),
         )
         commit_with_retry(self.conn)
 
@@ -21605,13 +21965,16 @@ class Database:
         rows = self.conn.execute(
             """SELECT cr.classifier_model, cr.labels_fingerprint
                FROM classifier_runs cr
-               WHERE cr.detection_id = ?""" + runtime_clause,
+               WHERE cr.detection_id = ? AND cr.input_recipe IS NULL""" + runtime_clause,
             params,
         ).fetchall()
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
     def get_classifier_run_key_gate(self, detection_id, runtime_fingerprint):
         """Return ``(accepted, rejected)`` classifier-run key sets for a detection.
+
+        These gates serve normal-image runs. A RAW recipe always requires
+        fresh normal inference, even when a manual decision pins its species.
 
         ``accepted`` mirrors what ``get_classifier_run_keys(detection_id,
         runtime_fingerprint=runtime_fingerprint)`` returns — keys whose row
@@ -21638,7 +22001,7 @@ class Database:
         rows = self.conn.execute(
             """SELECT cr.classifier_model,
                       cr.labels_fingerprint,
-                      cr.runtime_fingerprint,
+                      cr.runtime_fingerprint, cr.input_recipe,
                       EXISTS (
                           SELECT 1 FROM predictions p
                           JOIN prediction_review pr ON pr.prediction_id = p.id
@@ -21655,7 +22018,7 @@ class Database:
         accepted, rejected = set(), set()
         for row in rows:
             key = (row["classifier_model"], row["labels_fingerprint"])
-            if (
+            if row["input_recipe"] is None and (
                 row["runtime_fingerprint"] == runtime_fingerprint
                 or row["runtime_fingerprint"] == "legacy"
                 or row["has_individual_override"]
@@ -21836,6 +22199,9 @@ class Database:
 
             rt_predicate_sql_cr, rt_predicate_params = _runtime_predicate("cr")
             rt_predicate_sql = rt_predicate_sql_cr
+
+        # RAW outputs cannot satisfy a normal-image run, even when reviewed.
+        rt_predicate_sql += " AND cr.input_recipe IS NULL"
 
         # For photos whose detector iteration completed, mirror the runtime's
         # in-memory target selection rather than querying every detection row
@@ -22688,12 +23054,10 @@ class Database:
         if detector_model is not None:
             q += " AND detector_model = ?"
             params.append(detector_model)
-        # Explicit ``id ASC`` tie-break so callers that take the first
-        # row (mask extraction's primary detection picker) agree with
-        # ``find_stale_masks`` on which row is the primary when two
-        # detections share the maximum confidence. Without this,
-        # SQLite's row order on ties is implementation-defined.
-        q += " ORDER BY detector_confidence DESC, id ASC"
+        # The same ordering drives masks, crop previews, and bulk payloads:
+        # manual choice, subject quality, then confidence and stable ID.
+        from subjects import primary_order_sql
+        q += " ORDER BY " + primary_order_sql()
         return self.conn.execute(q, params).fetchall()
 
     def get_detections_for_photos(self, photo_ids, min_conf=None,
@@ -22701,7 +23065,8 @@ class Database:
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
         Each det_dict has keys: id, x, y, w, h, confidence, category, and
-        detector_model. Lists are ordered by confidence DESC. The detections
+        detector_model. Lists put the chosen primary first, then quality and
+        detector confidence. The detections
         table is global — threshold filtering happens at read time. Photos
         with no detections above ``min_conf`` are omitted from the result.
 
@@ -22735,7 +23100,8 @@ class Database:
             if detector_model is not None:
                 q += " AND detector_model = ?"
                 params.append(detector_model)
-            q += " ORDER BY photo_id, detector_confidence DESC"
+            from subjects import primary_order_sql
+            q += " ORDER BY photo_id, " + primary_order_sql()
             rows = self.conn.execute(q, params).fetchall()
             for r in rows:
                 result.setdefault(r["photo_id"], []).append({
@@ -22833,7 +23199,7 @@ class Database:
 
         Excludes photos already flagged as rejected. Scoped to folders
         linked to the active workspace. ``detection_box`` and
-        ``detection_conf`` are sourced from the primary (highest-confidence)
+        ``detection_conf`` are sourced from the selected primary
         row in the ``detections`` table — the legacy ``photos`` columns are
         not populated by normal pipeline runs. ``raw_detection_conf`` exposes
         the best animal candidate even when it is below the effective detector
@@ -22883,6 +23249,7 @@ class Database:
         import json as _json
 
         import config as cfg
+        from subjects import primary_order_sql
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
@@ -22903,11 +23270,13 @@ class Database:
                 f"WHERE photo_id IN ({placeholders}) "
                 f"  AND (detector_model IS NULL OR detector_model != 'full-image') "
                 f"  AND COALESCE(category, 'animal') = 'animal' "
-                f"ORDER BY photo_id, detector_confidence DESC",
+                f"ORDER BY photo_id, {primary_order_sql()}",
                 chunk,
             ).fetchall()
             for d in det_rows:
-                raw_primary.setdefault(d["photo_id"], d)
+                previous = raw_primary.get(d["photo_id"])
+                if previous is None or d["detector_confidence"] > previous["detector_confidence"]:
+                    raw_primary[d["photo_id"]] = d
                 if d["detector_confidence"] >= min_conf:
                     primary.setdefault(d["photo_id"], d)
         for p in photos:
@@ -23058,14 +23427,24 @@ class Database:
         if not detection_ids:
             return
         ids = list(detection_ids)
+        affected_subject_photos = set()
         _CHUNK = 900
         for i in range(0, len(ids), _CHUNK):
             chunk = ids[i : i + _CHUNK]
             placeholders = ",".join("?" * len(chunk))
+            affected_subject_photos.update(row[0] for row in self.conn.execute(
+                f"SELECT DISTINCT d.photo_id FROM detections d "
+                f"JOIN photo_subject_state s ON s.photo_id=d.photo_id "
+                f"WHERE d.id IN ({placeholders})", chunk,
+            ))
             self.conn.execute(
                 f"DELETE FROM detections WHERE id IN ({placeholders})",
                 chunk,
             )
+        if affected_subject_photos:
+            from subjects import sync_primary
+            for photo_id in affected_subject_photos:
+                sync_primary(self, photo_id)
         self.conn.commit()
 
     # -- Pending Changes --
@@ -23846,6 +24225,9 @@ class Database:
     # untag a keyword the user deliberately kept, and redo must not re-tag
     # or re-queue a keyword that was never touched -- only the prediction
     # status flip is reversed / re-applied.
+    # A prediction batch can accept different keyword aliases of one species.
+    # Its items carry the actual keyword IDs; the parent ID is only a default
+    # for old entries without an item value.
     #
     # Predicted-only relabels (no prior species tag) record their action as
     # `keyword_add` but still carry a `curation` payload when the photo held
@@ -23856,7 +24238,7 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        kid = int(entry['new_value'])
+        kid = int((item['new_value'] if action == 'prediction_accept' else None) or entry['new_value'])
         kw_name = self._keyword_name(kid)
         skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
         if not skip_tag:
@@ -23895,7 +24277,7 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        kid = int(entry['new_value'])
+        kid = int((item['new_value'] if action == 'prediction_accept' else None) or entry['new_value'])
         kw_name = self._keyword_name(kid)
         skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
         if not skip_tag:

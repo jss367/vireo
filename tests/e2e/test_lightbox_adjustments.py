@@ -122,12 +122,14 @@ def test_save_response_does_not_replace_newer_slider_input(live_server, page, ad
     assert live_server['db'].get_photo_edit_recipe(adjustment_photo)['adjustments']['exposure'] == 5
 
 
-@pytest.mark.parametrize('advanced', [False, True])
+@pytest.mark.parametrize('advanced', [False, True, 'shadows', 'highlights'])
 def test_server_preview_uses_complete_recipe_and_preserves_geometry(
     live_server, page, adjustment_photo, advanced,
 ):
     recipe = {'rotation': 90, 'crop': {'x': 0.1, 'y': 0.1, 'w': 0.8, 'h': 0.8}}
-    if advanced:
+    if advanced in ('shadows', 'highlights'):
+        recipe['adjustments'] = {advanced: 70 if advanced == 'shadows' else -70}
+    elif advanced:
         recipe['adjustments'] = {'tone_curve': {'midtones': 60}}
     live_server['db'].set_photo_edit_recipe(adjustment_photo, recipe)
     page.goto(live_server['url'] + '/browse')
@@ -144,7 +146,9 @@ def test_server_preview_uses_complete_recipe_and_preserves_geometry(
     assert rendered['rotation'] == 90
     assert rendered['crop'] == recipe['crop']
     assert rendered['adjustments']['exposure'] == 2
-    if advanced:
+    if advanced in ('shadows', 'highlights'):
+        assert rendered['adjustments'][advanced] == recipe['adjustments'][advanced]
+    elif advanced:
         assert rendered['adjustments']['tone_curve'] == {'midtones': 60}
     assert query['apply_crop'] == ['1']
     _wait_saved(page)
@@ -297,3 +301,30 @@ def test_failed_jpeg_switch_reloads_raw_edit_saved_during_switch(
     expect(source).to_have_text('Viewing RAW · Show JPEG')
     expect(page.locator('#lightboxImg')).to_have_attribute('src', expected_url)
     expect(page.locator('#lightboxAdjustBtn')).to_be_enabled()
+
+
+def test_raw_exposure_uses_full_server_recipe_even_when_webgl_is_available(
+    live_server, page, paired_adjustment_photo,
+):
+    photo_id, raw, _jpeg = paired_adjustment_photo
+    page.route('**/edit-preview?*', lambda route: route.fulfill(body=raw, content_type='image/png'))
+    page.goto(live_server['url'] + '/browse')
+    page.evaluate("id => openLightbox(id, 'gradient.nef')", photo_id)
+    page.wait_for_function('_lbEditRecipeLoaded')
+    source = page.locator('#lightboxSourceControl')
+    expect(source).to_have_text('Viewing JPEG · Show RAW')
+    source.click()
+    expect(source).to_have_text('Viewing RAW · Show JPEG')
+    page.evaluate('''() => {
+        window.rawShaderCalls = 0;
+        VireoToneGL.supported = () => true;
+        VireoToneGL.render = () => { window.rawShaderCalls++; return true; };
+    }''')
+    page.locator('#lightboxAdjustBtn').click()
+    with page.expect_response('**/edit-preview?*') as preview:
+        _set_exposure(page, -2)
+    query = parse_qs(urlparse(preview.value.url).query)
+    assert json.loads(query['recipe'][0])['adjustments']['exposure'] == -2
+    assert 'analysis' not in query
+    assert page.evaluate('window.rawShaderCalls') == 0
+    _wait_saved(page)

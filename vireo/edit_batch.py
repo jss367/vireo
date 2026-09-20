@@ -21,6 +21,7 @@ for name, bounds in _ADJUSTMENT_RANGES.items():
         "step": 0.1 if name == "exposure" else 1, "default": 0,
     })
 FIELDS += [
+    {"path": "adjustments.denoise_mode", "label": "Denoise method", "group": "Adjustments"},
     {"path": "adjustments.sharpen_radius", "label": "Sharpening radius", "group": "Adjustments",
      "min": 0.5, "max": 3, "step": 0.1, "default": 1},
     *({"path": f"adjustments.white_balance.{name}", "label": name.capitalize(), "group": "White balance",

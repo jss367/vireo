@@ -244,8 +244,11 @@ def test_toolbar_history_refreshes_editor_recipe_and_next_save(live_server, page
     expect(page.locator('#exposureRange')).to_have_value('2')
     page.evaluate('doUndo()')
     _set_range(page, '#contrastRange', 15)
-    # Unsaved work must not be replaced by a toolbar history refresh.
-    assert page.evaluate('doUndo()') is False
+    # Working edits undo locally before touching the persisted checkpoints.
+    assert page.evaluate('doUndo()') is True
+    expect(page.locator('#contrastRange')).to_have_value('0')
+    expect(page.locator('#exposureRange')).to_have_value('1')
+    assert page.evaluate('doRedo()') is True
     expect(page.locator('#contrastRange')).to_have_value('15')
     assert page.evaluate('saveRecipe()') is True
     recipe = live_server['db'].get_photo_edit_recipe(photo_id)

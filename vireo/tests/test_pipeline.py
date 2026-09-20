@@ -83,6 +83,23 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
 
+            # Seed an active photo_masks row aligned with the primary
+            # detection's prompt so the tightened eye-stage readiness
+            # counts (count_eye_keypoint_eligible / _attemptable), which
+            # require p.active_mask_variant + a matching mask row, see
+            # this photo as eligible. Skipping this would silently
+            # collapse eye_keypoint_target_photos to zero across every
+            # readiness test that uses this helper.
+            db.upsert_photo_mask(
+                pid, "sam2-small", f"/masks/{pid}.png",
+                detector_model="megadetector",
+                prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+            )
+            db.conn.execute(
+                "UPDATE photos SET active_mask_variant=? WHERE id=?",
+                ("sam2-small", pid),
+            )
+
             # Add a species prediction (references detection, not photo).
             # Stamp taxonomy_class so the prediction routes through the
             # eye-keypoint stage's primary path — without it, attemptable
@@ -1282,6 +1299,19 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
         eye_tenengrad=None,
         eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
     )
+    # Seed an active photo_masks row aligned with the primary detection
+    # so the tightened readiness counts (count_eye_keypoint_eligible /
+    # _attemptable) treat this photo as eligible — without it the target
+    # collapses to zero and the assertions below fail.
+    db.upsert_photo_mask(
+        pid, "sam2-small", f"/masks/{pid}.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+    )
+    db.conn.execute(
+        "UPDATE photos SET active_mask_variant=? WHERE id=?",
+        ("sam2-small", pid),
+    )
     db.update_photo_embeddings(
         pid,
         dino_subject_embedding=embedding_to_blob(emb),
@@ -1311,6 +1341,20 @@ def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
         taxonomy={"class": taxonomy_class} if taxonomy_class else None,
     )
     db.update_photo_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+    # The eye-stage readiness counts (count_eye_keypoint_eligible /
+    # _attemptable) require an active photo_masks row whose prompt
+    # matches the selected primary detection. Seed it so eligible photos
+    # in these tests count toward eye_keypoint_target_photos.
+    db.upsert_photo_mask(
+        pid, "sam2-small", f"/masks/{pid}.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+    )
+    db.conn.execute(
+        "UPDATE photos SET active_mask_variant=? WHERE id=?",
+        ("sam2-small", pid),
+    )
+    db.conn.commit()
     return pid
 
 
@@ -2372,7 +2416,6 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
         width=800,
         height=600,
     )
-    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
 
     det_ids = db.save_detections(
         pid,
@@ -2395,6 +2438,14 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
             "scientific_name": "Vulpes vulpes",
         },
     )
+    # Register the mask through the mask-variant path so the stale-mask
+    # predicate can confirm the row matches the primary detection.
+    db.upsert_photo_mask(
+        photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(pid, "test")
     return db, pid
 
 
@@ -2504,12 +2555,18 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    db.update_photo_pipeline_features(other_pid, mask_path=str(tmp_path / "mask.png"))
     det_ids = db.save_detections(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
     )
+    db.upsert_photo_mask(
+        photo_id=other_pid, variant="test",
+        path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(other_pid, "test")
     db.add_prediction(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2575,9 +2632,6 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    db.update_photo_pipeline_features(
-        other_pid, mask_path=str(tmp_path / "mask.png"),
-    )
     det_ids = db.save_detections(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
@@ -2589,6 +2643,13 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         model="bioclip-2.5", category="match",
         taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
     )
+    db.upsert_photo_mask(
+        photo_id=other_pid, variant="test",
+        path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(other_pid, "test")
 
     calls = {"n": 0}
 
@@ -2667,12 +2728,18 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    db.update_photo_pipeline_features(other_pid, mask_path=str(tmp_path / "mask.png"))
     det_ids = db.save_detections(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
     )
+    db.upsert_photo_mask(
+        photo_id=other_pid, variant="test",
+        path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+    )
+    db.set_active_mask_variant(other_pid, "test")
     db.add_prediction(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2755,7 +2822,6 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
         timestamp="2026-04-16T10:00:00",
         width=img_w, height=img_h,
     )
-    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
 
     det_ids = db.save_detections(
         pid,
@@ -2763,6 +2829,15 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
           "confidence": 0.95}],
         detector_model="MegaDetector",
     )
+    # Register the mask through the same path production uses, so
+    # ``list_photos_for_eye_keypoint_stage``'s stale-mask predicate
+    # can confirm the mask row matches the primary detection's prompt.
+    db.upsert_photo_mask(
+        photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
+        detector_model="MegaDetector",
+        prompt_x=0.125, prompt_y=0.167, prompt_w=0.75, prompt_h=0.667,
+    )
+    db.set_active_mask_variant(pid, "test")
     db.add_prediction(
         det_ids[0],
         species="Vulpes vulpes",
@@ -2936,6 +3011,158 @@ def test_eye_stage_gate3_failure_stamps_fingerprint(tmp_path, monkeypatch):
     # And the photo is no longer eligible on the next selection pass.
     rows = db.list_photos_for_eye_keypoint_stage()
     assert not any(r["id"] == pid for r in rows)
+
+
+def test_eye_stage_persists_when_state_lags_current_primary(tmp_path, monkeypatch):
+    """When ``photo_subject_state`` still names a detection that no longer
+    matches the effective primary — a workspace-level ``detector_confidence``
+    change, or a peer workspace sharing the photo pinning the cache at a
+    different floor — the pre-persistence staleness guard in
+    ``_process_photo_for_eye`` must resolve the primary the same way
+    ``list_photos_for_eye_keypoint_stage`` and both mask-extraction paths
+    do: via ``primary_order_sql`` at the current floor.
+
+    Comparing against the cached state instead would fail the box check
+    (row carries the effective primary; the cache still names another
+    detection) and skip stamping ``eye_kp_fingerprint`` — the photo would
+    then repeat the expensive keypoint inference on every stage run until
+    another operation refreshed the state.
+    """
+    import keypoints as kp
+    from pipeline import EYE_KP_FINGERPRINT_VERSION, detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # Existing setup writes one detection (box_x=0.125, conf=0.95) with a
+    # Vulpes vulpes prediction. Rewrite the detector's output for this
+    # photo to include BOTH that detection AND a second, lower-confidence
+    # one on a distinct box; save_detections replaces the whole set for
+    # (photo, model), so we must pass both dicts in a single call.
+    existing_det = db.get_detections(pid)[0]
+    det_ids = db.save_detections(
+        pid,
+        [
+            {"box": {k: existing_det["box_" + k] for k in "xywh"},
+             "confidence": existing_det["detector_confidence"]},
+            {"box": {"x": 0.5, "y": 0.2, "w": 0.2, "h": 0.3},
+             "confidence": 0.3},
+        ],
+        detector_model=existing_det["detector_model"],
+    )
+    # Attach a same-taxonomy prediction to the SECOND detection so it,
+    # too, could route through _resolve_keypoint_model — and, crucially,
+    # so it satisfies the prediction join in list_photos_for_eye_keypoint_stage.
+    db.add_prediction(
+        det_ids[1], species="Vulpes vulpes", confidence=0.92,
+        model="bioclip-2.5", category="match",
+        taxonomy={
+            "kingdom": "Animalia", "class": "Mammalia",
+            "scientific_name": "Vulpes vulpes",
+        },
+    )
+    # Simulate a peer workspace (or an earlier floor) having pinned the
+    # cached subject to the SECOND detection. Under the current floor
+    # (0.2), primary_order_sql still ranks the first (conf=0.95) ahead of
+    # the second (conf=0.3), so the eye stage queues a row carrying the
+    # first detection's box — which no longer matches photo_subject_state.
+    db.conn.execute(
+        "INSERT INTO photo_subject_state(photo_id, detection_id) VALUES (?, ?) "
+        "ON CONFLICT(photo_id) DO UPDATE SET detection_id=excluded.detection_id",
+        (pid, det_ids[1]),
+    )
+    db.conn.commit()
+
+    # Sanity check: the eye stage sees the FIRST detection's box.
+    queued = db.list_photos_for_eye_keypoint_stage([pid])
+    assert queued and queued[0]["box_x"] == existing_det["box_x"]
+
+    good = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.88},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.85},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: good)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] == EYE_KP_FINGERPRINT_VERSION, (
+        "Guard must resolve the effective primary from the current "
+        "detector_confidence floor, not the cached photo_subject_state; "
+        "otherwise persistence is skipped and the keypoint model reruns "
+        "on every stage invocation."
+    )
+    eye_x, eye_y, eye_conf, _ = _read_eye_fields(db, pid)
+    assert eye_x is not None and eye_y is not None and eye_conf is not None
+
+
+def test_eye_stage_skips_when_primary_disappears_before_lock(tmp_path, monkeypatch):
+    """When every eligible detection is removed (or dropped below the floor)
+    between the worklist build and the per-photo lock, the pre-persistence
+    guard must abort — otherwise ``eye_kp_fingerprint`` and the eye_*
+    coordinates land on the photo attributed to a subject that is no longer
+    the effective primary (Codex P2 r4056478554).
+    """
+    import keypoints as kp
+    from pipeline import _process_photo_for_eye
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    queued = db.list_photos_for_eye_keypoint_stage([pid])
+    assert queued, "fixture must satisfy the worklist"
+    row = queued[0]
+
+    # Simulate a concurrent reclassify (or a workspace floor raise above all
+    # detections) between the worklist build and the per-photo lock.
+    db.conn.execute("DELETE FROM detections WHERE photo_id=?", (pid,))
+    db.conn.commit()
+
+    good = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.88},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.85},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: good)
+
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    _process_photo_for_eye(db, row, folders, C=0.5, T=0.5, k_window=0.08)
+
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] is None, (
+        "Guard must abort when no effective primary remains; otherwise the "
+        "stage persists eye_kp_fingerprint for a subject that no longer "
+        "exists at the current confidence floor."
+    )
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
+
+def test_eye_stage_rejects_other_detector_with_identical_box(tmp_path, monkeypatch):
+    import keypoints as kp
+    from pipeline import _process_photo_for_eye
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+    row = db.list_photos_for_eye_keypoint_stage([pid])[0]
+    new_id = db.write_detection_batch(pid, "other-detector", [{
+        "box": {k: row["box_" + k] for k in "xywh"},
+        "confidence": .99, "category": "animal",
+    }])[0]
+    assert new_id != row["detection_id"]
+    # The new primary already has a replacement mask with the same geometry.
+    db.conn.execute("UPDATE photo_masks SET detector_model='other-detector' WHERE photo_id=?", (pid,))
+    db.conn.commit()
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: [
+        {"name": "left_eye", "x": 300., "y": 300., "conf": .88},
+    ])
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    _process_photo_for_eye(db, row, folders, C=.5, T=.5, k_window=.08)
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+    assert db.conn.execute("SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
 
 
 def test_eye_stage_gate1_out_of_scope_species_no_write(tmp_path, monkeypatch):

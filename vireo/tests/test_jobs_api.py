@@ -2722,6 +2722,23 @@ def test_extract_masks_route_writes_photo_masks_row(
     assert pr["active_mask_variant"] == "sam2-small"
     assert pr["mask_path"] == row["path"]
 
+    # Switching variants restores every quality field produced by this route.
+    expected_quality = {
+        "subject_tenengrad": 1.5, "bg_tenengrad": 0.3, "subject_clip_high": 0.01,
+        "subject_clip_low": 0.01, "subject_y_median": 100.0, "bg_separation": 50.0,
+        "phash_crop": "deadbeef", "noise_estimate": 5.0,
+    }
+    mask_row = db.get_photo_mask(pid, "sam2-small")
+    for field, value in expected_quality.items():
+        assert mask_row[field] == value
+    db.upsert_photo_mask(pid, "sam2-large", row["path"], "MegaDetector", 10, 20, 100, 200,
+                         noise_estimate=999)
+    db.set_active_mask_variant(pid, "sam2-large")
+    db.set_active_mask_variant(pid, "sam2-small")
+    restored = db.conn.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone()
+    for field, value in expected_quality.items():
+        assert restored[field] == value
+
     # A stale rerun publishes a new immutable generation and reclaims the
     # previously committed one after the atomic database switch.
     previous_path = row["path"]
@@ -2738,7 +2755,7 @@ def test_extract_masks_route_writes_photo_masks_row(
     )
     assert rerun_job["status"] == "completed", rerun_job
     replacement = db.conn.execute(
-        "SELECT path, prompt_x FROM photo_masks WHERE photo_id = ?", (pid,),
+        "SELECT path, prompt_x FROM photo_masks WHERE photo_id = ? AND variant='sam2-small'", (pid,),
     ).fetchone()
     assert replacement["prompt_x"] == 11
     assert replacement["path"] != previous_path
@@ -2809,8 +2826,9 @@ def test_extract_masks_pauses_without_holding_photo_lock(
             lock.release()
 
 
+@pytest.mark.parametrize("raw_cached", [False, True])
 def test_extract_masks_route_skips_sam_when_cached(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, raw_cached,
 ):
     """Re-hitting /api/jobs/extract-masks with the same configured
     variant + unchanged detection prompt must skip generate_mask: the
@@ -2857,6 +2875,9 @@ def test_extract_masks_route_skips_sam_when_cached(
     # Second run with the same config + same detection: SAM must NOT
     # be called again. The cache hit re-applies active_mask_variant
     # and counts the photo as masked without re-running SAM.
+    if raw_cached:
+        db.conn.execute("UPDATE photo_masks SET quality_input_recipe='raw', noise_estimate=999 WHERE photo_id=?", (pid,))
+        db.set_active_mask_variant(pid, "sam2-small")
     calls.clear()
     resp2 = client.post(
         "/api/jobs/extract-masks", json={"collection_id": col_id},
@@ -2866,9 +2887,10 @@ def test_extract_masks_route_skips_sam_when_cached(
         client, resp2.get_json()["job_id"],
     )
     assert data2["status"] == "completed"
-    assert calls == [], (
-        f"second run with cached prompt must skip generate_mask; got {calls}"
-    )
+    assert len(calls) == (1 if raw_cached else 0)
+    quality_row = db.conn.execute("SELECT quality_input_recipe, noise_estimate FROM photos WHERE id=?", (pid,)).fetchone()
+    assert quality_row["quality_input_recipe"] is None
+    assert quality_row["noise_estimate"] == 5.0
 
     # Still exactly one row for this (photo, variant).
     n = db.conn.execute(

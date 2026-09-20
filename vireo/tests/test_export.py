@@ -1081,11 +1081,11 @@ def test_export_edited_raw_skips_companion_jpeg_substitution(
     """Edited RAW+JPEG exports must decode the RAW, not the clipped companion JPEG.
 
     Companion JPEGs are camera-baked: their highlights are already clipped.
-    Substituting the companion would silently bypass the RAW_DECODE_PRESERVE_HIGHLIGHTS
+    Substituting the companion would silently bypass the RAW_DECODE_LINEAR
     decode mode and apply edits to clipped data.
     """
     import export as export_module
-    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    from image_loader import RAW_DECODE_LINEAR
 
     env = export_env
     db = env["db"]
@@ -1132,7 +1132,7 @@ def test_export_edited_raw_skips_companion_jpeg_substitution(
     assert loaded_path.lower().endswith(".nef"), (
         f"export should load the RAW primary, got {loaded_path!r}"
     )
-    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_LINEAR
 
 
 def test_export_edited_raw_uses_working_copy_when_source_missing(export_env):
@@ -1327,7 +1327,7 @@ def test_export_falls_back_to_companion_when_raw_decode_fails(
     demosaic the RAW.
     """
     import export as export_module
-    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    from image_loader import RAW_DECODE_LINEAR
 
     env = export_env
     db = env["db"]
@@ -1378,7 +1378,7 @@ def test_export_falls_back_to_companion_when_raw_decode_fails(
     # fallback path can't quietly downgrade the RAW-first contract by
     # passing the default JPEG-first decode mode.
     assert (
-        load_calls[0][1].get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+        load_calls[0][1].get("raw_decode") == RAW_DECODE_LINEAR
     )
     assert load_calls[1][0].lower().endswith(".jpg")
     # The fallback companion load must NOT pass raw_decode (it's a JPEG).

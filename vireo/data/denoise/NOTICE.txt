@@ -1,0 +1,13 @@
+Camera noise measurements from darktable
+
+This directory redistributes data/noiseprofiles.json from:
+https://github.com/darktable-org/darktable
+Commit: 636a7471b85ce7a65dcbbc9b6ee2946ef81eecae
+Source: https://github.com/darktable-org/darktable/blob/636a7471b85ce7a65dcbbc9b6ee2946ef81eecae/data/noiseprofiles.json
+
+Copyright the darktable contributors. Contributor credits are preserved in
+noiseprofiles.json. Distributed under the GNU General Public License version
+3 or later; see LICENSE.txt. The JSON itself is the complete source form of
+this data. No darktable program code is included.
+
+Vireo normalized trailing whitespace only; measurements and credits are unchanged.

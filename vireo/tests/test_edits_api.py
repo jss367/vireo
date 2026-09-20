@@ -1,4 +1,93 @@
+import json
 import os
+
+import pytest
+
+
+def test_editor_crop_ratio_persists_in_config(app_and_db):
+    import config as cfg
+
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    assert client.get(endpoint).get_json() == {"enabled": False, "aspect": None}
+    preference = {"enabled": True, "aspect": 1.5}
+    assert client.put(endpoint, json=preference).get_json() == preference
+    assert cfg.load()["editor_crop_ratio"] == preference
+    # A new client has no browser storage, as after the desktop port changes.
+    assert app.test_client().get(endpoint).get_json() == preference
+    response = client.put(endpoint, json={"enabled": False, "aspect": 1.5})
+    assert response.get_json() == {"enabled": False, "aspect": None}
+    assert cfg.load()["editor_crop_ratio"] == {"enabled": False, "aspect": None}
+
+
+@pytest.mark.parametrize("existing", [{}, {"pipeline": {"w_species": 0.4}}])
+def test_editor_crop_ratio_preserves_sparse_config(app_and_db, existing):
+    import config as cfg
+
+    app, _ = app_and_db
+    cfg.save(existing)
+    client = app.test_client()
+    for preference in (
+        {"enabled": True, "aspect": 1.5},
+        {"enabled": False, "aspect": None},
+    ):
+        response = client.put("/api/editor/crop-ratio", json=preference)
+        assert response.status_code == 200
+        with open(cfg.CONFIG_PATH) as config_file:
+            assert json.load(config_file) == {**existing, "editor_crop_ratio": preference}
+
+
+def test_editor_crop_ratio_ignores_late_older_writes(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    newest = {"enabled": True, "aspect": 1.5, "revision": 200}
+    assert client.put(endpoint, json=newest).get_json() == newest
+    older = {"enabled": True, "aspect": None, "revision": 100}
+    assert client.put(endpoint, json=older).get_json() == newest
+    assert client.get(endpoint).get_json() == newest
+    disabled = {"enabled": False, "aspect": None, "revision": 300}
+    assert client.put(endpoint, json=disabled).get_json() == disabled
+    assert client.put(endpoint, json=newest).get_json() == disabled
+    assert client.get(endpoint).get_json() == disabled
+
+
+def test_editor_crop_ratio_accepts_rollover_from_max_safe_revision(app_and_db):
+    """A stored revision at Number.MAX_SAFE_INTEGER can never be beaten by a
+    valid JavaScript revision — ``prev + 1`` is no longer a safe integer and
+    the browser can neither compute nor send it. Without a rollover exception
+    the preference would be wedged until the config was hand-repaired; the
+    server must accept the next legitimate write instead of rejecting it as
+    stale (Codex review, PR #1729)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    ceiling = 9007199254740991  # Number.MAX_SAFE_INTEGER
+    at_max = {"enabled": True, "aspect": 1.5, "revision": ceiling}
+    assert client.put(endpoint, json=at_max).get_json() == at_max
+    rolled_over = {"enabled": True, "aspect": 1.3333333333, "revision": 1}
+    assert client.put(endpoint, json=rolled_over).get_json() == rolled_over
+    assert client.get(endpoint).get_json() == rolled_over
+    # Once the counter resets, normal older-write rejection resumes.
+    stale = {"enabled": True, "aspect": 1.5, "revision": 1}
+    assert client.put(endpoint, json=stale).get_json() == rolled_over
+
+
+@pytest.mark.parametrize("body", [
+    [], {}, {"enabled": "true"}, {"enabled": True, "aspect": True},
+    {"enabled": True, "aspect": 0}, {"enabled": True, "aspect": -1},
+    {"enabled": True, "aspect": "1.5"}, {"enabled": True, "aspect": float("inf")},
+    {"enabled": True, "aspect": 10 ** 309},
+])
+def test_editor_crop_ratio_rejects_invalid_values(app_and_db, body):
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    preference = {"enabled": True, "aspect": 1.5}
+    client.put(endpoint, json=preference)
+    assert client.put(endpoint, json=body).status_code == 400
+    assert client.get(endpoint).get_json() == preference
 
 
 def test_set_color_label(app_and_db):
@@ -1602,6 +1691,107 @@ def test_culling_apply_undo_restores_flags(app_and_db):
     resp = client.post('/api/undo')
     assert resp.status_code == 200
     assert (db.get_photo(pid)['flag'] or 'none') == original_flag
+
+
+def test_culling_apply_unflag_clears_previous_flag(app_and_db):
+    """Moving an applied photo back to Review clears its saved flag."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    client.post('/api/culling/apply', json={'keepers': [pid], 'rejects': []})
+    assert db.get_photo(pid)['flag'] == 'flagged'
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [], 'unflag': [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()['cleared'] == 1
+    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+
+    history = db.get_edit_history()
+    assert history[0]['action_type'] == 'flag'
+    assert 'cleared 1' in history[0]['description']
+
+
+def test_culling_apply_unflag_undo_restores_flag(app_and_db):
+    """Undo puts back the flag a Review decision cleared."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]['id']
+
+    client.post('/api/culling/apply', json={'keepers': [pid], 'rejects': []})
+    client.post('/api/culling/apply',
+                json={'keepers': [], 'rejects': [], 'unflag': [pid]})
+    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    assert db.get_photo(pid)['flag'] == 'flagged'
+
+
+def test_culling_apply_unflag_ignores_unflagged_photos(app_and_db):
+    """Clearing a photo that has no flag is a no-op, not a history entry."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]['id']
+    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [], 'unflag': [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()['cleared'] == 0
+    assert db.get_edit_history() == []
+
+
+def test_culling_apply_rejects_non_list_ids(app_and_db):
+    """A malformed body is a 400, not a 500 from list concatenation."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': 'all', 'rejects': []})
+    assert resp.status_code == 400
+    assert 'keepers' in resp.get_json()['error']
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [], 'unflag': 7})
+    assert resp.status_code == 400
+    assert 'unflag' in resp.get_json()['error']
+
+
+def test_culling_apply_rejects_overlapping_action_lists(app_and_db):
+    """A photo can't be requested for two conflicting flag values at once."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:3]]
+
+    # keepers ∩ rejects
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [pids[0]], 'rejects': [pids[0]]})
+    assert resp.status_code == 400
+    assert 'keepers' in resp.get_json()['error']
+    assert 'rejects' in resp.get_json()['error']
+
+    # keepers ∩ unflag
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [pids[1]], 'rejects': [],
+                             'unflag': [pids[1]]})
+    assert resp.status_code == 400
+    assert 'unflag' in resp.get_json()['error']
+
+    # rejects ∩ unflag
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [pids[2]],
+                             'unflag': [pids[2]]})
+    assert resp.status_code == 400
+    assert 'unflag' in resp.get_json()['error']
+
+    # Nothing was mutated for any of the three requests.
+    for pid in pids:
+        assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+    assert db.get_edit_history() == []
 
 
 def test_encounter_species_records_history(app_and_db):

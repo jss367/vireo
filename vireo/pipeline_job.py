@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from artifact_flight import ArtifactProducerFailed
+from camera_denoise import cache_matches as _camera_cache_matches
 from classifier_cache import acquire_cached_classifier
 from db import Database, commit_with_retry
 from job_contract import progress_event
@@ -486,7 +487,7 @@ def _source_offline_reason(
 def _preflight_mask_outcomes(
     thread_db, dropped_photos, sam2_variant, dinov2_variant,
     detector_confidence, contextual_weak_ids=None,
-    weak_detection_confidence=None,
+    weak_detection_confidence=None, raw_subject_analysis=False,
 ):
     """Split pre-flight-dropped photos into ``(already_masked, at_risk)``.
 
@@ -567,7 +568,7 @@ def _preflight_mask_outcomes(
             primary["box_w"], primary["box_h"],
         )
         state = thread_db.conn.execute(
-            "SELECT active_mask_variant, dino_embedding_variant "
+            "SELECT active_mask_variant, dino_embedding_variant, quality_input_recipe "
             "FROM photos WHERE id = ?",
             (photo_id,),
         ).fetchone()
@@ -576,6 +577,8 @@ def _preflight_mask_outcomes(
             and cached_prompt == live_prompt
             and os.path.isfile(existing["path"])
             and state is not None
+            and not raw_subject_analysis
+            and state["quality_input_recipe"] is None
             and state["active_mask_variant"] == sam2_variant
             and state["dino_embedding_variant"] == dinov2_variant
         ):
@@ -788,6 +791,8 @@ class PipelineParams:
     model_id: str | None = None
     model_ids: list | None = None
     reclassify: bool = False
+    # Experimental, per-run opt-in. Normal browsing and editing stay unchanged.
+    raw_subject_analysis: bool = False
     skip_extract_masks: bool = False
     skip_regroup: bool = False
     # Distinguishes the identify preset's species-only review from a
@@ -1002,8 +1007,8 @@ def _thumb_raw_decode_kwargs(photo, recipe):
     filename = _photo_value(photo, "filename") or ""
     if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
         return {}
-    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
-    return {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+    from image_loader import RAW_DECODE_LINEAR
+    return {"raw_decode": RAW_DECODE_LINEAR}
 
 
 def _thumb_min_source_size_kwargs(photo, recipe, thumb_size, source_path):
@@ -1055,6 +1060,7 @@ def _retry_thumbnail_with_companion(
             commit_with_retry(thread_db.conn)
     recipe_kwargs = {"recipe": recipe} if recipe else {}
     if recipe:
+        recipe_kwargs["camera_metadata"] = photo
         recipe_kwargs["native_size"] = (
             _recipe_source_dimensions(photo)
         )
@@ -1105,6 +1111,7 @@ def _retry_thumbnail_with_working_copy(
         size=thumb_size,
         recipe=recipe,
         native_size=_recipe_source_dimensions(photo),
+        camera_metadata=photo,
     )
 
 
@@ -3443,6 +3450,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     continue
                         recipe_kwargs = {"recipe": recipe} if recipe else {}
                         if recipe:
+                            recipe_kwargs["camera_metadata"] = detail_photo
                             recipe_kwargs["native_size"] = (
                                 _recipe_source_dimensions(detail_photo)
                             )
@@ -3597,6 +3605,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     continue
                             recipe_kwargs = {"recipe": recipe} if recipe else {}
                             if recipe:
+                                recipe_kwargs["camera_metadata"] = detail_photo
                                 recipe_kwargs["native_size"] = (
                                     _recipe_source_dimensions(detail_photo)
                                 )
@@ -3828,7 +3837,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         cache_row = None
                         with contextlib.suppress(Exception):
                             cache_row = thread_db.preview_cache_get(photo["id"], max_size)
-                        if recipe and cache_row is None:
+                        if recipe and (cache_row is None or not _camera_cache_matches(cache_path, detail_photo, recipe)):
                             with contextlib.suppress(OSError):
                                 os.remove(cache_path)
                             if os.path.exists(cache_path):
@@ -4313,6 +4322,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             except (OSError, ValueError):
                 portable_model_identity = None
 
+            if params.raw_subject_analysis and portable_model_identity is not None:
+                from raw_analysis import RECIPE
+
+                portable_model_identity = {
+                    **portable_model_identity, "raw_subject_analysis": RECIPE,
+                }
+
             # What this model actually compares photos against — the merged
             # species lists, Tree of Life, or a timm model's fixed head. The
             # classify step shows it so the row names the label space, not
@@ -4694,6 +4710,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         params.reclassify, thread_db,
                         already_detected_ids=already_detected,
                         cached_detections=None,
+                        vireo_dir=effective_vireo_dir,
                     )
                     total_detected += det_count
                     already_detected.update(det_processed)
@@ -5095,6 +5112,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
                 detector_confidence = user_cfg.get("detector_confidence", 0.2)
                 pipeline_cfg = user_cfg.get("pipeline", {})
+                raw_session = None
+                if params.raw_subject_analysis:
+                    from raw_analysis import RECIPE, RawAnalysisSession
+
+                    raw_session = RawAnalysisSession(
+                        max_size=pipeline_cfg.get("proxy_longest_edge") or 1536,
+                        sam2_variant=pipeline_cfg.get("sam2_variant") or "sam2-small",
+                        preserve_detail=True,
+                    )
+
+                def prepare_pipeline_image(photo, folders, detection):
+                    kwargs = {"raw_analysis": raw_session} if raw_session is not None else {}
+                    img, folder_path, image_path = _prepare_image(photo, folders, detection, **kwargs)
+                    if img is not None and raw_session is not None and detection is not None:
+                        report = img.info.get("_vireo_raw_analysis")
+                        if report is not None:
+                            thread_db.save_subject_raw_analysis(detection["id"], report)
+                    return img, folder_path, image_path
+
                 weak_rescue_enabled = pipeline_cfg.get(
                     "weak_detection_rescue_enabled", True,
                 )
@@ -5513,7 +5549,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             ),
                         )
                     )
-                    if not params.reclassify:
+                    if not params.reclassify and not params.raw_subject_analysis:
                         # Precompute the classifier runtime_fingerprint the
                         # runtime gate will accept for each distinct
                         # ``detections.runtime_fingerprint`` present in this
@@ -6082,7 +6118,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # raw_results so downstream grouping/storage sees
                                 # it — otherwise the cached detection would silently
                                 # drop out of the grouping pipeline.
-                                if not params.reclassify:
+                                if not params.reclassify and not params.raw_subject_analysis:
                                     expected_classifier_runtime = None
                                     portable_labels_full = loaded_models.get(
                                         "labels_fingerprint_full"
@@ -6322,7 +6358,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # (Codex #1468 P2).
                                 _det_prep_seconds = 0.0
                                 _prep_started = time.time()
-                                img, folder_path, image_path = _prepare_image(
+                                img, folder_path, image_path = prepare_pipeline_image(
                                     photo, folders,
                                     None if full_image_fallback else detection,
                                 )
@@ -6429,7 +6465,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     # folder-scope, or gives up.
                                     _prep_started = time.time()
                                     img, folder_path, image_path = (
-                                        _prepare_image(
+                                        prepare_pipeline_image(
                                             photo, folders,
                                             None if full_image_fallback
                                             else detection,
@@ -6474,6 +6510,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # and understate the ETA (Codex #1468 P2).
                                 inference_seconds += _det_prep_seconds
                                 inference_batch.append({
+                                    "input_recipe": RECIPE if params.raw_subject_analysis else None,
                                     "photo": photo,
                                     "detection_id": detection["id"],
                                     "folder_path": folder_path,
@@ -7000,6 +7037,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 sam2_variant = pipeline_cfg.get("sam2_variant")
                 dinov2_variant = pipeline_cfg.get("dinov2_variant")
                 proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge")
+                raw_session = None
+                if params.raw_subject_analysis:
+                    from raw_analysis import RawAnalysisSession
+
+                    raw_session = RawAnalysisSession(
+                        max_size=proxy_longest_edge or 1536,
+                        sam2_variant=sam2_variant or "sam2-small",
+                    )
 
                 masks_dir = os.path.join(os.path.dirname(db_path), "masks")
                 os.makedirs(masks_dir, exist_ok=True)
@@ -7150,6 +7195,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         _preflight_mask_outcomes(
                             thread_db, dropped, sam2_variant, dinov2_variant,
                             detector_confidence,
+                            raw_subject_analysis=params.raw_subject_analysis,
                             contextual_weak_ids=contextual_weak_ids,
                             weak_detection_confidence=(
                                 weak_detection_confidence
@@ -7194,7 +7240,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         len(dropped_ids), len(still_offline_folder_ids),
                     )
 
-                # Build a map of photo_id -> primary detection (highest confidence)
+                # Build a map of photo_id -> selected primary detection
                 # from the detections table. Only photos with detections and without
                 # masks need processing.
                 #
@@ -7259,9 +7305,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         ]
                     if dets:
                         photos_with_detections += 1
-                        primary = dets[0]  # already ordered by confidence DESC
+                        primary = dets[0]  # selected primary first
                         photo_det_map[p["id"]] = {
                             "photo": p,
+                            "detection_id": primary["id"],
                             "det_box": {
                                 "x": primary["box_x"],
                                 "y": primary["box_y"],
@@ -7568,6 +7615,32 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         with bind_resource_cancel_check(
                             _pause_or_cancel_pending,
                         ), acquire_photo_mask(photo_id):
+                            # Resolve both state and extraction against the same
+                            # candidate set, including MDv6-only weak rescue.
+                            # Synchronizing under the lock clears old eye/DINO
+                            # results when the effective primary changed.
+                            from subjects import retained, sync_primary
+                            subject_floor = (weak_detection_confidence
+                                if photo_id in contextual_weak_ids else detector_confidence)
+                            subject_detector = ("megadetector-v6"
+                                if photo_id in contextual_weak_ids else None)
+                            sync_primary(
+                                thread_db, photo_id, min_conf=subject_floor,
+                                detector_model=subject_detector,
+                            )
+                            commit_with_retry(thread_db.conn)
+                            current = retained(
+                                thread_db, photo_id, min_conf=subject_floor,
+                                detector_model=subject_detector,
+                            )
+                            if not current:
+                                skipped += 1
+                                i += 1
+                                continue
+                            selected = current[0]
+                            det_box = {k: selected["box_" + k] for k in "xywh"}
+                            entry["detector_model"] = selected["detector_model"]
+                            entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
                             # Cache hit: a row already exists for (photo, variant)
                             # AND its stored prompt + detector still match the
                             # current primary detection AND the file is on disk.
@@ -7607,13 +7680,26 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     # fall through to the full recompute, which
                                     # writes set_active_mask_variant +
                                     # update_photo_embeddings together.
+                                    # Subject switching (subjects.sync_primary)
+                                    # clears both active_mask_variant AND
+                                    # dino_subject_embedding atomically inside
+                                    # ``_clear_primary_features``, so an
+                                    # active_mask_variant that still equals
+                                    # sam2_variant is enough to prove the
+                                    # denormalised subject state is fresh —
+                                    # a subject A→B→A round-trip would have
+                                    # nulled the variant here before the
+                                    # embedding could go stale (Codex P2
+                                    # r4056402007).
                                     state = thread_db.conn.execute(
                                         "SELECT active_mask_variant, "
-                                        "dino_embedding_variant FROM photos "
+                                        "dino_embedding_variant, quality_input_recipe FROM photos "
                                         "WHERE id = ?",
                                         (photo_id,),
                                     ).fetchone()
                                     if (state is not None
+                                            and not params.raw_subject_analysis
+                                            and state["quality_input_recipe"] is None
                                             and state["active_mask_variant"]
                                             == sam2_variant
                                             and state["dino_embedding_variant"]
@@ -7710,6 +7796,27 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                             completeness = crop_completeness(mask)
                             features = compute_all_quality_features(proxy, mask)
+                            features["quality_input_recipe"] = None
+                            analysis_report = None
+                            if raw_session is not None:
+                                from raw_analysis import (
+                                    RECIPE,
+                                    analyze_subject,
+                                    resize_linear,
+                                    scoring_features,
+                                )
+
+                                linear = raw_session.load(image_path)
+                                if (linear is not None and abs(
+                                    linear.shape[1] / linear.shape[0] - proxy.width / proxy.height
+                                ) <= 0.02):
+                                    corrected, analysis_report = analyze_subject(
+                                        resize_linear(linear, proxy.size), mask,
+                                    )
+                                    corrected.close()
+                                    analysis_report.update(raw_session.source_metadata())
+                                    features = scoring_features(analysis_report)
+                                    features["quality_input_recipe"] = RECIPE
                             if _should_abort_without_pause(abort):
                                 break
 
@@ -7772,10 +7879,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 subject_tenengrad=mask_subject_tenengrad,
                                 bg_tenengrad=mask_bg_tenengrad,
                                 crop_complete=completeness,
+                                quality_input_recipe=features.pop("quality_input_recipe", None),
+                                subject_clip_high=features.pop("subject_clip_high", None),
+                                subject_clip_low=features.pop("subject_clip_low", None),
+                                subject_y_median=features.pop("subject_y_median", None),
+                                bg_separation=features.pop("bg_separation", None),
+                                phash_crop=features.pop("phash_crop", None),
+                                noise_estimate=features.pop("noise_estimate", None),
                                 _commit=False,
                             )
                             thread_db.set_active_mask_variant(
                                 photo_id, sam2_variant, _commit=False,
+                                weak_rescue_min_conf=(weak_detection_confidence
+                                    if photo_id in contextual_weak_ids else None),
                             )
                             # Remaining (non-mask) per-photo features still land
                             # on the photos row.  mask_path / crop_complete /
@@ -7785,6 +7901,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if features:
                                 thread_db.update_photo_pipeline_features(
                                     photo_id, **features, _commit=False,
+                                )
+                            if analysis_report is not None:
+                                thread_db.save_subject_raw_analysis(
+                                    entry["detection_id"], analysis_report, _commit=False,
                                 )
                             thread_db.update_photo_embeddings(
                                 photo_id,

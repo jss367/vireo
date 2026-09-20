@@ -1,11 +1,13 @@
 [build-system]
-requires = ["setuptools>=75.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vireo"
 version = "0.57.1"
 description = "AI-powered wildlife photo organizer"
+license = "MIT AND GPL-3.0-or-later"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "vireo/data/denoise/LICENSE.txt", "vireo/data/denoise/NOTICE.txt"]
 requires-python = ">=3.14"
 dependencies = [
     "certifi>=2024.0.0",
@@ -16,6 +18,7 @@ dependencies = [
     "opencv-python-headless>=4.13.0.92",
     "onnxruntime>=1.22.0",
     "Pillow>=12.1.1",
+    "tifffile>=2026.1.28",
     "rawpy>=0.26.1",
     "requests>=2.32.0",
     "scipy>=1.17.1",
@@ -63,6 +66,7 @@ include = ["vireo*"]
 [tool.setuptools.package-data]
 vireo = [
     "data/**/*.json",
+    "data/denoise/*.txt",
     "templates/**/*.html",
     "static/**/*",
 ]

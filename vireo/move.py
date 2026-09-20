@@ -1876,6 +1876,8 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     including XMP and RAW/JPEG companions. Existing same-name files are never
     overwritten. Unlike ``move_folder``, this intentionally moves photos (and
     their companions), not unrelated untracked files in the source tree.
+    After a successful move, remove the selected source only if empty;
+    otherwise report the remaining files for optional cleanup in Jobs.
 
     When ``developed_dir`` is set (matching the caller's configured
     ``darktable_output_dir``), each moved photo's developed-output file is
@@ -1885,6 +1887,14 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     because photos in one source folder can fan out to many date
     destinations.
     """
+    source_row = db.conn.execute("SELECT path FROM folders WHERE id = ?", (folder_id,)).fetchone()
+    source_path = source_row["path"] if source_row else None
+    source_device = None
+    source_inode = None
+    if source_path:
+        with contextlib.suppress(OSError):
+            source_stat = os.stat(source_path)
+            source_device, source_inode = source_stat.st_dev, source_stat.st_ino
     groups = plan_folder_date_moves(
         db, folder_id, destination, folder_template,
     )
@@ -1938,12 +1948,19 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             # successful items).
             progress_cb(completed, total, "", "Organizing by capture date")
 
-    return {
+    result = {
         "moved": moved,
         "errors": errors,
         "destinations": destinations,
         "destination_count": len(destinations),
     }
+    if moved and not errors and source_path:
+        try:
+            from .move_cleanup import finish_source
+        except ImportError:
+            from move_cleanup import finish_source
+        result["source_cleanup"] = finish_source(db, source_path, source_device, source_inode)
+    return result
 
 
 def _has_untracked_destination_developed(

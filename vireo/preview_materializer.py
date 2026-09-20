@@ -16,6 +16,7 @@ import os
 from dataclasses import dataclass
 
 from artifact_flight import atomic_write_bytes, preview_artifact_flights
+from camera_denoise import cache_matches, cache_save_options
 from render_source import (
     companion_image_can_replace_raw_result,
     has_current_working_copy_failure,
@@ -61,7 +62,7 @@ def render_preview_bytes(
     """Render one preview using the same RAW/edit fallback rules everywhere."""
     from image_edits import apply_recipe_to_loaded_image
     from image_loader import (
-        RAW_DECODE_PRESERVE_HIGHLIGHTS,
+        RAW_DECODE_LINEAR,
         RAW_EXTENSIONS,
         load_image,
     )
@@ -126,7 +127,7 @@ def render_preview_bytes(
 
         load_max_size = None if recipe and recipe.get("crop") else size
         raw_decode = (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            RAW_DECODE_LINEAR
             if selected_ext in RAW_EXTENSIONS and (recipe or pair_source == "raw")
             else None
         )
@@ -172,7 +173,7 @@ def render_preview_bytes(
             and not original_failure_current
         ):
             fallback_raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                RAW_DECODE_LINEAR
                 if original_is_raw and (recipe or pair_source == "raw")
                 else None
             )
@@ -269,6 +270,7 @@ def render_preview_bytes(
                 img,
                 recipe,
                 max_size=size,
+                camera_metadata=photo,
                 native_size=recipe_source_dimensions(photo),
                 local_mask=local_masks.load_snapshot(
                     vireo_dir, photo_id, recipe,
@@ -279,7 +281,7 @@ def render_preview_bytes(
             img = rendered
 
         encoded = io.BytesIO()
-        img.save(encoded, format="JPEG", quality=preview_quality)
+        img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe))
         return encoded.getvalue()
     finally:
         with contextlib.suppress(Exception):
@@ -313,7 +315,8 @@ def materialize_preview(
         )
 
     def consume_published():
-        if cache_path and os.path.exists(cache_path) and os.path.getsize(cache_path):
+        if (cache_path and os.path.exists(cache_path) and os.path.getsize(cache_path)
+                and cache_matches(cache_path, photo, recipe)):
             return PreviewMaterialization(
                 data=None, generated=False, published=True,
             )
@@ -327,6 +330,7 @@ def materialize_preview(
             and cache_path
             and os.path.exists(cache_path)
             and os.path.getsize(cache_path)
+            and cache_matches(cache_path, photo, recipe)
         ):
             return PreviewMaterialization(
                 data=None, generated=False, published=True,
