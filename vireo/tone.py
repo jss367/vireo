@@ -31,14 +31,12 @@ JPEGs and offline working copies retain the legacy sRGB input path and cannot
 recover information already lost before loading. The WebGL shader implements
 that legacy path only; RAW adjustments use the server renderer.
 
-Keep-in-sync contract (Tier 3 / live preview)
----------------------------------------------
-Every function here is strictly per-pixel: each output channel depends only on
-the input pixel's own channels and the scalar parameters. That means this maps
-1:1 onto a GLSL fragment shader for the live WebGL preview. When the preview is
-ported, transcribe these functions verbatim and reuse the constants below; the
-CSS-``filter`` preview in ``_navbar.html`` cannot express the linear-light
-rolloff and only approximates this render.
+Live preview
+------------
+The default scalar path maps onto the legacy GLSL preview. Image renders pass
+``range_radius`` to preserve local contrast in Shadows/Highlights; those edits
+use server previews because their neighborhood filter cannot run in the
+single-pass shader. Whites/Blacks remain point curves.
 """
 
 from __future__ import annotations
@@ -84,6 +82,77 @@ BLACK_DEEPEN = 0.90
 # sensor or quantization noise from becoming a saturated speck beside neutral
 # black while retaining color once the source has meaningful luminance.
 BLACK_CHROMA_FADE = 4.0 / 255.0
+
+# Native-pixel radius, scaled by the renderer for previews. Two box-filter
+# stages give the guided filter a total support of twice this radius.
+RANGE_RADIUS = 24
+_RANGE_EPSILON = 0.25 ** 2  # log2-luminance variance, in stops squared
+
+
+def _range_log_base(luminance, radius):
+    """Self-guided log-luminance base, with finite support for tiled renders.
+
+    Large edges have high variance and stay in the base; small texture is
+    separated from it. Double-precision box sums avoid cancellation in flat
+    shadows and keep tile boundaries numerically stable.
+    Self-guided form of He et al., Guided Image Filtering (ECCV 2010):
+    https://people.csail.mit.edu/kaiming/eccv10/index.html
+    """
+    from scipy.ndimage import uniform_filter
+
+    log_y = np.log2(np.maximum(luminance[..., 0], np.float32(1e-6)))
+    guide = log_y.astype(np.float64)
+
+    def box(plane):
+        return uniform_filter(plane, size=2 * radius + 1, mode="reflect")
+
+    mean = box(guide)
+    variance = np.maximum(box(guide * guide) - mean * mean, 0.0)
+    slope = variance / (variance + _RANGE_EPSILON)
+    mean_slope = box(slope)
+    base = mean_slope * guide + box((1.0 - slope) * mean)
+    # Suppress detail restoration where the filter encounters strong edges.
+    # Even a small base error can otherwise become a visible bright/dark rim.
+    confidence = np.clip(1.0 - mean_slope, 0.0, 1.0) ** 2
+    return (
+        log_y[..., None], base.astype(np.float32)[..., None],
+        confidence.astype(np.float32)[..., None],
+    )
+
+
+def _shadow_highlight_levels(level, shadows, highlights):
+    if np.any(shadows):
+        level = _shadow_level_curve(level, shadows)
+    if np.any(highlights):
+        level = 1.0 - _shadow_level_curve(
+            1.0 - level, -np.asarray(highlights, dtype=np.float32)
+        )
+    return level
+
+
+def _spatial_range_level(luminance, source_level, mapped_level, shadows, highlights, radius):
+    """Move broad tones while retaining fine relative luminance differences.
+
+    Reapply the log detail to the adjusted base, with conservative blending
+    and a half-stop correction limit. Fade to the point curve near black
+    (where detail is often noise) and white (which must remain anchored).
+    The filter sees luminance only, never the adjustment mask: local amounts
+    are evaluated at each pixel and cannot bleed into an unselected region.
+    """
+    log_y, base, confidence = _range_log_base(luminance, radius)
+    base_level = linear_to_srgb(np.exp2(base))
+    mapped_base = _shadow_highlight_levels(base_level, shadows, highlights)
+    log_mapped_base = np.log2(np.maximum(srgb_to_linear(mapped_base), 1e-6))
+    log_point = np.log2(np.maximum(srgb_to_linear(mapped_level), 1e-6))
+    correction = np.clip(log_mapped_base + log_y - base - log_point, -0.5, 0.5)
+    retention = (
+        0.85 * confidence * smoothstep(BLACK_CHROMA_FADE, 0.08, source_level)
+        * (1.0 - smoothstep(0.94, 1.0, source_level))
+    )
+    result = linear_to_srgb(np.exp2(log_point + retention * correction))
+    # Preserve exact no-ops, including pixels outside the selected range and
+    # zero-valued areas of local amount maps. Also anchors true black/white.
+    return np.where(mapped_level == source_level, mapped_level, np.clip(result, 0.0, 1.0))
 
 
 def srgb_to_linear(c):
@@ -245,20 +314,18 @@ def apply_range_adjustments(
 
 
 def _apply_range_adjustments_linear(
-    linear, *, highlights=0.0, shadows=0.0, whites=0.0, blacks=0.0
+    linear, *, highlights=0.0, shadows=0.0, whites=0.0, blacks=0.0,
+    range_radius=0,
 ):
     """Linear-RGB implementation shared by the main pipeline and wrapper."""
     luminance = _luma(linear)
     level = linear_to_srgb(luminance)
     source_level = level
 
-    if np.any(shadows):
-        level = _shadow_level_curve(level, shadows)
-    if np.any(highlights):
-        # Mirror the shadow curve around white.  Negative highlights use the
-        # strong recovery branch; positive highlights use the gentler branch.
-        level = 1.0 - _shadow_level_curve(
-            1.0 - level, -np.asarray(highlights, dtype=np.float32)
+    level = _shadow_highlight_levels(level, shadows, highlights)
+    if range_radius and (np.any(shadows) or np.any(highlights)):
+        level = _spatial_range_level(
+            luminance, source_level, level, shadows, highlights, int(range_radius)
         )
     if np.any(blacks):
         level = _black_level_curve(level, blacks)
@@ -534,6 +601,7 @@ def apply_adjustments(
     local_subject=None,
     local_background=None,
     input_linear=False,
+    range_radius=0,
 ):
     """Apply tonal adjustments to an sRGB float image and return sRGB float.
 
@@ -554,6 +622,7 @@ def apply_adjustments(
         point_curves: composite and RGB channel [input, output] control points.
         point_color: sampled HSL colors with selection ranges and adjustments.
         color_grading: shadow/midtone/highlight hue and saturation tints.
+        range_radius: guided-filter radius in image pixels; zero uses point curves.
 
     Returns:
         float32 array, same shape, sRGB-encoded and clipped to [0,1].
@@ -565,9 +634,9 @@ def apply_adjustments(
     saturation). Effective per-pixel amounts are
     ``global + subject·w + background·(1−w)``, clamped to each control's
     global range. The weight is an extra per-pixel *input*, not a
-    neighborhood op, so this pipeline (and its future shader transcription)
-    stays strictly per-pixel. When no local inputs are given, execution
-    takes the original global-only path unchanged — byte-identical output.
+    neighborhood op. The optional range filter uses the image as its guide,
+    while the adjustment amounts remain per-pixel. Without local inputs,
+    execution uses the global-only path.
     """
     rgb = np.asarray(rgb, dtype=np.float32)
 
@@ -594,6 +663,7 @@ def apply_adjustments(
             hsl=hsl,
             color_grading=color_grading,
             input_linear=input_linear,
+            range_radius=range_radius,
         )
 
     # --- scene-referred ops, in linear light ---
@@ -633,6 +703,7 @@ def apply_adjustments(
             shadows=shadows,
             whites=whites,
             blacks=blacks,
+            range_radius=range_radius,
         )
 
     # --- display-referred ops, in sRGB ---
@@ -678,14 +749,13 @@ def _apply_adjustments_weighted(
     rgb, *, weight, subject, background, exposure, white_balance,
     highlights, shadows, whites, blacks, contrast, vibrance, saturation,
     tone_curve, point_curves, point_color, hsl, color_grading, input_linear=False,
+    range_radius=0,
 ):
     """Local (mask-weighted) variant of :func:`apply_adjustments`.
 
-    Kept as a separate branch so the global-only path above stays literally
-    unchanged (its byte-exactness backs the no-cache-purge guarantee and the
-    shader-parity test). Controls without local deltas run the same scalar
-    math as the global path; controls with deltas run the identical formulas
-    with a per-pixel amount map.
+    Controls without local deltas run the same scalar math as the global
+    path; controls with deltas run the identical formulas with a per-pixel
+    amount map. The optional range filter shares the same image guide.
     """
     w = weight[..., None]
 
@@ -738,6 +808,7 @@ def _apply_adjustments_weighted(
             shadows=sh_arg,
             whites=whites,
             blacks=blacks,
+            range_radius=range_radius,
         )
 
     # --- display-referred ops, in sRGB ---

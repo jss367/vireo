@@ -16,8 +16,12 @@ high-precision pipeline. Darktable remains a separate optional integration.
 3. Geometry, global and masked exposure, and white-balance adjustments operate
    on this source. A luminance shoulder maps highlights to display range, with
    gamut compression to avoid independently clipping color channels.
-4. Tonal range, curves, color, presence, and detail controls keep floating-point
-   buffers. Existing detail algorithms still run after tone and output resizing.
+4. Shadows and Highlights use an edge-aware log-luminance base to move broad
+   tones while retaining fine texture contrast. Restoration fades near strong
+   edges, deep black, and display white to limit halos and noise amplification.
+   Whites and Blacks remain point curves. Tonal range, curves, color, presence,
+   and detail controls keep floating-point buffers. Existing detail algorithms
+   still run after tone and output resizing.
 5. JPEG and PNG output is quantized to 8 bits at encoding. TIFF output from this
    RAW path is quantized to 16 bits per channel and carries an sRGB ICC profile.
    TIFF exports request this path even without a saved edit recipe.
@@ -27,6 +31,10 @@ exports, and external-editor handoffs use the same renderer. RAW lightbox
 adjustments use server previews because the JPEG-based browser shader cannot
 reproduce adjustments to retained RAW highlight data. Display previews are
 still JPEGs, but they are encoded after applying the requested recipe.
+Shadows/Highlights also use server previews for JPEG sources, since their
+neighborhood filter cannot be reproduced by the single-pass browser shader.
+The filter radius scales with loaded resolution, and overlapping row tiles
+provide the same neighborhood support in full-resolution exports.
 
 Sized decoded RAW buffers share a 128 MiB memory cache keyed by source path,
 modification time, file size, and requested size. Full-resolution originals and
@@ -38,7 +46,8 @@ retain their existing fast JPEG paths and disk working copies.
 
 - Originals and saved edit recipes are not rewritten. Existing RAW edits can
   look different because their rendering now starts with high-precision data.
-  Render version 6 invalidates edited caches and browser image URLs.
+  Render version 7 invalidates edited caches and browser image URLs. Existing
+  Shadows/Highlights recipes gain the new detail-preserving behavior.
 - An unsupported RAW can still fall back to its embedded JPEG. Offline files
   can use a companion JPEG or working copy. Those sources retain their original
   precision limits; their TIFF exports remain 8-bit. A pre-existing darktable
@@ -71,3 +80,10 @@ tests separately check exposure behavior against known linear-light values.
 These tests verify the data path. Camera-specific visual comparisons on
 difficult wildlife photos are still needed to tune default rendering and choose
 future denoising, highlight-reconstruction, and sharpening algorithms.
+
+`vireo/tests/test_spatial_tone.py` checks texture contrast at matched average
+brightness, hard-edge halo limits, noise protection near black, ordered tone
+ramps, local-mask isolation, float precision, tile seams, and preview scaling.
+These synthetic checks do not replace visual tuning on real wildlife photos.
+The RAW highlight shoulder still runs before the range controls; moving range
+compression ahead of that shoulder is a separate future change.

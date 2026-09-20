@@ -122,12 +122,14 @@ def test_save_response_does_not_replace_newer_slider_input(live_server, page, ad
     assert live_server['db'].get_photo_edit_recipe(adjustment_photo)['adjustments']['exposure'] == 5
 
 
-@pytest.mark.parametrize('advanced', [False, True])
+@pytest.mark.parametrize('advanced', [False, True, 'shadows', 'highlights'])
 def test_server_preview_uses_complete_recipe_and_preserves_geometry(
     live_server, page, adjustment_photo, advanced,
 ):
     recipe = {'rotation': 90, 'crop': {'x': 0.1, 'y': 0.1, 'w': 0.8, 'h': 0.8}}
-    if advanced:
+    if advanced in ('shadows', 'highlights'):
+        recipe['adjustments'] = {advanced: 70 if advanced == 'shadows' else -70}
+    elif advanced:
         recipe['adjustments'] = {'tone_curve': {'midtones': 60}}
     live_server['db'].set_photo_edit_recipe(adjustment_photo, recipe)
     page.goto(live_server['url'] + '/browse')
@@ -144,7 +146,9 @@ def test_server_preview_uses_complete_recipe_and_preserves_geometry(
     assert rendered['rotation'] == 90
     assert rendered['crop'] == recipe['crop']
     assert rendered['adjustments']['exposure'] == 2
-    if advanced:
+    if advanced in ('shadows', 'highlights'):
+        assert rendered['adjustments'][advanced] == recipe['adjustments'][advanced]
+    elif advanced:
         assert rendered['adjustments']['tone_curve'] == {'midtones': 60}
     assert query['apply_crop'] == ['1']
     _wait_saved(page)
