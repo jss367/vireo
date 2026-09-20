@@ -2397,23 +2397,39 @@ function setStraighten(value) {
   markChanged(true);
 }
 
-function pendingCropRatioPreference() {
+function pendingCropRatioRecords() {
+  var records = [];
   try {
-    var pending = JSON.parse(VireoViewPreferences.read('vireo_pending_crop_ratio'));
-    if (pending && typeof pending.enabled === 'boolean' &&
-        Number.isSafeInteger(pending.revision) && pending.revision > 0 &&
-        (pending.aspect === null || (Number.isFinite(pending.aspect) && pending.aspect > 0))) {
-      return pending;
-    }
+    Object.keys(localStorage).filter(function(key) {
+      return key.indexOf('vireo_pending_crop_ratio:') === 0;
+    }).forEach(function(key) {
+      try {
+        var pending = JSON.parse(VireoViewPreferences.read(key));
+        if (pending && typeof pending.enabled === 'boolean' &&
+            Number.isSafeInteger(pending.revision) && pending.revision > 0 &&
+            (pending.aspect === null || (Number.isFinite(pending.aspect) && pending.aspect > 0))) {
+          records.push({key: key, preference: pending});
+        }
+      } catch (_) {}
+    });
   } catch (_) {}
-  return null;
+  return records;
+}
+
+function pendingCropRatioPreference() {
+  return pendingCropRatioRecords().reduce(function(latest, record) {
+    return !latest || record.preference.revision > latest.revision ? record.preference : latest;
+  }, null);
 }
 
 function acknowledgeCropRatioPreference(revision) {
-  var pending = pendingCropRatioPreference();
-  if (pending && pending.revision <= revision) {
-    VireoViewPreferences.write('vireo_pending_crop_ratio', '');
-  }
+  // Each write owns an immutable key. Another tab can add a newer record
+  // between this read and removal without having its pending value erased.
+  pendingCropRatioRecords().forEach(function(record) {
+    if (record.preference.revision <= revision) {
+      try { localStorage.removeItem(record.key); } catch (_) {}
+    }
+  });
 }
 
 function saveCropRatioPreference(preference) {
@@ -2450,7 +2466,10 @@ function rememberCropRatio(force) {
   cropRatioPreference.revision = nextCropRatioRevision(cropRatioPreference.revision);
   // A reloaded page can issue its GET before this PUT reaches the server.
   // Keep the pending value synchronously until its revision is acknowledged.
-  VireoViewPreferences.write('vireo_pending_crop_ratio', JSON.stringify(cropRatioPreference));
+  var writeId = window.crypto && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID() : Date.now() + ':' + Math.random().toString(36).slice(2);
+  VireoViewPreferences.write('vireo_pending_crop_ratio:' + writeId,
+    JSON.stringify(cropRatioPreference));
   saveCropRatioPreference(cropRatioPreference);
 }
 

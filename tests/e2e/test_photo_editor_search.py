@@ -567,6 +567,32 @@ def test_photo_editor_keeps_pending_snapshot_when_another_tab_acknowledges(live_
     other.close()
 
 
+def test_photo_editor_acknowledgement_keeps_a_concurrent_pending_write(live_server, page):
+    """A write inserted between the acknowledgement's read and removal survives."""
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    remaining = page.evaluate("""() => {
+        const oldKey = 'vireo_pending_crop_ratio:old';
+        const newKey = 'vireo_pending_crop_ratio:new';
+        const older = {enabled: true, aspect: 1, revision: 100};
+        const newer = {enabled: true, aspect: 1.5, revision: 200};
+        localStorage.setItem(oldKey, JSON.stringify(older));
+        const originalGet = Storage.prototype.getItem;
+        Storage.prototype.getItem = function(key) {
+            const value = originalGet.call(this, key);
+            // Model another tab writing after the old snapshot is read.
+            if (key === oldKey) this.setItem(newKey, JSON.stringify(newer));
+            return value;
+        };
+        try { acknowledgeCropRatioPreference(100); }
+        finally { Storage.prototype.getItem = originalGet; }
+        return {old: localStorage.getItem(oldKey), pending: pendingCropRatioPreference()};
+    }""")
+    assert remaining["old"] is None
+    assert remaining["pending"] == {"enabled": True, "aspect": 1.5, "revision": 200}
+
+
 def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
     """A remembered ratio must not recrop an existing edit just by opening it."""
     url = live_server["url"]
