@@ -16,7 +16,7 @@ except ImportError:
 
 SCHEMA_VERSION = 1
 
-# Bump whenever the per-pixel rendering math in this module or `tone.py` changes
+# Bump whenever the rendering math in this module or `tone.py` changes
 # in a way that produces different output bytes for the same recipe. Cached
 # previews/thumbnails are keyed by (photo_id, size) — they have no recipe hash,
 # so without this version a deploy that changes the math keeps serving the old
@@ -31,7 +31,8 @@ SCHEMA_VERSION = 1
 #   4 — RAW edit renders demosaic with auto-bright off + highlight blending.
 #   5 — monotonic, linear-luminance range curves with chroma preservation.
 #   6 — scene-linear RAW decode and floating-point render/export buffers.
-EDIT_MATH_VERSION = 6
+#   7 — edge-aware Shadows/Highlights with local contrast preservation.
+EDIT_MATH_VERSION = 7
 
 _ADJUSTMENT_RANGES = {
     "exposure": (-5.0, 5.0),
@@ -581,25 +582,21 @@ _ADVANCED_COLOR_TILE_PIXELS = 1_000_000
 
 def _apply_adjustments(
     img, adjustments, local_weight=None, local_subject=None,
-    local_background=None,
+    local_background=None, range_scale=1.0,
 ):
     """Apply tonal adjustments to a PIL image via the linear tone pipeline.
 
-    Bridges PIL <-> numpy: promotes the image to RGB(A), runs the shared
-    per-pixel pipeline in :mod:`tone` (linear-light exposure/white balance with
-    a highlight shoulder, then display-space tonal/color controls), and merges
-    any alpha channel back unchanged. ``local_weight`` (a full-frame float
-    subject-weight array) plus per-region delta dicts route through the
-    weighted tone branch; the weight is sliced along the same row tiles as
-    the image, which keeps tiling numerically identical to a whole-frame
-    pass (the pipeline stays strictly per-pixel).
+    Promotes the image to RGB(A), runs the shared tone pipeline, and merges
+    alpha back unchanged. Overlapping row tiles provide full neighborhood
+    support for Shadows/Highlights. Local weights use the same overlap;
+    ``range_scale`` converts the range-filter radius from native pixels.
     """
     import numpy as np
 
     try:
-        from .tone import apply_adjustments
+        from .tone import RANGE_RADIUS, apply_adjustments
     except ImportError:
-        from tone import apply_adjustments
+        from tone import RANGE_RADIUS, apply_adjustments
 
     has_alpha = "A" in img.getbands() or "transparency" in img.info
     if img.mode not in ("RGB", "RGBA"):
@@ -622,6 +619,15 @@ def _apply_adjustments(
     hsl = adjustments.get("hsl")
     color_grading = adjustments.get("color_grading")
 
+    spatial = highlights or shadows or (
+        local_weight is not None and any(
+            region.get("shadows") or region.get("highlights")
+            for region in (local_subject or {}, local_background or {})
+        )
+    )
+    range_radius = max(1, int(round(RANGE_RADIUS * range_scale))) if spatial else 0
+    halo = 2 * range_radius
+
     floating = isinstance(img, FloatImage)
     src = np.asarray(img)  # view onto the source buffer
     height, width = src.shape[:2]
@@ -629,10 +635,11 @@ def _apply_adjustments(
     output = np.empty((height, width, channels), dtype=np.float32 if floating else np.uint8)
 
     # Process in row blocks so peak memory stays bounded on full-resolution
-    # originals/exports (45MP+). The tone pass is strictly per-pixel, so tiling
-    # is numerically identical to a single whole-frame pass. ~4M pixels per tile
-    # keeps the transient float arrays to a few hundred MB.
+    # originals/exports (45MP+). The guided range filter needs overlapping
+    # rows; all remaining tone/color operations are per-pixel.
     tile_budget = _ADJUST_TILE_PIXELS
+    if spatial:
+        tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
     if tone_curve or point_curves or point_color or hsl or color_grading:
         # HSL conversion and curve indexing keep several additional float
         # planes alive. Smaller tiles bound peak memory on 45MP+ exports while
@@ -641,7 +648,8 @@ def _apply_adjustments(
     rows_per_tile = max(1, tile_budget // max(1, width))
     for top in range(0, height, rows_per_tile):
         bottom = min(top + rows_per_tile, height)
-        tile = src[top:bottom].astype(np.float32)
+        start, end = max(0, top - halo), min(height, bottom + halo)
+        tile = src[start:end].astype(np.float32)
         if not floating:
             tile /= 255.0
         adj = apply_adjustments(
@@ -661,12 +669,14 @@ def _apply_adjustments(
             hsl=hsl,
             color_grading=color_grading,
             local_weight=(
-                local_weight[top:bottom] if local_weight is not None else None
+                local_weight[start:end] if local_weight is not None else None
             ),
             local_subject=local_subject,
             local_background=local_background,
             input_linear=floating and img.encoding == "linear",
+            range_radius=range_radius,
         )
+        adj = adj[top - start:bottom - start]
         output[top:bottom, :, :3] = (
             adj if floating else np.clip(adj * 255.0 + 0.5, 0, 255).astype(np.uint8)
         )
@@ -824,12 +834,15 @@ def _apply_recipe_impl(
         _local_region_deltas(local, _LOCAL_TONE_KEYS)
         if mask_geo is not None else ({}, {})
     )
+    # Tone runs at loaded resolution, before the final output resize. The
+    # detail override describes output pixels and must not shrink this radius.
+    range_scale = detail_render_scale(result.size, native_size, normalized)
+    scale = (
+        detail_scale
+        if detail_scale is not None
+        else detail_render_scale(result.size, native_size, normalized)
+    )
     if subject_tone or background_tone:
-        scale = (
-            detail_scale
-            if detail_scale is not None
-            else detail_render_scale(result.size, native_size, normalized)
-        )
         feather = (local["mask"].get("feather") or 0.0) * scale
         weight = _feathered_weight(mask_geo, feather)
         result = _apply_adjustments(
@@ -837,9 +850,10 @@ def _apply_recipe_impl(
             local_weight=weight,
             local_subject=subject_tone,
             local_background=background_tone,
+            range_scale=range_scale,
         )
     elif tone_adjustments or isinstance(result, FloatImage):
-        result = _apply_adjustments(result, tone_adjustments)
+        result = _apply_adjustments(result, tone_adjustments, range_scale=range_scale)
 
     return result, mask_geo
 

@@ -5179,7 +5179,7 @@ function _vireoHashString(s) {
 // seeing the old bytes from their own browser cache until they expire.
 // test_edit_math_version_template_constant_matches_python locks the two
 // constants together.
-var _VIREO_EDIT_MATH_VERSION = 6;
+var _VIREO_EDIT_MATH_VERSION = 7;
 
 function _vireoEditRecipeCacheKey(recipe) {
   var normalized = _lbCloneEditRecipe(recipe);
@@ -6058,6 +6058,10 @@ function _lbPreviewNeedsServer(recipe) {
   var photo = _lightboxPhotoList.find(function(p) { return p.id === _lightboxCurrentId; });
   var filename = (photo && photo.filename) || document.getElementById('lightboxFilename').textContent;
   if (/\.(nef|cr2|cr3|arw|raf|dng|rw2|orf)$/i.test(filename || '')) return true;
+  // Range adjustments preserve texture using neighboring luminance samples.
+  // The single-pass shader cannot reproduce this shared preview/export math.
+  var adjustments = recipe.adjustments || {};
+  if (adjustments.shadows || adjustments.highlights) return true;
   var supported = ['exposure', 'highlights', 'shadows', 'whites', 'blacks',
     'contrast', 'vibrance', 'saturation', 'white_balance', 'temperature', 'tint'];
   return !!recipe.local || Object.keys(recipe.adjustments || {}).some(function(key) {
