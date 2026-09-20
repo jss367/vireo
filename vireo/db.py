@@ -19200,20 +19200,33 @@ class Database:
                     and review["status"] in {"accepted", "rejected"}
                     and review["individual"] != AUTO_MATCH_REVIEW_MARKER
                 ):
+                    if refresh_output:
+                        # Review decisions survive reinference, but burst
+                        # membership is recomputed for the active workspace.
+                        self.conn.execute(
+                            """UPDATE prediction_review SET group_id=?, vote_count=?,
+                               total_votes=?, individual=?
+                               WHERE prediction_id=? AND workspace_id=?""",
+                            (group_id, vote_count, total_votes,
+                             None if individual == AUTO_MATCH_REVIEW_MARKER else individual,
+                             pred_id, ws_id),
+                        )
                     self.conn.commit()
                     return
+            metadata_updates = ", ".join(
+                f"{field} = excluded.{field}" if refresh_output
+                else f"{field} = COALESCE(excluded.{field}, {field})"
+                for field in ("individual", "group_id", "vote_count", "total_votes")
+            )
             self.conn.execute(
-                """INSERT INTO prediction_review
+                f"""INSERT INTO prediction_review
                      (prediction_id, workspace_id, status, reviewed_at,
                       individual, group_id, vote_count, total_votes)
                    VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)
                    ON CONFLICT(prediction_id, workspace_id)
                    DO UPDATE SET status      = excluded.status,
                                  reviewed_at = excluded.reviewed_at,
-                                 individual  = COALESCE(excluded.individual, individual),
-                                 group_id    = COALESCE(excluded.group_id,   group_id),
-                                 vote_count  = COALESCE(excluded.vote_count, vote_count),
-                                 total_votes = COALESCE(excluded.total_votes,total_votes)""",
+                                 {metadata_updates}""",
                 (pred_id, ws_id, status, individual, group_id,
                  vote_count, total_votes),
             )

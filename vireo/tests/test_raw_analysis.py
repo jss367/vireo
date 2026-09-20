@@ -417,3 +417,35 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
     ).fetchall()
     assert [r[0] for r in rows] == ["Warbler"]
     db.close()
+
+
+@pytest.mark.parametrize("status", ["pending", "accepted", "rejected"])
+@pytest.mark.parametrize("new_group", [None, "new-burst"])
+def test_reinference_refreshes_burst_metadata(tmp_path, status, new_group):
+    from classify_job import _store_pending_detection_prediction
+    from db import Database
+
+    db = Database(str(tmp_path / "burst.db"))
+    workspace = db._active_workspace_id
+    folder = db.add_folder(str(tmp_path))
+    photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
+    detection = db.save_detections(photo, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.add_prediction(detection, "Robin", 0.2, "model", status=status,
+                      group_id="old-burst", vote_count=3, total_votes=4, individual='{"Robin":3}')
+    item = {"detection_id": detection, "prediction": "Robin", "confidence": 0.9,
+            "_replace_prediction_outputs": True}
+    _store_pending_detection_prediction(
+        db, item, "model", "legacy", "new", group_id=new_group,
+        vote_count=2 if new_group else None, total_votes=2 if new_group else None,
+        individual='{"Robin":2}' if new_group else None,
+    )
+    row = db.conn.execute("SELECT * FROM prediction_review WHERE workspace_id=?", (workspace,)).fetchone()
+    assert row["status"] == status
+    assert row["group_id"] == new_group
+    assert row["vote_count"] == (2 if new_group else None)
+    assert row["total_votes"] == (2 if new_group else None)
+    assert row["individual"] == ('{"Robin":2}' if new_group else None)
+    db.close()
