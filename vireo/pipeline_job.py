@@ -7569,6 +7569,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         with bind_resource_cancel_check(
                             _pause_or_cancel_pending,
                         ), acquire_photo_mask(photo_id):
+                            # In a ``skip_classify=True`` run, ``detect_stage``
+                            # returns early so the subject-analysis
+                            # synchronization normally performed inside
+                            # ``_detect_batch``'s ``analyze_photo`` loop never
+                            # runs. A ``detector_confidence`` change since
+                            # ``photos_to_process`` was built (or another
+                            # workspace sharing this photo writing
+                            # ``photo_subject_state`` under a different floor)
+                            # can promote a new primary here; without a sync
+                            # the mask extraction below would replace the mask
+                            # and DINO data for the new primary while
+                            # ``photo_subject_state`` and the old subject's
+                            # ``eye_*`` fields remained unchanged. A still-
+                            # current ``eye_kp_fingerprint`` then causes
+                            # ``list_photos_for_eye_keypoint_stage()`` to omit
+                            # the photo, leaving eye focus from the previous
+                            # subject. ``sync_primary`` clears mask_path,
+                            # active_mask_variant, dino_subject_embedding, and
+                            # eye_*/eye_kp_fingerprint when the primary
+                            # detection actually changed, matching the
+                            # standalone Extract Masks path
+                            # (app.py:27729) (Codex r4056646680).
+                            from subjects import sync_primary
+                            sync_primary(
+                                thread_db, photo_id, min_conf=detector_confidence,
+                            )
+                            commit_with_retry(thread_db.conn)
                             # Re-resolve under the lock: primary may have changed
                             # since photos_to_process was built. Mirror the
                             # build-time candidacy filter exactly — weak-rescued

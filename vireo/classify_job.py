@@ -1337,7 +1337,24 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         from image_loader import get_canonical_image_path
 
     for photo in photos:
-        if photo["id"] not in processed_ids or photo["id"] in cached_detections:
+        if photo["id"] in cached_detections:
+            continue
+        # ``processed_ids`` only tracks photos whose detection loop reached
+        # ``processed_ids.add(...)`` — i.e. detection ran to completion or
+        # produced an empty scene. In a reclassify batch, ``_detect_subjects``
+        # calls ``clear_detections(photo["id"])`` *before* calling us, so a
+        # photo whose ``detect_animals()`` returned None (decode failure) or
+        # raised a swallowed error is now absent from ``processed_ids`` AND
+        # has no detections in the DB, yet its old mask, DINO embedding,
+        # eye_* fields, and ``photo_subject_state`` still point at the
+        # deleted subject. Skipping subject analysis for those photos would
+        # let that stale state affect subsequent review/scoring under the
+        # full-image classifier fallback. Fall through to ``analyze_photo``
+        # for reclassified-but-undetected photos: its ``if not detections``
+        # branch runs before ``os.stat``, so an offline source doesn't
+        # crash, and its ``sync_primary`` clears the stale derived state
+        # (Codex r4056646676).
+        if photo["id"] not in processed_ids and not reclassify:
             continue
         _subject_analysis_checkpoint()
         if vireo_dir:
