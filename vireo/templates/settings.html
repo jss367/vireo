@@ -4050,9 +4050,9 @@ function renderPlatformReadiness(support) {
     row.style.display = '';
     var status = document.getElementById('windowsSupportStatus');
     var detail = document.getElementById('windowsSupportDetail');
-    var supported = support.support_tier === 'public_beta';
-    status.textContent = supported ? 'Public beta' : 'Unsupported Windows version';
-    status.style.color = supported ? 'var(--warning)' : 'var(--danger)';
+    var supported = support.support_tier === 'supported';
+    status.textContent = supported ? 'Supported' : 'Unsupported Windows version';
+    status.style.color = supported ? 'var(--accent)' : 'var(--danger)';
     var bits = ['Windows ' + (support.windows_release || '11'), support.architecture || 'x64', 'CPU inference supported'];
     if (support.webview2_version) bits.push('WebView2 ' + support.webview2_version);
     if (support.long_paths && !support.long_paths.enabled) {

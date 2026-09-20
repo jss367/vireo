@@ -5,6 +5,10 @@ All notable changes to Vireo are documented in this file.
 ## Unreleased
 
 ### Changed
+- **Windows 11 support no longer carries a beta label.** The download page,
+  setup guide, and Settings now describe Windows 11 as supported. CPU inference
+  remains the guaranteed configuration; GPU acceleration is outside the support
+  commitment. Unsigned installers may still show an unknown-publisher warning.
 - **Browse's Stacks toggle now finds your bursts.** Stacks used to group
   camera bursts by the EXIF "image unique ID" tag. Most cameras never write
   that tag, and the ones that do reuse the same value for the life of the
@@ -65,10 +69,10 @@ All notable changes to Vireo are documented in this file.
   checksum-verified ExifTool. Import checks metadata readiness before starting,
   offers an explicit advanced metadata-free override, and can repair photos
   imported by an older or damaged installation.
-- **Windows 11 public beta.** Windows releases now include ExifTool, report
-  optional integration readiness, support long-path-aware packaging, require
-  signed release installers, and run Windows browser, native-shell, installer,
-  updater, and uninstall-preservation gates before publication.
+- **Windows 11 packaging and diagnostics.** Windows releases include ExifTool,
+  report optional integration readiness, support long-path-aware packaging,
+  and provide automated browser, native-shell, installer, restart, and
+  uninstall-preservation checks, plus signature verification for signed builds.
 - **"Check again" for offline folders.** When the new-images banner reports
   that a registered folder's volume is offline, it now offers a manual
   recheck and shows the time of the check behind the message. Clicking it

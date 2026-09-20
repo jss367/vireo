@@ -44,7 +44,7 @@ For downloads, system requirements, and user documentation, visit [vireo.photo](
 
 AI models are downloaded automatically on first use.
 
-64-bit Windows 11 is available as a public beta with CPU inference support. See
+64-bit Windows 11 is supported with CPU inference. See
 [the Windows support guide](docs/WINDOWS_SUPPORT.md) for optional integrations,
 storage coverage, and troubleshooting.
 
