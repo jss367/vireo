@@ -29,7 +29,7 @@ def review_source(db, source, expected_device=None, expected_inode=None):
         if expected_device is None or parent_stat.st_dev != expected_device:
             raise ValueError("The original volume is unavailable or cannot be verified; reconnect it and review again") from None
         return {"state": "removed", "source_path": source, "files": [], "file_count": 0,
-                "source_device": expected_device}
+                "source_device": expected_device, "source_inode": expected_inode}
     if expected_device is not None and source_stat.st_dev != expected_device:
         raise ValueError("The original volume changed; reconnect it and review again")
     if expected_inode is not None and source_stat.st_ino != expected_inode:

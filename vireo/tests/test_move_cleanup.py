@@ -481,6 +481,31 @@ def test_review_rejects_different_device_with_same_saved_inode(cleanup_case):
     assert (source / "orphan.xmp").read_text() == "editing settings"
 
 
+def test_missing_source_recreated_between_checks_keeps_saved_inode(cleanup_case, monkeypatch):
+    import move_cleanup
+
+    _, db, source, folder_id = cleanup_case
+    identity = source.stat()
+    source.rename(source.parent / "renamed-source")
+    original_review = move_cleanup.review_source
+    recreated = False
+
+    def review_then_recreate(*args, **kwargs):
+        nonlocal recreated
+        review = original_review(*args, **kwargs)
+        if not recreated:
+            source.mkdir()
+            recreated = True
+        return review
+
+    monkeypatch.setattr(move_cleanup, "review_source", review_then_recreate)
+    result = finish_source(db, str(source), identity.st_dev, identity.st_ino)
+    assert result["state"] == "unavailable"
+    assert "replaced" in result["error"]
+    assert source.is_dir()
+    assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
+
+
 def test_cleanup_is_blocked_while_workspace_job_runs(cleanup_case, monkeypatch):
     import threading
 
