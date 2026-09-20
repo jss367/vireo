@@ -77,6 +77,7 @@
   let quickSearchTimer = null;
   let toastTimer = null;
   let wouldMatchEpoch = 0;
+  let localEdits = false;
 
   const $ = (sel) => rootEl.querySelector(sel);
   const $$ = (sel) => Array.from(rootEl.querySelectorAll(sel));
@@ -496,6 +497,7 @@
   }
 
   function mutate(fn, opts) {
+    localEdits = true;
     const options = opts || {};
     // A pending debounced edit would replay stale input against the
     // re-rendered tree (e.g. overwrite a just-picked suggestion with the
@@ -609,6 +611,9 @@
   function restorePersisted() {
     return fetchJson('/api/workspaces/active').then((ws) => {
       state.workspaceId = ws.id;
+      // Startup can finish after the user has already searched or cleared
+      // the bar. Saved filters must never replace that newer intent.
+      if (localEdits) return false;
       const uiState = parseUiState(ws.ui_state);
       const saved = uiState.universal_filters && uiState.universal_filters[state.page];
       if (saved && saved.root && Array.isArray(saved.root.rules)) {
@@ -708,6 +713,7 @@
   }
 
   function clearUnappliedQuickSearchText() {
+    localEdits = true;
     const input = $('.vf-search input');
     if (input) input.value = '';
     setSearchError('');
@@ -715,6 +721,7 @@
   }
 
   function applyQuickSearch(text, opts) {
+    localEdits = true;
     cancelQuickSearchTimer();
     const value = String(text || '').trim();
     let group;
@@ -813,7 +820,7 @@
 
   function syncQuickSearchInput() {
     const input = $('.vf-search input');
-    if (!input || document.activeElement === input || input.getAttribute('aria-invalid') === 'true') return;
+    if (!input || quickSearchTimer !== null || document.activeElement === input || input.getAttribute('aria-invalid') === 'true') return;
     const group = quickSearchGroup();
     input.value = group ? group._qs_text : (state.visual ? state.visual.prompt : '');
   }
@@ -1485,6 +1492,7 @@
       }
     });
     searchInput.addEventListener('input', (e) => {
+      localEdits = true;
       if (!e.isComposing) scheduleQuickSearch();
     });
     searchInput.addEventListener('compositionend', scheduleQuickSearch);
@@ -1922,10 +1930,22 @@
       state.excludedValues = options.excludedValues || {};
       rootEl = typeof options.root === 'string' ? document.querySelector(options.root) : options.root;
       if (!rootEl) return Promise.reject(new Error('VireoFilter: missing root element'));
+      // The search box is already editable while its event handlers wait
+      // for the registry. Remember even a type-then-clear during that gap.
+      const searchInput = $('.vf-search input');
+      let earlySearchEdited = false;
+      let earlySearchComposing = false;
+      const rememberEarlySearch = (event) => {
+        localEdits = true;
+        earlySearchEdited = true;
+        earlySearchComposing = event.isComposing;
+      };
+      searchInput.addEventListener('input', rememberEarlySearch);
       // Both loads run together: the shortcut row paints as soon as its
       // config lands, without waiting on the (larger) field registry.
       return Promise.all([loadRegistry(), loadShortcuts()]).then(() => {
         installEvents();
+        searchInput.removeEventListener('input', rememberEarlySearch);
         const urlParams = new URLSearchParams(window.location.search);
         let fromUrl = false;
         // Use ``has`` rather than truthiness: ``/misses?filters=`` (or
@@ -1973,9 +1993,12 @@
         // (e.g. ``?flag=rejected`` on Misses) and would otherwise bypass
         // the excluded-value guard.
         if (fromUrl) state.root = sanitizeRoot(state.root);
+        if (earlySearchEdited && !earlySearchComposing) scheduleQuickSearch();
         const finish = () => {
           state.ready = true;
           render();
+          // Edits made before the workspace ID arrived could not be saved.
+          if (localEdits) schedulePersist();
           if (state.muted) refreshWouldMatch();
           return true;
         };
