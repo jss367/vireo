@@ -1671,6 +1671,40 @@ def test_culling_apply_rejects_non_list_ids(app_and_db):
     assert 'unflag' in resp.get_json()['error']
 
 
+def test_culling_apply_rejects_overlapping_action_lists(app_and_db):
+    """A photo can't be requested for two conflicting flag values at once."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:3]]
+
+    # keepers ∩ rejects
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [pids[0]], 'rejects': [pids[0]]})
+    assert resp.status_code == 400
+    assert 'keepers' in resp.get_json()['error']
+    assert 'rejects' in resp.get_json()['error']
+
+    # keepers ∩ unflag
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [pids[1]], 'rejects': [],
+                             'unflag': [pids[1]]})
+    assert resp.status_code == 400
+    assert 'unflag' in resp.get_json()['error']
+
+    # rejects ∩ unflag
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [], 'rejects': [pids[2]],
+                             'unflag': [pids[2]]})
+    assert resp.status_code == 400
+    assert 'unflag' in resp.get_json()['error']
+
+    # Nothing was mutated for any of the three requests.
+    for pid in pids:
+        assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+    assert db.get_edit_history() == []
+
+
 def test_encounter_species_records_history(app_and_db):
     """Confirming encounter species records keyword_add in edit history."""
     app, db = app_and_db

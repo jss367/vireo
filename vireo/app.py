@@ -29148,6 +29148,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not isinstance(value, list):
                 return json_error(f"{name} must be a list")
 
+        # A photo listed in more than one action would otherwise land on
+        # whichever mutation ran last (or whichever kept its old flag), so
+        # the endpoint's answer would depend on prior state. Reject the
+        # payload before touching anything.
+        overlaps = (
+            (set(keepers) & set(rejects), "keepers", "rejects"),
+            (set(keepers) & set(unflag), "keepers", "unflag"),
+            (set(rejects) & set(unflag), "rejects", "unflag"),
+        )
+        for shared, a, b in overlaps:
+            if shared:
+                pid = next(iter(sorted(shared)))
+                return json_error(
+                    f"Photo {pid} listed in both {a} and {b}", 400
+                )
+
         # Pre-validate all photo IDs against workspace before any mutations
         for pid in keepers + rejects + unflag:
             if not db._photo_in_workspace(pid):
