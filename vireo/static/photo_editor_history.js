@@ -25,7 +25,9 @@ function refreshEditorHistoryLocalStaleness() {
   // Staleness describes the mask snapshot, not an editing step. A delayed
   // status read must update every matching undo/redo state without changing
   // the status of a newer mask selected while that read was in flight.
-  editorHistory.undo.concat(editorHistory.redo, [editorHistory.current, editorState]).forEach(function(snapshot) {
+  var gesture = editorHistory.gesture || {};
+  editorHistory.undo.concat(editorHistory.redo, gesture.undoBefore || [], gesture.redoBefore || [],
+    [editorHistory.current, editorState]).forEach(function(snapshot) {
     var mask = snapshot && (snapshot.recipe.local || {}).mask;
     if (mask && mask.ref === savedMask.ref && mask.source_digest === savedMask.source_digest) {
       snapshot.localStale = editorState.savedLocalStale;
@@ -41,6 +43,12 @@ function recordEditorHistory() {
     return;
   }
   if (!editorHistory.gesture || editorHistory.recordedGesture !== editorHistory.gesture) {
+    if (editorHistory.gesture) {
+      // Keep the branch intact until a drag has made a lasting change. These
+      // shallow copies also retain any oldest entry evicted by the size cap.
+      editorHistory.gesture.undoBefore = editorHistory.undo.slice();
+      editorHistory.gesture.redoBefore = editorHistory.redo.slice();
+    }
     editorHistory.undo.push(previous);
     // Bound memory for long editing sessions; recipes contain no image pixels.
     if (editorHistory.undo.length > 100) editorHistory.undo.shift();
@@ -56,7 +64,8 @@ function finishEditorHistoryGesture() {
   var previous = editorHistory.undo[editorHistory.undo.length - 1];
   if (editorHistory.gesture && editorHistory.recordedGesture === editorHistory.gesture &&
       previous && recipeKey(previous.recipe) === recipeKey(editorState.recipe)) {
-    editorHistory.undo.pop();
+    editorHistory.undo = editorHistory.gesture.undoBefore;
+    editorHistory.redo = editorHistory.gesture.redoBefore;
   }
   editorHistory.gesture = null;
   editorHistory.recordedGesture = null;

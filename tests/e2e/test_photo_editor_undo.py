@@ -249,3 +249,42 @@ def test_delayed_mask_staleness_survives_keyboard_undo_redo(page, editor_photo, 
         page.keyboard.press('Meta+Shift+z')
         expect(page.locator('#exposureRange')).to_have_value(value)
         expect(page.locator('#localStaleBanner')).to_be_visible()
+
+
+@pytest.mark.parametrize('end_event', ['pointerup', 'pointercancel', 'lostpointercapture'])
+def test_slider_gesture_with_no_net_change_preserves_redo(page, editor_photo, end_event):
+    set_range(page, 'contrast', 10)
+    set_range(page, 'exposure', 1)
+    assert page.evaluate('doUndo()') is True
+    slider = page.locator('#contrastRange')
+    slider.dispatch_event('pointerdown', {'pointerId': 5, 'button': 0})
+    set_range(page, 'contrast', 15)
+    set_range(page, 'contrast', 10)
+    slider.dispatch_event(end_event, {'pointerId': 5})
+    expect(page.locator('#historyRedoBtn')).to_be_enabled()
+    assert page.evaluate('doRedo()') is True
+    expect(page.locator('#exposureRange')).to_have_value('1')
+    expect(slider).to_have_value('10')
+    assert page.evaluate('doUndo()') is True
+    assert page.evaluate('doUndo()') is True
+    expect(slider).to_have_value('0')
+
+
+def test_slider_gesture_with_no_net_change_keeps_oldest_undo(page, editor_photo, tmp_path):
+    # Exercise the full history limit without launching 100 image renders.
+    page.route(f'**/photos/{editor_photo}/edit-preview?*', lambda route: route.fulfill(
+        path=str(tmp_path / 'undo-photo.jpg'),
+    ))
+    page.evaluate("() => { for (let value = 1; value <= 100; value++) setAdjustment('contrast', value); }")
+    slider = page.locator('#contrastRange')
+    slider.dispatch_event('pointerdown', {'pointerId': 5, 'button': 0})
+    set_range(page, 'contrast', 90)
+    set_range(page, 'contrast', 100)
+    slider.dispatch_event('pointerup', {'pointerId': 5})
+    assert page.evaluate("""async () => {
+        for (let step = 0; step < 100; step++) {
+            if (!await doUndo()) return false;
+        }
+        return true;
+    }""") is True
+    expect(slider).to_have_value('0')
