@@ -482,6 +482,52 @@ def test_photo_editor_issues_latest_ratio_while_previous_save_is_pending(live_se
     expect(page.get_by_label("Remember crop ratio")).to_be_checked()
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_photo_editor_restores_pending_ratio_on_immediate_reload(live_server, page, enabled):
+    """Reload restores the latest choice even before its PUT reaches the server."""
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    if not enabled:
+        assert page.request.put(
+            f"{url}/api/editor/crop-ratio", data={"enabled": True, "aspect": 1.5},
+        ).ok
+    page.goto(f"{url}/edit/{photo_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    if enabled:
+        page.locator("#aspect32Btn").click()
+    pending = []
+
+    def hold_first_save(route):
+        if route.request.method == "PUT" and not pending:
+            pending.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/editor/crop-ratio", hold_first_save)
+    with page.expect_request(lambda request: request.method == "PUT"):
+        page.get_by_label("Remember crop ratio").set_checked(enabled)
+    # Deliberately reload without waiting for cropRatioSave. The fresh GET
+    # returns the old server value; the pending local choice must win.
+    page.reload()
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    expect(page.get_by_label("Remember crop ratio")).to_be_checked(checked=enabled)
+    if enabled:
+        expect(page.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    else:
+        expect(page.locator("#aspectLockBtn")).not_to_have_class(re.compile(r"\bactive\b"))
+    page.evaluate("() => cropRatioSave")
+    saved = page.request.get(f"{url}/api/editor/crop-ratio").json()
+    assert saved["enabled"] == enabled
+    assert saved["aspect"] == (1.5 if enabled else None)
+
+
 def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
     """A remembered ratio must not recrop an existing edit just by opening it."""
     url = live_server["url"]
