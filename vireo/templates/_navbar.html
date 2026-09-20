@@ -9021,6 +9021,12 @@ function buildLightboxContextMenu(pid) {
   items.push(toggleItem('Wildlife classification', !_lbCurrentWildlifeExcluded,
     lightboxToggleWildlifeExcluded, readOnlyHint));
   items.push({ separator: true });
+  var editButton = document.getElementById('lightboxEditPhoto');
+  if (editButton) {
+    items.push({ label: 'Edit Photo', disabled: editButton.disabled,
+      disabledHint: editButton.disabled ? editButton.title : undefined,
+      onClick: function() { editButton.click(); } });
+  }
   var browseDisabledHint = typeof window.getLightboxBrowseDisabledHint === 'function'
     ? window.getLightboxBrowseDisabledHint(pid)
     : null;
