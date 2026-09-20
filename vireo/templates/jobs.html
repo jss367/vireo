@@ -634,13 +634,21 @@
         !cfg.folder_template || !cfg.source_path || !result.moved ||
         result.ok === false || (result.errors || []).length) return '';
     var review = sourceCleanupReviews[job.id];
-    var state = review || result.source_cleanup || {};
+    if (!review) {
+      // Move results describe completion time. Refresh on each page load so
+      // a later cleanup (including one in another tab) is not shown as pending.
+      sourceCleanupReviews[job.id] = review = {checking: true};
+      Promise.resolve().then(function() { requestSourceCleanup(job.id, false, true); });
+    }
+    var state = review;
     var id = escapeAttr(job.id);
     var html = '<section class="move-cleanup" aria-label="Original folder cleanup">';
     if (state.state === 'removed') {
       html += '<p>The original folder has been removed.</p>';
     } else {
-      if (typeof state.file_count === 'number') {
+      if (state.checking) {
+        html += '<p>Checking the original folder…</p>';
+      } else if (typeof state.file_count === 'number') {
         var n = state.file_count;
         html += '<p>The original folder still contains ' + n.toLocaleString() + ' ' +
           (n > 0 && n === state.xmp_count ? 'XMP metadata ' : '') + plural(n, 'file') + '.</p>';
@@ -682,13 +690,14 @@
     }
   }
 
-  async function requestSourceCleanup(jobId, clean) {
+  async function requestSourceCleanup(jobId, clean, summary) {
     var prior = sourceCleanupReviews[jobId] || {};
     if (prior.busy || (clean && !prior.confirmed)) return;
     sourceCleanupReviews[jobId] = Object.assign({}, prior, {busy: true, error: null});
     refreshCleanupDetail(jobId);
     try {
-      var data = await safeFetch('/api/jobs/' + encodeURIComponent(jobId) + '/source-cleanup', clean ? {
+      var data = await safeFetch('/api/jobs/' + encodeURIComponent(jobId) + '/source-cleanup' +
+        (summary ? '?summary=1' : ''), clean ? {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({confirm_trash: true, review_token: prior.review_token}),
       } : {});

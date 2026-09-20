@@ -117,12 +117,81 @@ def test_partial_trash_failure_keeps_folder_and_supports_retry(cleanup_case):
 
 
 def test_finish_removes_only_empty_selected_folder(cleanup_case):
-    _, db, source, _ = cleanup_case
+    _, db, source, folder_id = cleanup_case
     assert finish_source(db, str(source))["state"] == "remaining"
     (source / "orphan.xmp").unlink()
     assert finish_source(db, str(source))["state"] == "removed"
     assert not source.exists()
     assert source.parent.exists()
+    assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone() is None
+    assert db.conn.execute("SELECT 1 FROM workspace_folders WHERE folder_id = ?", (folder_id,)).fetchone() is None
+    db.check_folder_health()
+    assert str(source) not in [row["path"] for row in db.get_missing_folders()]
+
+
+def test_cleanup_retires_empty_child_catalog_rows(cleanup_case):
+    _, db, source, folder_id = cleanup_case
+    child = source / "nested"
+    child.mkdir()
+    child_id = db.add_folder(str(child), name="nested", parent_id=folder_id)
+    review = review_source(db, str(source))
+
+    def trash(paths):
+        for path in paths:
+            os.unlink(path)
+        return len(paths), set(paths), []
+
+    assert cleanup_source(db, str(source), review["review_token"], trash)["state"] == "removed"
+    assert db.conn.execute("SELECT 1 FROM folders WHERE id IN (?, ?)", (folder_id, child_id)).fetchone() is None
+
+
+def test_shared_empty_folder_and_membership_are_retained(cleanup_case):
+    _, db, source, folder_id = cleanup_case
+    (source / "orphan.xmp").unlink()
+    other_workspace = db.create_workspace("Shared folder workspace")
+    db.add_workspace_folder(other_workspace, folder_id)
+    result = finish_source(db, str(source))
+    assert result["state"] == "unavailable"
+    assert "another workspace" in result["error"]
+    assert source.is_dir()
+    assert db.conn.execute("SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                           (other_workspace, folder_id)).fetchone()
+
+
+def test_failed_directory_removal_preserves_catalog(cleanup_case, monkeypatch):
+    _, db, source, folder_id = cleanup_case
+    (source / "orphan.xmp").unlink()
+    monkeypatch.setattr("move_cleanup.os.rmdir", lambda path: (_ for _ in ()).throw(PermissionError("denied")))
+    assert finish_source(db, str(source))["state"] == "unavailable"
+    assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
+    assert db.conn.execute("SELECT 1 FROM workspace_folders WHERE folder_id = ?", (folder_id,)).fetchone()
+
+
+def test_inaccessible_source_is_not_reported_removed(cleanup_case, monkeypatch):
+    _, db, source, _ = cleanup_case
+    original = os.lstat
+
+    def inaccessible(path, *args, **kwargs):
+        if os.fspath(path) == str(source):
+            raise PermissionError("source is inaccessible")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr("move_cleanup.os.lstat", inaccessible)
+    result = finish_source(db, str(source))
+    assert result["state"] == "unavailable"
+    assert "inaccessible" in result["error"]
+
+
+@pytest.mark.parametrize("field", ["config", "result"])
+@pytest.mark.parametrize("value", ['{invalid', 'null', '[]', '"text"', '1'])
+def test_invalid_history_json_returns_conflict(cleanup_case, field, value):
+    app, db, source, _ = cleanup_case
+    db.conn.execute(f"UPDATE job_history SET {field} = ? WHERE id = ?", (value, "old-move"))
+    db.conn.commit()
+    response = app.test_client().get(URL)
+    assert response.status_code == 409
+    assert response.json["error"] == "Cleanup job data is invalid"
+    assert (source / "orphan.xmp").exists()
 
 
 def test_files_added_during_trash_are_preserved(cleanup_case):

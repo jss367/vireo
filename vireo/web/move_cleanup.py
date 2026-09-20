@@ -24,22 +24,35 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
             return json_error("Move job not found in this workspace", 404)
         config = job.get("config") or {}
         result = job.get("result") or {}
-        if isinstance(config, str):
-            config = json.loads(config)
-        if isinstance(result, str):
-            result = json.loads(result)
+        try:
+            if isinstance(config, str):
+                config = json.loads(config)
+            if isinstance(result, str):
+                result = json.loads(result)
+        except (ValueError, TypeError):
+            return json_error("Cleanup job data is invalid", 409)
+        if not isinstance(config, dict) or not isinstance(result, dict):
+            return json_error("Cleanup job data is invalid", 409)
         if (job.get("type") != "move-folder" or job.get("status") != "completed"
                 or not config.get("folder_template") or not config.get("source_path")
                 or not result.get("moved") or result.get("errors") or result.get("ok") is False):
             return json_error("Cleanup requires a successfully completed date-organized move", 409)
         try:
             with cleanup_lock, runner.workspace_mutation(db._active_workspace_id, exclusive=True):
-                error = guard_move_folder(db, config.get("folder_id"))
-                if error:
-                    return json_error(error, 409)
                 source = config["source_path"]
+                # A successful cleanup can retire the old ID. Resolve the
+                # current row by path so a reused ID cannot guard another folder.
+                folder = db.conn.execute("SELECT id FROM folders WHERE path = ?", (source,)).fetchone()
+                if folder:
+                    error = guard_move_folder(db, folder["id"])
+                    if error:
+                        return json_error(error, 409)
                 if request.method == "GET":
-                    return jsonify(review_source(db, source))
+                    review = review_source(db, source)
+                    if request.args.get("summary") == "1":
+                        review = {key: review[key] for key in
+                                  ("state", "source_path", "file_count", "xmp_count") if key in review}
+                    return jsonify(review)
                 body = request.get_json(silent=True)
                 if not isinstance(body, dict) or body.get("confirm_trash") is not True:
                     return json_error("Confirm moving the reviewed files to Trash", 400)
