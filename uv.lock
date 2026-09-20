@@ -2583,6 +2583,18 @@ wheels = [
 ]
 
 [[package]]
+name = "tifffile"
+version = "2026.9.15"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/01/da/39803ba58b0ada6ba3841724368e4a9676475379cb4b70cdf3152b2caa3b/tifffile-2026.9.15.tar.gz", hash = "sha256:2ad086262b5bd3b3804f2d044926e5f63d8f6ae72b235d8b774f164b79f587c4", size = 442944, upload-time = "2026-09-15T16:38:49.397Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/68/5adfb759d1a7e3ffb7ff43512908bcfe8514882b290ef6bc6df8efa9b425/tifffile-2026.9.15-py3-none-any.whl", hash = "sha256:9a4a74671c72645e0d48372ff2d20ec1625b1cd52067a72fbd021435dd044794", size = 273353, upload-time = "2026-09-15T16:38:47.92Z" },
+]
+
+[[package]]
 name = "timm"
 version = "1.0.26"
 source = { registry = "https://pypi.org/simple" }
@@ -2836,7 +2848,7 @@ wheels = [
 
 [[package]]
 name = "vireo"
-version = "0.56.2"
+version = "0.57.1"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
@@ -2852,6 +2864,7 @@ dependencies = [
     { name = "requests" },
     { name = "scipy" },
     { name = "send2trash" },
+    { name = "tifffile" },
     { name = "tokenizers" },
     { name = "waitress" },
 ]
@@ -2910,6 +2923,7 @@ requires-dist = [
     { name = "sam2", marker = "extra == 'export'", specifier = ">=1.0" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "send2trash", specifier = ">=1.8.0" },
+    { name = "tifffile", specifier = ">=2026.1.28" },
     { name = "timm", marker = "extra == 'export'", specifier = ">=1.0" },
     { name = "tokenizers", specifier = ">=0.21.0" },
     { name = "torch", marker = "extra == 'export'", specifier = ">=2.6" },

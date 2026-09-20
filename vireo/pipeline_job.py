@@ -1002,8 +1002,8 @@ def _thumb_raw_decode_kwargs(photo, recipe):
     filename = _photo_value(photo, "filename") or ""
     if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
         return {}
-    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
-    return {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+    from image_loader import RAW_DECODE_LINEAR
+    return {"raw_decode": RAW_DECODE_LINEAR}
 
 
 def _thumb_min_source_size_kwargs(photo, recipe, thumb_size, source_path):

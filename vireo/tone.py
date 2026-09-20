@@ -22,13 +22,14 @@ flat white. This pipeline therefore:
   5. re-encodes linear -> sRGB,
   6. applies the remaining display-referred ops (contrast and color) in sRGB.
 
-Data ceiling: this operates on whatever RGB source it is handed. JPEGs and
-legacy working copies are still 8-bit and cannot *recover* highlights that were
-already clipped upstream. New RAW working copies and edited RAW renders ask
-``image_loader`` to demosaic with auto-bright disabled and highlight blending
-enabled before quantizing to the JPEG working/render cache. That preserves more
-RAW highlight headroom for this tone curve, but it is still not a full
-scene-linear 16-bit editing pipeline.
+RAW inputs use ``input_linear=True`` and retain floating-point radiance,
+including negative/out-of-display-gamut and above-white channel values, until
+exposure and white balance have been applied. A luminance shoulder and gamut
+compression then map to display range. Rendered buffers stay float through
+geometry, tone, presence, and detail; encoding is the quantization boundary.
+JPEGs and offline working copies retain the legacy sRGB input path and cannot
+recover information already lost before loading. The WebGL shader implements
+that legacy path only; RAW adjustments use the server renderer.
 
 Keep-in-sync contract (Tier 3 / live preview)
 ---------------------------------------------
@@ -197,6 +198,25 @@ def _compress_linear_gamut(rgb, luminance):
         np.maximum(0.0, (1.0 - luminance) / denominator),
     )
     return luminance + (rgb - luminance) * chroma_scale
+
+
+def _scene_to_display_linear(rgb):
+    """Map scene radiance to display range after exposure and white balance.
+
+    Roll luminance off, retaining channel ratios until gamut compression is
+    necessary. Unlike the legacy JPEG push-gate, RAW values above display white
+    need this mapping even at zero exposure. A negative exposure is applied
+    before the shoulder, so bright source detail remains recoverable.
+    """
+    luminance = np.maximum(_luma(rgb), 0.0)
+    mapped = highlight_rolloff(luminance)
+    rgb = rgb * (mapped / np.maximum(luminance, np.float32(1e-7)))
+    # Compress both upper and lower gamut boundaries toward the same neutral
+    # luminance. RAW's float color conversion can produce negative channels.
+    chroma = rgb - mapped
+    upper = (1.0 - mapped) / np.maximum(np.max(chroma, axis=-1, keepdims=True), 1e-7)
+    lower = mapped / np.maximum(-np.min(chroma, axis=-1, keepdims=True), 1e-7)
+    return np.clip(mapped + chroma * np.minimum(1.0, np.minimum(upper, lower)), 0.0, 1.0)
 
 
 def apply_range_adjustments(
@@ -513,11 +533,13 @@ def apply_adjustments(
     local_weight=None,
     local_subject=None,
     local_background=None,
+    input_linear=False,
 ):
     """Apply tonal adjustments to an sRGB float image and return sRGB float.
 
     Args:
-        rgb: float array shaped ``(..., 3)`` with sRGB-encoded values in [0,1].
+        rgb: float array shaped ``(..., 3)``. Normally sRGB-encoded [0,1];
+            ``input_linear=True`` accepts scene-linear RAW data above white.
         exposure: stops of exposure (linear gain ``2 ** exposure``).
         white_balance: dict with ``temperature``/``tint`` in [-100, 100], or None.
         highlights: [-100, 100]; perceptual-luminance highlight adjustment.
@@ -571,10 +593,11 @@ def apply_adjustments(
             point_color=point_color,
             hsl=hsl,
             color_grading=color_grading,
+            input_linear=input_linear,
         )
 
     # --- scene-referred ops, in linear light ---
-    lin_pre = srgb_to_linear(rgb)
+    lin_pre = rgb if input_linear else srgb_to_linear(rgb)
     lin = lin_pre
     exp_gain = 2.0 ** float(exposure)
     if exposure:
@@ -583,10 +606,11 @@ def apply_adjustments(
     if white_balance:
         gr, gg, gb = white_balance_gains(white_balance)
         lin = lin * np.array([gr, gg, gb], dtype=np.float32)
-    # Roll highlights off only when something actually pushes values up. With
-    # no net gain, nothing can exceed display white, so the shoulder must stay
-    # disabled to keep an un-pushed image a true no-op (ev=0 == original).
-    if exp_gain * max(gr, gg, gb) > 1.0 + 1e-6:
+    # RAW always needs a display transform. Legacy display inputs retain the
+    # push-only shoulder so an unadjusted JPEG remains a true no-op.
+    if input_linear:
+        lin = _scene_to_display_linear(lin)
+    elif exp_gain * max(gr, gg, gb) > 1.0 + 1e-6:
         # The shoulder curve is below identity for inputs in (knee, ∞), so
         # naively rolling every post-gain value above the knee can darken
         # near-white pixels — e.g. a 0.95-linear pixel at +0.1 EV becomes
@@ -653,7 +677,7 @@ _LOCAL_CLAMPS = {
 def _apply_adjustments_weighted(
     rgb, *, weight, subject, background, exposure, white_balance,
     highlights, shadows, whites, blacks, contrast, vibrance, saturation,
-    tone_curve, point_curves, point_color, hsl, color_grading,
+    tone_curve, point_curves, point_color, hsl, color_grading, input_linear=False,
 ):
     """Local (mask-weighted) variant of :func:`apply_adjustments`.
 
@@ -678,7 +702,7 @@ def _apply_adjustments_weighted(
         )
 
     # --- scene-referred ops, in linear light ---
-    lin_pre = srgb_to_linear(rgb)
+    lin_pre = rgb if input_linear else srgb_to_linear(rgb)
     lin = lin_pre
     ev_map = amount_map("exposure", exposure)
     if ev_map is not None:
@@ -696,7 +720,9 @@ def _apply_adjustments_weighted(
     # Same push-gate and monotonicity clamp as the global path; with a
     # per-pixel gain the clamp is already per-pixel-correct, and gating on
     # the maximum gain only controls whether the shoulder runs at all.
-    if max_gain * max(gr, gg, gb) > 1.0 + 1e-6:
+    if input_linear:
+        lin = _scene_to_display_linear(lin)
+    elif max_gain * max(gr, gg, gb) > 1.0 + 1e-6:
         rolled = highlight_rolloff(lin)
         lin = np.maximum(rolled, np.minimum(lin_pre, lin))
 

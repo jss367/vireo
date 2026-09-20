@@ -20739,7 +20739,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 recipe_to_json,
             )
             from image_loader import (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_DECODE_LINEAR,
                 RAW_EXTENSIONS,
                 load_image,
             )
@@ -20809,14 +20809,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Derive the decode mode from the primary photo's extension
                 # rather than source_path so a future change to source_path
                 # resolution (working copy, companion JPEG fallback, etc.)
-                # cannot silently bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a
+                # cannot silently bypass RAW_DECODE_LINEAR for a
                 # RAW primary.
                 primary_is_raw = (
                     os.path.splitext(photo["filename"])[1].lower()
                     in RAW_EXTENSIONS
                 )
                 raw_decode = (
-                    RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
+                    RAW_DECODE_LINEAR if primary_is_raw else None
                 )
                 load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
                 img = load_image(source_path, max_size=None, **load_kwargs)
@@ -22963,7 +22963,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         companion_path = photo["companion_path"]
         raw_source_available = os.path.exists(fallback_path)
-        # RAW primaries are decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS later;
+        # RAW primaries are decoded with RAW_DECODE_LINEAR later;
         # only use the clipped camera JPEG when the RAW source is offline.
         if companion_path and (not primary_is_raw or not raw_source_available):
             companion = os.path.join(photo["folder_path"], companion_path)
@@ -22989,7 +22989,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             recipe_to_json,
         )
         from image_loader import (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_DECODE_LINEAR,
             RAW_EXTENSIONS,
             load_image,
         )
@@ -23058,13 +23058,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Derive the decode mode from the primary photo's extension rather
             # than source_path so a future change to source_path resolution
             # (working copy, companion JPEG fallback, etc.) cannot silently
-            # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
+            # bypass RAW_DECODE_LINEAR for a RAW primary.
             primary_is_raw = (
                 os.path.splitext(photo["filename"])[1].lower()
                 in RAW_EXTENSIONS
             )
             raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
+                RAW_DECODE_LINEAR if primary_is_raw else None
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(source_path, max_size=None, **load_kwargs)
@@ -27143,14 +27143,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return "", 404
             # Derive the decode mode from the primary photo's extension
             # rather than source so a future change to render-source
-            # resolution cannot silently bypass RAW_DECODE_PRESERVE_HIGHLIGHTS
+            # resolution cannot silently bypass RAW_DECODE_LINEAR
             # for a RAW primary. Without this, EDIT_MATH_VERSION's cache
             # purge regenerates edited-RAW thumbnails through the default
             # JPEG-first decode and grid thumbnails diverge from previews
             # / exports (which preserve highlights).
-            from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS
+            from image_loader import RAW_DECODE_LINEAR, RAW_EXTENSIONS
             raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                RAW_DECODE_LINEAR
                 if (
                     pair_source == "raw"
                     or (
@@ -29986,7 +29986,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 normalize_recipe,
             )
             from image_loader import (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_DECODE_LINEAR,
                 RAW_EXTENSIONS,
                 load_image,
             )
@@ -30033,7 +30033,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             photo, recipe, size, vireo_dir,
                         )
                     )
-                    if request.args.get("analysis") == "1" or undersized_wc:
+                    if (
+                        request.args.get("analysis") == "1" or undersized_wc
+                        or os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+                    ):
                         source_recipe = {"version": SCHEMA_VERSION}
                 canonical, using_working_copy = _recipe_render_source(
                     photo, source_recipe, size, vireo_dir,
@@ -30052,7 +30055,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
                 )
                 raw_decode = (
-                    RAW_DECODE_PRESERVE_HIGHLIGHTS
+                    RAW_DECODE_LINEAR
                     if selected_ext in RAW_EXTENSIONS
                     else None
                 )
@@ -30177,7 +30180,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     and not original_failure_current
                 ):
                     fallback_raw_decode = (
-                        RAW_DECODE_PRESERVE_HIGHLIGHTS
+                        RAW_DECODE_LINEAR
                         if original_is_raw else None
                     )
                     fallback_kwargs = (
@@ -30354,11 +30357,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 import io
 
                 from image_loader import (
-                    RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                    RAW_DECODE_LINEAR,
                     load_image,
                 )
                 load_kwargs = (
-                    {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+                    {"raw_decode": RAW_DECODE_LINEAR}
                     if pair_source == "raw" else {}
                 )
                 img = load_image(
@@ -30650,7 +30653,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if recipe:
             from image_loader import (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_DECODE_LINEAR,
                 RAW_EXTENSIONS,
                 load_image,
             )
@@ -30727,7 +30730,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return "Could not load image", 500
             raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                RAW_DECODE_LINEAR
                 if resolved_ext in RAW_EXTENSIONS
                 else None
             )
@@ -30868,7 +30871,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         original_retry_path
                     )[1].lower()
                     retry_kwargs = (
-                        {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+                        {"raw_decode": RAW_DECODE_LINEAR}
                         if retry_ext in RAW_EXTENSIONS
                         else {}
                     )

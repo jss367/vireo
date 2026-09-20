@@ -27,6 +27,11 @@ import numpy as np
 from PIL import Image
 
 try:
+    from .float_image import FloatImage
+except ImportError:
+    from float_image import FloatImage
+
+try:
     from .tone import LUMA_B, LUMA_G, LUMA_R
 except ImportError:
     from tone import LUMA_B, LUMA_G, LUMA_R
@@ -200,10 +205,11 @@ def apply_detail(img, *, sharpen=0.0, sharpen_radius=1.0, noise_reduction=0.0,
     elif img.mode == "RGB" and "transparency" in img.info:
         img = img.convert("RGBA")
 
+    floating = isinstance(img, FloatImage)
     src = np.asarray(img)
     height, width = src.shape[:2]
     channels = src.shape[2]
-    out8 = np.empty((height, width, channels), dtype=np.uint8)
+    output = np.empty((height, width, channels), dtype=np.float32 if floating else np.uint8)
 
     halo = params["halo"]
     rows_per_tile = max(1, _DETAIL_TILE_PIXELS // max(1, width))
@@ -211,13 +217,17 @@ def apply_detail(img, *, sharpen=0.0, sharpen_radius=1.0, noise_reduction=0.0,
         bottom = min(top + rows_per_tile, height)
         ext_top = max(0, top - halo)
         ext_bottom = min(height, bottom + halo)
-        tile = src[ext_top:ext_bottom, :, :3].astype(np.float32) / 255.0
+        tile = src[ext_top:ext_bottom, :, :3].astype(np.float32)
+        if not floating:
+            tile /= 255.0
         result = _run_detail(tile, params)
         result = result[top - ext_top : bottom - ext_top]
-        out8[top:bottom, :, :3] = np.clip(result * 255.0 + 0.5, 0, 255).astype(
-            np.uint8
+        output[top:bottom, :, :3] = (
+            result if floating else np.clip(result * 255.0 + 0.5, 0, 255).astype(np.uint8)
         )
         if channels == 4:
-            out8[top:bottom, :, 3] = src[top:bottom, :, 3]
+            output[top:bottom, :, 3] = src[top:bottom, :, 3]
 
-    return Image.fromarray(out8, "RGBA" if channels == 4 else "RGB")
+    if floating:
+        return FloatImage(output, encoding="srgb")
+    return Image.fromarray(output, "RGBA" if channels == 4 else "RGB")
