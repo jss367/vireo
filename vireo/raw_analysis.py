@@ -164,7 +164,7 @@ class RawAnalysisSession:
         self._linear = None
         self._native = None
         self._weights_ready = False
-        self._weights_failed = False
+        self._masking_unavailable = False
 
     def load(self, path):
         try:
@@ -194,7 +194,7 @@ class RawAnalysisSession:
 
     def prepare(self, path, detection):
         """Return a corrected frame and report; normal loader handles fallbacks."""
-        if self._weights_failed or detection is None or dict(detection).get("detector_model") == "full-image":
+        if self._masking_unavailable or detection is None or dict(detection).get("detector_model") == "full-image":
             return None, None
         linear = self.load(path)
         if linear is None:
@@ -230,10 +230,9 @@ class RawAnalysisSession:
             # pipeline stage aborts promptly.
             raise
         except Exception:
-            if not self._weights_ready:
-                # A missing/offline model cannot recover per subject. Retry on
-                # the next pipeline session, without repeating network waits.
-                self._weights_failed = True
+            # Weight setup and ONNX session initialization failures cannot
+            # recover per subject. Retry only on the next pipeline session.
+            self._masking_unavailable = True
             # Unavailable weights, corrupt ONNX, or an inference error must
             # not abort classification — the documented fallback is the
             # normal image path.

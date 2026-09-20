@@ -271,9 +271,13 @@ def test_session_falls_back_when_generate_mask_raises(tmp_path, monkeypatch):
     def raise_mask_error(*args, **kwargs):
         raise FileNotFoundError("SAM2 image encoder not found")
 
-    monkeypatch.setattr("masking.generate_mask", raise_mask_error)
+    generate = Mock(side_effect=raise_mask_error)
+    monkeypatch.setattr("masking.generate_mask", generate)
     detection = {"box_x": 0.1, "box_y": 0.1, "box_w": 0.8, "box_h": 0.8}
-    assert ra.RawAnalysisSession().prepare(str(path), detection) == (None, None)
+    session = ra.RawAnalysisSession()
+    assert session.prepare(str(path), detection) == (None, None)
+    assert session.prepare(str(path), detection) == (None, None)
+    assert generate.call_count == 1
 
 
 def test_session_preserves_cooperative_cancellation(tmp_path, monkeypatch):
