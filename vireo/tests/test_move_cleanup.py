@@ -467,6 +467,20 @@ def test_later_file_changed_during_trash_is_retained(cleanup_case, replace):
     assert later.read_text() == "new settings from editor"
 
 
+def test_review_rejects_different_device_with_same_saved_inode(cleanup_case):
+    app, db, source, _ = cleanup_case
+    identity = source.stat()
+    result = {"moved": 1, "errors": [], "source_cleanup": {
+        "state": "remaining", "source_device": identity.st_dev + 1, "source_inode": identity.st_ino,
+    }}
+    db.conn.execute("UPDATE job_history SET result = ? WHERE id = 'old-move'", (json.dumps(result),))
+    db.conn.commit()
+    response = app.test_client().get(URL)
+    assert response.status_code == 409
+    assert "volume changed" in response.json["error"]
+    assert (source / "orphan.xmp").read_text() == "editing settings"
+
+
 def test_cleanup_is_blocked_while_workspace_job_runs(cleanup_case, monkeypatch):
     import threading
 
