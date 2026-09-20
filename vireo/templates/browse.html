@@ -898,7 +898,15 @@ body.sidebar-resizing {
   flex-direction: column;
   align-items: stretch;
 }
-.prediction-accept-all {
+/* "Accept on all" is the common case, not the dangerous one: a selection is
+   normally a single bird event, so the whole-selection accept is what gets
+   clicked, and it takes the accent fill and the top slot. The narrower
+   "Accept on N" is the exception and drops to an outline below it. Position
+   is not what makes that safe — both buttons carry the photo count they
+   would write, so "Accept on all 15" under "Predicted on 14 of 15" reads
+   differently from "Accept on all 70" under "Predicted on 2 of 70", right
+   where the click happens. */
+.prediction-accept-subset {
   background: var(--bg-primary);
   color: var(--text-primary);
   border: 1px solid var(--border-secondary);
@@ -11152,18 +11160,33 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
       : formatPredictionConfidence(p.min_confidence) + '–' + formatPredictionConfidence(p.max_confidence);
     rowMeta += ' · ' + range;
 
-    // The button names the count it will actually act on. "Accept on 38" that
-    // silently accepts 35 is exactly what CORE_PHILOSOPHY.md forbids, so the
-    // ambiguous remainder is called out beside it rather than folded in.
+    // Each Accept button names the photo count it will actually act on.
+    // "Accept on 38" that silently accepts 35 is exactly what
+    // CORE_PHILOSOPHY.md forbids, so the ambiguous remainder is called out
+    // beside it rather than folded in — and "Accept on all" carries the
+    // selection size for the same reason. It is the primary, top button, so
+    // its own number is what has to tell the user whether "all" is a
+    // rounding error on the prediction or a species claim about 68 photos
+    // that never predicted it.
     var actions = '';
-    if (acceptablePhotoCount) {
-      actions += '<button class="prediction-accept" onclick="acceptSelectionPrediction(' + idx +
-        ')" title="Accept this species on the selected photos that are unambiguous">Accept on ' +
+    var allTitle = acceptablePhotoCount === selectedCount
+      ? 'Accept this species on all ' + selectedCount + ' selected photos'
+      : 'Add this species to all ' + selectedCount +
+        ' selected photos, including those without this prediction. ' +
+        'Existing keywords are kept; conflicts still need review.';
+    actions += '<button class="prediction-accept prediction-accept-all" onclick="acceptSelectionPrediction(' + idx +
+      ', true, this)" title="' + allTitle + '">Accept on all ' + selectedCount + '</button>';
+    // The narrower accept is only a second *action* when it would touch
+    // fewer photos. When every selected photo already predicts this species
+    // unambiguously, the two buttons submit the same work and land the same
+    // undo entry, so the second one is a decision the user has to stop and
+    // make for no difference in outcome.
+    if (acceptablePhotoCount && acceptablePhotoCount !== selectedCount) {
+      actions += '<button class="prediction-accept prediction-accept-subset" onclick="acceptSelectionPrediction(' + idx +
+        ')" title="Accept this species only on the ' + acceptablePhotoCount +
+        ' selected photos that predict it and are unambiguous">Accept on ' +
         acceptablePhotoCount + '</button>';
     }
-    actions += '<button class="prediction-accept prediction-accept-all" onclick="acceptSelectionPrediction(' + idx +
-      ', true, this)" title="Add this species to all ' + selectedCount +
-      ' selected photos, including those without this prediction. Existing keywords are kept; conflicts still need review.">Accept on all</button>';
     // Look before you accept. "Blue-breasted Quail on 2 of 70" is either a
     // real find or a bad detection, and no count in this row can tell the
     // user which — only the pixels can. Opens exactly the photos the row's
@@ -11283,6 +11306,11 @@ async function acceptSelectionPrediction(idx, onAll, button) {
   var expectedSpecies = selectionPredictionSpeciesByIdx[idx];
   var selection = getActiveSelection();
   if (!expectedSpecies || !selection.length) return;
+  // Restore whatever label the button was rendered with rather than a
+  // hardcoded one: "Accept on all" now carries the selection count, and a
+  // fixed string here would quietly drop the number on every button that
+  // finished a request.
+  var restoreLabel = button ? button.textContent : null;
   if (button) {
     button.disabled = true;
     button.textContent = 'Accepting…';
@@ -11306,7 +11334,7 @@ async function acceptSelectionPrediction(idx, onAll, button) {
   finally {
     if (button) {
       button.disabled = false;
-      button.textContent = 'Accept on all';
+      button.textContent = restoreLabel;
     }
   }
   await _afterPredictionMutation(
