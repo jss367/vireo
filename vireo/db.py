@@ -13003,11 +13003,17 @@ class Database:
             raise ValueError("source_taxon_id must be a positive SQLite integer")
         taxon = self.conn.execute("SELECT id FROM taxa WHERE inat_id = ?", (source_taxon_id,)).fetchone()
         local_id = taxon["id"] if taxon else None
+        # Imported catalogs can have several keyword spellings linked to one
+        # taxon. Prefer the requested name among those matches, just as the
+        # legacy name-only accept does. This keeps the tagged name aligned
+        # with the prediction when possible, rather than choosing an older
+        # alias (e.g. "Red-eared slider" instead of "Pond slider").
+        # The identity predicate still excludes same-name, different taxa.
         existing = self.conn.execute(
             "SELECT id FROM keywords WHERE parent_id IS ? AND type IN ('taxonomy', 'general') "
             "AND (source_taxon_id = ? OR (source_taxon_id IS NULL AND taxon_id = ?)) "
-            "ORDER BY (type = 'taxonomy') DESC, id LIMIT 1",
-            (parent_id, source_taxon_id, local_id),
+            "ORDER BY (name = ? COLLATE NOCASE) DESC, (type = 'taxonomy') DESC, id LIMIT 1",
+            (parent_id, source_taxon_id, local_id, name),
         ).fetchone()
         if existing:
             kid = existing["id"]
@@ -15401,12 +15407,12 @@ class Database:
                 removed_count += len(remove_ids)
 
                 # Drop this photo's undo/redo items that reference a root tag
-                # the repair detached. The keyword_add, keyword_remove, and
-                # prediction_accept handlers read the shared parent
-                # edit_history.new_value rather than the per-photo value, so
-                # merely retargeting edit_history_items would let redo attach
-                # the redundant root again. Deleting only the affected item
-                # preserves other photos in a batch; empty parent edits are
+                # the repair detached. Keyword add/remove handlers read the
+                # shared parent edit_history.new_value, so merely retargeting
+                # edit_history_items would let redo attach the redundant root
+                # again. Prediction accepts record each actual tag per item.
+                # Deleting only the affected item preserves other photos in
+                # a batch; empty parent edits are
                 # removed below. Scope by action/column so an unrelated rating
                 # or prediction id with the same numeric value is untouched.
                 # ``no_tag`` prediction_accept items (JSON old_value carrying
@@ -20598,6 +20604,11 @@ class Database:
         can skip rows a previous grouped accept already covered instead of
         re-accepting them into duplicate history items.
 
+        ``species_key`` is the resolved consensus identity, independent of
+        the particular keyword alias used to tag the photos. Batch callers
+        compare this key and record each result's actual ``keyword_id`` for
+        undo/redo rather than requiring equivalent aliases to share an ID.
+
         All database changes are performed atomically in a single transaction
         unless ``_commit`` is False and the caller owns the transaction.
         """
@@ -20825,6 +20836,7 @@ class Database:
                 ).fetchone()
                 return {
                     "species": existing["name"] if existing else display,
+                    "species_key": identity.key,
                     "keyword_id": existing["id"] if existing else None,
                     "affected": [],
                     "accepted_prediction_ids": [],
@@ -21177,6 +21189,7 @@ class Database:
                 self.conn.commit()
             return {
                 "species": species,
+                "species_key": identity.key,
                 "keyword_id": kid,
                 "affected": affected,
                 "accepted_prediction_ids": accepted_pred_ids,
@@ -23838,6 +23851,9 @@ class Database:
     # untag a keyword the user deliberately kept, and redo must not re-tag
     # or re-queue a keyword that was never touched -- only the prediction
     # status flip is reversed / re-applied.
+    # A prediction batch can accept different keyword aliases of one species.
+    # Its items carry the actual keyword IDs; the parent ID is only a default
+    # for old entries without an item value.
     #
     # Predicted-only relabels (no prior species tag) record their action as
     # `keyword_add` but still carry a `curation` payload when the photo held
@@ -23848,7 +23864,7 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        kid = int(entry['new_value'])
+        kid = int((item['new_value'] if action == 'prediction_accept' else None) or entry['new_value'])
         kw_name = self._keyword_name(kid)
         skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
         if not skip_tag:
@@ -23887,7 +23903,7 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        kid = int(entry['new_value'])
+        kid = int((item['new_value'] if action == 'prediction_accept' else None) or entry['new_value'])
         kw_name = self._keyword_name(kid)
         skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
         if not skip_tag:

@@ -26049,6 +26049,160 @@ def test_selection_prediction_species_identity_merges_names_and_accepts(
     assert {r["status"] for r in db.get_predictions(photo_ids=photos[:2])} == {"pending"}
 
 
+@pytest.mark.parametrize("on_all", [False, True])
+@pytest.mark.parametrize("inat_first", [False, True])
+@pytest.mark.parametrize("already_tagged", [False, True])
+def test_batch_accept_prefers_named_keyword_among_same_taxon_aliases(
+    app_and_db, on_all, inat_first, already_tagged,
+):
+    """Legacy and native classifiers must select the same Pond Slider tag."""
+    app, db = app_and_db
+    client = app.test_client()
+    taxon_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (39782, 'Trachemys scripta', 'Pond Slider', 'species')",
+    ).lastrowid
+    # Reproduce an imported catalog with two spellings linked to one taxon.
+    # Source-based lookup used to choose the older alias, while name-based
+    # lookup chose Pond slider, failing the batch's single-keyword check.
+    alias_id, pond_id = [db.conn.execute(
+        "INSERT INTO keywords (name, is_species, type, taxon_id) "
+        "VALUES (?, 1, 'taxonomy', ?)", (name, taxon_id),
+    ).lastrowid for name in ("Red-eared slider", "Pond slider")]
+    db.conn.commit()
+    photos = []
+    prediction_ids = []
+    for i in range(2):
+        photo, detection = _seed_prediction_photo(db, f"slider-{i}.jpg", "Pond Slider", .95)
+        photos.append(photo)
+        legacy_id = _prediction_id(db, photo, "Pond Slider")
+        db.add_prediction(
+            detection, "Pond Slider", .96, "iNat21", labels_fingerprint="tol",
+            taxonomy={"scientific_name": "Trachemys scripta"},
+        )
+        native_id = next(row["id"] for row in db.get_predictions(photo_ids=[photo]) if row["model"] == "iNat21")
+        prediction_ids.extend([native_id, legacy_id] if inat_first else [legacy_id, native_id])
+    if already_tagged:
+        db.tag_photo(photos[0], alias_id)
+    extra, _ = _seed_prediction_photo(db, "slider-no-pending.jpg", "Pond Slider", .9, status="rejected")
+    selection = [*photos, extra]
+    entries = client.post(
+        "/api/selection/prediction-suggestions", json={"photo_ids": selection},
+    ).get_json()["predictions"]
+    assert len(entries) == 1
+    assert set(entries[0]["acceptable_prediction_ids"]) == set(prediction_ids)
+    payload = {"prediction_ids": prediction_ids, "expected_species": entries[0]["species"]}
+    if on_all:
+        payload["photo_ids"] = selection
+    response = client.post("/api/predictions/batch-accept", json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.get_json()["accepted"] == (3 if on_all else 2)
+    assert response.get_json()["species"] == "Pond slider"
+    assert [k["id"] for k in db.get_photo_keywords(photos[0])] == [alias_id if already_tagged else pond_id]
+    assert [k["id"] for k in db.get_photo_keywords(photos[1])] == [pond_id]
+    assert [k["id"] for k in db.get_photo_keywords(extra)] == ([pond_id] if on_all else [])
+    assert {r["status"] for r in db.get_predictions(photo_ids=photos)} == {"accepted"}
+    assert client.post("/api/undo").status_code == 200
+    assert [k["id"] for k in db.get_photo_keywords(photos[0])] == ([alias_id] if already_tagged else [])
+    assert not db.get_photo_keywords(photos[1])
+    assert not db.get_photo_keywords(extra)
+    assert {r["status"] for r in db.get_predictions(photo_ids=photos)} == {"pending"}
+
+
+@pytest.mark.parametrize("common,alias,scientific,taxon", [
+    ("European Starling", "Common Starling", "Sturnus vulgaris", 14850),
+    ("California Scrub-Jay", "California Scrub Jay", "Aphelocoma californica", 506118),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("on_all", [False, True])
+def test_batch_accept_same_species_with_different_keyword_names(
+    app_and_db, common, alias, scientific, taxon, reverse, on_all,
+):
+    """Aliases need not share a keyword ID for one accept/undo/redo action."""
+    app, db = app_and_db
+    client = app.test_client()
+    local_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, 'species')",
+        (taxon, scientific, common),
+    ).lastrowid
+    db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
+    db.set_meta("common_name_identity_version", "1")
+    alias_id = db.add_keyword(alias, is_species=True)
+    common_id = db.add_keyword(common, is_species=True)
+    assert alias_id != common_id
+    photo_a, _ = _seed_prediction_photo(db, "alias.jpg", alias, .95)
+    photo_b, _ = _seed_prediction_photo(db, "common.jpg", common, .96, model="iNat21", labels_fingerprint="tol")
+    pred_ids = [_prediction_id(db, photo_a, alias), _prediction_id(db, photo_b, common)]
+    db.conn.execute("UPDATE predictions SET scientific_name = ? WHERE id = ?", (scientific, pred_ids[1]))
+    db.conn.commit()
+    extra, _ = _seed_prediction_photo(db, "no-pending.jpg", common, .9, status="rejected")
+    photos = [photo_a, photo_b, extra]
+    entries = client.post(
+        "/api/selection/prediction-suggestions", json={"photo_ids": photos},
+    ).get_json()["predictions"]
+    assert len(entries) == 1
+    assert set(entries[0]["acceptable_prediction_ids"]) == set(pred_ids)
+    if reverse:
+        pred_ids.reverse()
+    payload = {"prediction_ids": pred_ids, "expected_species": entries[0]["species"]}
+    if on_all:
+        payload["photo_ids"] = photos
+    response = client.post("/api/predictions/batch-accept", json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)
+    expected = {photo_a: [alias_id], photo_b: [common_id], extra: []}
+    if on_all:
+        expected[extra] = [common_id if reverse else alias_id]
+
+    def assert_accepted():
+        assert {p: [k["id"] for k in db.get_photo_keywords(p)] for p in photos} == expected
+        assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"accepted"}
+        for photo, kids in expected.items():
+            names = {db.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()[0] for kid in kids}
+            adds = {r[0] for r in db.conn.execute(
+                "SELECT value FROM pending_changes WHERE photo_id = ? AND change_type = 'keyword_add'", (photo,),
+            )}
+            assert adds == names
+
+    assert_accepted()
+    edits = [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
+    assert len(edits) == 1
+    assert client.post("/api/undo").status_code == 200
+    assert all(not db.get_photo_keywords(p) for p in photos)
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"pending"}
+    assert not db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id IN (?, ?, ?) AND change_type = 'keyword_add'", photos,
+    ).fetchone()
+    assert client.post("/api/redo").status_code == 200
+    assert_accepted()
+
+
+def test_batch_accept_rejects_distinct_taxa_with_same_display_name(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    photos, pred_ids = [], []
+    for i, scientific in enumerate(("Firstus species", "Secondus species"), start=1):
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, 'Shared name', 'species')",
+            (100 + i, scientific),
+        )
+        photo, _ = _seed_prediction_photo(db, f"homonym-{i}.jpg", "Shared name", .95)
+        photos.append(photo)
+        pred_ids.append(_prediction_id(db, photo, "Shared name"))
+        db.conn.execute(
+            "UPDATE predictions SET source_taxon_id = ?, scientific_name = ? WHERE id = ?",
+            (100 + i, scientific, pred_ids[-1]),
+        )
+    db.conn.commit()
+    keywords_before = [tuple(r) for r in db.conn.execute("SELECT * FROM keywords ORDER BY id")]
+    response = client.post("/api/predictions/batch-accept", json={"prediction_ids": pred_ids})
+    assert response.status_code == 400
+    assert "one species" in response.get_json()["error"]
+    assert all(not db.get_photo_keywords(p) for p in photos)
+    assert {r["status"] for r in db.get_predictions(photo_ids=photos)} == {"pending"}
+    assert [tuple(r) for r in db.conn.execute("SELECT * FROM keywords ORDER BY id")] == keywords_before
+    assert not [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
+
+
 def test_selection_prediction_species_identity_keeps_homonyms_separate(app_and_db):
     app, db = app_and_db
     client = app.test_client()
