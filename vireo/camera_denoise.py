@@ -26,6 +26,7 @@ _MAKERS = {
     "sonycorporation": "sony", "olympusimagingcorp": "olympus",
     "olympuscorporation": "olympus", "omsystem": "omdigitalsolutions",
     "ricohimagingcompanyltd": "pentax",
+    "konicaminolta": "minolta", "konicaminoltacamerainc": "minolta",
 }
 
 

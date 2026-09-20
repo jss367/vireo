@@ -38,6 +38,15 @@ def test_nikon_base_iso_profiles():
     assert d850['profile_iso'] == [31, 100]
 
 
+@pytest.mark.parametrize('make', ['KONICA MINOLTA', 'KONICA MINOLTA CAMERA, Inc.'])
+def test_konica_minolta_exif_matches_bundled_minolta_profile(make):
+    profile = denoise.resolve_profile({'camera_make': make, 'camera_model': 'DYNAX 5D', 'iso': 400})
+    assert profile['source'] == 'camera'
+    expected = denoise.resolve_profile({'camera_make': 'Minolta', 'camera_model': 'Dynax 5D', 'iso': 400})
+    assert profile['a'] == expected['a']
+    assert profile['b'] == expected['b']
+
+
 def test_iso_interpolation_and_endpoint_clamping():
     low, high = (denoise.resolve_profile(_photo(iso)) for iso in (1600, 2000))
     middle = denoise.resolve_profile(_photo(1800))
