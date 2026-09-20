@@ -25,6 +25,15 @@
     details.replaceChildren();
     panel.hidden = !data || !data.subjects.length;
     if (panel.hidden) return;
+    // Scoped Pipeline Review views open the lightbox with _lbReadOnly to
+    // freeze mutating writes. Every subject control here reaches a
+    // PUT/POST — subject cards and "Choose automatically" invoke
+    // sync_primary which can clear mask/embedding/eye state, "Analyze
+    // subjects" enqueues a job that writes detection_subjects and can
+    // change the primary, and Use crop / Use exposure PUT the edit
+    // recipe — so they all must honor _lbReadOnly (Codex r4056621185).
+    const readOnly = typeof _lbReadOnly !== 'undefined' && _lbReadOnly;
+    const readOnlyTitle = readOnly && typeof _lbReadOnlyMessage === 'string' ? _lbReadOnlyMessage : null;
     document.getElementById('lightboxSubjectSummary').textContent = 'Subjects (' + data.subjects.length + ')';
     // Stable spatial order keeps thumbnails from jumping when primary changes.
     data.subjects.slice().sort((a, b) => a.box_x - b.box_x || a.box_y - b.box_y || a.id - b.id).forEach((subject, index) => {
@@ -32,14 +41,15 @@
       button.type = 'button';
       button.className = 'lb-subject-card';
       button.setAttribute('aria-pressed', String(subject.is_primary));
-      button.disabled = busy;
+      button.disabled = busy || readOnly;
       const img = document.createElement('img');
       img.src = previewUrl(subject, false);
       img.alt = 'Subject ' + (index + 1);
       const caption = document.createElement('span');
       caption.textContent = subject.predictions[0]?.species || 'Subject ' + (index + 1);
       button.append(img, caption);
-      button.title = (subject.is_primary ? 'Primary: ' : 'Make primary: ') + caption.textContent;
+      button.title = readOnlyTitle
+        || (subject.is_primary ? 'Primary: ' : 'Make primary: ') + caption.textContent;
       button.onclick = () => choose(subject.id);
       list.append(button);
     });
@@ -59,21 +69,20 @@
     quality.title = 'Quality is measured within this detection box, before exposure correction.';
     description.append(species, quality);
     details.append(img, description);
-    // Scoped Pipeline Review views open the lightbox with _lbReadOnly to
-    // freeze edit-recipe writes; Use crop / Use exposure PUT the edit
-    // recipe, so they must respect that flag alongside the standard
-    // enable/disable state (Codex r4056563011).
-    const readOnly = typeof _lbReadOnly !== 'undefined' && _lbReadOnly;
     analyzeButton.hidden = data.subjects.every(s => s.analysis);
-    analyzeButton.disabled = busy;
-    automatic.disabled = busy || data.selection === 'automatic';
+    analyzeButton.disabled = busy || readOnly;
+    automatic.disabled = busy || data.selection === 'automatic' || readOnly;
     corrected.disabled = !subject.analysis;
     cropButton.disabled = busy || !subject.analysis || readOnly;
     exposureButton.disabled = busy || !subject.analysis || readOnly;
-    if (readOnly && typeof _lbReadOnlyMessage === 'string') {
-      cropButton.title = _lbReadOnlyMessage;
-      exposureButton.title = _lbReadOnlyMessage;
+    if (readOnlyTitle) {
+      analyzeButton.title = readOnlyTitle;
+      automatic.title = readOnlyTitle;
+      cropButton.title = readOnlyTitle;
+      exposureButton.title = readOnlyTitle;
     } else {
+      analyzeButton.removeAttribute('title');
+      automatic.removeAttribute('title');
       cropButton.removeAttribute('title');
       exposureButton.removeAttribute('title');
     }
@@ -100,6 +109,10 @@
   }
   async function choose(detectionId) {
     if (!data || busy || data.photo_id !== _lightboxCurrentId) return;
+    // Choosing a primary — including "Choose automatically" — reaches
+    // sync_primary, which clears mask, embedding and eye state; block
+    // it in a scoped Pipeline Review lightbox (Codex r4056621185).
+    if (typeof _lbGuardReadOnly === 'function' && _lbGuardReadOnly()) return;
     const photoId = data.photo_id;
     const seq = generation;
     busy = true;
@@ -181,6 +194,11 @@
   }
   analyzeButton.onclick = async () => {
     if (!data || busy || data.photo_id !== _lightboxCurrentId) return;
+    // Analyze subjects enqueues a job that writes detection_subjects and
+    // can flip the primary via sync_primary (clearing mask, embedding
+    // and eye state), so it must be blocked in read-only lightboxes
+    // (Codex r4056621185).
+    if (typeof _lbGuardReadOnly === 'function' && _lbGuardReadOnly()) return;
     const photoId = data.photo_id;
     const seq = generation;
     busy = true; render();

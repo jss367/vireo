@@ -9612,13 +9612,20 @@ class Database:
         """Count photos eligible for the eye-keypoint stage, ignoring the
         ``eye_tenengrad IS NULL`` idempotency gate.
 
-        Eligibility = mask present + at least one non-synthetic detection
-        above min_conf + at least one prediction on that detection. Matches
-        the join shape of ``list_photos_for_eye_keypoint_stage`` minus the
-        "not yet processed" filter, so the plan can distinguish "no
-        eligible photos" from "all eligible photos already processed".
+        Eligibility = active mask present for the currently-selected
+        primary detection + at least one prediction on that detection.
+        Mirrors ``list_photos_for_eye_keypoint_stage``'s selected-primary
+        + active-mask predicates minus the "not yet processed" filter,
+        so the plan can distinguish "no eligible photos" from "all
+        eligible photos already processed". Counting on the loose
+        mask+detection+prediction join would include photos whose only
+        prediction sits on a non-primary detection — the stage cannot
+        produce eye keypoints for those, so review readiness would
+        repeatedly flag missing keypoints while the plan reported the
+        stage complete (Codex r4056621190).
         """
         import config as cfg
+        from subjects import primary_order_sql
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
@@ -9634,16 +9641,33 @@ class Database:
                  AND d.detector_model != 'full-image'
                  AND d.detector_confidence >= ?
                 JOIN predictions pr ON pr.detection_id = d.id
-                WHERE p.mask_path IS NOT NULL{scope_sql}""",
-            (ws, min_conf, *scope_params),
+                JOIN photo_masks pm
+                  ON pm.photo_id = p.id
+                 AND pm.variant = p.active_mask_variant
+                 AND pm.detector_model = d.detector_model
+                 AND pm.prompt_x = d.box_x
+                 AND pm.prompt_y = d.box_y
+                 AND pm.prompt_w = d.box_w
+                 AND pm.prompt_h = d.box_h
+                WHERE p.mask_path IS NOT NULL
+                  AND p.active_mask_variant IS NOT NULL
+                  AND d.id = (
+                      SELECT d2.id FROM detections d2
+                      WHERE d2.photo_id = p.id
+                        AND d2.detector_confidence >= ?
+                        AND d2.detector_model != 'full-image'
+                      ORDER BY {primary_order_sql("d2")}
+                      LIMIT 1
+                  ){scope_sql}""",
+            (ws, min_conf, min_conf, *scope_params),
         ).fetchone()
         return row["n"] or 0
 
     def count_eye_keypoint_stale(self, photo_ids=None):
         """Count photos in scope whose eye_tenengrad is set under a
         non-current eye_kp_fingerprint. Mirrors
-        ``count_eye_keypoint_eligible``'s join shape (workspace + mask +
-        detection + prediction) and adds the staleness predicate.
+        ``count_eye_keypoint_eligible``'s selected-primary + active-mask
+        join shape and adds the staleness predicate.
 
         A NULL fingerprint on a row with eye_tenengrad set is treated as
         stale — only the migration backfill should produce that state,
@@ -9652,6 +9676,7 @@ class Database:
         """
         import config as cfg
         from pipeline import EYE_KP_FINGERPRINT_VERSION
+        from subjects import primary_order_sql
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
@@ -9667,11 +9692,28 @@ class Database:
                  AND d.detector_model != 'full-image'
                  AND d.detector_confidence >= ?
                 JOIN predictions pr ON pr.detection_id = d.id
+                JOIN photo_masks pm
+                  ON pm.photo_id = p.id
+                 AND pm.variant = p.active_mask_variant
+                 AND pm.detector_model = d.detector_model
+                 AND pm.prompt_x = d.box_x
+                 AND pm.prompt_y = d.box_y
+                 AND pm.prompt_w = d.box_w
+                 AND pm.prompt_h = d.box_h
                 WHERE p.mask_path IS NOT NULL
+                  AND p.active_mask_variant IS NOT NULL
                   AND p.eye_tenengrad IS NOT NULL
                   AND (p.eye_kp_fingerprint IS NULL
-                       OR p.eye_kp_fingerprint != ?){scope_sql}""",
-            (ws, min_conf, EYE_KP_FINGERPRINT_VERSION, *scope_params),
+                       OR p.eye_kp_fingerprint != ?)
+                  AND d.id = (
+                      SELECT d2.id FROM detections d2
+                      WHERE d2.photo_id = p.id
+                        AND d2.detector_confidence >= ?
+                        AND d2.detector_model != 'full-image'
+                      ORDER BY {primary_order_sql("d2")}
+                      LIMIT 1
+                  ){scope_sql}""",
+            (ws, min_conf, EYE_KP_FINGERPRINT_VERSION, min_conf, *scope_params),
         ).fetchone()
         return row["n"] or 0
 
@@ -9679,26 +9721,29 @@ class Database:
         """Count photos whose top-routable prediction would actually be
         attempted by the eye-keypoint stage under the current config.
 
-        Tighter than ``count_eye_keypoint_eligible``: that one matches the
-        loose mask+detection+prediction join, which includes photos whose
-        top prediction will be skipped at Gate 1 (classifier confidence
-        below ``min_species_conf``) or fail taxonomy routing (anything
-        outside the keys of ``pipeline._EYE_KEYPOINT_MODEL_FOR_CLASS``).
-        Those photos never get an ``eye_kp_fingerprint`` stamped — by
-        design, so a future config change can retry them — so they would
-        permanently inflate ``eye_target`` and trip the "computed without
-        eye keypoints" banner on every run.
+        Tighter than ``count_eye_keypoint_eligible``: eligible photos
+        include ones whose selected primary detection's top prediction
+        will be skipped at Gate 1 (classifier confidence below
+        ``min_species_conf``) or fail taxonomy routing (anything outside
+        the keys of ``pipeline._EYE_KEYPOINT_MODEL_FOR_CLASS``). Those
+        photos never get an ``eye_kp_fingerprint`` stamped — by design,
+        so a future config change can retry them — so they would
+        permanently inflate ``eye_target`` and trip the "computed
+        without eye keypoints" banner on every run.
 
-        Match ``list_photos_for_eye_keypoint_stage``'s "best routable row
-        per photo" selection so a taxonomy-bearing prediction wins over a
-        taxonomy-less one. Predictions that route only via the scientific
-        name → taxa-table fallback are *not* counted here (the SQL filter
-        is taxonomy_class-only); those photos will still be attempted by
-        the stage but will be undercounted in the target, which keeps
-        ``attempts >= target`` and means the banner won't lie — at worst
-        it stays quiet when it could have surfaced.
+        Match ``list_photos_for_eye_keypoint_stage``'s selected-primary
+        + active-mask predicates and its "best routable row per photo"
+        selection so a taxonomy-bearing prediction wins over a
+        taxonomy-less one on the *same* selected detection (Codex
+        r4056621190). Predictions that route only via the scientific
+        name → taxa-table fallback are *not* counted here (the SQL
+        filter is taxonomy_class-only); those photos will still be
+        attempted by the stage but will be undercounted in the target,
+        which keeps ``attempts >= target`` and means the banner won't
+        lie — at worst it stays quiet when it could have surfaced.
         """
         import config as cfg
+        from subjects import primary_order_sql
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
@@ -9710,7 +9755,11 @@ class Database:
         # the *winner*, not to any prediction the photo happens to carry.
         # The labels_fingerprint subquery mirrors
         # list_photos_for_eye_keypoint_stage so re-classified detections
-        # only contribute their latest prediction set.
+        # only contribute their latest prediction set. The selected-
+        # primary and active-mask predicates mirror
+        # list_photos_for_eye_keypoint_stage so predictions on non-primary
+        # detections and photos with a stale mask are excluded from the
+        # target — the stage cannot produce keypoints for those.
         row = self.conn.execute(
             f"""WITH ranked AS (
                     SELECT p.id AS photo_id,
@@ -9736,7 +9785,24 @@ class Database:
                      AND d.detector_model != 'full-image'
                      AND d.detector_confidence >= ?
                     JOIN predictions pr ON pr.detection_id = d.id
+                    JOIN photo_masks pm
+                      ON pm.photo_id = p.id
+                     AND pm.variant = p.active_mask_variant
+                     AND pm.detector_model = d.detector_model
+                     AND pm.prompt_x = d.box_x
+                     AND pm.prompt_y = d.box_y
+                     AND pm.prompt_w = d.box_w
+                     AND pm.prompt_h = d.box_h
                     WHERE p.mask_path IS NOT NULL
+                      AND p.active_mask_variant IS NOT NULL
+                      AND d.id = (
+                          SELECT d2.id FROM detections d2
+                          WHERE d2.photo_id = p.id
+                            AND d2.detector_confidence >= ?
+                            AND d2.detector_model != 'full-image'
+                          ORDER BY {primary_order_sql("d2")}
+                          LIMIT 1
+                      )
                       AND pr.labels_fingerprint = (
                           SELECT pr2.labels_fingerprint FROM predictions pr2
                           WHERE pr2.detection_id = pr.detection_id
@@ -9749,7 +9815,7 @@ class Database:
                 WHERE rn = 1
                   AND taxonomy_class IN ('Aves', 'Mammalia')
                   AND species_conf >= ?""",
-            (ws, min_conf, *scope_params, min_species_conf),
+            (ws, min_conf, min_conf, *scope_params, min_species_conf),
         ).fetchone()
         return row["n"] or 0
 
