@@ -22,6 +22,7 @@ from photo_payload import (
     attach_edit_recipes,
     attach_nested_edit_recipes,
     attach_species_representatives,
+    render_key_for_recipe,
 )
 from pipeline_results import (
     build_species_override,
@@ -1593,6 +1594,7 @@ def create_pipeline_blueprint(
             return json_error("Photo not found", 404)
         result = dict(row)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        result["render_key"] = render_key_for_recipe(result["edit_recipe"])
         # Get primary detection from global detections table (threshold
         # resolved from workspace-effective config inside get_detections).
         dets = db.get_detections(photo_id)

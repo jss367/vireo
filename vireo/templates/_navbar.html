@@ -4314,6 +4314,17 @@ var _lbPreviewLoading = false;
 var _lbProgressiveTargetKey = null;
 var _lbSessionFullUsesOriginal = null;
 var _lbEditRecipeByPhoto = {};
+// The recipe exactly as the server sent it, kept alongside the clipped
+// ``_lbEditRecipeByPhoto`` view above. ``_lbCloneEditRecipe`` only models the
+// fields the lightbox itself can edit, so it drops sections such as ``local``;
+// a cache fingerprint computed from the clipped copy cannot tell two different
+// local-adjustment recipes apart. Fingerprints read this map instead.
+var _lbRawEditRecipeByPhoto = {};
+// Server-computed render keys (``photo_payload.render_key_for_recipe``),
+// remembered per photo from whichever payload delivered the photo dict. The
+// server derives its key from the whole canonical recipe, so preferring it
+// over the client's own fingerprint keeps the two from drifting.
+var _lbRenderKeyByPhoto = {};
 var _lbEditRecipeKnownByPhoto = {};
 var _lbEditRecipeWriteSeq = 0;
 var _lbEditRecipeWriteSeqByPhoto = {};
@@ -5077,11 +5088,24 @@ window.vireoRefreshPhotoRenders = function(photoIds) {
 window.vireoRenderedUrl = function(url, photoId, sourceOverride) {
   var source = sourceOverride || (photoId == null ? null : _vireoPairSource(photoId));
   if (source) url = _vireoUrlWithPhotoSource(url, source);
-  var recipe = photoId == null ? null : _lbEditRecipeByPhoto[String(photoId)];
-  var recipeKey = _vireoEditRecipeCacheKey(recipe);
+  var recipeKey = _vireoPhotoRenderKey(photoId);
   if (recipeKey) url = _vireoUrlWithQueryParam(url, 'er', recipeKey);
   return _vireoUrlWithRenderVersion(url, photoId);
 };
+
+// The `er` fingerprint for a photo: the server's key when the payload carried
+// one, otherwise a fingerprint of the recipe we hold. Both exist because they
+// go stale at different moments — the server key is authoritative on page load
+// and after a refetch, while a recipe this page just wrote is newer than any
+// key the last payload carried.
+function _vireoPhotoRenderKey(photoId) {
+  if (photoId == null) return '';
+  var serverKey = _lbRenderKeyByPhoto[String(photoId)];
+  if (serverKey) return serverKey;
+  var recipe = _lbRawEditRecipeByPhoto[String(photoId)];
+  if (recipe === undefined) recipe = _lbEditRecipeByPhoto[String(photoId)];
+  return _vireoEditRecipeCacheKey(recipe);
+}
 
 window.vireoThumbnailUrl = function(photoOrId) {
   var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
@@ -5097,6 +5121,15 @@ window.vireoThumbnailUrl = function(photoOrId) {
     typeof window.vireoRememberPhotoEditRecipe === 'function'
   ) {
     window.vireoRememberPhotoEditRecipe(photoId, photo.edit_recipe, {
+      skipIfLocallyWritten: true
+    });
+  }
+  if (
+    photo &&
+    Object.prototype.hasOwnProperty.call(photo, 'render_key') &&
+    typeof window.vireoRememberPhotoRenderKey === 'function'
+  ) {
+    window.vireoRememberPhotoRenderKey(photoId, photo.render_key, {
       skipIfLocallyWritten: true
     });
   }
@@ -5181,10 +5214,33 @@ function _vireoHashString(s) {
 // constants together.
 var _VIREO_EDIT_MATH_VERSION = 7;
 
+// Stable stringify: sort object keys at every depth so a fingerprint tracks
+// the recipe's *content*. Two payloads can serialize the same recipe with
+// different property order, and JSON.stringify would hash them differently —
+// which costs a needless refetch of an image that did not change.
+function _vireoCanonicalRecipeJson(value) {
+  if (Array.isArray(value)) {
+    return '[' + value.map(_vireoCanonicalRecipeJson).join(',') + ']';
+  }
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map(function(key) {
+      return JSON.stringify(key) + ':' + _vireoCanonicalRecipeJson(value[key]);
+    }).join(',') + '}';
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+// Fingerprint the *whole* recipe, not the subset the lightbox can edit.
+// This used to hash ``_lbCloneEditRecipe(recipe)``, which models only
+// rotation/straighten/flip/crop/adjustments — so a recipe whose only edit
+// lived in the ``local`` section fingerprinted identically to no edit at all,
+// and the grid kept serving the pre-edit thumbnail out of the browser cache
+// for the full 24h max-age. Prefer ``render_key`` from the server (see
+// ``_vireoPhotoRenderKey``); this is the fallback for payloads that predate
+// it and for recipes this page wrote itself.
 function _vireoEditRecipeCacheKey(recipe) {
-  var normalized = _lbCloneEditRecipe(recipe);
-  if (!_lbRecipeHasEdits(normalized)) return '';
-  return _vireoHashString(JSON.stringify(normalized))
+  if (!_lbRecipeHasEdits(recipe)) return '';
+  return _vireoHashString(_vireoCanonicalRecipeJson(recipe))
     + '.m' + _VIREO_EDIT_MATH_VERSION;
 }
 
@@ -5217,6 +5273,17 @@ window.vireoRememberPhotoEditRecipe = function(photoId, recipe, options) {
   _lbRememberEditRecipe(photoId, recipe);
 };
 
+// Record the server's render key for a photo. Call this *after* remembering
+// the recipe it belongs to: ``_lbRememberEditRecipe`` drops any key it holds,
+// because every other caller of it is a local write whose recipe is newer than
+// the key the last payload carried.
+window.vireoRememberPhotoRenderKey = function(photoId, renderKey, options) {
+  if (photoId == null) return;
+  if (options && options.skipIfLocallyWritten && _lbEditRecipeWriteSeqFor(photoId)) return;
+  if (renderKey) _lbRenderKeyByPhoto[String(photoId)] = String(renderKey);
+  else delete _lbRenderKeyByPhoto[String(photoId)];
+};
+
 window.vireoPhotoEditRecipe = function(photoId) {
   if (photoId == null) return {};
   return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(photoId)]);
@@ -5225,6 +5292,10 @@ window.vireoPhotoEditRecipe = function(photoId) {
 function _lbRememberEditRecipe(photoId, recipe, preserveAdjustmentInput) {
   if (photoId == null) return;
   var numericId = Number(photoId);
+  // Keep the unclipped recipe for fingerprinting, and drop any server render
+  // key we were holding: this recipe is the newer of the two.
+  _lbRawEditRecipeByPhoto[String(photoId)] = recipe || null;
+  delete _lbRenderKeyByPhoto[String(photoId)];
   var storedRecipe = _lbCloneEditRecipe(recipe);
   var currentRecipe = _lbRecipeHasEdits(storedRecipe) ? storedRecipe : null;
   _lbEditRecipeByPhoto[String(photoId)] = storedRecipe;
@@ -8204,7 +8275,14 @@ function openLightbox(photoId, filename, photoList, options) {
         window.vireoRefreshPhotoRenders([photoId]);
       }
       var editRecipeFresh = _lbEditRecipeWriteSeqFor(photoId) === editRecipeFetchSeq;
-      var recipeKeyBefore = _vireoEditRecipeCacheKey(_lbEditRecipeByPhoto[String(photoId)]);
+      // Fingerprint the unclipped recipe on both sides of this comparison:
+      // ``data.edit_recipe`` arrives straight from the server, so reading the
+      // clipped ``_lbEditRecipeByPhoto`` view here would report a change on
+      // every refetch of any photo carrying a section the lightbox does not
+      // model (``local``), and bump the render version for nothing.
+      var recipeBefore = _lbRawEditRecipeByPhoto[String(photoId)];
+      if (recipeBefore === undefined) recipeBefore = _lbEditRecipeByPhoto[String(photoId)];
+      var recipeKeyBefore = _vireoEditRecipeCacheKey(recipeBefore);
       if (!editRecipeFresh) {
         var currentRecipe = _lbEditRecipeByPhoto[String(photoId)];
         data.edit_recipe = _lbRecipeHasEdits(currentRecipe) ? _lbCloneEditRecipe(currentRecipe) : null;
@@ -8215,6 +8293,9 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbRenderLifeListPanel(photoId);
       if (editRecipeFresh) {
         _lbRememberEditRecipe(photoId, data.edit_recipe);
+        if (typeof window.vireoRememberPhotoRenderKey === 'function') {
+          window.vireoRememberPhotoRenderKey(photoId, data.render_key);
+        }
         if (_vireoEditRecipeCacheKey(data.edit_recipe) !== recipeKeyBefore) {
           _vireoBumpRenderVersion(photoId);
           if (typeof window.vireoRefreshPhotoRenders === 'function') {

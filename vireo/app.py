@@ -83,6 +83,7 @@ from photo_payload import (
     attach_prediction_confidence,
     attach_species,
     attach_species_representatives,
+    render_key_for_recipe,
 )
 from pipeline_results import auto_detach_burst_for_species
 from preview_cache import (
@@ -7833,6 +7834,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        result["render_key"] = render_key_for_recipe(result["edit_recipe"])
         from camera_denoise import resolve_profile
         result["denoise_profile"] = resolve_profile(photo)
         # The shared lightbox normally warms /original after /full settles.
@@ -13258,6 +13260,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         for photo in page_photos:
             photo["edit_recipe"] = recipe_map.get(photo["photo_id"])
+            photo["render_key"] = render_key_for_recipe(photo["edit_recipe"])
         # A slow sidecar or network-folder read can leave the queue time to
         # change after the snapshot was validated above. Never mark the final
         # page complete from that stale snapshot: the client will restart the
@@ -16730,6 +16733,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if d.get("status") == "alternative":
                 continue  # alternatives are nested, not top-level
             d["edit_recipe"] = recipes_by_photo.get(d.get("photo_id"))
+            d["render_key"] = render_key_for_recipe(d["edit_recipe"])
             # Species the accept path will actually apply. For an ordinary
             # prediction this is the row's own species; for a grouped/burst
             # prediction whose frames disagree, ``accept_prediction`` derives

@@ -2842,3 +2842,110 @@ def test_sync_review_waits_for_active_workspace_job(app_and_db, monkeypatch):
     job["status"] = "completed"
     assert client.get('/api/sync/status').get_json()["active_job"] is None
     assert client.get('/api/sync/preview?limit=25').status_code == 200
+
+
+def _local_only_recipe(subject_exposure):
+    """A recipe whose only edit lives in the mask-weighted ``local`` section."""
+    return {
+        "local": {
+            "mask": {"ref": "a1b2c3d4e5f6", "source_digest": "sha1:0011223344556677"},
+            "regions": [
+                {"region": "subject", "adjustments": {"exposure": subject_exposure}},
+            ],
+        },
+    }
+
+
+def test_render_key_fingerprints_the_whole_recipe():
+    """``render_key`` must change whenever the rendered pixels would.
+
+    It is the only cache-busting signal a browser gets for a thumbnail:
+    ``serve_thumbnail`` answers ``Cache-Control: public, max-age=86400``, so
+    deleting the server-side render on save is invisible to a cache that never
+    revalidates. The client used to build this fingerprint from a hand-listed
+    subset of recipe fields that omitted ``local``, which left the grid showing
+    pre-edit pixels for a day after a mask-based adjustment.
+    """
+    import image_edits
+    from photo_payload import render_key_for_recipe
+
+    # A recipe that renders as a no-op leaves the URL bare: an unedited
+    # photo's thumbnail is the same image it has always been.
+    assert render_key_for_recipe(None) is None
+    assert render_key_for_recipe({}) is None
+    assert render_key_for_recipe({"version": 1}) is None
+    assert render_key_for_recipe({"rotation": 0, "flip": {}}) is None
+
+    local_a = render_key_for_recipe(_local_only_recipe(1.0))
+    local_b = render_key_for_recipe(_local_only_recipe(-2.0))
+    assert local_a and local_b
+    assert local_a != local_b, (
+        "two different local-only recipes fingerprint identically; the grid "
+        "would keep serving the first one's cached thumbnail"
+    )
+
+    # Same again on top of identical global adjustments — the shape that made
+    # the subset fingerprint look like it worked.
+    mixed_a = render_key_for_recipe(
+        {"adjustments": {"exposure": 0.5}, **_local_only_recipe(1.0)},
+    )
+    mixed_b = render_key_for_recipe(
+        {"adjustments": {"exposure": 0.5}, **_local_only_recipe(-2.0)},
+    )
+    assert mixed_a != mixed_b
+
+    # Content, not key order, decides the fingerprint.
+    assert render_key_for_recipe(
+        {"adjustments": {"exposure": 0.5, "shadows": 20.0}},
+    ) == render_key_for_recipe(
+        {"adjustments": {"shadows": 20.0, "exposure": 0.5}},
+    )
+
+    # A rendering-math bump invalidates every edited render, exactly as it
+    # does for the server-side caches keyed on the same constant.
+    assert local_a.endswith(f".m{image_edits.EDIT_MATH_VERSION}")
+
+
+def test_photo_payloads_carry_render_key(app_and_db):
+    """Every payload a thumbnail URL is built from ships the fingerprint.
+
+    Browse builds `/thumbnails/<id>.jpg?er=<render_key>` from the photo dict,
+    so a payload that omits the key sends the browser back to the bare URL it
+    already has cached.
+    """
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    client = app.test_client()
+
+    def keys_for(recipe):
+        db.set_photo_edit_recipe(pid, recipe)
+        detail = client.get(f"/api/photos/{pid}").get_json()
+        listing = client.get("/api/photos").get_json()
+        query = client.post(
+            "/api/photos/query", json={"rules": None, "per_page": 200},
+        ).get_json()
+        found = {"detail": detail["render_key"]}
+        for label, payload in (("listing", listing), ("query", query)):
+            match = [p for p in payload["photos"] if p["id"] == pid]
+            assert match, f"photo {pid} missing from /api/photos{label}"
+            assert "render_key" in match[0], (
+                f"{label} payload has no render_key; thumbnail URLs built "
+                "from it cannot bust the browser cache after an edit"
+            )
+            found[label] = match[0]["render_key"]
+        return found
+
+    unedited = keys_for(None)
+    assert set(unedited.values()) == {None}
+
+    first = keys_for(_local_only_recipe(1.0))
+    assert all(first.values()), f"local-only edit produced no render key: {first}"
+    assert len(set(first.values())) == 1, (
+        f"payloads disagree on the render key: {first}"
+    )
+
+    second = keys_for(_local_only_recipe(-2.0))
+    assert len(set(second.values())) == 1
+    assert second["detail"] != first["detail"], (
+        "changing only the local section left the render key unchanged"
+    )
