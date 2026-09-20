@@ -47,6 +47,8 @@ from artifact_flight import (
     preview_artifact_flights,
     preview_prefetch_slots,
 )
+from camera_denoise import cache_matches as _camera_cache_matches
+from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from classification_readiness import classification_readiness
 from db import (
     _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE,
@@ -266,6 +268,7 @@ def _paired_render_state_hash(
             "source_state": source_state,
             "recipe": recipe_to_json(recipe) if recipe else None,
             "edit_math_version": EDIT_MATH_VERSION,
+            **_camera_render_cache_fields(photo, recipe),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -4431,6 +4434,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "file_state": file_state,
             "recipe": recipe_to_json(recipe),
             "edit_math_version": EDIT_MATH_VERSION,
+            **_camera_render_cache_fields(photo, recipe),
         }
 
     def _full_resolution_render_path(
@@ -7828,6 +7832,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        from camera_denoise import resolve_profile
+        result["denoise_profile"] = resolve_profile(photo)
         # The shared lightbox normally warms /original after /full settles.
         # In full-resolution preview mode /full already redirects to /original,
         # so tell the client not to repeat that potentially expensive RAW work.
@@ -17297,6 +17303,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         items = []
         keyword_id = None
         species = None
+        species_key = None
         for pid in pred_ids:
             if pid in handled:
                 continue
@@ -17317,13 +17324,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # no keyword was created. Folding it into the check below
                 # would 400 a perfectly uniform batch.
                 continue
-            # One edit row carries one ``new_value`` keyword id, which the
-            # undo handler applies to every item. Accepting a mixed bag of
-            # species through one call would therefore undo incorrectly —
-            # refuse rather than record an entry that cannot be reversed.
+            # Browse groups predictions by species identity, not keyword ID.
+            # Different aliases can legitimately tag different keyword rows
+            # of that species. Record the actual ID on each history item so
+            # undo/redo reverses exactly that tag, while still rejecting a
+            # batch that resolves to genuinely different species.
             if keyword_id is None:
                 keyword_id, species = result["keyword_id"], result["species"]
-            elif result["keyword_id"] != keyword_id:
+                species_key = result["species_key"]
+            elif result["species_key"] != species_key:
                 db.conn.rollback()
                 return json_error(
                     "prediction_ids must all resolve to one species", 400,
@@ -17339,7 +17348,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 items.append({
                     "photo_id": a["photo_id"],
                     "old_value": old_value,
-                    "new_value": str(keyword_id),
+                    "new_value": str(result["keyword_id"]),
                 })
 
         has_accepted_predictions = bool(items)
@@ -17388,16 +17397,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if old_meta.get("no_tag"):
                     continue
                 photo_id = item["photo_id"]
+                item_species = db.conn.execute(
+                    "SELECT name FROM keywords WHERE id = ?", (int(item["new_value"]),),
+                ).fetchone()["name"]
                 flat_removals = [dict(row) for row in db.conn.execute(
                     """SELECT workspace_id, value FROM pending_changes
                        WHERE photo_id = ? AND change_type = 'keyword_remove_flat'
                          AND value = ? COLLATE NOCASE""",
-                    (photo_id, species),
+                    (photo_id, item_species),
                 )]
                 # accept_prediction queues an add directly. Reconcile it
                 # with any pending removal before applying the shared helper.
-                db.remove_pending_changes(photo_id, "keyword_add", species, _commit=False)
-                _queue_keyword_add(photo_id, species, _commit=False)
+                db.remove_pending_changes(photo_id, "keyword_add", item_species, _commit=False)
+                _queue_keyword_add(photo_id, item_species, _commit=False)
                 # Keep the suppression records cleared by the add, including
                 # those in other workspaces sharing this photo's sidecar.
                 old_meta.update(symmetric_keyword_queue=True, flat_removals=flat_removals)
@@ -20796,6 +20808,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "source_path": source_path,
                     "source_mtime": source_mtime,
                     "edit_math_version": EDIT_MATH_VERSION,
+                    **_camera_render_cache_fields(photo, recipe),
                 }
                 try:
                     if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -20911,6 +20924,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 rendered = apply_recipe_to_loaded_image(
                     img, recipe,
+                    camera_metadata=photo,
                     native_size=_recipe_source_dimensions(photo),
                     local_mask=_local_masks.load_snapshot(
                         vireo_dir, photo["id"], recipe,
@@ -23045,6 +23059,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "source_path": source_path,
                 "source_mtime": source_mtime,
                 "edit_math_version": EDIT_MATH_VERSION,
+                **_camera_render_cache_fields(photo, recipe),
             }
             try:
                 if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -23153,6 +23168,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rendered = apply_recipe_to_loaded_image(
                 img, recipe,
+                camera_metadata=photo,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=_local_masks.load_snapshot(
                     vireo_dir, photo["id"], recipe,
@@ -26970,6 +26986,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         if pair_source and not pair_source_path:
             return "", 404
+        cache_recipe = None if pair_source == "jpeg" else db.get_photo_edit_recipe(photo_id)
         cache_filename = (
             f"{photo_id}_{pair_source}.jpg" if pair_source else filename
         )
@@ -27003,11 +27020,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 selected_source_mtime is None
                 or cached_mtime >= selected_source_mtime
             )
+            fresh = fresh and _camera_cache_matches(thumb_path, photo, cache_recipe)
             if fresh:
                 return _send_cached(thumb_dir, cache_filename)
             log.info(
-                "Thumbnail for photo %s is stale (cached mtime %.0f < "
-                "source file_mtime %.0f) — regenerating",
+                "Thumbnail for photo %s is stale (cached mtime %s, "
+                "source file_mtime %s, or changed camera profile) — regenerating",
                 photo_id, cached_mtime, selected_source_mtime,
             )
             # ``generate_thumbnail`` short-circuits when the destination
@@ -27050,7 +27068,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if sidecar_mtime is not None and (
                     selected_source_mtime is None
                     or sidecar_mtime >= selected_source_mtime
-                ):
+                ) and _camera_cache_matches(thumb_path, photo, cache_recipe):
                     return _send_cached(thumb_dir, cache_filename)
                 # A stale sidecar has to go before we fall through, for
                 # the same reason as the original: ``generate_thumbnail``
@@ -27177,6 +27195,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 thumb_dir,
                 size=thumb_size,
                 recipe=render_recipe,
+                camera_metadata=photo,
                 raw_decode=raw_decode,
                 min_source_size=min_source_size,
                 native_size=(
@@ -27229,6 +27248,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             thumb_dir,
                             size=thumb_size,
                             recipe=render_recipe,
+                            camera_metadata=photo,
                             native_size=(
                                 _recipe_source_dimensions(photo)
                                 if render_recipe else None
@@ -29122,29 +29142,65 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/culling/apply", methods=["POST"])
     def api_culling_apply():
-        """Apply culling decisions — flag keepers and reject others."""
+        """Apply culling decisions — flag keepers and reject others.
+
+        ``unflag`` carries the photos the user explicitly moved back to
+        Review on the cull page. Without it those photos would keep a stale
+        "flagged"/"rejected" flag from an earlier apply, and the cull page
+        would show that old flag back on the card the moment the decision
+        stopped being a session override — a silently reverted decision.
+        Only ids the client sends are touched, never every REVIEW photo.
+        """
         db = _get_db()
         body = request.get_json(silent=True) or {}
         keepers = body.get("keepers", [])
         rejects = body.get("rejects", [])
+        unflag = body.get("unflag", [])
+
+        for name, value in (("keepers", keepers), ("rejects", rejects),
+                            ("unflag", unflag)):
+            if not isinstance(value, list):
+                return json_error(f"{name} must be a list")
+
+        # A photo listed in more than one action would otherwise land on
+        # whichever mutation ran last (or whichever kept its old flag), so
+        # the endpoint's answer would depend on prior state. Reject the
+        # payload before touching anything.
+        overlaps = (
+            (set(keepers) & set(rejects), "keepers", "rejects"),
+            (set(keepers) & set(unflag), "keepers", "unflag"),
+            (set(rejects) & set(unflag), "rejects", "unflag"),
+        )
+        for shared, a, b in overlaps:
+            if shared:
+                pid = next(iter(sorted(shared)))
+                return json_error(
+                    f"Photo {pid} listed in both {a} and {b}", 400
+                )
 
         # Pre-validate all photo IDs against workspace before any mutations
-        for pid in keepers + rejects:
+        for pid in keepers + rejects + unflag:
             if not db._photo_in_workspace(pid):
                 return json_error(f"Photo {pid} is not in the active workspace", 403)
 
         # Capture old flags before mutation
         old_flags = {}
-        for pid in keepers + rejects:
+        for pid in keepers + rejects + unflag:
             old = db.get_photo(pid)
             if old:
                 old_flags[pid] = old["flag"] or "none"
+
+        # Clearing a flag that is already "none" would write a no-op history
+        # entry, so only the photos that actually carry a flag are cleared.
+        cleared = [pid for pid in unflag if old_flags.get(pid, "none") != "none"]
 
         try:
             for pid in keepers:
                 db.update_photo_flag(pid, "flagged")
             for pid in rejects:
                 db.update_photo_flag(pid, "rejected")
+            for pid in cleared:
+                db.update_photo_flag(pid, "none")
         except ValueError as e:
             return json_error(str(e), 403)
 
@@ -29156,18 +29212,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for pid in rejects:
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
+        for pid in cleared:
+            flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'none'})
         if flag_items:
             for item in flag_items:
                 db.queue_flag_change_if_enabled(
                     item["photo_id"], item["new_value"], _commit=False
                 )
             db.conn.commit()
-            db.record_edit('flag',
-                           f'Culling: flagged {len(keepers)}, rejected {len(rejects)}',
-                           'culling_apply', flag_items, is_batch=True)
+            summary = f'Culling: flagged {len(keepers)}, rejected {len(rejects)}'
+            if cleared:
+                summary += f', cleared {len(cleared)}'
+            db.record_edit('flag', summary, 'culling_apply', flag_items, is_batch=True)
 
-        log.info("Culling applied: %d keepers, %d rejects", len(keepers), len(rejects))
-        return jsonify({"ok": True, "keepers": len(keepers), "rejects": len(rejects)})
+        log.info(
+            "Culling applied: %d keepers, %d rejects, %d cleared",
+            len(keepers), len(rejects), len(cleared),
+        )
+        return jsonify({
+            "ok": True,
+            "keepers": len(keepers),
+            "rejects": len(rejects),
+            "cleared": len(cleared),
+        })
 
     @app.route("/api/photos/search")
     def api_photo_text_search():
@@ -29594,6 +29661,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stale_after_failed_invalidation = (
             cache_path in _invalid_preview_cache_paths
             or _is_preview_cache_invalid(db, photo_id, size)
+            or (os.path.exists(cache_path) and not _camera_cache_matches(cache_path, photo, render_recipe))
         )
         if (
             not bypass_cache
@@ -30282,6 +30350,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import local_masks
             img = apply_recipe_to_loaded_image(
                 img, recipe_json, max_size=size,
+                camera_metadata=photo,
                 native_size=native_dims,
                 detail_scale=preview_detail_scale,
                 local_mask=local_masks.load_snapshot(
@@ -30378,6 +30447,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = apply_recipe_to_loaded_image(
                         img,
                         recipe,
+                        camera_metadata=photo,
                         native_size=_recipe_source_dimensions(photo),
                         local_mask=local_masks.load_snapshot(
                             vireo_dir, photo_id, recipe,
@@ -30888,6 +30958,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe,
+                camera_metadata=photo,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=local_masks.load_snapshot(
                     vireo_dir, photo_id, recipe,

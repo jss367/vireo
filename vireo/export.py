@@ -545,6 +545,10 @@ def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
             import local_masks
             img = apply_recipe_to_loaded_image(
                 img, recipe, max_size=max_size,
+                camera_metadata={
+                    **dict(photo),
+                    "exif_data": exif_data if exif_data is not None else _photo_value(photo, "exif_data"),
+                },
                 native_size=_recipe_source_dimensions(photo, exif_data),
                 local_mask=local_masks.load_snapshot(
                     vireo_dir, pid, recipe,

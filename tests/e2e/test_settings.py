@@ -1,6 +1,7 @@
 import json
 import re
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -30,6 +31,33 @@ def test_settings_system_info_renders(live_server, page):
     # Compute device should be populated
     device_name = page.locator("#deviceName")
     expect(device_name).not_to_have_text("-", timeout=api_timeout)
+
+
+@pytest.mark.parametrize(
+    ("tier", "long_paths", "expected"),
+    [
+        ("supported", True, "Supported"),
+        ("supported", False, "Action needed"),
+        ("unsupported", True, "Unsupported Windows version"),
+    ],
+)
+def test_settings_windows_support_status(live_server, page, tier, long_paths, expected):
+    def system_info(route):
+        response = route.fetch()
+        info = response.json()
+        info["platform_support"] = {
+            "platform": "win32",
+            "support_tier": tier,
+            "windows_release": "11" if tier == "supported" else "10",
+            "architecture": "AMD64",
+            "long_paths": {"enabled": long_paths},
+        }
+        route.fulfill(response=response, json=info)
+
+    page.route("**/api/system/info", system_info)
+    page.goto(f"{live_server['url']}/settings")
+    expect(page.locator("#windowsSupportRow")).to_be_visible()
+    expect(page.locator("#windowsSupportStatus")).to_have_text(expected)
 
 
 def test_settings_cmd_f_opens_page_text_search(live_server, page):

@@ -23201,10 +23201,11 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept
     """A `prediction_accept(src_id)` edit retargeted onto dst_id must not
     let undo strip a pre-existing survivor tag. prediction_accept shares
     the keyword_add branch in _apply_undo — the untag_photo call would
-    remove the survivor. The migration drops such items; prediction-
-    status restoration for those specific items is intentionally
-    sacrificed to preserve the user's tag (see _merge_keyword_into).
+    remove the survivor. Retain the item as status-only so the prediction
+    ID remains available to undo without removing the user's tag.
     """
+    import json
+
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
@@ -23248,11 +23249,13 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept
                 (eid,),
             ).fetchall()
         ]
-        assert pid_had_both not in remaining_pids, (
-            "prediction_accept item for a photo that pre-existingly held "
-            "the survivor tag should be dropped so undo does not untag it"
-        )
+        assert pid_had_both in remaining_pids
         assert pid_only_src in remaining_pids
+        retained = db.conn.execute(
+            "SELECT old_value FROM edit_history_items WHERE edit_id = ? AND photo_id = ?",
+            (eid, pid_had_both),
+        ).fetchone()[0]
+        assert json.loads(retained) == {"prediction_ids": [42], "no_tag": True}
 
         db.undo_last_edit()
         assert keep_id in {

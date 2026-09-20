@@ -213,3 +213,32 @@ def test_straighten_preserves_float_geometry_and_source():
     assert result.size == source.size
     assert len(np.unique(result.pixels[32, 10:-10, 0])) > 256
     np.testing.assert_array_equal(source.pixels, pixels)
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_camera_denoise_retains_float_precision_and_16_bit_export(local):
+    from camera_denoise import _filter_strength
+
+    rng = np.random.default_rng(1722)
+    pixels = np.clip(0.3 + rng.normal(0, 0.02, (64, 96, 3)), 0, 1).astype(np.float32)
+    image = FloatImage(pixels, encoding="srgb")
+    assert _filter_strength(np.asarray(image.convert("RGB")), None, 1).max() > 0.5
+    recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 60}}
+    mask = None
+    if local:
+        recipe['local'] = {
+            'mask': {'ref': 'a1b2c3d4e5f6', 'source_digest': 'test'},
+            'regions': [{'region': 'subject', 'adjustments': {'noise_reduction': 30}}],
+        }
+        mask = Image.fromarray(np.tile(np.repeat([255, 0], 48).astype(np.uint8), (64, 1)))
+    result = apply_recipe_to_loaded_image(image, recipe, local_mask=mask)
+    assert isinstance(result, FloatImage)
+    assert result.pixels.std() < pixels.std()
+    assert np.max(np.abs(result.pixels * 255 - np.rint(result.pixels * 255))) > 0.1
+    np.testing.assert_array_equal(image.pixels, pixels)
+    stream = io.BytesIO()
+    result.save(stream, format='TIFF')
+    stream.seek(0)
+    exported = tifffile.imread(stream)
+    assert exported.dtype == np.uint16
+    assert len(np.unique(exported)) > 256

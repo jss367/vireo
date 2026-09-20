@@ -22316,7 +22316,7 @@ var predictions = Array.from({length: 6}, function(_, idx) {
   var collapsedHTML = __list.innerHTML;
   selectionPredictionsExpanded = true;
   renderSelectionPredictions(predictions, 3, {});
-  var button = {disabled: false, textContent: 'Accept on all'};
+  var button = {disabled: false, textContent: 'Accept on all 3'};
   await acceptSelectionPrediction(0, true, button);
   await acceptSelectionPrediction(2, true, button);
   await acceptSelectionPrediction(1);
@@ -22328,8 +22328,8 @@ var predictions = Array.from({length: 6}, function(_, idx) {
 """,
     ])
     result = _run_node(source, [])
-    assert result["collapsedHTML"].count(">Accept on all</button>") == 5
-    assert result["expandedHTML"].count(">Accept on all</button>") == 6
+    assert result["collapsedHTML"].count(">Accept on all 3</button>") == 5
+    assert result["expandedHTML"].count(">Accept on all 3</button>") == 6
     assert result["requests"][0]["body"] == {
         "prediction_ids": [100], "expected_species": "Say's Phoebe", "photo_ids": [11, 12, 13],
     }
@@ -22340,7 +22340,119 @@ var predictions = Array.from({length: 6}, function(_, idx) {
         "prediction_ids": [101], "expected_species": "Species 1",
     }
     assert result["refreshes"] == [[11, 12, 13]] * 3
-    assert result["button"] == {"disabled": False, "textContent": "Accept on all"}
+    # The in-flight label is restored to what the row rendered, count and
+    # all, rather than to a hardcoded "Accept on all" that would drop the
+    # number off every button the user has already clicked once.
+    assert result["button"] == {"disabled": False, "textContent": "Accept on all 3"}
+
+
+def test_selection_prediction_accept_on_all_leads_and_names_its_count(app_and_db):
+    """"Accept on all" is the primary action, and it says how many photos.
+
+    A selection in Browse is normally one bird event, so accepting the
+    species across the whole selection is the button that actually gets
+    clicked; the narrower "Accept on N" is the exception. The panel
+    therefore renders the whole-selection accept first and in the accent
+    fill, with the subset accept outlined beneath it.
+
+    That promotion only stays honest if the promoted button names its own
+    size. "Accept on all" under "Predicted on 14 of 15" is a rounding error
+    on the prediction; the same words under "Predicted on 2 of 70" claim a
+    species on 68 photos that never predicted it, and nothing in the button
+    would have said so. So the label carries the selection count.
+
+    And when every selected photo already predicts the species
+    unambiguously, the two buttons submit identical work — same rows, same
+    keywords, same single undo entry. The panel drops the duplicate rather
+    than asking the user to choose between two spellings of one action.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    source = "\n".join([
+        _PANEL_DOM_STUB.replace(
+            "id === 'detailPredictions'", "id === 'selectionPredictions'",
+        ),
+        _browse_escape_helpers(),
+        _browse_js_function_body(html, "function formatPredictionConfidence("),
+        _browse_js_function_body(html, "function renderSelectionPredictions("),
+        _browse_js_function_body(html, "async function acceptSelectionPrediction("),
+        """
+var selectionPredictionsExpanded = true;
+var selectionPredictionAcceptableById = {};
+var selectionPredictionSpeciesByIdx = {};
+var selectionPredictionPhotoIdsByIdx = {};
+var requests = [];
+var selection = [];
+for (var i = 1; i <= 15; i++) selection.push(i);
+function getActiveSelection() { return selection.slice(); }
+async function safeFetch(url, opts) {
+  requests.push({url: url, body: JSON.parse(opts.body)});
+  return {accepted: 15};
+}
+async function _afterPredictionMutation() {}
+function _reportSkippedAccepts() {}
+var predictions = [
+  {species: 'Saffron Finch', predicted_count: 14, predicted_photo_ids: [],
+   acceptable_photo_count: 14,
+   acceptable_prediction_ids: [101], ambiguous_photo_ids: [],
+   min_confidence: 0.03, max_confidence: 1.0},
+  {species: 'Blue-breasted Quail', predicted_count: 2, predicted_photo_ids: [],
+   acceptable_photo_count: 2,
+   acceptable_prediction_ids: [102], ambiguous_photo_ids: [],
+   min_confidence: 0.9, max_confidence: 0.95},
+  {species: 'Common Gallinule', predicted_count: 15, predicted_photo_ids: [],
+   acceptable_photo_count: 15,
+   acceptable_prediction_ids: [103], ambiguous_photo_ids: [],
+   min_confidence: 0.8, max_confidence: 0.99},
+];
+(async function() {
+  renderSelectionPredictions(predictions, 15, {});
+  var rendered = __list.innerHTML;
+  // Click the single button on the row whose subset accept was dropped.
+  var button = {disabled: false, textContent: 'Accept on all 15'};
+  await acceptSelectionPrediction(2, true, button);
+  process.stdout.write(JSON.stringify({
+    html: rendered, requests: requests, button: button,
+  }));
+})();
+""",
+    ])
+    result = _run_node(source, [])
+    rows = result["html"].split('class="prediction-row')[1:]
+    assert len(rows) == 3, result["html"]
+
+    # Every row leads with the whole-selection accept, and every accept
+    # button — both kinds — carries the photo count it would write to.
+    for row in rows:
+        assert ">Accept on all 15</button>" in row, row
+    assert ">Accept on 14</button>" in rows[0]
+    assert ">Accept on 2</button>" in rows[1]
+    # The promoted button comes first in each row, so the accent-filled
+    # button under the cursor is the one that gets clicked most.
+    assert rows[0].index("Accept on all 15") < rows[0].index("Accept on 14")
+    assert rows[1].index("Accept on all 15") < rows[1].index("Accept on 2")
+    # Primary vs secondary chrome, not just order.
+    assert rows[0].count("prediction-accept-all") == 1
+    assert rows[0].count("prediction-accept-subset") == 1
+
+    # Predicted on all 15 of 15: the subset accept would submit the exact
+    # same work, so it is not rendered at all.
+    assert "prediction-accept-subset" not in rows[2], rows[2]
+    assert rows[2].count("<button") == 1, rows[2]
+    assert "all 15 selected photos" in rows[2]
+
+    # And the surviving button still runs the whole-selection accept.
+    assert result["requests"] == [{
+        "url": "/api/predictions/batch-accept",
+        "body": {
+            "prediction_ids": [103],
+            "expected_species": "Common Gallinule",
+            "photo_ids": list(range(1, 16)),
+        },
+    }]
+    assert result["button"] == {
+        "disabled": False, "textContent": "Accept on all 15",
+    }
 
 
 def test_selection_prediction_show_button_opens_only_that_species_photos(app_and_db):
@@ -26047,6 +26159,287 @@ def test_selection_prediction_species_identity_merges_names_and_accepts(
     assert all(not db.get_photo_keywords(p) for p in photos[1:])
     assert [k["id"] for k in db.get_photo_keywords(photos[0])] == ([existing_kid] if already_tagged else [])
     assert {r["status"] for r in db.get_predictions(photo_ids=photos[:2])} == {"pending"}
+
+
+@pytest.mark.parametrize("on_all", [False, True])
+@pytest.mark.parametrize("inat_first", [False, True])
+@pytest.mark.parametrize("already_tagged", [False, True])
+def test_batch_accept_prefers_named_keyword_among_same_taxon_aliases(
+    app_and_db, on_all, inat_first, already_tagged,
+):
+    """Legacy and native classifiers must select the same Pond Slider tag."""
+    app, db = app_and_db
+    client = app.test_client()
+    taxon_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (39782, 'Trachemys scripta', 'Pond Slider', 'species')",
+    ).lastrowid
+    # Reproduce an imported catalog with two spellings linked to one taxon.
+    # Source-based lookup used to choose the older alias, while name-based
+    # lookup chose Pond slider, failing the batch's single-keyword check.
+    alias_id, pond_id = [db.conn.execute(
+        "INSERT INTO keywords (name, is_species, type, taxon_id) "
+        "VALUES (?, 1, 'taxonomy', ?)", (name, taxon_id),
+    ).lastrowid for name in ("Red-eared slider", "Pond slider")]
+    db.conn.commit()
+    photos = []
+    prediction_ids = []
+    for i in range(2):
+        photo, detection = _seed_prediction_photo(db, f"slider-{i}.jpg", "Pond Slider", .95)
+        photos.append(photo)
+        legacy_id = _prediction_id(db, photo, "Pond Slider")
+        db.add_prediction(
+            detection, "Pond Slider", .96, "iNat21", labels_fingerprint="tol",
+            taxonomy={"scientific_name": "Trachemys scripta"},
+        )
+        native_id = next(row["id"] for row in db.get_predictions(photo_ids=[photo]) if row["model"] == "iNat21")
+        prediction_ids.extend([native_id, legacy_id] if inat_first else [legacy_id, native_id])
+    if already_tagged:
+        db.tag_photo(photos[0], alias_id)
+    extra, _ = _seed_prediction_photo(db, "slider-no-pending.jpg", "Pond Slider", .9, status="rejected")
+    selection = [*photos, extra]
+    entries = client.post(
+        "/api/selection/prediction-suggestions", json={"photo_ids": selection},
+    ).get_json()["predictions"]
+    assert len(entries) == 1
+    assert set(entries[0]["acceptable_prediction_ids"]) == set(prediction_ids)
+    payload = {"prediction_ids": prediction_ids, "expected_species": entries[0]["species"]}
+    if on_all:
+        payload["photo_ids"] = selection
+    response = client.post("/api/predictions/batch-accept", json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.get_json()["accepted"] == (3 if on_all else 2)
+    assert response.get_json()["species"] == "Pond slider"
+    assert [k["id"] for k in db.get_photo_keywords(photos[0])] == [alias_id if already_tagged else pond_id]
+    assert [k["id"] for k in db.get_photo_keywords(photos[1])] == [pond_id]
+    assert [k["id"] for k in db.get_photo_keywords(extra)] == ([pond_id] if on_all else [])
+    assert {r["status"] for r in db.get_predictions(photo_ids=photos)} == {"accepted"}
+    assert client.post("/api/undo").status_code == 200
+    assert [k["id"] for k in db.get_photo_keywords(photos[0])] == ([alias_id] if already_tagged else [])
+    assert not db.get_photo_keywords(photos[1])
+    assert not db.get_photo_keywords(extra)
+    assert {r["status"] for r in db.get_predictions(photo_ids=photos)} == {"pending"}
+
+
+@pytest.mark.parametrize("common,alias,scientific,taxon", [
+    ("European Starling", "Common Starling", "Sturnus vulgaris", 14850),
+    ("California Scrub-Jay", "California Scrub Jay", "Aphelocoma californica", 506118),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("on_all", [False, True])
+def test_batch_accept_same_species_with_different_keyword_names(
+    app_and_db, common, alias, scientific, taxon, reverse, on_all,
+):
+    """Aliases need not share a keyword ID for one accept/undo/redo action."""
+    app, db = app_and_db
+    client = app.test_client()
+    local_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, 'species')",
+        (taxon, scientific, common),
+    ).lastrowid
+    db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
+    db.set_meta("common_name_identity_version", "1")
+    alias_id = db.add_keyword(alias, is_species=True)
+    common_id = db.add_keyword(common, is_species=True)
+    assert alias_id != common_id
+    photo_a, _ = _seed_prediction_photo(db, "alias.jpg", alias, .95)
+    photo_b, _ = _seed_prediction_photo(db, "common.jpg", common, .96, model="iNat21", labels_fingerprint="tol")
+    pred_ids = [_prediction_id(db, photo_a, alias), _prediction_id(db, photo_b, common)]
+    db.conn.execute("UPDATE predictions SET scientific_name = ? WHERE id = ?", (scientific, pred_ids[1]))
+    db.conn.commit()
+    extra, _ = _seed_prediction_photo(db, "no-pending.jpg", common, .9, status="rejected")
+    photos = [photo_a, photo_b, extra]
+    entries = client.post(
+        "/api/selection/prediction-suggestions", json={"photo_ids": photos},
+    ).get_json()["predictions"]
+    assert len(entries) == 1
+    assert set(entries[0]["acceptable_prediction_ids"]) == set(pred_ids)
+    if reverse:
+        pred_ids.reverse()
+    payload = {"prediction_ids": pred_ids, "expected_species": entries[0]["species"]}
+    if on_all:
+        payload["photo_ids"] = photos
+    response = client.post("/api/predictions/batch-accept", json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)
+    expected = {photo_a: [alias_id], photo_b: [common_id], extra: []}
+    if on_all:
+        expected[extra] = [common_id if reverse else alias_id]
+
+    def assert_accepted():
+        assert {p: [k["id"] for k in db.get_photo_keywords(p)] for p in photos} == expected
+        assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"accepted"}
+        for photo, kids in expected.items():
+            names = {db.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()[0] for kid in kids}
+            adds = {r[0] for r in db.conn.execute(
+                "SELECT value FROM pending_changes WHERE photo_id = ? AND change_type = 'keyword_add'", (photo,),
+            )}
+            assert adds == names
+
+    assert_accepted()
+    edits = [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
+    assert len(edits) == 1
+    assert client.post("/api/undo").status_code == 200
+    assert all(not db.get_photo_keywords(p) for p in photos)
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"pending"}
+    assert not db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id IN (?, ?, ?) AND change_type = 'keyword_add'", photos,
+    ).fetchone()
+    assert client.post("/api/redo").status_code == 200
+    assert_accepted()
+
+
+def test_batch_accept_rejects_distinct_taxa_with_same_display_name(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    photos, pred_ids = [], []
+    for i, scientific in enumerate(("Firstus species", "Secondus species"), start=1):
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, 'Shared name', 'species')",
+            (100 + i, scientific),
+        )
+        photo, _ = _seed_prediction_photo(db, f"homonym-{i}.jpg", "Shared name", .95)
+        photos.append(photo)
+        pred_ids.append(_prediction_id(db, photo, "Shared name"))
+        db.conn.execute(
+            "UPDATE predictions SET source_taxon_id = ?, scientific_name = ? WHERE id = ?",
+            (100 + i, scientific, pred_ids[-1]),
+        )
+    db.conn.commit()
+    keywords_before = [tuple(r) for r in db.conn.execute("SELECT * FROM keywords ORDER BY id")]
+    response = client.post("/api/predictions/batch-accept", json={"prediction_ids": pred_ids})
+    assert response.status_code == 400
+    assert "one species" in response.get_json()["error"]
+    assert all(not db.get_photo_keywords(p) for p in photos)
+    assert {r["status"] for r in db.get_predictions(photo_ids=photos)} == {"pending"}
+    assert [tuple(r) for r in db.conn.execute("SELECT * FROM keywords ORDER BY id")] == keywords_before
+    assert not [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
+
+
+@pytest.mark.parametrize("on_all", [False, True])
+def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db, on_all):
+    """Merging an alias used by a mixed-alias prediction_accept must not let
+    undo strip a survivor tag the photo carried before the merge.
+
+    The batch records each item's actual keyword id, so the parent edit's
+    ``new_value`` (the first alias) can differ from a later item's. The
+    merge cleanup in ``_merge_keyword_into`` therefore cannot require the
+    parent to also equal the source keyword — it must identify per-item
+    ``prediction_accept`` entries by their own ``new_value`` alone, or a
+    subsequent undo will untag the pre-existing survivor on that photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    common, alias, scientific, taxon = (
+        "Common Starling", "European Starling", "Sturnus vulgaris", 14850,
+    )
+    local_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, 'species')",
+        (taxon, scientific, common),
+    ).lastrowid
+    db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
+    db.set_meta("common_name_identity_version", "1")
+    alias_id = db.add_keyword(alias, is_species=True)
+    common_id = db.add_keyword(common, is_species=True)
+    assert alias_id != common_id
+    photo_a, _ = _seed_prediction_photo(db, "alias.jpg", alias, .95)
+    photo_b, _ = _seed_prediction_photo(
+        db, "common.jpg", common, .96, model="iNat21", labels_fingerprint="tol",
+    )
+    pred_ids = [_prediction_id(db, photo_a, alias), _prediction_id(db, photo_b, common)]
+    db.conn.execute(
+        "UPDATE predictions SET scientific_name = ? WHERE id = ?", (scientific, pred_ids[1]),
+    )
+    db.conn.commit()
+    entries = client.post(
+        "/api/selection/prediction-suggestions", json={"photo_ids": [photo_a, photo_b]},
+    ).get_json()["predictions"]
+    assert len(entries) == 1
+    payload = {
+        "prediction_ids": pred_ids, "expected_species": entries[0]["species"],
+    }
+    if on_all:
+        payload["photo_ids"] = [photo_a, photo_b]
+    response = client.post("/api/predictions/batch-accept", json=payload)
+    assert response.status_code == 200, response.get_data(as_text=True)
+    # Sanity: the batch tags each photo with the alias that matched its own
+    # prediction, so the two items have different ``new_value`` keyword ids.
+    assert [k["id"] for k in db.get_photo_keywords(photo_a)] == [alias_id]
+    assert [k["id"] for k in db.get_photo_keywords(photo_b)] == [common_id]
+    # Simulate the user tagging photo_b with the OTHER alias after acceptance,
+    # then merging the two aliases together. Photo_b's ``alias_id`` tag is a
+    # user action the accept never created.
+    db.tag_photo(photo_b, alias_id)
+    assert alias_id in [k["id"] for k in db.get_photo_keywords(photo_b)]
+    db._merge_keyword_into(common_id, alias_id)
+    db.conn.commit()
+    # After the merge photo_b carries the surviving alias_id only.
+    assert [k["id"] for k in db.get_photo_keywords(photo_b)] == [alias_id]
+    # Undo of the accept must not strip the manually applied ``alias_id`` from
+    # photo_b — that tag pre-existed the merge and was never in this batch.
+    assert client.post("/api/undo").status_code == 200
+    assert alias_id in [k["id"] for k in db.get_photo_keywords(photo_b)]
+    # photo_a's accepted tag was the only thing that item contributed, so its
+    # undo still runs and clears the tag.
+    assert not db.get_photo_keywords(photo_a)
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"pending"}
+    assert client.post("/api/redo").status_code == 200
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"accepted"}
+    assert all([k["id"] for k in db.get_photo_keywords(p)] == [alias_id] for p in [photo_a, photo_b])
+
+
+@pytest.mark.parametrize("earlier_source_add", [False, True])
+def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_source_add):
+    """A no-tag accept remains undoable after its alias is merged away."""
+    app, db = app_and_db
+    client = app.test_client()
+    common, alias = "Common Starling", "European Starling"
+    local_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (14850, 'Sturnus vulgaris', ?, 'species')", (common,),
+    ).lastrowid
+    db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
+    db.set_meta("common_name_identity_version", "1")
+    alias_id = db.add_keyword(alias, is_species=True)
+    common_id = db.add_keyword(common, is_species=True)
+    photo_a, _ = _seed_prediction_photo(db, "alias-status.jpg", alias, .95)
+    photo_b, _ = _seed_prediction_photo(db, "common-status.jpg", common, .96)
+    pred_ids = [_prediction_id(db, photo_a, alias), _prediction_id(db, photo_b, common)]
+    # Either the survivor was manually tagged before acceptance, or the
+    # source has an older tag-adding edit and the survivor is added later.
+    # These exercise both merge-history cleanup DELETEs.
+    db.tag_photo(photo_b, common_id if earlier_source_add else alias_id)
+    if earlier_source_add:
+        db.record_edit("keyword_add", "Add source", str(common_id), [{
+            "photo_id": photo_b, "old_value": "", "new_value": str(common_id),
+        }])
+    response = client.post("/api/predictions/batch-accept", json={"prediction_ids": pred_ids})
+    assert response.status_code == 200, response.get_data(as_text=True)
+    accept_id = next(e["id"] for e in db.get_edit_history() if e["action_type"] == "prediction_accept")
+    item = db.conn.execute(
+        "SELECT old_value, new_value FROM edit_history_items WHERE edit_id = ? AND photo_id = ?",
+        (accept_id, photo_b),
+    ).fetchone()
+    assert json.loads(item["old_value"])["no_tag"] is True
+    assert item["new_value"] == str(common_id)
+    if earlier_source_add:
+        db.tag_photo(photo_b, alias_id)
+        later_edit = db.record_edit("keyword_add", "Add survivor", str(alias_id), [{
+            "photo_id": photo_b, "old_value": "", "new_value": str(alias_id),
+        }])
+    db._merge_keyword_into(common_id, alias_id)
+    db.conn.commit()
+    if earlier_source_add:
+        # The later redundant add is retained as an empty history entry.
+        assert not db.conn.execute("SELECT 1 FROM edit_history_items WHERE edit_id = ?", (later_edit,)).fetchone()
+        assert client.post("/api/undo").status_code == 200
+        assert [k["id"] for k in db.get_photo_keywords(photo_b)] == [alias_id]
+    assert client.post("/api/undo").status_code == 200
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"pending"}
+    assert not db.get_photo_keywords(photo_a)
+    assert [k["id"] for k in db.get_photo_keywords(photo_b)] == [alias_id]
+    assert client.post("/api/redo").status_code == 200
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"accepted"}
+    assert all([k["id"] for k in db.get_photo_keywords(p)] == [alias_id] for p in [photo_a, photo_b])
 
 
 def test_selection_prediction_species_identity_keeps_homonyms_separate(app_and_db):

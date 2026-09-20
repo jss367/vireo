@@ -6,6 +6,7 @@ import os
 import tempfile
 from datetime import UTC, datetime
 
+from camera_denoise import cache_matches, cache_save_options
 from image_loader import (
     RAW_DECODE_LINEAR,
     RAW_EXTENSIONS,
@@ -101,6 +102,7 @@ def _retry_thumbnail_after_working_copy_eviction(
         raw_decode=raw_decode,
         min_source_size=min_source_size,
         native_size=_recipe_source_dimensions(photo) if recipe else None,
+        camera_metadata=photo,
         cache_name=cache_name,
     ), original_path
 
@@ -178,6 +180,7 @@ def _retry_thumbnail_with_companion(
             db.conn.commit()
     recipe_kwargs = {"recipe": recipe} if recipe else {}
     if recipe:
+        recipe_kwargs["camera_metadata"] = photo
         recipe_kwargs["native_size"] = _recipe_source_dimensions(photo)
     return generate_thumbnail(
         photo_id,
@@ -221,7 +224,7 @@ def _retry_thumbnail_with_working_copy(
                 (file_mtime, photo_id),
             )
             db.conn.commit()
-    recipe_kwargs = {"recipe": recipe, "native_size": _recipe_source_dimensions(photo)}
+    recipe_kwargs = {"recipe": recipe, "native_size": _recipe_source_dimensions(photo), "camera_metadata": photo}
     return generate_thumbnail(
         photo_id,
         wc_path,
@@ -235,7 +238,7 @@ def _retry_thumbnail_with_working_copy(
 
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
-    raw_decode=None, min_source_size=None, native_size=None, cache_name=None,
+    raw_decode=None, min_source_size=None, native_size=None, cache_name=None, camera_metadata=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -270,7 +273,7 @@ def generate_thumbnail(
     """
     thumb_path = os.path.join(cache_dir, cache_name or f"{photo_id}.jpg")
 
-    if os.path.exists(thumb_path):
+    if os.path.exists(thumb_path) and cache_matches(thumb_path, camera_metadata, recipe):
         return thumb_path
 
     load_max_size = None if recipe and recipe.get("crop") else size
@@ -300,6 +303,7 @@ def generate_thumbnail(
         # without threading vireo_dir through every caller.
         img = apply_recipe_to_loaded_image(
             img, recipe, max_size=size, native_size=native_size,
+            camera_metadata=camera_metadata,
             local_mask=local_masks.load_snapshot(
                 os.path.dirname(os.path.abspath(cache_dir)), photo_id, recipe,
             ),
@@ -315,7 +319,7 @@ def generate_thumbnail(
     )
     os.close(fd)
     try:
-        img.save(tmp_path, "JPEG", quality=quality)
+        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe))
         os.replace(tmp_path, thumb_path)
     except Exception:
         with contextlib.suppress(OSError):
@@ -364,6 +368,12 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         thumb_path = os.path.join(cache_dir, f"{photo['id']}.jpg")
         if not os.path.exists(thumb_path):
             needed.append(photo)
+        else:
+            recipe = db.get_photo_edit_recipe(photo["id"])
+            if ((recipe or {}).get("adjustments") or {}).get("denoise_mode") == "camera":
+                detail_photo = db.get_photo(photo["id"]) or photo
+                if not cache_matches(thumb_path, detail_photo, recipe):
+                    needed.append(photo)
 
     total = len(needed)
     skipped = len(photos) - total
@@ -385,7 +395,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # have a vireo_dir; fall back to a raw folder+filename join for
         # callers that don't pass it.
         recipe = db.get_photo_edit_recipe(photo["id"])
-        source_photo = db.get_photo(photo["id"]) if recipe and vireo_dir else photo
+        source_photo = db.get_photo(photo["id"]) if recipe else photo
         if source_photo is None:
             source_photo = photo
         source_path = _recipe_source_path(
@@ -401,6 +411,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # add_photo INSERT) past the 30s busy_timeout.
         recipe_kwargs = {"recipe": recipe} if recipe else {}
         if recipe:
+            recipe_kwargs["camera_metadata"] = source_photo
             recipe_kwargs["native_size"] = _recipe_source_dimensions(
                 source_photo
             )

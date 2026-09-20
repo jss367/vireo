@@ -51,8 +51,11 @@ retain their existing fast JPEG paths and disk working copies.
   decoder still imposes a finite range. The final working/output primaries and
   profile are sRGB; wide-gamut output profiles are not yet offered.
 - Temperature and tint remain relative RGB adjustments around the camera's
-  as-shot balance. Calibrated Kelvin controls, camera/ISO noise profiles, lens
-  profiles, and capture sharpening are separate future improvements.
+  as-shot balance. Calibrated Kelvin controls, lens profiles, and capture
+  sharpening are separate future improvements. Camera-aware denoising is
+  available; its non-local means filter uses an 8-bit guide and applies the
+  resulting noise correction to the floating-point image, preserving its
+  finer tonal steps.
 - This change upgrades RAW processing and TIFF output. It does not add a
   high-bit-depth loader for arbitrary TIFF or PNG inputs.
 

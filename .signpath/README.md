@@ -1,6 +1,6 @@
 # SignPath release configuration
 
-Windows public-beta tags require the SignPath Foundation open-source project
+Signing Windows releases requires the SignPath Foundation open-source project
 to be approved and the SignPath GitHub App to have repository access.
 
 Configure these repository values:
@@ -21,16 +21,16 @@ Authenticode changes installer bytes.
 The signing policy must accept tagged builds and explicitly requested signed
 release-candidate builds from GitHub-hosted runners on protected repository
 branches. Restrict manual workflow dispatch to trusted maintainers in GitHub
-and SignPath. The workflow rejects a signed Windows build when configuration is
-absent, a signature is invalid, the publisher differs, or the timestamp is
-missing.
+and SignPath. When signing is configured, the workflow rejects signatures that
+are invalid, have a different publisher, or lack a timestamp.
 
-Unsigned artifacts remain available only from manually dispatched internal
-builds and must not be described as supported beta releases.
+If any signing configuration is missing, the workflow falls back to unsigned
+artifacts, including for tagged releases and requested signed candidates.
+Unsigned installers can show an "unknown publisher" warning on Windows.
 
 To certify a build before publishing, manually run **Build & Release** from the
 protected `main` branch, leave `tag_name` blank, and enable
-`sign_windows_candidate`. This uses the repository version, signs and
-smoke-tests the Windows application and installers, and retains the signed
+`sign_windows_candidate` after configuring all signing values above. This uses
+the repository version, signs and smoke-tests the Windows application and installers, and retains the signed
 candidate artifact for 30 days. It does not create a tag or GitHub release and
 does not update the website.

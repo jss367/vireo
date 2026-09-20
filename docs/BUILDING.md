@@ -63,11 +63,14 @@ runs only when every platform build succeeds.
 
 To trigger manually without a tag, use the "Run workflow" button on the Actions tab.
 Manual runs without a tag produce unsigned internal Windows artifacts by
-default. Enable `sign_windows_candidate` to sign, verify, smoke-test, and retain
-a candidate for 30 days without creating a public release. Tagged Windows
-releases and signed candidates require the SignPath repository values
-documented in `.signpath/README.md`; missing or invalid Authenticode signatures
-block the build.
+default. With all signing values configured, run from `main` and enable
+`sign_windows_candidate` to sign, verify, smoke-test, and retain a candidate
+for 30 days without creating a public release. Tagged releases and requested
+signed candidates fall back to unsigned Windows artifacts if any SignPath
+repository value is missing; those installers can show an "unknown publisher"
+warning. When signing is configured, missing or invalid Authenticode signatures,
+an unexpected publisher, or a missing timestamp block the build. See the
+[SignPath configuration guide](../.signpath/README.md) for the required values.
 
 ### Signed Mac build (notarized)
 

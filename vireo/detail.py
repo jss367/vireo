@@ -188,13 +188,20 @@ def _run_detail(rgb, params):
 
 
 def apply_detail(img, *, sharpen=0.0, sharpen_radius=1.0, noise_reduction=0.0,
-                 scale=1.0):
+                 scale=1.0, denoise_mode="standard", noise_profile=None):
     """Apply the detail pass to a PIL image and return a PIL image.
 
     ``sharpen`` and ``noise_reduction`` are recipe amounts in [0, 100];
     ``sharpen_radius`` is in native photo pixels and ``scale`` converts it to
     this render's pixels. A no-op returns the input image unchanged.
     """
+    if denoise_mode == "camera" and noise_reduction > 0:
+        try:
+            from .camera_denoise import apply_camera_denoise
+        except ImportError:
+            from camera_denoise import apply_camera_denoise
+        img = apply_camera_denoise(img, noise_reduction, profile=noise_profile, scale=scale)
+        noise_reduction = 0.0
     params = _detail_params(sharpen, sharpen_radius, noise_reduction, scale)
     if params is None:
         return img
