@@ -632,6 +632,38 @@ def test_photo_editor_adopts_the_server_winner_after_a_concurrent_save(
     assert page.evaluate("() => editorState.cropAspect") == (1 if enabled else None)
 
 
+def test_photo_editor_navigation_adopts_sibling_tab_preference(live_server, page):
+    """A tab whose own PUT has already resolved still opens later photos with
+    the newer preference persisted by another tab."""
+    url = live_server["url"]
+    first_id, second_id = live_server["data"]["photos"][:2]
+    page.context.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{first_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspect32Btn").click()
+    page.get_by_label("Remember crop ratio").check()
+    page.evaluate("() => cropRatioSave")
+
+    other = page.context.new_page()
+    other.goto(f"{url}/edit/{first_id}")
+    other.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    expect(other.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    other.locator("#aspect43Btn").click()
+    other.evaluate("() => cropRatioSave")
+    other.close()
+
+    page.evaluate("photoId => loadPhoto(photoId)", second_id)
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    expect(page.locator("#aspect43Btn")).to_have_class(re.compile(r"\bactive\b"))
+    assert page.evaluate("() => editorState.cropAspect") == pytest.approx(1.3333333333)
+
+
 def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
     """A remembered ratio must not recrop an existing edit just by opening it."""
     url = live_server["url"]

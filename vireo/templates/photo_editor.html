@@ -2397,6 +2397,14 @@ function setStraighten(value) {
   markChanged(true);
 }
 
+var COMMITTED_CROP_RATIO_KEY = 'vireo_committed_crop_ratio';
+
+function isValidCropRatioPreference(value) {
+  return value && typeof value.enabled === 'boolean' &&
+    Number.isSafeInteger(value.revision) && value.revision > 0 &&
+    (value.aspect === null || (Number.isFinite(value.aspect) && value.aspect > 0));
+}
+
 function pendingCropRatioRecords() {
   var records = [];
   try {
@@ -2405,15 +2413,48 @@ function pendingCropRatioRecords() {
     }).forEach(function(key) {
       try {
         var pending = JSON.parse(VireoViewPreferences.read(key));
-        if (pending && typeof pending.enabled === 'boolean' &&
-            Number.isSafeInteger(pending.revision) && pending.revision > 0 &&
-            (pending.aspect === null || (Number.isFinite(pending.aspect) && pending.aspect > 0))) {
+        if (isValidCropRatioPreference(pending)) {
           records.push({key: key, preference: pending});
         }
       } catch (_) {}
     });
   } catch (_) {}
   return records;
+}
+
+function readCommittedCropRatioPreference() {
+  try {
+    var raw = VireoViewPreferences.read(COMMITTED_CROP_RATIO_KEY);
+    if (!raw) return null;
+    var committed = JSON.parse(raw);
+    return isValidCropRatioPreference(committed) ? committed : null;
+  } catch (_) { return null; }
+}
+
+function writeCommittedCropRatioPreference(preference) {
+  if (!isValidCropRatioPreference(preference)) return;
+  var existing = readCommittedCropRatioPreference();
+  if (existing && existing.revision >= preference.revision) return;
+  try {
+    VireoViewPreferences.write(COMMITTED_CROP_RATIO_KEY, JSON.stringify({
+      enabled: !!preference.enabled,
+      aspect: preference.aspect === null ? null : Number(preference.aspect),
+      revision: preference.revision,
+    }));
+  } catch (_) {}
+}
+
+function adoptCommittedCropRatioPreference() {
+  // Another tab may have persisted a newer preference after this tab's last
+  // PUT resolved; that write leaves no callback in this tab, so line-of-sight
+  // navigation would otherwise keep applying the stale in-memory value.
+  var committed = readCommittedCropRatioPreference();
+  if (committed && committed.revision > (cropRatioPreference.revision || 0)) {
+    cropRatioPreference = committed;
+    updateAspectButtons();
+    return true;
+  }
+  return false;
 }
 
 function pendingCropRatioPreference() {
@@ -2447,6 +2488,9 @@ function saveCropRatioPreference(preference) {
       cropRatioPreference = saved;
       updateAspectButtons();
     }
+    // Publish the accepted revision so other editor tabs adopt it via the
+    // storage event instead of relying on their own PUT responses.
+    writeCommittedCropRatioPreference(saved);
     acknowledgeCropRatioPreference(saved.revision);
   }).catch(function() {
     showToast('Could not remember the crop ratio. Please try again.', 'error');
@@ -4512,7 +4556,10 @@ async function loadPhoto(photoId, opts) {
   editorState.showBefore = false;
   editorState.cropEditing = true;
   // Restore only the resizing constraint; opening a photo must not change
-  // its saved crop or create an unsaved edit.
+  // its saved crop or create an unsaved edit. Sync the last committed
+  // preference first so navigation adopts a newer choice made in another tab
+  // even before its storage event has been delivered.
+  adoptCommittedCropRatioPreference();
   editorState.cropAspect = cropRatioPreference.enabled ? cropRatioPreference.aspect : null;
   updateAspectButtons();
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
@@ -4670,9 +4717,22 @@ async function initEditor() {
       cropRatioPreference = saved;
       acknowledgeCropRatioPreference(saved.revision || 0);
     }
+    // Seed the shared committed key so any other tab open on this origin can
+    // see the authoritative revision even before its next PUT round-trips.
+    writeCommittedCropRatioPreference(cropRatioPreference);
+    // Then adopt any newer committed value that arrived from another tab
+    // while this GET was in flight.
+    adoptCommittedCropRatioPreference();
   } catch (_) {
     showToast('Could not load your remembered crop ratio.', 'error');
   }
+  window.addEventListener('storage', function(event) {
+    if (event.key !== COMMITTED_CROP_RATIO_KEY) return;
+    // A sibling editor tab persisted a newer preference. Reflect it in
+    // memory so subsequent Next/Prev navigation opens photos with the
+    // updated resizing constraint without needing a reload.
+    adoptCommittedCropRatioPreference();
+  });
   setEditorLoading(false);
   initCropDrag();
   initEditorKeyboard();
