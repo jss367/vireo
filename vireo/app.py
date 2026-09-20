@@ -83,6 +83,7 @@ from photo_payload import (
     attach_prediction_confidence,
     attach_species,
     attach_species_representatives,
+    render_key_for_recipe,
 )
 from pipeline_results import auto_detach_burst_for_species
 from preview_cache import (
@@ -7833,6 +7834,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        result["render_key"] = render_key_for_recipe(result["edit_recipe"])
         from camera_denoise import resolve_profile
         result["denoise_profile"] = resolve_profile(photo)
         # The shared lightbox normally warms /original after /full settles.
@@ -13258,6 +13260,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         for photo in page_photos:
             photo["edit_recipe"] = recipe_map.get(photo["photo_id"])
+            photo["render_key"] = render_key_for_recipe(photo["edit_recipe"])
         # A slow sidecar or network-folder read can leave the queue time to
         # change after the snapshot was validated above. Never mark the final
         # page complete from that stale snapshot: the client will restart the
@@ -16730,6 +16733,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if d.get("status") == "alternative":
                 continue  # alternatives are nested, not top-level
             d["edit_recipe"] = recipes_by_photo.get(d.get("photo_id"))
+            d["render_key"] = render_key_for_recipe(d["edit_recipe"])
             # Species the accept path will actually apply. For an ordinary
             # prediction this is the row's own species; for a grouped/burst
             # prediction whose frames disagree, ``accept_prediction`` derives
@@ -16815,6 +16819,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error(f"{name} must be a positive integer")
         return photo_ids, None
 
+    def _attach_comparison_render_keys(db, photos):
+        """Give ID Conflicts rows the fingerprint their thumbnail URLs need.
+
+        The page builds ``/thumbnails/<id>.jpg`` through ``vireoThumbnailUrl``
+        like every other grid, and that URL only carries an ``er`` fingerprint
+        when the photo dict does. Thumbnails answer ``Cache-Control: public,
+        max-age=86400``, so without one a browser that cached a row's
+        thumbnail before an edit keeps showing the pre-edit image for a day.
+
+        These rows are keyed by ``photo_id`` rather than ``id``, so they
+        cannot go through ``attach_edit_recipes``.
+        """
+        if not photos:
+            return photos
+        recipes = db.get_photo_edit_recipes(
+            [photo["photo_id"] for photo in photos],
+        )
+        for photo in photos:
+            recipe = recipes.get(photo["photo_id"])
+            photo["edit_recipe"] = recipe
+            photo["render_key"] = render_key_for_recipe(recipe)
+        return photos
+
     @app.route("/api/predictions/compare")
     def api_predictions_compare():
         """One page of the ID Conflicts comparison, plus every count it shows.
@@ -16857,6 +16884,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             for photo in built["photos"]:
                 id_conflicts.attach_assessment(photo, visible, min_confidence)
+            _attach_comparison_render_keys(db, built["photos"])
             return jsonify(built)
 
         refresh_ids, err = _compare_photo_ids("refresh_photo_id")
@@ -16916,10 +16944,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "models": snapshot.all_models,
             "visible_models": snapshot.models,
             "taxonomy_available": snapshot.taxonomy_available,
-            "photos": id_conflicts.page_rows(
+            "photos": _attach_comparison_render_keys(db, id_conflicts.page_rows(
                 db, collection_id, selection.photo_ids,
                 snapshot.models, snapshot.min_confidence,
-            ),
+            )),
             "page": selection.page,
             "per_page": per_page,
             "total": selection.total,

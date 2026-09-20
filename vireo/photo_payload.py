@@ -8,6 +8,45 @@ costs a handful of queries, not one per photo. Only
 accept the ``photo_id`` shape used by cached pipeline results.
 """
 
+import hashlib
+
+
+def render_key_for_recipe(recipe):
+    """Fingerprint an edit recipe for cache-busting rendered-image URLs.
+
+    Thumbnails are served ``Cache-Control: public, max-age=86400``
+    (``serve_thumbnail``), so the URL is the only thing that tells a browser
+    its copy is out of date: the server deleting the cached JPEG on save is
+    invisible to a cache that never asks. Clients append this key to
+    ``/thumbnails/<id>.jpg`` so an edit produces a URL the browser has never
+    seen.
+
+    Derived from the *whole* canonical recipe rather than a hand-listed
+    subset of fields. A subset silently stops busting the cache the moment
+    the recipe grows a key nobody remembered to add -- which is how
+    mask-based ``local`` adjustments came to leave the grid showing pre-edit
+    pixels for a day. ``EDIT_MATH_VERSION`` is folded in for the same reason
+    it keys the server-side render caches: a change to the rendering math
+    produces different bytes for an unchanged recipe.
+
+    Returns ``None`` for a recipe that renders as a no-op, which leaves the
+    URL bare -- correct, because an unedited photo's thumbnail is the same
+    image it has always been.
+    """
+    from image_edits import EDIT_MATH_VERSION, RecipeError, recipe_to_json
+
+    try:
+        canonical = recipe_to_json(recipe)
+    except (RecipeError, ValueError, TypeError):
+        # A recipe the current schema rejects still has to bust the cache:
+        # whatever the renderer makes of it, it is not the unedited image.
+        # Fingerprint the raw value so the URL at least changes with it.
+        canonical = repr(recipe)
+    if not canonical:
+        return None
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    return f"{digest}.m{EDIT_MATH_VERSION}"
+
 
 def attach_species(db, photo_dicts):
     """Attach species keyword names to a list of photo dicts (in-place)."""
@@ -107,7 +146,9 @@ def attach_edit_recipes(db, photo_dicts):
     ids = [p["id"] for p in photo_dicts]
     recipe_map = db.get_photo_edit_recipes(ids)
     for p in photo_dicts:
-        p["edit_recipe"] = recipe_map.get(p["id"])
+        recipe = recipe_map.get(p["id"])
+        p["edit_recipe"] = recipe
+        p["render_key"] = render_key_for_recipe(recipe)
     return photo_dicts
 
 def attach_nested_edit_recipes(db, payload):
@@ -134,6 +175,8 @@ def attach_nested_edit_recipes(db, payload):
         return payload
     recipe_map = db.get_photo_edit_recipes(sorted({pid for _, pid in refs}))
     for photo, pid in refs:
-        photo["edit_recipe"] = recipe_map.get(pid)
+        recipe = recipe_map.get(pid)
+        photo["edit_recipe"] = recipe
+        photo["render_key"] = render_key_for_recipe(recipe)
     attach_species_representatives(db, [photo for photo, _pid in refs])
     return payload

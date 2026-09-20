@@ -415,3 +415,36 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
                  token=refreshed["token"])
     assert still["token"] == refreshed["token"]
     assert still["visible_models"] == ["model-a"]
+
+
+def test_compare_rows_carry_the_render_key_their_thumbnails_need(compare_collection):
+    """Rows must ship the edit fingerprint, on both payload paths.
+
+    ID Conflicts builds its thumbnail URLs with the shared
+    ``vireoThumbnailUrl``, which appends ``?er=<render_key>``. Thumbnails are
+    served ``Cache-Control: public, max-age=86400``, so a row without the key
+    falls back to the bare URL — and a browser holding a copy cached before
+    the edit keeps showing pre-edit pixels for a day.
+    """
+    app, db, cid, photo_ids = compare_collection
+    edited = photo_ids[0]
+    db.set_photo_edit_recipe(edited, {"adjustments": {"exposure": 1.5}})
+
+    # Snapshot path (a normal page) and refresh path (after a decision) are
+    # built separately; both feed the same renderer.
+    snapshot_rows = _get(app, cid, filter="all", per_page=10)["photos"]
+    refresh_rows = _get(app, cid, filter="all", refresh_photo_id=edited)["photos"]
+
+    for label, rows in (("snapshot", snapshot_rows), ("refresh", refresh_rows)):
+        by_id = {row["photo_id"]: row for row in rows}
+        assert edited in by_id, f"{label} payload dropped the edited photo"
+        assert by_id[edited].get("render_key"), (
+            f"{label} row for the edited photo has no render_key; its "
+            "thumbnail URL cannot bust the browser cache"
+        )
+        for photo_id in photo_ids[1:]:
+            if photo_id in by_id:
+                assert by_id[photo_id]["render_key"] is None, (
+                    f"{label} row for an unedited photo invented a render "
+                    "key, costing a needless refetch"
+                )
