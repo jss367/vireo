@@ -12739,7 +12739,7 @@ class Database:
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
-                      d.box_x, d.box_y, d.box_w, d.box_h,
+                      d.id AS detection_id, d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence,
                       pr.confidence AS species_conf,
                       pr.taxonomy_class,
@@ -12804,6 +12804,7 @@ class Database:
                 "width": r["width"],
                 "height": r["height"],
                 "mask_path": r["mask_path"],
+                "detection_id": r["detection_id"],
                 "box_x": r["box_x"],
                 "box_y": r["box_y"],
                 "box_w": r["box_w"],

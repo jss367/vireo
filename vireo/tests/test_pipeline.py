@@ -3140,6 +3140,31 @@ def test_eye_stage_skips_when_primary_disappears_before_lock(tmp_path, monkeypat
     assert _read_eye_fields(db, pid) == (None, None, None, None)
 
 
+
+def test_eye_stage_rejects_other_detector_with_identical_box(tmp_path, monkeypatch):
+    import keypoints as kp
+    from pipeline import _process_photo_for_eye
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+    row = db.list_photos_for_eye_keypoint_stage([pid])[0]
+    new_id = db.write_detection_batch(pid, "other-detector", [{
+        "box": {k: row["box_" + k] for k in "xywh"},
+        "confidence": .99, "category": "animal",
+    }])[0]
+    assert new_id != row["detection_id"]
+    # The new primary already has a replacement mask with the same geometry.
+    db.conn.execute("UPDATE photo_masks SET detector_model='other-detector' WHERE photo_id=?", (pid,))
+    db.conn.commit()
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: [
+        {"name": "left_eye", "x": 300., "y": 300., "conf": .88},
+    ])
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    _process_photo_for_eye(db, row, folders, C=.5, T=.5, k_window=.08)
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+    assert db.conn.execute("SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
+
+
 def test_eye_stage_gate1_out_of_scope_species_no_write(tmp_path, monkeypatch):
     """Gate 1: species class not in {Aves, Mammalia} → no write."""
     import keypoints as kp

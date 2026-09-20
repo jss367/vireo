@@ -2219,7 +2219,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
             "detector_confidence", 0.2
         )
         selected = db.conn.execute(
-            f"""SELECT d.box_x, d.box_y, d.box_w, d.box_h
+            f"""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h
                   FROM detections d
                  WHERE d.photo_id = ?
                    AND d.detector_confidence >= ?
@@ -2234,7 +2234,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
         # eye_kp_fingerprint against ``row`` in that state would strand the
         # photo with results attributed to a subject that is no longer the
         # effective primary (Codex P2 r4056478554).
-        if selected is None or any(selected["box_" + k] != row["box_" + k] for k in "xywh"):
+        if selected is None or selected["id"] != row["detection_id"]:
             return
         current_mask = db.conn.execute(
             "SELECT mask_path FROM photos WHERE id = ?", (row["id"],),
