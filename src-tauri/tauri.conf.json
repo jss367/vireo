@@ -43,6 +43,11 @@
     "externalBin": [
       "binaries/vireo-server"
     ],
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "licenseFile": "../LICENSE",
     "createUpdaterArtifacts": true,
     "macOS": {
       "entitlements": "Entitlements.plist",
