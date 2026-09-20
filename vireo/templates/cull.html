@@ -21,9 +21,27 @@ body { padding-bottom: 36px; }
   border-radius: 8px;
   border: 1px solid var(--border-primary);
 }
+.summary-bar { flex-wrap: wrap; }
 .summary-stat { text-align: center; }
 .summary-stat .num { font-size: 28px; font-weight: 700; color: var(--accent); }
 .summary-stat .label { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.summary-actions {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.summary-link {
+  background: none;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.summary-link:hover { border-color: var(--accent); color: var(--accent); }
 
 .species-section {
   background: var(--bg-secondary);
@@ -121,6 +139,27 @@ body { padding-bottom: 36px; }
 .cull-card-action.review-badge {
   background: var(--warning);
   color: var(--accent-text);
+}
+.cull-card-source {
+  position: absolute;
+  top: 6px;
+  left: 4px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.cull-card-source.manual {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  cursor: pointer;
+}
+.cull-card-source.confirmed {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary);
 }
 .cull-quality { color: var(--text-muted); }
 .cull-filename {
@@ -405,7 +444,18 @@ var cullBusy = false;
 var cullAnalysisPending = 0;
 var cullAnalysisSeq = 0;
 var cullDirty = false;
-var cullUseSavedFlags = false;
+// Per-photo decisions the user made by hand this session: photo_id -> action.
+// They outrank both the saved flag and the freshly computed label, so a
+// slider tweak re-runs the analysis without silently undoing your calls.
+var cullManualDecisions = {};
+// Pinned decisions already written to the database, photo_id -> action.
+// "Review" is the one decision a photo flag cannot hold, so a review pin
+// stays after Apply (otherwise the card would snap back to the suggestion
+// the moment you saved it) — it just no longer counts as unsaved work.
+var cullAppliedDecisions = {};
+// Saved photo flags are decisions you already applied. Honor them over the
+// algorithm's fresh label unless you ask to see the raw suggestions again.
+var cullHonorSavedFlags = true;
 var pipelineResults = null;
 var selectedCollectionId = null;
 var expandedSpecies = {};
@@ -608,14 +658,19 @@ function onGroupingChange(slider) {
   updateCullApplyButton();
 }
 
-function setPipelineResults(data, statusText, useSavedFlags) {
+function setPipelineResults(data, statusText) {
   pipelineResults = data;
-  cullUseSavedFlags = !!useSavedFlags;
-  cullDirty = false;
   rebuildCullDataFromPipeline();
+  cullDirty = unappliedPinCount() > 0;
+  var kept = cullData ? (cullData.pinned_count || 0) : 0;
+  var parts = [];
+  if (statusText) parts.push(statusText);
+  // Say what the recompute did NOT touch, so a preserved decision never
+  // looks like the analysis quietly agreed with you.
+  if (kept) parts.push(kept + ' pinned decision' + (kept === 1 ? '' : 's') + ' kept');
   var status = document.getElementById('cullStatus');
-  if (statusText && status) {
-    status.textContent = statusText;
+  if (parts.length && status) {
+    status.textContent = parts.join(' \u00b7 ');
     status.style.color = 'var(--accent)';
   }
 }
@@ -698,7 +753,7 @@ window.beforeHistoryChange = function() {
     return false;
   }
   if (cullDirty) {
-    showToast('Apply your staged culling decisions or reload before undoing saved edits.', 'info');
+    showToast('Apply or clear your pinned culling decisions before undoing saved edits.', 'info');
     return false;
   }
   return true;
@@ -725,8 +780,7 @@ window.afterHistoryChange = async function(result) {
       results = data && data.results;
     }
     setPipelineResults(results,
-      result.undone ? 'Undone: ' + result.undone : 'Redone: ' + result.redone,
-      cullUseSavedFlags || result.flags_changed === true);
+      result.undone ? 'Undone: ' + result.undone : 'Redone: ' + result.redone);
   } catch (error) {
     cullData = null;
     renderCulling();
@@ -783,6 +837,36 @@ function actionForLabel(label) {
   return 'review';
 }
 
+function actionForFlag(flag) {
+  if (flag === 'flagged') return 'keep';
+  if (flag === 'rejected') return 'reject';
+  return null;
+}
+
+function manualDecisionCount() {
+  return Object.keys(cullManualDecisions).length;
+}
+
+function unappliedPinCount() {
+  return Object.keys(cullManualDecisions).filter(function(pid) {
+    return cullAppliedDecisions[pid] !== cullManualDecisions[pid];
+  }).length;
+}
+
+// Resolve one photo's decision: your hand edit wins, then the flag you
+// already applied, then the analysis label. Returns the action plus where
+// it came from so the card can show it.
+function resolveCullDecision(photo) {
+  var suggested = actionForLabel(photo.label);
+  var manual = cullManualDecisions[photo.id];
+  if (manual) return {action: manual, source: 'manual', suggested: suggested};
+  var confirmed = actionForFlag(photo.flag);
+  if (confirmed && cullHonorSavedFlags) {
+    return {action: confirmed, source: 'confirmed', suggested: suggested};
+  }
+  return {action: suggested, source: 'auto', suggested: suggested};
+}
+
 function encounterLabel(enc, idx, count) {
   var label = 'Encounter ' + (idx + 1) + ' (' + count + ' photos)';
   if (enc.time_range && enc.time_range[0]) {
@@ -804,6 +888,9 @@ function pipelineToCullData(results) {
   var keep = 0;
   var review = 0;
   var reject = 0;
+  var pinned = 0;
+  var confirmed = 0;
+  var saved = 0;
 
   results.encounters.forEach(function(enc, ei) {
     var encIds = (enc.photo_ids || []).filter(function(pid) {
@@ -836,9 +923,11 @@ function pipelineToCullData(results) {
 
     burstOrder.forEach(function(pid) {
       var p = photoMap[pid];
-      var action = cullUseSavedFlags
-        ? (p.flag === 'flagged' ? 'keep' : p.flag === 'rejected' ? 'reject' : 'review')
-        : actionForLabel(p.label);
+      var decision = resolveCullDecision(p);
+      var action = decision.action;
+      if (decision.source === 'manual') pinned++;
+      else if (decision.source === 'confirmed') confirmed++;
+      if (actionForFlag(p.flag)) saved++;
       groupPhotos.push({
         photo_id: pid,
         quality: p.quality_composite || 0,
@@ -846,6 +935,8 @@ function pipelineToCullData(results) {
         sharpness: p.subject_sharpness != null ? p.subject_sharpness : null,
         filename: p.filename || '',
         action: action,
+        decision_source: decision.source,
+        suggested_action: decision.suggested,
         pipeline_label: p.label || 'REVIEW',
       });
       total++;
@@ -874,8 +965,62 @@ function pipelineToCullData(results) {
     suggested_keepers: keep,
     suggested_reviews: review,
     suggested_rejects: reject,
+    pinned_count: pinned,
+    confirmed_count: confirmed,
+    saved_flag_count: saved,
+    // Pins on photos outside the current scope stay in cullManualDecisions
+    // but aren't on screen; count them separately so "Clear N pinned" can
+    // say what it will actually drop.
+    pinned_offscreen: Math.max(0, manualDecisionCount() - pinned),
     pipeline_summary: results.summary || {},
   };
+}
+
+function cullDecisionStatsHtml() {
+  var html = '';
+  var pinned = cullData.pinned_count || 0;
+  if (pinned) {
+    html += '<div class="summary-stat" title="Decisions you made by hand. ' +
+      'Recomputing keeps them exactly as they are; Apply writes them to the photos.">' +
+      '<div class="num" style="color:var(--text-primary);">' + pinned + '</div>' +
+      '<div class="label">Pinned by you</div></div>';
+  }
+  var confirmed = cullData.confirmed_count || 0;
+  if (confirmed) {
+    html += '<div class="summary-stat" title="Photos already flagged by a previous Apply. ' +
+      'Their saved flag is shown instead of the fresh suggestion.">' +
+      '<div class="num" style="color:var(--text-secondary);">' + confirmed + '</div>' +
+      '<div class="label">Already applied</div></div>';
+  }
+  return html;
+}
+
+function cullDecisionActionsHtml() {
+  var buttons = [];
+  var pinnedTotal = manualDecisionCount();
+  if (pinnedTotal) {
+    var offscreen = cullData.pinned_offscreen || 0;
+    var label = 'Clear ' + pinnedTotal + ' pinned';
+    var title = 'Drop your manual decisions and go back to what the analysis suggests.';
+    if (offscreen) {
+      title += ' ' + offscreen + ' of them are on photos outside this view.';
+    }
+    buttons.push('<button class="summary-link" title="' + escapeAttr(title) +
+      '" onclick="clearPinnedDecisions()">' + escapeHtml(label) + '</button>');
+  }
+  var saved = cullData.saved_flag_count || 0;
+  if (saved) {
+    buttons.push(cullHonorSavedFlags
+      ? '<button class="summary-link" title="' + escapeAttr(
+          'Show the fresh suggestion for the ' + saved + ' photos you already flagged. ' +
+          'Their saved flags stay in the database until you apply again.') +
+        '" onclick="toggleHonorSavedFlags()">Ignore ' + saved + ' saved flags</button>'
+      : '<button class="summary-link" title="' + escapeAttr(
+          'Go back to showing the saved flag for the ' + saved + ' photos you already flagged.') +
+        '" onclick="toggleHonorSavedFlags()">Honor ' + saved + ' saved flags</button>');
+  }
+  if (!buttons.length) return '';
+  return '<div class="summary-actions">' + buttons.join('') + '</div>';
 }
 
 function cullGroupsForSpecies(speciesGroup) {
@@ -980,6 +1125,8 @@ function renderCulling() {
     '<div class="summary-stat"><div class="num" style="color:var(--warning);">' + (cullData.suggested_reviews || 0) + '</div><div class="label">Review</div></div>' +
     '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + cullData.suggested_rejects + '</div><div class="label">Reject</div></div>' +
     '<div class="summary-stat"><div class="num">' + cullData.species_groups.length + '</div><div class="label">Species</div></div>' +
+    cullDecisionStatsHtml() +
+    cullDecisionActionsHtml() +
   '</div>';
   document.getElementById('cullSummary').innerHTML = summaryHtml;
   document.getElementById('cullSummary').style.display = '';
@@ -1034,6 +1181,21 @@ function renderCulling() {
           badge = '<div class="cull-card-action review-badge" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">?</div>';
         }
 
+        var sourceChip = '';
+        if (photo.decision_source === 'manual') {
+          sourceChip = '<div class="cull-card-source manual" title="' + escapeAttr(
+            'You set this to ' + photo.action.toUpperCase() + '. The analysis suggests ' +
+            (photo.suggested_action || 'review').toUpperCase() +
+            '. Recomputing keeps your call; click to release it.') +
+            '" onclick="event.stopPropagation(); releaseCullDecision(' + photo.photo_id + ')"' +
+            ' ondblclick="event.stopPropagation()" onmousedown="event.stopPropagation()">Pinned</div>';
+        } else if (photo.decision_source === 'confirmed') {
+          sourceChip = '<div class="cull-card-source confirmed" title="' + escapeAttr(
+            'Saved flag from a previous Apply. The analysis suggests ' +
+            (photo.suggested_action || 'review').toUpperCase() + '.') +
+            '">Applied</div>';
+        }
+
         var qScore = photo.quality_score != null ? photo.quality_score.toFixed(2) : (photo.sharpness != null ? Math.round(photo.sharpness) : '-');
 
         // Filename rides in a data attribute: interpolating it into the
@@ -1047,6 +1209,7 @@ function renderCulling() {
           'onclick="openLightbox(' + photo.photo_id + ', this.dataset.filename, window.' + poseKey + ')" ' +
           'ondblclick="toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">' +
           badge +
+          sourceChip +
           '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy">' +
           '<div class="cull-card-info">' +
             '<div class="cull-quality">' + (photo.pipeline_label || photo.action.toUpperCase()) + ' &middot; Q: ' + qScore + '</div>' +
@@ -1091,9 +1254,55 @@ function toggleCullAction(speciesIdx, poseIdx, photoId) {
   var next = photo.action === 'keep' ? 'review' : (photo.action === 'review' ? 'reject' : 'keep');
   dec(photo.action);
   photo.action = next;
-  cullDirty = true;
+  // Pin it: a later reflow/regroup rebuilds every other card from the fresh
+  // labels but reads this photo's action back out of cullManualDecisions.
+  if (photo.decision_source !== 'manual') {
+    cullData.pinned_count = (cullData.pinned_count || 0) + 1;
+    if (photo.decision_source === 'confirmed') {
+      cullData.confirmed_count = Math.max(0, (cullData.confirmed_count || 0) - 1);
+    }
+  }
+  photo.decision_source = 'manual';
+  cullManualDecisions[photoId] = next;
+  cullDirty = unappliedPinCount() > 0;
   inc(next);
   renderCulling();
+}
+
+function releaseCullDecision(photoId) {
+  if (cullOperationPending()) return;
+  if (!cullManualDecisions[photoId]) return;
+  delete cullManualDecisions[photoId];
+  delete cullAppliedDecisions[photoId];
+  cullDirty = unappliedPinCount() > 0;
+  rebuildCullDataFromPipeline();
+}
+
+function clearPinnedDecisions() {
+  if (cullOperationPending()) return;
+  if (!manualDecisionCount()) return;
+  cullManualDecisions = {};
+  cullAppliedDecisions = {};
+  cullDirty = false;
+  rebuildCullDataFromPipeline();
+  var status = document.getElementById('cullStatus');
+  if (status) {
+    status.textContent = 'Pinned decisions cleared \u2014 showing the current suggestions.';
+    status.style.color = 'var(--text-dim)';
+  }
+}
+
+function toggleHonorSavedFlags() {
+  if (cullOperationPending()) return;
+  cullHonorSavedFlags = !cullHonorSavedFlags;
+  rebuildCullDataFromPipeline();
+  var status = document.getElementById('cullStatus');
+  if (status) {
+    status.textContent = cullHonorSavedFlags
+      ? 'Showing saved flags where photos were already applied.'
+      : 'Showing fresh suggestions for every photo, including ones you already applied.';
+    status.style.color = 'var(--text-dim)';
+  }
 }
 
 async function applyCulling() {
@@ -1101,17 +1310,37 @@ async function applyCulling() {
 
   var keepers = [];
   var rejects = [];
+  var unflag = [];
+  var appliedPins = {};
+  var savedFlags = {};
+  (pipelineResults && pipelineResults.photos || []).forEach(function(p) {
+    savedFlags[p.id] = p.flag;
+  });
   cullData.species_groups.forEach(function(sg) {
     var groups = sg.scene_groups || sg.pose_groups || [];
     groups.forEach(function(pg) {
       pg.photos.forEach(function(p) {
+        if (p.decision_source === 'manual') appliedPins[p.photo_id] = p.action;
         if (p.action === 'keep') keepers.push(p.photo_id);
         else if (p.action === 'reject') rejects.push(p.photo_id);
+        else if (p.decision_source === 'manual' && actionForFlag(savedFlags[p.photo_id])) {
+          // You moved an already-flagged photo back to Review. Clear the old
+          // flag, otherwise it would reappear as the photo's decision as soon
+          // as the pin is released.
+          unflag.push(p.photo_id);
+        }
       });
     });
   });
 
-  if (!confirm('Apply culling decisions?\n\n' + keepers.length + ' photos flagged as keepers\n' + rejects.length + ' photos flagged as rejected\n\nThis sets the flag on each photo. Use Undo below to restore the previous flags.')) return;
+  var confirmMsg = 'Apply culling decisions?\n\n' +
+    keepers.length + ' photos flagged as keepers\n' +
+    rejects.length + ' photos flagged as rejected';
+  if (unflag.length) {
+    confirmMsg += '\n' + unflag.length + ' photos cleared back to no flag (moved to Review)';
+  }
+  confirmMsg += '\n\nThis sets the flag on each photo. Use Undo below to restore the previous flags.';
+  if (!confirm(confirmMsg)) return;
 
   cullBusy = true;
   document.getElementById('applyBtn').disabled = true;
@@ -1119,20 +1348,36 @@ async function applyCulling() {
     await safeFetch('/api/culling/apply', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({keepers: keepers, rejects: rejects}),
+      body: JSON.stringify({keepers: keepers, rejects: rejects, unflag: unflag}),
     }, { toast: false });
     // Apply establishes the saved baseline. Review photos were not sent to
     // the server, so retain their existing flags instead of clearing them.
     var keeperIds = new Set(keepers);
     var rejectIds = new Set(rejects);
+    var clearedIds = new Set(unflag);
     pipelineResults.photos.forEach(function(photo) {
       if (keeperIds.has(photo.id)) photo.flag = 'flagged';
       else if (rejectIds.has(photo.id)) photo.flag = 'rejected';
+      else if (clearedIds.has(photo.id)) photo.flag = 'none';
     });
-    cullUseSavedFlags = true;
-    cullDirty = false;
+    // Pins the write covered are in the database now. Keep/reject ones are
+    // saved flags from here on; review ones stay pinned (no flag can say
+    // "undecided on purpose") but stop counting as unsaved. Pins on photos
+    // outside this view were never sent, so they stay untouched.
+    Object.keys(appliedPins).forEach(function(pid) {
+      if (appliedPins[pid] === 'review') {
+        cullAppliedDecisions[pid] = 'review';
+      } else {
+        delete cullManualDecisions[pid];
+        delete cullAppliedDecisions[pid];
+      }
+    });
+    cullHonorSavedFlags = true;
+    cullDirty = unappliedPinCount() > 0;
     rebuildCullDataFromPipeline();
-    document.getElementById('cullStatus').textContent = 'Applied! ' + keepers.length + ' keepers, ' + rejects.length + ' rejected';
+    document.getElementById('cullStatus').textContent = 'Applied! ' + keepers.length +
+      ' keepers, ' + rejects.length + ' rejected' +
+      (unflag.length ? ', ' + unflag.length + ' cleared' : '');
     document.getElementById('cullStatus').style.color = 'var(--accent)';
   } catch(e) {
     document.getElementById('cullStatus').textContent = 'Error: ' + e.message;
