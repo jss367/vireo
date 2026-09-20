@@ -7592,8 +7592,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             # standalone Extract Masks path
                             # (app.py:27729) (Codex r4056646680).
                             from subjects import sync_primary
+                            # Match the subsequent ``current`` query's floor:
+                            # weak-rescued photos use ``weak_detection_confidence``.
+                            # Passing ``detector_confidence`` for a contextual
+                            # weak candidate whose animal detection sits between
+                            # the two floors would make ``sync_primary`` see no
+                            # primary and clear mask_path, active_mask_variant
+                            # and the DINO embedding — invalidating the cache
+                            # every Process run right before the code below
+                            # correctly re-resolves the same detection at the
+                            # weak floor and repeats SAM/DINO inference
+                            # (Codex r4056724365).
                             sync_primary(
-                                thread_db, photo_id, min_conf=detector_confidence,
+                                thread_db, photo_id,
+                                min_conf=(weak_detection_confidence
+                                    if photo_id in contextual_weak_ids
+                                    else detector_confidence),
                             )
                             commit_with_retry(thread_db.conn)
                             # Re-resolve under the lock: primary may have changed

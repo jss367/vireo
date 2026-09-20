@@ -1447,6 +1447,22 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
 
     try:
         if detect_animals is None or get_primary_detection is None:
+            # Cached-detection rows still deserve subject-analysis
+            # backfill even when the detector module is unavailable —
+            # analyzing cached boxes doesn't require detect_animals or
+            # get_primary_detection. ``_detect_batch`` handles this
+            # detector-less branch internally by iterating only cached
+            # rows, so route through it before signalling the missing
+            # detector to the outer handler (Codex r4056724369).
+            import config as cfg
+            effective_cfg = db.get_effective_config(cfg.load())
+            det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+            _detect_batch(
+                photos, folders, runner, job, reclassify, db,
+                det_conf_threshold=det_conf_threshold,
+                already_detected_ids=already_detected_ids,
+                vireo_dir=vireo_dir,
+            )
             raise ImportError(
                 "MegaDetector ONNX model not available — cannot run detection"
             )
