@@ -146,3 +146,17 @@ def test_live_absolute_slider_preserves_other_controls(live_server, page, batch_
         assert after['crop'] == before[index]['crop']
         assert after['adjustments']['exposure'] == .7
         assert after['adjustments']['white_balance'] == before[index]['adjustments']['white_balance']
+
+
+def test_batch_adjustments_work_when_optional_presets_fail(live_server, page, batch_photos):
+    page.route('**/api/edit-presets', lambda route: route.abort())
+    dialog = _open_batch(page, live_server, batch_photos)
+    expect(dialog.get_by_text('Presets could not load.', exact=False)).to_be_visible()
+    expect(dialog.get_by_label('Batch preset')).to_be_disabled()
+    number = dialog.get_by_label('Numeric adjustment value')
+    number.fill('0.7')
+    number.press('Enter')
+    expect(dialog.get_by_role('status')).to_have_text('Updated 2 photos.')
+    expect(dialog.get_by_role('button', name='Paste settings…')).to_be_enabled()
+    for pid in batch_photos:
+        assert live_server['db'].get_photo_edit_recipe(pid)['adjustments']['exposure'] == .7

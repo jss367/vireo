@@ -142,7 +142,9 @@ window.VireoBatchEdits = (function() {
     var number = element('input', null, sliderRow); number.type = 'number'; number.style.width = '90px'; number.setAttribute('aria-label', 'Numeric adjustment value');
     var more = element('fieldset', null, modal); element('legend', 'Reusable settings', more);
     var presetSelect = element('select', null, more); presetSelect.setAttribute('aria-label', 'Batch preset');
-    element('option', 'Select a preset…', presetSelect).value = '';
+    var presetPlaceholder = element('option', 'Loading presets…', presetSelect); presetPlaceholder.value = '';
+    presetSelect.disabled = true;
+    var presetNote = element('p', '', more); presetNote.setAttribute('aria-live', 'polite');
     var presetButton = button('Apply preset…', more, applyPreset); presetButton.disabled = true;
     button('Paste settings…', more, function() { perform(function() { return paste(ids); }); });
     var status = element('div', null, modal); status.className = 'development-status'; status.setAttribute('role', 'status');
@@ -216,10 +218,21 @@ window.VireoBatchEdits = (function() {
     modal.addEventListener('cancel', function(event) { if (busy) event.preventDefault(); });
     modal.addEventListener('close', function() { activeDialog = null; modal.remove(); }, {once: true});
     modal.showModal(); setBusy(true);
+    // Presets are optional: a slow or failed request must not prevent
+    // adjustments and clipboard paste once the selection summary is ready.
+    safeFetch('/api/edit-presets', {}, {toast: false}).then(function(data) {
+      if (!modal.isConnected) return;
+      presets = data.presets || [];
+      presets.forEach(function(preset) { element('option', preset.name, presetSelect).value = preset.id; });
+      presetPlaceholder.textContent = presets.length ? 'Select a preset…' : 'No presets saved';
+      presetSelect.disabled = !presets.length;
+    }).catch(function() {
+      if (!modal.isConnected) return;
+      presetPlaceholder.textContent = 'Presets unavailable';
+      presetNote.textContent = 'Presets could not load. You can still adjust photos or paste settings.';
+    });
     try {
       await reloadSummary();
-      var data = await safeFetch('/api/edit-presets', {}, {toast: false}); presets = data.presets || [];
-      presets.forEach(function(preset) { element('option', preset.name, presetSelect).value = preset.id; });
       setBusy(false);
     } catch (error) {
       status.textContent = error.message || 'Could not load selection settings.'; status.classList.add('error');
