@@ -12,7 +12,7 @@ import tempfile
 import time
 
 from image_edits import apply_recipe_to_loaded_image
-from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS, load_image
+from image_loader import RAW_DECODE_LINEAR, RAW_EXTENSIONS, load_image
 from proc import no_window_kwargs
 from render_source import (
     companion_image_can_replace_raw_result,
@@ -363,6 +363,14 @@ def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
     fallback, local masks, and developed-output selection stay consistent.
     """
     pid = photo["id"]
+    # A TIFF requested from a RAW should retain sensor precision even when no
+    # edits are saved. The sentinel also prevents selecting a JPEG working copy
+    # solely because it has enough pixels for a resized TIFF export.
+    if (
+        not recipe and output_ext in ("tif", "tiff")
+        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    ):
+        recipe = {"version": 1}
     if developed_index is None:
         developed_index = _DevelopedDirIndex()
     # Resolve source path.  Precedence:
@@ -381,7 +389,7 @@ def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
     ):
         is_raw = os.path.splitext(path)[1].lower() in RAW_EXTENSIONS
         raw_decode = (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS if _recipe and is_raw else None
+            RAW_DECODE_LINEAR if _recipe and is_raw else None
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
         return (
@@ -1750,7 +1758,7 @@ def _companion_can_satisfy_export(
     """Return a full-resolution companion path when it can satisfy edited export.
 
     By default RAW primaries are skipped so the export decodes the RAW with
-    ``RAW_DECODE_PRESERVE_HIGHLIGHTS`` instead of the camera JPEG (whose
+    ``RAW_DECODE_LINEAR`` instead of the camera JPEG (whose
     highlights are already clipped). Pass ``skip_raw_primary=False`` to get
     the companion path as a fallback when the RAW decode itself fails — a
     rendered camera JPEG is still better than a failed export.

@@ -5,6 +5,11 @@ All notable changes to Vireo are documented in this file.
 ## Unreleased
 
 ### Changed
+- **RAW edits retain more image information.** The built-in editor now keeps
+  decoded RAW pixels in floating point through tone, color, and detail edits,
+  with exposure recovery before mapping highlights to the display. RAW TIFF
+  exports preserve 16 bits per channel. Existing RAW edits may render
+  differently; unavailable or unsupported originals retain their JPEG fallback.
 - **Windows 11 support no longer carries a beta label.** The download page,
   setup guide, and Settings now describe Windows 11 as supported. CPU inference
   remains the guaranteed configuration; GPU acceleration is outside the support

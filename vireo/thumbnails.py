@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 
 from camera_denoise import cache_matches, cache_save_options
 from image_loader import (
-    RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    RAW_DECODE_LINEAR,
     RAW_EXTENSIONS,
     load_image,
 )
@@ -84,7 +84,7 @@ def _retry_thumbnail_after_working_copy_eviction(
         os.path.splitext(original_path)[1].lower() in RAW_EXTENSIONS
     )
     raw_decode = (
-        RAW_DECODE_PRESERVE_HIGHLIGHTS
+        RAW_DECODE_LINEAR
         if recipe and original_is_raw else None
     )
     load_max_size = None if recipe and recipe.get("crop") else size
@@ -251,7 +251,7 @@ def generate_thumbnail(
         raw_decode: optional RAW decode mode forwarded to ``load_image``.
             Defaults to ``None``, which uses ``load_image``'s default
             (RAW_DECODE_JPEG_FIRST). Pass
-            ``RAW_DECODE_PRESERVE_HIGHLIGHTS`` when regenerating an
+            ``RAW_DECODE_LINEAR`` when regenerating an
             edited RAW thumbnail so the demosaic matches the preview /
             export pipeline instead of falling back to the embedded
             camera JPEG's clipped highlights.
@@ -423,7 +423,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         if recipe and os.path.splitext(
             source_photo["filename"]
         )[1].lower() in RAW_EXTENSIONS:
-            raw_decode_kwargs["raw_decode"] = RAW_DECODE_PRESERVE_HIGHLIGHTS
+            raw_decode_kwargs["raw_decode"] = RAW_DECODE_LINEAR
         min_source_size = None
         if (
             recipe

@@ -14,6 +14,11 @@ from PIL import Image
 from scipy.ndimage import gaussian_filter, minimum_filter
 
 try:
+    from .float_image import FloatImage
+except ImportError:
+    from float_image import FloatImage
+
+try:
     from .tone import LUMA_B, LUMA_G, LUMA_R
 except ImportError:
     from tone import LUMA_B, LUMA_G, LUMA_R
@@ -36,7 +41,9 @@ def _airlight(src):
     # Slice the existing source buffer before allocating a float sample.
     # Resizing RGBA with Pillow would first copy the full frame to RGBa.
     step = max(1, math.ceil(max(src.shape[:2]) / 256))
-    rgb = src[::step, ::step, :3].reshape(-1, 3).astype(np.float32) / 255.0
+    rgb = src[::step, ::step, :3].reshape(-1, 3).astype(np.float32)
+    if src.dtype == np.uint8:
+        rgb /= 255.0
     dark = rgb.min(axis=1)
     count = max(1, len(dark) // 100)
     indices = np.argpartition(dark, len(dark) - count)[-count:]
@@ -75,6 +82,7 @@ def apply_presence(img, *, texture=0.0, clarity=0.0, dehaze=0.0, scale=1.0):
         halo += math.ceil(3 * texture_sigma)
     if clarity:
         halo += math.ceil(3 * clarity_sigma)
+    floating = isinstance(img, FloatImage)
     src = np.asarray(img)
     airlight = _airlight(src) if dehaze else None
     height, width = src.shape[:2]
@@ -83,7 +91,9 @@ def apply_presence(img, *, texture=0.0, clarity=0.0, dehaze=0.0, scale=1.0):
     for top in range(0, height, rows):
         bottom = min(height, top + rows)
         start, end = max(0, top - halo), min(height, bottom + halo)
-        rgb = src[start:end, :, :3].astype(np.float32) / 255.0
+        rgb = src[start:end, :, :3].astype(np.float32)
+        if not floating:
+            rgb /= 255.0
         if dehaze:
             dark = np.min(rgb / airlight, axis=2)
             dark = minimum_filter(dark, size=2 * haze_radius + 1, mode="mirror")
@@ -107,7 +117,9 @@ def apply_presence(img, *, texture=0.0, clarity=0.0, dehaze=0.0, scale=1.0):
             delta *= (4.0 * y * (1.0 - y)) * (float(clarity) / 100.0)
             rgb = np.clip(rgb + delta[..., None], 0.0, 1.0)
         rgb = rgb[top - start:bottom - start]
-        out[top:bottom, :, :3] = np.clip(rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        out[top:bottom, :, :3] = (
+            rgb if floating else np.clip(rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        )
         if src.shape[2] == 4:
             out[top:bottom, :, 3] = src[top:bottom, :, 3]
-    return Image.fromarray(out)
+    return FloatImage(out, encoding="srgb") if floating else Image.fromarray(out)

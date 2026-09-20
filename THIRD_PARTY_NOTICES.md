@@ -14,6 +14,12 @@ The complete upstream README containing the copyright and license statement is
 included beside the bundled ExifTool runtime. Source and licensing information
 are available at https://exiftool.org/.
 
+## tifffile
+
+Vireo uses tifffile by Christoph Gohlke for 16-bit RGB TIFF export.
+Copyright (c) 2008-2026, Christoph Gohlke. Distributed under the BSD 3-Clause
+license. Desktop builds include its license in the bundled package metadata.
+Source and license: https://github.com/cgohlke/tifffile.
 ## darktable camera noise measurements
 
 Camera-aware denoising includes darktable's camera/ISO noise measurements,

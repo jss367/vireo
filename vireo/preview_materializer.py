@@ -62,7 +62,7 @@ def render_preview_bytes(
     """Render one preview using the same RAW/edit fallback rules everywhere."""
     from image_edits import apply_recipe_to_loaded_image
     from image_loader import (
-        RAW_DECODE_PRESERVE_HIGHLIGHTS,
+        RAW_DECODE_LINEAR,
         RAW_EXTENSIONS,
         load_image,
     )
@@ -127,7 +127,7 @@ def render_preview_bytes(
 
         load_max_size = None if recipe and recipe.get("crop") else size
         raw_decode = (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            RAW_DECODE_LINEAR
             if selected_ext in RAW_EXTENSIONS and (recipe or pair_source == "raw")
             else None
         )
@@ -173,7 +173,7 @@ def render_preview_bytes(
             and not original_failure_current
         ):
             fallback_raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                RAW_DECODE_LINEAR
                 if original_is_raw and (recipe or pair_source == "raw")
                 else None
             )

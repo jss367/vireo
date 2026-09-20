@@ -20,6 +20,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+try:
+    from .float_image import FloatImage
+except ImportError:
+    from float_image import FloatImage
+
 _DATA = Path(__file__).parent / "data" / "denoise" / "noiseprofiles.json"
 _TILE_PIXELS = 1_000_000
 _MAKERS = {
@@ -215,6 +220,10 @@ def apply_camera_denoise(img, amount, *, profile=None, scale=1.0):
     import cv2
 
     has_alpha = "A" in img.getbands() or "transparency" in img.info
+    floating = isinstance(img, FloatImage)
+    # OpenCV non-local means requires an integer guide. Keep the float source
+    # and transfer only the guide's noise correction, so denoising does not
+    # quantize the developed RAW image or its subsequent 16-bit TIFF export.
     src = np.asarray(img.convert("RGBA" if has_alpha else "RGB"))
     strength = _filter_strength(src[..., :3], profile, scale)
     if float(np.max(strength)) < 0.5:
@@ -225,7 +234,7 @@ def apply_camera_denoise(img, amount, *, profile=None, scale=1.0):
     halo = template // 2 + search // 2
     height, width = src.shape[:2]
     rows = max(1, _TILE_PIXELS // max(1, width))
-    out = src.copy()
+    out = img.pixels.copy() if floating else src.copy()
     for top in range(0, height, rows):
         bottom = min(height, top + rows)
         start, end = max(0, top - halo), min(height, bottom + halo)
@@ -238,6 +247,13 @@ def apply_camera_denoise(img, amount, *, profile=None, scale=1.0):
                     ycc[..., channel], None, float(strength[channel] * 0.85), template, search,
                 )
         denoised = cv2.cvtColor(filtered, cv2.COLOR_YCrCb2RGB)
-        mixed = rgb.astype(np.float32) + (denoised.astype(np.float32) - rgb) * blend
-        out[top:bottom, :, :3] = np.clip(mixed[top - start:bottom - start] + 0.5, 0, 255).astype(np.uint8)
+        correction = (denoised.astype(np.float32) - rgb) * blend
+        correction = correction[top - start:bottom - start]
+        if floating:
+            out[top:bottom] = np.clip(img.pixels[top:bottom] + correction / 255.0, 0, 1)
+        else:
+            mixed = src[top:bottom, :, :3].astype(np.float32) + correction
+            out[top:bottom, :, :3] = np.clip(mixed + 0.5, 0, 255).astype(np.uint8)
+    if floating:
+        return FloatImage(out, encoding="srgb")
     return Image.fromarray(out)
