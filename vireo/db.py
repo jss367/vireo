@@ -8945,6 +8945,7 @@ class Database:
                   ON cr.detection_id = d.id
                  AND cr.classifier_model = ?
                  AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                 WHERE d.detector_model != 'full-image'
                   AND d.detector_confidence >= ?
                   AND cr.detection_id IS NULL{scope_sql}""",
@@ -8989,6 +8990,7 @@ class Database:
                     ON cr.detection_id = d.id
                    AND cr.classifier_model = ?
                    AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                  WHERE d.rn = 1
                    AND cr.detection_id IS NULL""",
             (ws, min_conf, *scope_params, classifier_model, labels_fingerprint),
@@ -9175,6 +9177,7 @@ class Database:
                     ON cr.detection_id = f.detection_id
                    AND cr.classifier_model = ?
                    AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                  WHERE f.detection_id IS NULL
                     OR cr.detection_id IS NULL""",
             (

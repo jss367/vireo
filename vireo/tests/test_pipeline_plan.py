@@ -4057,3 +4057,33 @@ def test_exclusions_apply_in_whole_workspace_mode(tmp_path):
     )
     assert plan["stages"]["Extract"]["detail"]["pending"] == 1
     assert plan["scope"]["photo_count"] == 1
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_normal_plan_counts_raw_recipe_as_pending(tmp_path, monkeypatch, fallback):
+    import labels as labels_mod
+    import models as models_mod
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    from raw_analysis import RECIPE
+
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    db, folder = _make_db(tmp_path)
+    photo, detection = _add_photo_with_detection(
+        db, folder, "bird.jpg", detector_model="full-image" if fallback else "megadetector-v6",
+    )
+    if fallback:
+        db.record_detector_run(photo, "megadetector-v6", 0)
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2", "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True, "weights_path": _tol_weights(tmp_path)},
+    ])
+    db.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1, input_recipe=RECIPE)
+    stage = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))["stages"]["Classify"]
+    assert stage["state"] == "will-run"
+    assert stage["detail"]["pending"] == 1
+    db.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1)
+    stage = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))["stages"]["Classify"]
+    assert stage["detail"]["pending"] == 0
+    db.close()
