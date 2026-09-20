@@ -16399,17 +16399,27 @@ class Database:
             # on undo/redo, but leaving it retargeted would silently
             # untag the user's pre-existing survivor — the tradeoff
             # mirrors the prediction_accept case above.
+            # Identity is per item: for a mixed-alias prediction_accept
+            # batch (see api_accept_predictions), the parent edit's
+            # ``new_value`` records only the first alias, while each item's
+            # ``new_value`` records its own resolved keyword id. Requiring
+            # the parent to also equal ``src`` would miss items in that
+            # batch whose alias is the one being merged, and the survivor
+            # retarget below would then silently untag a pre-existing
+            # ``dst`` tag on undo. For ``keyword_add`` and
+            # ``species_replace`` the parent and item always agree, so
+            # dropping the parent match only widens coverage where it was
+            # under-matching before.
             self.conn.execute(
                 f"""DELETE FROM edit_history_items
                     WHERE new_value = ?
                       AND photo_id IN ({ph})
                       AND edit_id IN (
                           SELECT id FROM edit_history
-                          WHERE new_value = ?
-                            AND action_type IN (
-                                'keyword_add', 'prediction_accept',
-                                'species_replace'
-                            )
+                          WHERE action_type IN (
+                              'keyword_add', 'prediction_accept',
+                              'species_replace'
+                          )
                       )
                       AND NOT EXISTS (
                           SELECT 1
@@ -16425,7 +16435,7 @@ class Database:
                             )
                             AND ehi2.id > edit_history_items.id
                       )""",
-                [src_str, *chunk, src_str, src_str, dst_str],
+                [src_str, *chunk, src_str, dst_str],
             )
             # When the source add happened first and a later add created
             # the current survivor association, the later add becomes the
@@ -16436,6 +16446,11 @@ class Database:
             # itself undone. Restrict this to add-like actions whose whole
             # per-photo effect is the tag association; species_replace has
             # an old-species restoration side that cannot be discarded.
+            # The earlier-source lookup matches on the item's own
+            # ``new_value`` alone, not the parent edit's, so a mixed-alias
+            # prediction_accept batch (whose parent records only the first
+            # alias) still counts as the earlier source add for a later
+            # redundant item.
             self.conn.execute(
                 f"""DELETE FROM edit_history_items
                     WHERE photo_id IN ({ph})
@@ -16453,13 +16468,12 @@ class Database:
                             ON eh1.id = ehi1.edit_id
                           WHERE ehi1.photo_id = edit_history_items.photo_id
                             AND ehi1.new_value = ?
-                            AND eh1.new_value = ?
                             AND eh1.action_type IN (
                                 'keyword_add', 'prediction_accept'
                             )
                             AND ehi1.id < edit_history_items.id
                       )""",
-                [*chunk, src_str, dst_str, src_str, src_str],
+                [*chunk, src_str, dst_str, src_str],
             )
             # keyword_remove: item.new_value is '' by convention (see
             # record_edit call sites in app.py); the keyword id lives in

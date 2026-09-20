@@ -26203,6 +26203,70 @@ def test_batch_accept_rejects_distinct_taxa_with_same_display_name(app_and_db):
     assert not [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
 
 
+def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db):
+    """Merging an alias used by a mixed-alias prediction_accept must not let
+    undo strip a survivor tag the photo carried before the merge.
+
+    The batch records each item's actual keyword id, so the parent edit's
+    ``new_value`` (the first alias) can differ from a later item's. The
+    merge cleanup in ``_merge_keyword_into`` therefore cannot require the
+    parent to also equal the source keyword — it must identify per-item
+    ``prediction_accept`` entries by their own ``new_value`` alone, or a
+    subsequent undo will untag the pre-existing survivor on that photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    common, alias, scientific, taxon = (
+        "Common Starling", "European Starling", "Sturnus vulgaris", 14850,
+    )
+    local_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, 'species')",
+        (taxon, scientific, common),
+    ).lastrowid
+    db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
+    db.set_meta("common_name_identity_version", "1")
+    alias_id = db.add_keyword(alias, is_species=True)
+    common_id = db.add_keyword(common, is_species=True)
+    assert alias_id != common_id
+    photo_a, _ = _seed_prediction_photo(db, "alias.jpg", alias, .95)
+    photo_b, _ = _seed_prediction_photo(
+        db, "common.jpg", common, .96, model="iNat21", labels_fingerprint="tol",
+    )
+    pred_ids = [_prediction_id(db, photo_a, alias), _prediction_id(db, photo_b, common)]
+    db.conn.execute(
+        "UPDATE predictions SET scientific_name = ? WHERE id = ?", (scientific, pred_ids[1]),
+    )
+    db.conn.commit()
+    entries = client.post(
+        "/api/selection/prediction-suggestions", json={"photo_ids": [photo_a, photo_b]},
+    ).get_json()["predictions"]
+    assert len(entries) == 1
+    response = client.post("/api/predictions/batch-accept", json={
+        "prediction_ids": pred_ids, "expected_species": entries[0]["species"],
+    })
+    assert response.status_code == 200, response.get_data(as_text=True)
+    # Sanity: the batch tags each photo with the alias that matched its own
+    # prediction, so the two items have different ``new_value`` keyword ids.
+    assert [k["id"] for k in db.get_photo_keywords(photo_a)] == [alias_id]
+    assert [k["id"] for k in db.get_photo_keywords(photo_b)] == [common_id]
+    # Simulate the user tagging photo_b with the OTHER alias after acceptance,
+    # then merging the two aliases together. Photo_b's ``alias_id`` tag is a
+    # user action the accept never created.
+    db.tag_photo(photo_b, alias_id)
+    assert alias_id in [k["id"] for k in db.get_photo_keywords(photo_b)]
+    db._merge_keyword_into(common_id, alias_id)
+    db.conn.commit()
+    # After the merge photo_b carries the surviving alias_id only.
+    assert [k["id"] for k in db.get_photo_keywords(photo_b)] == [alias_id]
+    # Undo of the accept must not strip the manually applied ``alias_id`` from
+    # photo_b — that tag pre-existed the merge and was never in this batch.
+    assert client.post("/api/undo").status_code == 200
+    assert alias_id in [k["id"] for k in db.get_photo_keywords(photo_b)]
+    # photo_a's accepted tag was the only thing that item contributed, so its
+    # undo still runs and clears the tag.
+    assert not db.get_photo_keywords(photo_a)
+
+
 def test_selection_prediction_species_identity_keeps_homonyms_separate(app_and_db):
     app, db = app_and_db
     client = app.test_client()
