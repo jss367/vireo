@@ -693,6 +693,44 @@ def test_photo_editor_next_revision_outranks_sibling_tab_pending_write(live_serv
     assert outcome > ceiling
 
 
+def test_photo_editor_replaces_cached_snapshot_after_revision_rollover(live_server, page):
+    """A committed snapshot at Number.MAX_SAFE_INTEGER must not outrank the
+    lower rollover revision the server has already accepted.
+
+    Without the ceiling-aware guard, ``writeCommittedCropRatioPreference``
+    refuses to overwrite the stale MAX_SAFE_INTEGER entry with the new
+    Date.now() revision, and ``adoptCommittedCropRatioPreference`` then
+    treats the stale entry as newer on the next navigation, reverting the
+    aspect (Codex review, PR #1729).
+    """
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    outcome = page.evaluate(
+        """() => {
+            const ceiling = Number.MAX_SAFE_INTEGER;
+            localStorage.setItem('vireo_committed_crop_ratio', JSON.stringify(
+                {enabled: true, aspect: 1.5, revision: ceiling}));
+            cropRatioPreference = {enabled: true, aspect: 1.5, revision: ceiling};
+            const rolled = {enabled: true, aspect: 1.3333333333, revision: 42};
+            writeCommittedCropRatioPreference(rolled);
+            const stored = JSON.parse(
+                localStorage.getItem('vireo_committed_crop_ratio'));
+            // A sibling tab still at the ceiling must adopt the rollover
+            // written by the tab that just committed it.
+            cropRatioPreference = {enabled: true, aspect: 1.5, revision: ceiling};
+            const adopted = adoptCommittedCropRatioPreference();
+            return {stored: stored, adopted: adopted,
+                    inMemory: cropRatioPreference};
+        }"""
+    )
+    assert outcome["stored"] == {"enabled": True, "aspect": 1.3333333333, "revision": 42}
+    assert outcome["adopted"] is True
+    assert outcome["inMemory"] == {
+        "enabled": True, "aspect": 1.3333333333, "revision": 42,
+    }
+
+
 def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
     """A remembered ratio must not recrop an existing edit just by opening it."""
     url = live_server["url"]
