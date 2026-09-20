@@ -207,6 +207,7 @@ GET          /thumbnails/<filename>
 GET          /welcome
 GET          /workspace
 GET,POST     /api/edit-presets
+GET,POST     /api/jobs/<job_id>/source-cleanup
 GET,POST     /api/misses
 GET,POST     /api/pipeline/config
 PATCH        /api/settings/global
