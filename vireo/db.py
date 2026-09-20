@@ -16361,15 +16361,9 @@ class Database:
         #   * `keyword_add`: undo calls untag_photo(pid, entry.new_value)
         #     per item; the retargeted entry.new_value = dst_id would
         #     remove the survivor.
-        #   * `prediction_accept`: shares the keyword_add branch in
-        #     _apply_undo — the same untag_photo(pid, entry.new_value)
-        #     runs. Trade-off: dropping the item also loses that item's
-        #     prediction-status restoration on undo. Accepted because the
-        #     alternative silently removes a legitimate user tag; the
-        #     prediction row itself remains and the user can re-manage
-        #     it. Only affects the narrow case of a legacy DB merging a
-        #     src that was ever prediction-accepted onto a photo that
-        #     already held the survivor.
+        #   * `prediction_accept`: undo uses item.new_value for the tag.
+        #     Retire only that tag mutation by converting the item to
+        #     ``no_tag``; its prediction-status history remains undoable.
         #   * `keyword_remove`: undo tags on the survivor (INSERT OR
         #     IGNORE — no-op if dst pre-existed), BUT redo calls
         #     untag_photo(pid, entry.new_value); the retargeted
@@ -16385,6 +16379,27 @@ class Database:
         #     — a src→dst retarget of those references would strip the
         #     pre-existing survivor. Drop those items too (bare-string in
         #     the second DELETE below, JSON in the payload rewrite pass).
+        def _retire_tag_mutations(rows):
+            # A prediction accept has two effects: the tag and review status.
+            # When a merge makes its tag redundant, retain the status effect
+            # and metadata so undo/redo still restores every prediction.
+            for row in rows:
+                if row["action_type"] != "prediction_accept":
+                    self.conn.execute("DELETE FROM edit_history_items WHERE id = ?", (row["id"],))
+                    continue
+                try:
+                    meta = json.loads(row["old_value"] or "{}")
+                except (TypeError, ValueError):
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["prediction_ids"] = self._edit_prediction_ids(meta, row["old_value"])
+                meta["no_tag"] = True
+                self.conn.execute(
+                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+                    (json.dumps(meta), row["id"]),
+                )
+
         preexisting_dst_photos = [
             r["photo_id"] for r in self.conn.execute(
                 "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
@@ -16397,8 +16412,8 @@ class Database:
             # item.new_value = str(kid). Deleting a species_replace item
             # here loses the retag-old-species side of that per-photo swap
             # on undo/redo, but leaving it retargeted would silently
-            # untag the user's pre-existing survivor — the tradeoff
-            # mirrors the prediction_accept case above.
+            # untag the user's pre-existing survivor. Prediction accepts
+            # instead keep a status-only record.
             # Identity is per item: for a mixed-alias prediction_accept
             # batch (see api_accept_predictions), the parent edit's
             # ``new_value`` records only the first alias, while each item's
@@ -16412,8 +16427,11 @@ class Database:
             # under-matching before.
             # Status-only accepts must retain their prediction undo record,
             # and do not count as earlier/later tag additions in these checks.
-            self.conn.execute(
-                f"""DELETE FROM edit_history_items
+            _retire_tag_mutations(self.conn.execute(
+                f"""SELECT id, old_value,
+                           (SELECT action_type FROM edit_history
+                            WHERE id = edit_history_items.edit_id) AS action_type
+                    FROM edit_history_items
                     WHERE new_value = ?
                       AND photo_id IN ({ph})
                       AND edit_id IN (
@@ -16442,12 +16460,12 @@ class Database:
                             AND ehi2.id > edit_history_items.id
                       )""",
                 [src_str, *chunk, src_str, dst_str],
-            )
+            ).fetchall())
             # When the source add happened first and a later add created
             # the current survivor association, the later add becomes the
             # redundant operation after src and dst converge. The guarded
-            # DELETE above deliberately preserves the earlier source item;
-            # drop the later add item instead so latest-first undo leaves
+            # cleanup above deliberately preserves the earlier source item;
+            # retire the later tag mutation instead so latest-first undo leaves
             # the merged tag in place until the original source add is
             # itself undone. Restrict this to add-like actions whose whole
             # per-photo effect is the tag association; species_replace has
@@ -16457,8 +16475,11 @@ class Database:
             # prediction_accept batch (whose parent records only the first
             # alias) still counts as the earlier source add for a later
             # redundant item.
-            self.conn.execute(
-                f"""DELETE FROM edit_history_items
+            _retire_tag_mutations(self.conn.execute(
+                f"""SELECT id, old_value,
+                           (SELECT action_type FROM edit_history
+                            WHERE id = edit_history_items.edit_id) AS action_type
+                    FROM edit_history_items
                     WHERE photo_id IN ({ph})
                       AND new_value IN (?, ?)
                       AND edit_id IN (
@@ -16483,7 +16504,7 @@ class Database:
                             AND ehi1.id < edit_history_items.id
                       )""",
                 [*chunk, src_str, dst_str, src_str],
-            )
+            ).fetchall())
             # keyword_remove: item.new_value is '' by convention (see
             # record_edit call sites in app.py); the keyword id lives in
             # item.old_value. Drop the item ONLY when the survivor

@@ -26203,7 +26203,8 @@ def test_batch_accept_rejects_distinct_taxa_with_same_display_name(app_and_db):
     assert not [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
 
 
-def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db):
+@pytest.mark.parametrize("on_all", [False, True])
+def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db, on_all):
     """Merging an alias used by a mixed-alias prediction_accept must not let
     undo strip a survivor tag the photo carried before the merge.
 
@@ -26241,9 +26242,12 @@ def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db
         "/api/selection/prediction-suggestions", json={"photo_ids": [photo_a, photo_b]},
     ).get_json()["predictions"]
     assert len(entries) == 1
-    response = client.post("/api/predictions/batch-accept", json={
+    payload = {
         "prediction_ids": pred_ids, "expected_species": entries[0]["species"],
-    })
+    }
+    if on_all:
+        payload["photo_ids"] = [photo_a, photo_b]
+    response = client.post("/api/predictions/batch-accept", json=payload)
     assert response.status_code == 200, response.get_data(as_text=True)
     # Sanity: the batch tags each photo with the alias that matched its own
     # prediction, so the two items have different ``new_value`` keyword ids.
@@ -26265,6 +26269,10 @@ def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db
     # photo_a's accepted tag was the only thing that item contributed, so its
     # undo still runs and clears the tag.
     assert not db.get_photo_keywords(photo_a)
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"pending"}
+    assert client.post("/api/redo").status_code == 200
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"accepted"}
+    assert all([k["id"] for k in db.get_photo_keywords(p)] == [alias_id] for p in [photo_a, photo_b])
 
 
 @pytest.mark.parametrize("earlier_source_add", [False, True])
