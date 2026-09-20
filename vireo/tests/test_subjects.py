@@ -332,3 +332,43 @@ def test_empty_redetection_clears_previous_subject_quality(db, subject_photo):
     db.clear_detections(photo_id)
     assert analyze_photo(db, photo_id, path) == 0
     assert db.conn.execute('SELECT quality_score FROM photos WHERE id=?', (photo_id,)).fetchone()[0] is None
+
+
+@pytest.mark.parametrize("cancel_during_detection", [False, True])
+@pytest.mark.parametrize("replacement", [False, True])
+def test_reclassify_cancellation_clears_previous_subject(db, subject_photo, monkeypatch,
+                                                       cancel_during_detection, replacement):
+    from types import SimpleNamespace
+
+    import classify_job
+    from resource_ledger import ResourceWaitCancelled
+
+    photo_id, ids, path = subject_photo
+    analyze_photo(db, photo_id, path)
+    db.conn.execute("UPDATE photos SET mask_path='old.png', eye_x=.7, dino_subject_embedding=X'01' WHERE id=?", (photo_id,))
+    db.conn.commit()
+    # Standalone Classify clears immediately before entering _detect_batch.
+    db.clear_detections(photo_id)
+
+    def detect(_path):
+        if cancel_during_detection:
+            raise ResourceWaitCancelled("Stopped")
+        return ([{"box": {"x": .1, "y": .1, "w": .2, "h": .2},
+                  "confidence": .9, "category": "animal"}] if replacement else [])
+
+    monkeypatch.setattr(classify_job, "detect_animals", detect)
+    monkeypatch.setattr(classify_job, "get_primary_detection", lambda detections: None)
+    monkeypatch.setattr("subjects.analyze_image", lambda *args: pytest.fail("Stop must not start analysis"))
+    runner = SimpleNamespace(is_cancelled=lambda _: True)
+    photo = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
+    with pytest.raises(ResourceWaitCancelled):
+        classify_job._detect_batch([photo], {photo["folder_id"]: str(path.parent)},
+                                   runner, {"id": 1}, True, db, det_conf_threshold=.2)
+    state = db.conn.execute("SELECT detection_id FROM photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone()
+    if replacement and not cancel_during_detection:
+        assert state["detection_id"] == db.get_detections(photo_id)[0]["id"]
+    else:
+        assert state is None
+    row = db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+    for column in ("mask_path", "eye_x", "eye_kp_fingerprint", "dino_subject_embedding", "quality_score"):
+        assert row[column] is None

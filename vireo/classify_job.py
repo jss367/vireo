@@ -999,6 +999,20 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     if cached_detections is None:
         cached_detections = {}
 
+    def sync_reclassified_subjects():
+        # Reclassification already committed detection replacements (or a
+        # clear in the standalone caller). Cleanup is required even on Stop;
+        # it performs no image decoding or additional inference.
+        if not reclassify:
+            return
+        from db import commit_with_retry
+        from pipeline_locks import acquire_photo_mask
+        from subjects import sync_primary
+        for photo in photos:
+            with acquire_photo_mask(photo["id"]):
+                sync_primary(db, photo["id"], min_conf=det_conf_threshold)
+                commit_with_retry(db.conn)
+
     try:
         if detect_animals is None or get_primary_detection is None:
             # Detector module unavailable. Skip the detection call itself,
@@ -1315,6 +1329,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         # committed catalog change even though the user pressed Stop.
         # ``ResourceWaitCancelled`` subclasses ``RuntimeError``, so
         # this narrow arm MUST precede the broad one.
+        sync_reclassified_subjects()
         raise
     except (ImportError, RuntimeError) as e:
         # Detection unavailable (missing weights/backend) — non-fatal, the
@@ -1324,6 +1339,8 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         log.warning("Detection unavailable for batch (non-fatal): %s", e)
     except Exception:
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
+
+    sync_reclassified_subjects()
 
     # Analyze every retained subject, including cached detector runs from older
     # libraries. Detection/classification results remain usable if a source goes
