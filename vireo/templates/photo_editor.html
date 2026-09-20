@@ -618,6 +618,7 @@ body {
   }
 }
 </style>
+<link rel="stylesheet" href="/static/vireo-export.css">
 <link rel="stylesheet" href="/static/photo_editor_color.css">
 </head>
 <body>
@@ -1039,102 +1040,111 @@ body {
 </main>
 
 <div id="exportOverlay" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
-  <div class="modal">
+  <div class="modal export-modal">
     <h3 id="exportTitle">Export Photo</h3>
+    <div class="export-layout">
+      <aside class="export-summary" aria-labelledby="exportSummaryTitle">
+        <h4 id="exportSummaryTitle">Output preview</h4>
+        <div id="exportPreview" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;font-family:monospace;"></div>
+        <div id="exportCollisionPolicy" style="font-size:11px;color:var(--text-secondary);margin-bottom:12px;padding:8px 10px;border:1px solid var(--border-secondary);border-radius:4px;background:var(--bg-tertiary);line-height:1.45;">
+          Existing files are never overwritten. If an export name is already in use, Vireo adds a number such as <code>_2</code>. You&rsquo;ll be shown the filename change before export starts.
+        </div>
+      </aside>
+      <section class="export-settings" aria-label="Export settings">
+        <label for="exportPreset" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Preset</label>
+        <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:12px;">
+          <select id="exportPreset" class="modal-input" style="cursor:pointer;flex:1;min-width:0;margin-bottom:0;">
+            <option value="original-jpg">Full-size JPEG</option>
+            <option value="web-jpg">Web JPEG, 2048 px</option>
+            <option value="small-jpg">Small JPEG, 1080 px</option>
+            <option value="archive-tiff">Full-size TIFF</option>
+            <option value="png">Full-size PNG</option>
+            <option value="custom">Custom</option>
+          </select>
+          <button id="exportPresetSaveBtn" class="modal-btn modal-btn-cancel" type="button"
+                  title="Save every setting in this dialog as a named preset">Save&hellip;</button>
+          <button id="exportPresetDeleteBtn" class="modal-btn modal-btn-cancel" type="button"
+                  title="Delete the selected saved preset" disabled>Delete</button>
+        </div>
+        <div class="export-settings-grid">
+          <div class="export-settings-group">
+            <h4>Files &amp; destination</h4>
+            <label for="exportDest" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Custom destination folder <span style="font-weight:400;color:var(--text-faint);">(optional)</span></label>
+            <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:4px;">
+              <input id="exportDest" class="modal-input" type="text"
+                     placeholder="Same folder as the original"
+                     style="flex:1;min-width:0;margin-bottom:0;">
+              <button class="modal-btn modal-btn-cancel" type="button"
+                      onclick="browseForExportDestination()">Browse&hellip;</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+              Leave blank to export the photo beside its original.
+            </div>
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-bottom:12px;">
+              <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input id="exportSubfolder" type="checkbox">
+                Put the export in a subfolder named
+              </label>
+              <input id="exportSubfolderName" aria-label="Subfolder name" class="modal-input" type="text" value="exported"
+                     placeholder="exported" maxlength="120"
+                     style="flex:1;min-width:0;margin-bottom:0;padding:4px 8px;font-size:12px;">
+            </div>
 
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Custom destination folder <span style="font-weight:400;color:var(--text-faint);">(optional)</span></label>
-    <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:4px;">
-      <input id="exportDest" class="modal-input" type="text"
-             placeholder="Same folder as the original"
-             style="flex:1;min-width:0;margin-bottom:0;">
-      <button class="modal-btn modal-btn-cancel" type="button"
-              onclick="browseForExportDestination()">Browse&hellip;</button>
+            <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:12px;cursor:pointer;">
+              <input id="exportRevealAfter" type="checkbox">
+              Show the exported file in the file manager when finished
+            </label>
+            <label for="exportTemplate" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Naming template</label>
+            <input id="exportTemplate" class="modal-input" type="text" value="{original}">
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{original}')">{original}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{date}')">{date}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{datetime}')">{datetime}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{species}')">{species}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{rating}')">{rating}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{seq}')">{seq}</button>
+              <button class="export-var-pill" type="button" onclick="insertTemplateVar('{folder}')">{folder}</button>
+            </div>
+          </div>
+          <div class="export-settings-group">
+            <h4>Image &amp; metadata</h4>
+            <label for="exportFormat" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Format</label>
+            <select id="exportFormat" class="modal-input" style="cursor:pointer;">
+              <option value="jpg">JPEG</option>
+              <option value="png">PNG</option>
+              <option value="tiff">TIFF</option>
+            </select>
+
+            <label for="exportResize" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Resize (max long edge)</label>
+            <select id="exportResize" class="modal-input" style="cursor:pointer;">
+              <option value="">Original size</option>
+              <option value="4096">4096 px</option>
+              <option value="2048">2048 px</option>
+              <option value="1920">1920 px</option>
+              <option value="1080">1080 px</option>
+              <option value="custom">Custom&hellip;</option>
+            </select>
+            <input id="exportResizeCustom" aria-label="Custom maximum long edge in pixels" class="modal-input" type="number" placeholder="Max pixels (long edge)" min="100" max="20000" style="display:none;">
+
+            <label for="exportQuality" id="exportQualityLabel" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Quality</label>
+            <div id="exportQualityRow" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+              <input id="exportQuality" type="range" min="1" max="100" value="92" style="flex:1;">
+              <span id="exportQualityVal" style="font-size:13px;color:var(--text-secondary);min-width:32px;">92</span>
+            </div>
+            <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:7px;">Include metadata in exported file</label>
+            <div class="export-metadata-options">
+              <label class="export-metadata-option"><input id="exportMetadataSpecies" type="checkbox" value="species"> Species</label>
+              <label class="export-metadata-option"><input id="exportMetadataCaptureDate" type="checkbox" value="capture_date"> Capture date</label>
+              <label class="export-metadata-option"><input id="exportMetadataCaptureTime" type="checkbox" value="capture_time"> Capture time</label>
+              <label class="export-metadata-option"><input id="exportMetadataRating" type="checkbox" value="rating"> Rating</label>
+              <label class="export-metadata-option"><input id="exportMetadataLocation" type="checkbox" value="location"> Location</label>
+              <label class="export-metadata-option"><input id="exportMetadataCamera" type="checkbox" value="camera"> Camera &amp; exposure</label>
+            </div>
+            <p class="export-metadata-help">Unchecked details are left out.</p>
+          </div>
+        </div>
+      </section>
     </div>
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
-      Leave blank to export the photo beside its original.
-    </div>
-    <div style="display:flex;align-items:center;gap:7px;margin-bottom:12px;">
-      <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);cursor:pointer;white-space:nowrap;">
-        <input id="exportSubfolder" type="checkbox">
-        Put the export in a subfolder named
-      </label>
-      <input id="exportSubfolderName" class="modal-input" type="text" value="exported"
-             placeholder="exported" maxlength="120"
-             style="flex:1;min-width:0;margin-bottom:0;padding:4px 8px;font-size:12px;">
-    </div>
-
-    <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:12px;cursor:pointer;">
-      <input id="exportRevealAfter" type="checkbox">
-      Show the exported file in the file manager when finished
-    </label>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Preset</label>
-    <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:12px;">
-      <select id="exportPreset" class="modal-input" style="cursor:pointer;flex:1;min-width:0;margin-bottom:0;">
-        <option value="original-jpg">Full-size JPEG</option>
-        <option value="web-jpg">Web JPEG, 2048 px</option>
-        <option value="small-jpg">Small JPEG, 1080 px</option>
-        <option value="archive-tiff">Full-size TIFF</option>
-        <option value="png">Full-size PNG</option>
-        <option value="custom">Custom</option>
-      </select>
-      <button id="exportPresetSaveBtn" class="modal-btn modal-btn-cancel" type="button"
-              title="Save every setting in this dialog as a named preset">Save&hellip;</button>
-      <button id="exportPresetDeleteBtn" class="modal-btn modal-btn-cancel" type="button"
-              title="Delete the selected saved preset" disabled>Delete</button>
-    </div>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Format</label>
-    <select id="exportFormat" class="modal-input" style="cursor:pointer;">
-      <option value="jpg">JPEG</option>
-      <option value="png">PNG</option>
-      <option value="tiff">TIFF</option>
-    </select>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Resize (max long edge)</label>
-    <select id="exportResize" class="modal-input" style="cursor:pointer;">
-      <option value="">Original size</option>
-      <option value="4096">4096 px</option>
-      <option value="2048">2048 px</option>
-      <option value="1920">1920 px</option>
-      <option value="1080">1080 px</option>
-      <option value="custom">Custom&hellip;</option>
-    </select>
-    <input id="exportResizeCustom" class="modal-input" type="number" placeholder="Max pixels (long edge)" min="100" max="20000" style="display:none;">
-
-    <label id="exportQualityLabel" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Quality</label>
-    <div id="exportQualityRow" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
-      <input id="exportQuality" type="range" min="1" max="100" value="92" style="flex:1;">
-      <span id="exportQualityVal" style="font-size:13px;color:var(--text-secondary);min-width:32px;">92</span>
-    </div>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Naming template</label>
-    <input id="exportTemplate" class="modal-input" type="text" value="{original}">
-    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{original}')">{original}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{date}')">{date}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{datetime}')">{datetime}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{species}')">{species}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{rating}')">{rating}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{seq}')">{seq}</button>
-      <button class="export-var-pill" type="button" onclick="insertTemplateVar('{folder}')">{folder}</button>
-    </div>
-    <div id="exportPreview" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;font-family:monospace;"></div>
-    <div id="exportCollisionPolicy" style="font-size:11px;color:var(--text-secondary);margin-bottom:12px;padding:8px 10px;border:1px solid var(--border-secondary);border-radius:4px;background:var(--bg-tertiary);line-height:1.45;">
-      Existing files are never overwritten. If an export name is already in use, Vireo adds a number such as <code>_2</code>. You&rsquo;ll be shown the filename change before export starts.
-    </div>
-
-    <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:7px;">Include metadata in exported file</label>
-    <div class="export-metadata-options">
-      <label class="export-metadata-option"><input id="exportMetadataSpecies" type="checkbox" value="species"> Species</label>
-      <label class="export-metadata-option"><input id="exportMetadataCaptureDate" type="checkbox" value="capture_date"> Capture date</label>
-      <label class="export-metadata-option"><input id="exportMetadataCaptureTime" type="checkbox" value="capture_time"> Capture time</label>
-      <label class="export-metadata-option"><input id="exportMetadataRating" type="checkbox" value="rating"> Rating</label>
-      <label class="export-metadata-option"><input id="exportMetadataLocation" type="checkbox" value="location"> Location</label>
-      <label class="export-metadata-option"><input id="exportMetadataCamera" type="checkbox" value="camera"> Camera &amp; exposure</label>
-    </div>
-    <p class="export-metadata-help">Unchecked details are left out.</p>
-
     <div class="modal-actions">
       <button id="exportSubmitBtn" class="modal-btn modal-btn-primary" type="button" onclick="startExport()">Export Photo</button>
       <button class="modal-btn modal-btn-cancel" type="button" data-export-cancel onclick="closeExportModal()">Cancel</button>
