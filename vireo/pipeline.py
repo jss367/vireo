@@ -2202,9 +2202,32 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     # carry its predecessor path. Re-read and fully load the current active
     # mask under the same photo lock writers hold through predecessor cleanup.
     with acquire_photo_mask(row["id"]):
-        selected = db.conn.execute("""SELECT d.box_x,d.box_y,d.box_w,d.box_h
-            FROM photo_subject_state ss LEFT JOIN detections d ON d.id=ss.detection_id
-            WHERE ss.photo_id=?""", (row["id"],)).fetchone()
+        # Resolve the effective primary the same way
+        # ``list_photos_for_eye_keypoint_stage`` and both mask-extraction
+        # paths do: the top-ordered non-full-image detection above the
+        # workspace's current detector_confidence floor.
+        # ``photo_subject_state.detection_id`` can lag when the floor
+        # changes (workspace override, or a peer workspace sharing this
+        # photo runs with a different floor), so joining against the
+        # cached state would compare ``row`` against a stale subject and
+        # skip persisting eye_kp_fingerprint — the photo would then repeat
+        # the expensive keypoint inference on every run until another
+        # operation refreshed the state.
+        import config as cfg
+        from subjects import primary_order_sql
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+        selected = db.conn.execute(
+            f"""SELECT d.box_x, d.box_y, d.box_w, d.box_h
+                  FROM detections d
+                 WHERE d.photo_id = ?
+                   AND d.detector_confidence >= ?
+                   AND d.detector_model != 'full-image'
+                 ORDER BY {primary_order_sql("d")}
+                 LIMIT 1""",
+            (row["id"], min_conf),
+        ).fetchone()
         if selected is not None and any(selected["box_" + k] != row["box_" + k] for k in "xywh"):
             return
         current_mask = db.conn.execute(

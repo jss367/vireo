@@ -2938,6 +2938,91 @@ def test_eye_stage_gate3_failure_stamps_fingerprint(tmp_path, monkeypatch):
     assert not any(r["id"] == pid for r in rows)
 
 
+def test_eye_stage_persists_when_state_lags_current_primary(tmp_path, monkeypatch):
+    """When ``photo_subject_state`` still names a detection that no longer
+    matches the effective primary — a workspace-level ``detector_confidence``
+    change, or a peer workspace sharing the photo pinning the cache at a
+    different floor — the pre-persistence staleness guard in
+    ``_process_photo_for_eye`` must resolve the primary the same way
+    ``list_photos_for_eye_keypoint_stage`` and both mask-extraction paths
+    do: via ``primary_order_sql`` at the current floor.
+
+    Comparing against the cached state instead would fail the box check
+    (row carries the effective primary; the cache still names another
+    detection) and skip stamping ``eye_kp_fingerprint`` — the photo would
+    then repeat the expensive keypoint inference on every stage run until
+    another operation refreshed the state.
+    """
+    import keypoints as kp
+    from pipeline import EYE_KP_FINGERPRINT_VERSION, detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # Existing setup writes one detection (box_x=0.125, conf=0.95) with a
+    # Vulpes vulpes prediction. Rewrite the detector's output for this
+    # photo to include BOTH that detection AND a second, lower-confidence
+    # one on a distinct box; save_detections replaces the whole set for
+    # (photo, model), so we must pass both dicts in a single call.
+    existing_det = db.get_detections(pid)[0]
+    det_ids = db.save_detections(
+        pid,
+        [
+            {"box": {k: existing_det["box_" + k] for k in "xywh"},
+             "confidence": existing_det["detector_confidence"]},
+            {"box": {"x": 0.5, "y": 0.2, "w": 0.2, "h": 0.3},
+             "confidence": 0.3},
+        ],
+        detector_model=existing_det["detector_model"],
+    )
+    # Attach a same-taxonomy prediction to the SECOND detection so it,
+    # too, could route through _resolve_keypoint_model — and, crucially,
+    # so it satisfies the prediction join in list_photos_for_eye_keypoint_stage.
+    db.add_prediction(
+        det_ids[1], species="Vulpes vulpes", confidence=0.92,
+        model="bioclip-2.5", category="match",
+        taxonomy={
+            "kingdom": "Animalia", "class": "Mammalia",
+            "scientific_name": "Vulpes vulpes",
+        },
+    )
+    # Simulate a peer workspace (or an earlier floor) having pinned the
+    # cached subject to the SECOND detection. Under the current floor
+    # (0.2), primary_order_sql still ranks the first (conf=0.95) ahead of
+    # the second (conf=0.3), so the eye stage queues a row carrying the
+    # first detection's box — which no longer matches photo_subject_state.
+    db.conn.execute(
+        "INSERT INTO photo_subject_state(photo_id, detection_id) VALUES (?, ?) "
+        "ON CONFLICT(photo_id) DO UPDATE SET detection_id=excluded.detection_id",
+        (pid, det_ids[1]),
+    )
+    db.conn.commit()
+
+    # Sanity check: the eye stage sees the FIRST detection's box.
+    queued = db.list_photos_for_eye_keypoint_stage([pid])
+    assert queued and queued[0]["box_x"] == existing_det["box_x"]
+
+    good = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.88},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.85},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: good)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] == EYE_KP_FINGERPRINT_VERSION, (
+        "Guard must resolve the effective primary from the current "
+        "detector_confidence floor, not the cached photo_subject_state; "
+        "otherwise persistence is skipped and the keypoint model reruns "
+        "on every stage invocation."
+    )
+    eye_x, eye_y, eye_conf, _ = _read_eye_fields(db, pid)
+    assert eye_x is not None and eye_y is not None and eye_conf is not None
+
+
 def test_eye_stage_gate1_out_of_scope_species_no_write(tmp_path, monkeypatch):
     """Gate 1: species class not in {Aves, Mammalia} → no write."""
     import keypoints as kp
