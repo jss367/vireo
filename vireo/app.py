@@ -27583,7 +27583,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from pipeline_locks import acquire_photo_mask
             from quality import compute_all_quality_features
             from resource_ledger import ResourceWaitCancelled
-            from subjects import primary_order_sql
+            from subjects import primary_order_sql, sync_primary
 
             thread_db = ctx.thread_db()
 
@@ -27715,6 +27715,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     break
                 mask_file_stage = None
                 try:
+                    # Sync the primary before deciding whether a cached
+                    # mask still applies. A workspace confidence-floor
+                    # change (or another workspace sharing this photo
+                    # writing photo_subject_state with a different floor)
+                    # can promote a new primary since this job was queued;
+                    # sync_primary clears mask_path, active_mask_variant,
+                    # dino_subject_embedding, and eye_*/eye_kp_fingerprint
+                    # when the primary detection actually changed, so the
+                    # subsequent eye stage recomputes for the newly
+                    # published subject instead of retaining the previous
+                    # subject's eye focus (Codex r4056563009).
+                    sync_primary(thread_db, photo_id, min_conf=min_detector_conf)
+                    commit_with_retry(thread_db.conn)
                     # A user can change primary after this job was queued.
                     current = [d for d in thread_db.get_detections(photo_id, min_conf=min_detector_conf)
                                if d["detector_model"] != "full-image"]
@@ -27728,8 +27741,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     # Cache hit: photo_masks already has a row for
                     # (photo, configured variant) AND its stored prompt
                     # + detector still match the current primary
-                    # detection AND the file is on disk. Skip SAM and
-                    # just (re-)activate the cached mask.
+                    # detection AND the file is on disk AND the photos row
+                    # is already fully consistent for this (sam, dino)
+                    # pair. A subject A→B→A round-trip clears
+                    # dino_subject_embedding via sync_primary while the
+                    # matching photo_masks row for A remains cached; a
+                    # bare cache-hit shortcut would then re-activate the
+                    # mask and skip DINO, leaving dino_subject_embedding
+                    # null even though the job reported the photo
+                    # processed. Mirror the Process pipeline's
+                    # active_mask_variant/dino_embedding_variant guard
+                    # (Codex r4056402007).
                     existing = thread_db.get_photo_mask(
                         photo_id, sam2_variant,
                     )
@@ -27743,27 +27765,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 and cached_prompt == photo["prompt"]
                                 and existing["path"]
                                 and os.path.isfile(existing["path"])):
-                            thread_db.set_active_mask_variant(
-                                photo_id, sam2_variant,
-                            )
-                            masked += 1
-                            ctx.runner.push_event(
-                                job["id"],
-                                "progress",
-                                {
-                                    "current": i + 1,
-                                    "total": total,
-                                    "current_file": photo["filename"],
-                                    "rate": round(
-                                        (i + 1) / max(
-                                            time.time() - job["_start_time"], 0.01,
+                            state = thread_db.conn.execute(
+                                "SELECT active_mask_variant, "
+                                "dino_embedding_variant FROM photos "
+                                "WHERE id = ?",
+                                (photo_id,),
+                            ).fetchone()
+                            if (state is not None
+                                    and state["active_mask_variant"]
+                                    == sam2_variant
+                                    and state["dino_embedding_variant"]
+                                    == dinov2_variant):
+                                masked += 1
+                                ctx.runner.push_event(
+                                    job["id"],
+                                    "progress",
+                                    {
+                                        "current": i + 1,
+                                        "total": total,
+                                        "current_file": photo["filename"],
+                                        "rate": round(
+                                            (i + 1) / max(
+                                                time.time() - job["_start_time"], 0.01,
+                                            ),
+                                            1,
                                         ),
-                                        1,
-                                    ),
-                                    "phase": "Extracting features (SAM2 + DINOv2)",
-                                },
-                            )
-                            continue
+                                        "phase": "Extracting features (SAM2 + DINOv2)",
+                                    },
+                                )
+                                continue
+                            # Denormalised subject state is stale: fall
+                            # through to the full recompute below, which
+                            # writes set_active_mask_variant +
+                            # update_photo_embeddings atomically.
 
                     # Load working-resolution proxy
                     proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)

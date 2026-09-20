@@ -59,12 +59,24 @@
     quality.title = 'Quality is measured within this detection box, before exposure correction.';
     description.append(species, quality);
     details.append(img, description);
+    // Scoped Pipeline Review views open the lightbox with _lbReadOnly to
+    // freeze edit-recipe writes; Use crop / Use exposure PUT the edit
+    // recipe, so they must respect that flag alongside the standard
+    // enable/disable state (Codex r4056563011).
+    const readOnly = typeof _lbReadOnly !== 'undefined' && _lbReadOnly;
     analyzeButton.hidden = data.subjects.every(s => s.analysis);
     analyzeButton.disabled = busy;
     automatic.disabled = busy || data.selection === 'automatic';
     corrected.disabled = !subject.analysis;
-    cropButton.disabled = busy || !subject.analysis;
-    exposureButton.disabled = busy || !subject.analysis;
+    cropButton.disabled = busy || !subject.analysis || readOnly;
+    exposureButton.disabled = busy || !subject.analysis || readOnly;
+    if (readOnly && typeof _lbReadOnlyMessage === 'string') {
+      cropButton.title = _lbReadOnlyMessage;
+      exposureButton.title = _lbReadOnlyMessage;
+    } else {
+      cropButton.removeAttribute('title');
+      exposureButton.removeAttribute('title');
+    }
     status.textContent = data.choice_unavailable ? 'Your chosen subject is unavailable. Showing the best retained subject; your choice is remembered.'
       : data.selection === 'manual' ? 'Primary chosen by you. Saved edits are unchanged.'
       : data.subjects.every(s => s.analysis) ? 'Primary selected by quality. Suggestions leave saved edits unchanged.'
@@ -124,6 +136,10 @@
   async function useSuggestion(kind) {
     const subject = primary();
     if (!subject?.analysis || busy || _lbEditWritePending || data.photo_id !== _lightboxCurrentId) return;
+    // Guard against a rogue click before render() runs after the read-only
+    // state flips (Codex r4056563011). _lbGuardReadOnly surfaces the same
+    // read-only toast every other edit-recipe writer uses.
+    if (typeof _lbGuardReadOnly === 'function' && _lbGuardReadOnly()) return;
     const photoId = data.photo_id;
     const seq = generation;
     busy = true;
