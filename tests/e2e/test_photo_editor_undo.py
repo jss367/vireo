@@ -210,3 +210,42 @@ def test_webview_history_events_use_working_history(page, editor_photo):
         'beforeinput', {inputType: 'historyRedo', bubbles: true, cancelable: true}
     ))""")
     expect(page.locator('#exposureRange')).to_have_value('1')
+
+
+@pytest.mark.parametrize('status_after_edits', [False, True])
+def test_delayed_mask_staleness_survives_keyboard_undo_redo(page, editor_photo, status_after_edits):
+    saved = {'local': {
+        'mask': {'ref': 'saved-mask', 'source_digest': 'saved-digest'},
+        'regions': [{'region': 'subject', 'adjustments': {'exposure': 0.5}}],
+    }}
+    page.route(f'**/api/photos/{editor_photo}', lambda route: route.fulfill(json={
+        'id': editor_photo, 'filename': 'undo-photo.jpg', 'width': 600, 'height': 400,
+        'edit_recipe': saved,
+    }))
+    held = []
+    page.route(f'**/api/photos/{editor_photo}/edit-recipe', lambda route: held.append(route))
+    page.evaluate('(id) => loadPhoto(id)', editor_photo)
+    page.wait_for_function('!editorState.loading')
+    page.wait_for_timeout(50)
+    assert len(held) == 1
+
+    def finish_status():
+        held.pop().fulfill(json={'recipe': saved, 'local_mask_stale': True})
+        expect(page.locator('#localStaleBanner')).to_be_visible()
+
+    if not status_after_edits:
+        finish_status()
+    page.locator('#exposureRange').focus()
+    page.keyboard.press('ArrowRight')
+    page.keyboard.press('ArrowRight')
+    page.keyboard.press('Meta+z')
+    expect(page.locator('#exposureRange')).to_have_value('0.1')
+    if status_after_edits:
+        finish_status()  # Both undo and redo snapshots already exist.
+    page.keyboard.press('Meta+z')
+    expect(page.locator('#exposureRange')).to_have_value('0')
+    expect(page.locator('#localStaleBanner')).to_be_visible()
+    for value in ('0.1', '0.2'):
+        page.keyboard.press('Meta+Shift+z')
+        expect(page.locator('#exposureRange')).to_have_value(value)
+        expect(page.locator('#localStaleBanner')).to_be_visible()

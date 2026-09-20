@@ -19,6 +19,20 @@ function resetEditorHistory() {
   if (window.renderHistoryControls) window.renderHistoryControls();
 }
 
+function refreshEditorHistoryLocalStaleness() {
+  var savedMask = (editorState.savedRecipe.local || {}).mask;
+  if (!savedMask) return;
+  // Staleness describes the mask snapshot, not an editing step. A delayed
+  // status read must update every matching undo/redo state without changing
+  // the status of a newer mask selected while that read was in flight.
+  editorHistory.undo.concat(editorHistory.redo, [editorHistory.current, editorState]).forEach(function(snapshot) {
+    var mask = snapshot && (snapshot.recipe.local || {}).mask;
+    if (mask && mask.ref === savedMask.ref && mask.source_digest === savedMask.source_digest) {
+      snapshot.localStale = editorState.savedLocalStale;
+    }
+  });
+}
+
 function recordEditorHistory() {
   var next = editorHistorySnapshot();
   var previous = editorHistory.current;

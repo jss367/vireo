@@ -4388,8 +4388,8 @@ function editorEmptyState() {
 function applyLoadedLocalStaleness(photoId, loadSeq, savedRecipeSeq, data) {
   if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq ||
       editorState.savedRecipeSeq !== savedRecipeSeq) return false;
-  editorState.localStale = !!data.local_mask_stale;
-  editorState.savedLocalStale = editorState.localStale;
+  editorState.savedLocalStale = !!data.local_mask_stale;
+  refreshEditorHistoryLocalStaleness();
   updateLocalBandVisibility();
   return true;
 }
