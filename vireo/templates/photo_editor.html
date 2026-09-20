@@ -2504,6 +2504,13 @@ function nextCropRatioRevision(previous) {
   // range; the server accepts this rollover instead of rejecting it as
   // stale.
   var current = Number(previous) || 0;
+  // Sibling tabs starting from the same server revision in this Date.now()
+  // tick would otherwise compute the same next revision. Their pending
+  // records live in shared localStorage; take the max so this write
+  // outranks whatever they queued instead of colliding on equal revisions.
+  pendingCropRatioRecords().forEach(function(record) {
+    if (record.preference.revision > current) current = record.preference.revision;
+  });
   var candidate = current + 1;
   if (!Number.isSafeInteger(candidate)) candidate = Date.now();
   var next = Math.max(Date.now(), candidate);

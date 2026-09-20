@@ -664,6 +664,35 @@ def test_photo_editor_navigation_adopts_sibling_tab_preference(live_server, page
     assert page.evaluate("() => editorState.cropAspect") == pytest.approx(1.3333333333)
 
 
+def test_photo_editor_next_revision_outranks_sibling_tab_pending_write(live_server, page):
+    """A sibling tab's pending revision must never equal this tab's next one.
+
+    Two editors starting from the same stored revision and toggling the
+    preference in the same ``Date.now()`` tick would otherwise compute the
+    same next revision, so the server rejects one and the shared
+    acknowledgement clears both pending records — losing one user's choice
+    silently (Codex review, PR #1729).
+    """
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(f"{live_server['url']}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    ceiling = page.evaluate("""() => Date.now() + 1_000_000""")
+    outcome = page.evaluate(
+        """(sibling) => {
+            const key = 'vireo_pending_crop_ratio:sibling';
+            const record = {enabled: true, aspect: 1.5, revision: sibling};
+            localStorage.setItem(key, JSON.stringify(record));
+            try {
+                return nextCropRatioRevision(sibling - 10);
+            } finally {
+                localStorage.removeItem(key);
+            }
+        }""",
+        ceiling,
+    )
+    assert outcome > ceiling
+
+
 def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
     """A remembered ratio must not recrop an existing edit just by opening it."""
     url = live_server["url"]
