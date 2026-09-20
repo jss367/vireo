@@ -2400,19 +2400,19 @@ function setStraighten(value) {
 function rememberCropRatio(force) {
   if (!cropRatioPreference.enabled && !force) return;
   cropRatioPreference.aspect = cropRatioPreference.enabled ? editorState.cropAspect : null;
+  cropRatioPreference.revision = Math.max(Date.now(), (cropRatioPreference.revision || 0) + 1);
   var body = JSON.stringify(cropRatioPreference);
-  // Serialize rapid choices so an older request cannot overwrite the last
-  // ratio. Configuration survives the desktop app's changing server port.
-  cropRatioSave = cropRatioSave.then(function() {
-    return safeFetch('/api/editor/crop-ratio', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: body,
-      keepalive: true,
-    }, {toast: false});
-  }).catch(function() {
+  // Issue every write before teardown can discard JavaScript callbacks.
+  // The server compares revisions so a slow older request cannot win.
+  var request = safeFetch('/api/editor/crop-ratio', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: body,
+    keepalive: true,
+  }, {toast: false}).catch(function() {
     showToast('Could not remember the crop ratio. Please try again.', 'error');
   });
+  cropRatioSave = Promise.all([cropRatioSave, request]);
 }
 
 function setRememberCropRatio(enabled) {

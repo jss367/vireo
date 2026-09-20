@@ -38,6 +38,21 @@ def test_editor_crop_ratio_preserves_sparse_config(app_and_db, existing):
             assert json.load(config_file) == {**existing, "editor_crop_ratio": preference}
 
 
+def test_editor_crop_ratio_ignores_late_older_writes(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    newest = {"enabled": True, "aspect": 1.5, "revision": 200}
+    assert client.put(endpoint, json=newest).get_json() == newest
+    older = {"enabled": True, "aspect": None, "revision": 100}
+    assert client.put(endpoint, json=older).get_json() == newest
+    assert client.get(endpoint).get_json() == newest
+    disabled = {"enabled": False, "aspect": None, "revision": 300}
+    assert client.put(endpoint, json=disabled).get_json() == disabled
+    assert client.put(endpoint, json=newest).get_json() == disabled
+    assert client.get(endpoint).get_json() == disabled
+
+
 @pytest.mark.parametrize("body", [
     [], {}, {"enabled": "true"}, {"enabled": True, "aspect": True},
     {"enabled": True, "aspect": 0}, {"enabled": True, "aspect": -1},

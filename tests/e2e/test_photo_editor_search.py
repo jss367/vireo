@@ -446,6 +446,42 @@ def test_photo_editor_remembers_crop_ratio_across_photos_and_reload(live_server,
     expect(page.locator("#aspectLockBtn")).not_to_have_class(re.compile(r"\bactive\b"))
 
 
+def test_photo_editor_issues_latest_ratio_while_previous_save_is_pending(live_server, page):
+    """A slow preference save cannot strand newer choices in a JS callback."""
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{photo_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    pending = []
+
+    def hold_first_save(route):
+        if route.request.method == "PUT" and not pending:
+            pending.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/editor/crop-ratio", hold_first_save)
+    with page.expect_request(lambda request: request.method == "PUT"):
+        page.get_by_label("Remember crop ratio").check()
+    # The first PUT has not reached the server. The second must start now,
+    # so keepalive can finish it even if the page closes immediately.
+    with page.expect_response(lambda response: response.request.method == "PUT"):
+        page.locator("#aspect32Btn").click()
+    assert pending
+    pending[0].continue_()
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.get_by_label("Remember crop ratio")).to_be_checked()
+
+
 def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
     """A remembered ratio must not recrop an existing edit just by opening it."""
     url = live_server["url"]

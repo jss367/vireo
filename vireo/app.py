@@ -19481,12 +19481,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 and value > 0
             )
 
-        if request.method == "GET":
-            stored = cfg.load().get("editor_crop_ratio", {})
+        def valid_revision(value):
+            return type(value) is int and 0 < value <= 9007199254740991
+
+        def normalized_preference(stored):
+            result = {"enabled": False, "aspect": None}
+            if isinstance(stored, dict) and valid_revision(stored.get("revision")):
+                result["revision"] = stored["revision"]
             if not isinstance(stored, dict) or stored.get("enabled") is not True:
-                return jsonify(enabled=False, aspect=None)
+                return result
             aspect = stored.get("aspect")
-            return jsonify(enabled=True, aspect=aspect if valid_aspect(aspect) else None)
+            result.update(enabled=True, aspect=aspect if valid_aspect(aspect) else None)
+            return result
+
+        if request.method == "GET":
+            return jsonify(normalized_preference(cfg.load().get("editor_crop_ratio", {})))
 
         body = request.get_json(silent=True)
         if not isinstance(body, dict) or type(body.get("enabled")) is not bool:
@@ -19494,9 +19503,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         aspect = body.get("aspect")
         if aspect is not None and not valid_aspect(aspect):
             return json_error("aspect must be a positive finite number or null", status=400)
+        revision = body.get("revision")
+        if "revision" in body and not valid_revision(revision):
+            return json_error("revision must be a positive safe integer", status=400)
         preference = {"enabled": body["enabled"], "aspect": aspect if body["enabled"] else None}
+        if revision is not None:
+            preference["revision"] = revision
         with _settings_write_lock:
             current = _read_raw_config_file()
+            stored = normalized_preference(current.get("editor_crop_ratio", {}))
+            if revision is not None and revision <= stored.get("revision", 0):
+                return jsonify(stored)
             current["editor_crop_ratio"] = preference
             cfg.save(current)
         return jsonify(preference)
