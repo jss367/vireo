@@ -13,7 +13,7 @@ def _identity(path):
             info.st_mtime_ns, info.st_ctime_ns]
 
 
-def review_source(db, source, expected_device=None):
+def review_source(db, source, expected_device=None, expected_inode=None):
     """Inventory without following links; protect catalog photos in all workspaces."""
     source = os.path.abspath(source)
     resolved = os.path.realpath(source)
@@ -31,16 +31,16 @@ def review_source(db, source, expected_device=None):
                 "source_device": expected_device}
     if expected_device is not None and source_stat.st_dev != expected_device:
         raise ValueError("The original volume changed; reconnect it and review again")
+    if expected_inode is not None and source_stat.st_ino != expected_inode:
+        raise ValueError("The original folder was replaced; review the replacement separately")
     if not stat.S_ISDIR(source_stat.st_mode):
         raise ValueError("The original folder has been replaced by a file")
-    for row in db.conn.execute(
-        "SELECT DISTINCT f.path FROM folders f JOIN photos p ON p.folder_id = f.id"
-    ):
-        path = os.path.realpath(row["path"])
-        if path == resolved or path.startswith(resolved + os.sep):
+    source_rows = _source_folder_rows(db, source)
+    for row in source_rows:
+        if db.conn.execute("SELECT 1 FROM photos WHERE folder_id = ? LIMIT 1", (row["id"],)).fetchone():
             raise ValueError("The original folder still contains cataloged photos")
 
-    for row in _source_folder_rows(db, source):
+    for row in source_rows:
         if db.conn.execute(
             "SELECT 1 FROM workspace_folders WHERE folder_id = ? "
             "AND workspace_id IS NOT ? LIMIT 1",
@@ -77,26 +77,34 @@ def review_source(db, source, expected_device=None):
         "state": "remaining" if files or directories else "empty",
         "source_path": source, "files": files, "file_count": len(files),
         "directories": directories, "review_token": token,
+        "directory_inodes": {name: identity[1] for name, identity in identities
+                             if stat.S_ISDIR(identity[2])},
         "xmp_count": sum(item["name"].lower().endswith(".xmp") for item in files),
         "source_device": source_stat.st_dev,
+        "source_inode": source_stat.st_ino,
     }
 
 
 def _source_folder_rows(db, source):
     """Find catalog rows under the selected physical source, including aliases."""
-    resolved = os.path.realpath(source)
+    try:
+        from .move import _path_equal_or_descends
+    except ImportError:
+        from move import _path_equal_or_descends
+    # Existing ancestors are compared by filesystem identity, so case aliases
+    # work on APFS/NTFS without conflating distinct case-sensitive directories.
+    # Do not create case-probe directories during a read-only review.
     return [row for row in db.conn.execute("SELECT id, path FROM folders")
-            if (path := os.path.realpath(row["path"])) == resolved
-            or path.startswith(resolved + os.sep)]
+            if _path_equal_or_descends(row["path"], source, case_insensitive_root=None)]
 
 
-def _remove_empty_source(db, source, expected_device):
+def _remove_empty_source(db, source, expected_device, expected_inode):
     """Retire empty catalog rows and remove the directory under a writer lock."""
     db.conn.execute("BEGIN IMMEDIATE")
     try:
         # Recheck after obtaining the writer lock: a scanner may have added
         # photos or workspace links since the initial filesystem inventory.
-        review = review_source(db, source, expected_device)
+        review = review_source(db, source, expected_device, expected_inode)
         if review["state"] not in ("empty", "removed"):
             raise ValueError("The folder changed. Review remaining files again before cleaning up")
         rows = sorted(_source_folder_rows(db, source),
@@ -126,15 +134,15 @@ def _remove_empty_source(db, source, expected_device):
         db._new_images_cache.invalidate_workspaces(db._db_path, [db._active_workspace_id])
 
 
-def finish_source(db, source, expected_device=None):
+def finish_source(db, source, expected_device=None, expected_inode=None):
     """Remove only the selected source when empty, and report remaining files."""
     try:
-        review = review_source(db, source, expected_device)
+        review = review_source(db, source, expected_device, expected_inode)
         if review["state"] in ("empty", "removed"):
-            _remove_empty_source(db, source, review["source_device"])
+            _remove_empty_source(db, source, review["source_device"], review.get("source_inode"))
             review["state"] = "removed"
         return {key: review[key] for key in
-                ("state", "source_path", "file_count", "xmp_count", "source_device") if key in review}
+                ("state", "source_path", "file_count", "xmp_count", "source_device", "source_inode") if key in review}
     except (OSError, ValueError, sqlite3.Error) as exc:
         result = {"state": "unavailable", "source_path": source, "error": str(exc)}
         if expected_device is not None:
@@ -156,7 +164,8 @@ def cleanup_source(db, source, token, trash_paths):
     trashed, _successful, failures = trash_paths(paths) if paths else (0, set(), [])
     # rmdir cannot remove a folder containing a new file or a failed Trash item.
     for relative in sorted(review["directories"], key=lambda p: p.count(os.sep), reverse=True):
-        finish_source(db, os.path.join(source, relative), review["source_device"])
-    result = finish_source(db, source, review["source_device"])
+        finish_source(db, os.path.join(source, relative), review["source_device"],
+                      review["directory_inodes"][relative])
+    result = finish_source(db, source, review["source_device"], review["source_inode"])
     result.update(trashed=trashed, failures=failures)
     return result

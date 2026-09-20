@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+from contextlib import ExitStack
 
 from flask import Blueprint, jsonify, request
 from jobs import WorkspaceBusyError
@@ -39,7 +40,17 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                 or not result.get("moved") or result.get("errors") or result.get("ok") is False):
             return json_error("Cleanup requires a successfully completed date-organized move", 409)
         try:
-            with cleanup_lock, runner.workspace_mutation(db._active_workspace_id, exclusive=True):
+            with cleanup_lock, ExitStack() as reservations:
+                reservations.enter_context(runner.workspace_mutation(db._active_workspace_id, exclusive=True))
+                if request.method == "POST":
+                    # An import in any workspace can discover this source.
+                    # Hold every workspace reservation through review and Trash,
+                    # including workspaces created while reservations are acquired.
+                    reserved = {db._active_workspace_id}
+                    while pending := {item[0] for item in db.conn.execute("SELECT id FROM workspaces")} - reserved:
+                        for workspace_id in sorted(pending):
+                            reservations.enter_context(runner.workspace_mutation(workspace_id, exclusive=True))
+                            reserved.add(workspace_id)
                 source = config["source_path"]
                 # A successful cleanup can retire the old ID. Resolve the
                 # current row by path so a reused ID cannot guard another folder.

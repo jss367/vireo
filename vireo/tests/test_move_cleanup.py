@@ -268,7 +268,7 @@ def test_device_change_between_inventory_and_removal_keeps_catalog(cleanup_case,
     device = source.stat().st_dev
     original_review = move_cleanup.review_source
 
-    def changed_review(db, path, expected_device=None):
+    def changed_review(db, path, expected_device=None, expected_inode=None):
         if expected_device is not None:
             raise ValueError("The original volume changed")
         return original_review(db, path)
@@ -277,6 +277,98 @@ def test_device_change_between_inventory_and_removal_keeps_catalog(cleanup_case,
     assert finish_source(db, str(source))["state"] == "unavailable"
     assert source.is_dir()
     assert source.stat().st_dev == device
+    assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
+
+
+def test_cleanup_refuses_job_running_in_another_workspace(cleanup_case, monkeypatch):
+    import threading
+
+    app, db, source, _ = cleanup_case
+    client = app.test_client()
+    review = client.get(URL).json
+    other = db.create_workspace("Import workspace")
+    release = threading.Event()
+    app._job_runner.start("scan", lambda job: release.wait(5), workspace_id=other)
+    monkeypatch.setattr("app._trash_paths", lambda paths: pytest.fail("Trash called during another workspace's scan"))
+    try:
+        response = client.post(URL, json={"confirm_trash": True, "review_token": review["review_token"]})
+        assert response.status_code == 409
+        assert (source / "orphan.xmp").exists()
+    finally:
+        release.set()
+
+
+def test_cleanup_blocks_new_cross_workspace_import_until_trash_finishes(cleanup_case, monkeypatch):
+    from jobs import WorkspaceBusyError
+
+    app, db, source, _ = cleanup_case
+    client = app.test_client()
+    review = client.get(URL).json
+    other = db.create_workspace("Import workspace")
+
+    def trash(paths):
+        with pytest.raises(WorkspaceBusyError):
+            app._job_runner.start("import", lambda job: {}, workspace_id=other)
+        for path in paths:
+            os.unlink(path)
+        return len(paths), set(paths), []
+
+    monkeypatch.setattr("app._trash_paths", trash)
+    response = client.post(URL, json={"confirm_trash": True, "review_token": review["review_token"]})
+    assert response.status_code == 200, response.json
+    assert response.json["state"] == "removed"
+    assert not source.exists()
+
+
+@pytest.mark.parametrize("tracked", [True, False])
+def test_case_alias_catalog_rows_are_protected(cleanup_case, monkeypatch, tracked):
+    _, db, source, folder_id = cleanup_case
+    alias = str(source.parent / source.name.upper())
+    db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (alias, folder_id))
+    db.conn.commit()
+    if tracked:
+        db.add_photo(folder_id=folder_id, filename="orphan.NEF", extension=".NEF", file_size=1, file_mtime=1)
+    else:
+        other = db.create_workspace("Alias workspace")
+        db.add_workspace_folder(other, folder_id)
+    original_exists, original_samefile = os.path.exists, os.path.samefile
+
+    def exists(path):
+        return True if os.fspath(path) == alias else original_exists(path)
+
+    def samefile(a, b):
+        if {os.fspath(a), os.fspath(b)} == {alias, str(source)}:
+            return True
+        return original_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "exists", exists)
+    monkeypatch.setattr(os.path, "samefile", samefile)
+    with pytest.raises(ValueError, match="cataloged photos" if tracked else "another workspace"):
+        review_source(db, str(source))
+
+
+def test_auto_cleanup_keeps_replacement_directory(cleanup_case, monkeypatch):
+    import move
+
+    _, db, source, folder_id = cleanup_case
+    (source / "orphan.xmp").unlink()
+    (source / "photo.NEF").write_text("original")
+    db.add_photo(folder_id=folder_id, filename="photo.NEF", extension=".NEF",
+                 file_size=8, file_mtime=1, timestamp="2026-07-11T10:00:00")
+    original_move = move.move_photos
+
+    def move_then_replace(*args, **kwargs):
+        result = original_move(*args, **kwargs)
+        source.rename(source.parent / "renamed-original")
+        source.mkdir()
+        return result
+
+    monkeypatch.setattr(move, "move_photos", move_then_replace)
+    result = move.move_folder_by_date(db, folder_id, str(source.parent / "archive"), "%Y-%m-%d")
+    assert result["moved"] == 1
+    assert result["source_cleanup"]["state"] == "unavailable"
+    assert "replaced" in result["source_cleanup"]["error"]
+    assert source.is_dir()
     assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
 
 
