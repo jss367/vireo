@@ -521,6 +521,9 @@ def test_preparation_skips_concurrently_deleted_photos(
     assert result["ok"] is True
     assert result["skipped_deleted"] == 1
     assert result["ready"] == 1
+    assert result["copied"] == 1
+    assert result["reused"] == 0
+    assert result["bytes"] == db.offline_original_get(other_id)["bytes"]
     assert result["failed"] == 0
     assert result["total"] == 2
     assert result["errors"] == []
@@ -573,3 +576,123 @@ def test_preparation_preserves_errors_for_existing_photos(
     assert result["ready"] == 0
     assert len(result["errors"]) == 1
     assert db.get_photo(photo_id) is not None
+
+
+@pytest.mark.parametrize("stage", ["before_turn", "after_copy", "during_render"])
+def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, stage):
+    import image_loader
+    import offline_cache
+    from db import Database
+    from preview_cache import cleanup_cached_files_for_deleted_photos
+
+    app, db, photo_id = client_with_photo
+    selected = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (selected["folder_id"],),
+    ).fetchone()["path"]
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    replacement_path = os.path.join(folder, "replacement.jpg")
+    replacement_bytes = []
+    replacement_cache = []
+
+    def replace_photo():
+        other_db = Database(app.config["DB_PATH"])
+        try:
+            deleted = other_db.delete_photos([photo_id])
+            cleanup_cached_files_for_deleted_photos(app.config["THUMB_CACHE_DIR"], deleted["files"])
+            Image.new("RGB", (800, 600), "blue").save(replacement_path)
+            replacement_bytes.append(Path(replacement_path).read_bytes())
+            new_id = other_db.add_photo(
+                folder_id=selected["folder_id"], filename="replacement.jpg", extension=".jpg",
+                file_size=selected["file_size"], file_mtime=selected["file_mtime"],
+                width=800, height=600,
+            )
+            assert new_id == photo_id  # Reproduce SQLite recycling the highest ID.
+            if stage == "before_turn":
+                # Work not yet started must leave the new owner's cache alone.
+                cached = offline_cache.cache_photo_original(
+                    other_db, other_db.get_photo(new_id), vireo_dir,
+                    {selected["folder_id"]: folder},
+                )
+                replacement_cache.append(cached["path"])
+        finally:
+            other_db.close()
+
+    if stage == "before_turn":
+        original_tree = Database.get_folder_tree
+
+        def replace_before_turn(self, *args, **kwargs):
+            result = original_tree(self, *args, **kwargs)
+            if not replacement_bytes:
+                replace_photo()
+            return result
+
+        monkeypatch.setattr(Database, "get_folder_tree", replace_before_turn)
+    elif stage == "after_copy":
+        original_copy = offline_cache._copy_atomic
+
+        def publish_after_replacement(src, dst):
+            original_copy(src, dst)
+            old_bytes = Path(dst).read_bytes()
+            replace_photo()
+            Path(dst).write_bytes(old_bytes)
+
+        monkeypatch.setattr(offline_cache, "_copy_atomic", publish_after_replacement)
+    else:
+        db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+        original_load = image_loader.load_image
+
+        def replace_during_render(*args, **kwargs):
+            image = original_load(*args, **kwargs)
+            if not replacement_bytes:
+                replace_photo()
+            return image
+
+        monkeypatch.setattr(image_loader, "load_image", replace_during_render)
+
+    client = app.test_client()
+    started = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["skipped_deleted"] == 1
+    assert job["result"]["ready"] == 0
+    assert job["result"]["copied"] == 0
+    assert job["result"]["reused"] == 0
+    assert job["result"]["bytes"] == 0
+    assert job["result"]["errors"] == []
+    assert db.get_photo(photo_id)["filename"] == "replacement.jpg"
+    assert Path(replacement_path).read_bytes() == replacement_bytes[0]
+    if stage == "before_turn":
+        assert Path(replacement_cache[0]).read_bytes() == replacement_bytes[0]
+        assert db.offline_original_get(photo_id) is not None
+    else:
+        assert db.offline_original_get(photo_id) is None
+    response = client.get(f"/photos/{photo_id}/original")
+    assert response.status_code == 200
+    assert response.data == replacement_bytes[0]
+    response.close()
+
+
+def test_preparation_does_not_count_deleted_reused_cache(client_with_photo, monkeypatch):
+    import offline_cache
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    first = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
+    assert wait_for_job_via_client(client, first.get_json()["job_id"])["status"] == "completed"
+    original_cache = offline_cache.cache_photo_original
+
+    def delete_reused(thread_db, *args, **kwargs):
+        result = original_cache(thread_db, *args, **kwargs)
+        assert result["status"] == "skipped"
+        thread_db.delete_photos([photo_id])
+        return result
+
+    monkeypatch.setattr(offline_cache, "cache_photo_original", delete_reused)
+    second = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
+    job = wait_for_job_via_client(client, second.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["skipped_deleted"] == 1
+    assert job["result"]["reused"] == 0
+    assert job["result"]["copied"] == 0
+    assert job["result"]["bytes"] == 0

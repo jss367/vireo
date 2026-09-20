@@ -25274,6 +25274,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("no photos in the current workspace can be prepared")
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        # Preserve the selected source identity even if SQLite recycles its
+        # numeric ID before this job reaches it.
+        selected_photos = db.get_photos_by_ids(photo_ids)
+
+        def same_source(selected, current):
+            return selected is not None and current is not None and all(
+                selected[key] == current[key]
+                for key in ("folder_id", "filename", "file_size", "file_mtime", "companion_path")
+            )
 
         def work(job):
             from offline_cache import cache_photo_original
@@ -25299,26 +25308,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         break
                     # Re-read each photo: deletion may have run while this
                     # job was preparing earlier selections.
-                    photo = thread_db.get_photo(photo_id)
+                    photo = selected_photos.get(photo_id)
+                    current_photo = thread_db.get_photo(photo_id)
                     filename = photo["filename"] if photo else f"Photo {photo_id}"
                     error = None
-                    if not photo:
-                        error = "photo was not found"
-                    else:
+                    cached = None
+                    attempted = same_source(photo, current_photo)
+                    if attempted:
                         try:
                             cached = cache_photo_original(
                                 thread_db, photo, vireo_dir, folders,
                             )
                             cache_status = cached.get("status")
-                            if cache_status == "cached":
-                                copied += 1
-                                copied_bytes += int(cached.get("bytes") or 0)
-                            elif cache_status == "skipped":
-                                reused += 1
-                            else:
+                            if cache_status not in ("cached", "skipped"):
                                 error = cache_status or "source could not be cached"
 
-                            if error is None:
+                            if error is None and same_source(
+                                photo, thread_db.get_photo(photo_id),
+                            ):
                                 # Execute the canonical renderer inside an
                                 # isolated request context. This avoids a
                                 # second implementation drifting from the
@@ -25346,30 +25353,45 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         except Exception as exc:
                             thread_db.conn.rollback()
                             error = str(exc) or exc.__class__.__name__
-                            if thread_db.get_photo(photo_id) is not None:
+                            if same_source(photo, thread_db.get_photo(photo_id)):
                                 log.warning(
                                     "Full-resolution preparation failed for %s: %s",
                                     filename, exc, exc_info=True,
                                 )
 
-                    # Recheck after copy/render too: a concurrent deletion
-                    # can cause an FK error, a render 404, or finish before
-                    # a successful render publishes its cache file. Only a
-                    # missing catalog row makes this an expected skip.
-                    if photo is None or thread_db.get_photo(photo_id) is None:
-                        from preview_cache import cleanup_cached_files_for_deleted_photos
+                    # Serialize this final identity check and cache cleanup
+                    # against catalog writers. An import can reuse a deleted
+                    # ID; any cache written by this iteration is then suspect,
+                    # including the offline row attached to that replacement.
+                    # Purge disposable caches only if we actually attempted
+                    # work, leaving replacements found before our turn alone.
+                    with thread_db.conn:
+                        thread_db.conn.execute("BEGIN IMMEDIATE")
+                        current_photo = thread_db.get_photo(photo_id)
+                        if not attempted or not same_source(photo, current_photo):
+                            from preview_cache import cleanup_cached_files_for_deleted_photos
 
-                        skipped_deleted += 1
-                        cleanup_cached_files_for_deleted_photos(
-                            app.config["THUMB_CACHE_DIR"],
-                            [{"photo_id": photo_id}],
-                            vireo_dir=vireo_dir,
-                        )
-                    elif error is None:
-                        ready += 1
-                    else:
-                        failed += 1
-                        job["errors"].append(f"{filename}: {error}")
+                            skipped_deleted += 1
+                            if attempted:
+                                thread_db.conn.execute(
+                                    "DELETE FROM offline_originals WHERE photo_id=?",
+                                    (photo_id,),
+                                )
+                                cleanup_cached_files_for_deleted_photos(
+                                    app.config["THUMB_CACHE_DIR"],
+                                    [{"photo_id": photo_id}],
+                                    vireo_dir=vireo_dir,
+                                )
+                        elif error is None:
+                            ready += 1
+                            if cached["status"] == "cached":
+                                copied += 1
+                                copied_bytes += int(cached.get("bytes") or 0)
+                            elif cached["status"] == "skipped":
+                                reused += 1
+                        else:
+                            failed += 1
+                            job["errors"].append(f"{filename}: {error}")
 
                     progress = {
                         "current": index,
