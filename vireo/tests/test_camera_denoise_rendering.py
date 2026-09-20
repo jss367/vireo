@@ -160,3 +160,44 @@ def test_preview_warmer_and_thumbnail_generator_refresh_profile(tmp_path):
     third = materialize_preview(None, photo, str(tmp_path), size=1920, vireo_dir=str(tmp_path),
                                 preview_quality=90, recipe=recipe, cache_path=str(preview))
     assert not third.generated
+
+
+def test_exports_use_promoted_camera_fields_without_full_exif_or_metadata_embedding(app_and_db, tmp_path):
+    from camera_denoise import resolve_profile
+    from export import export_photos
+
+    app, db = app_and_db
+    folder = tmp_path / 'promoted-camera-photos'
+    folder.mkdir()
+    source = folder / 'nikon.png'
+    pixels = np.clip(120 + np.random.default_rng(23).normal(0, 10, (96, 144, 3)), 0, 255).astype(np.uint8)
+    Image.fromarray(pixels).save(source)
+    fid = db.add_folder(str(folder))
+    pid = db.add_photo(folder_id=fid, filename=source.name, extension='.png', width=144, height=96,
+                       file_size=source.stat().st_size, file_mtime=source.stat().st_mtime)
+    # This is how extraction stores summary-only metadata when full EXIF is disabled.
+    db.conn.execute('UPDATE photos SET camera_make=?, camera_model=?, iso=?, exif_data=? WHERE id=?',
+                    ('NIKON CORPORATION', 'NIKON D850', 100, '{}', pid))
+    db.conn.commit()
+    recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 85}}
+    db.set_photo_edit_recipe(pid, recipe)
+    detail_photo = db.get_photo(pid)
+    bulk_photo = db.get_photos_by_ids([pid])[pid]
+    assert resolve_profile(bulk_photo)['source'] == 'camera'
+    assert resolve_profile(bulk_photo) == resolve_profile(detail_photo)
+    expected = apply_recipe_to_loaded_image(Image.fromarray(pixels), recipe, camera_metadata=detail_photo)
+    fallback = apply_recipe_to_loaded_image(Image.fromarray(pixels), recipe)
+    assert not np.array_equal(expected, fallback)
+
+    vireo_dir = str(Path(app.config['THUMB_CACHE_DIR']).parent)
+    # Panoramas and site publishing/export share this loader and bulk photo query.
+    rendered = load_export_image(bulk_photo, vireo_dir, {fid: str(folder)}, recipe=recipe, exif_data='{}')
+    np.testing.assert_array_equal(rendered, expected)
+    destination = tmp_path / 'export-without-metadata'
+    result = export_photos(db, vireo_dir, [pid], destination=str(destination),
+                           options={'format': 'png', 'metadata_fields': [], 'collect_files': True})
+    assert result['errors'] == []
+    assert result['exported'] == 1
+    with Image.open(result['files'][0]) as exported:
+        np.testing.assert_array_equal(exported, expected)
+        assert not exported.getexif()

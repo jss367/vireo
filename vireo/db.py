@@ -8130,7 +8130,8 @@ class Database:
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     subject_sharpness, subject_size, quality_score,
                     latitude, longitude, companion_path, working_copy_path,
-                    wildlife_excluded, miss_no_subject, miss_clipped, miss_oof"""
+                    wildlife_excluded, miss_no_subject, miss_clipped, miss_oof,
+                    camera_make, camera_model, iso"""
 
     # Columns for single-photo detail queries (includes exif_data JSON +
     # eye-focus fields consumed by the review lightbox's crosshair overlay)
@@ -8139,7 +8140,6 @@ class Database:
         + ", exif_data, eye_x, eye_y, eye_conf, eye_tenengrad,"
         + " working_copy_failed_at, working_copy_failed_mtime,"
         + " working_copy_failed_source"
-        + ", camera_make, camera_model, iso"
     )
 
     def get_photo(self, photo_id, verify_workspace=False):
