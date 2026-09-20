@@ -1025,7 +1025,10 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 if photo["id"] in cached_detections:
                     continue
                 try:
-                    if db.get_detections(photo["id"]):
+                    if (photo["id"] in already_detected_ids
+                            or db.get_detections(photo["id"], min_conf=0)):
+                        # Empty and now-subthreshold cached runs still need
+                        # to clear outputs from their former primary.
                         processed_ids.add(photo["id"])
                 except Exception:
                     pass

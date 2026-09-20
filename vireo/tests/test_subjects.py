@@ -394,3 +394,28 @@ def test_live_misses_preview_uses_primary_and_keeps_maximum_confidence(db, subje
     _attach_primary_detections(db, rows, .99)
     assert rows[0]["detection_box"] is None
     assert rows[0]["raw_detection_conf"] == .95
+
+
+@pytest.mark.parametrize("empty, known_run", [(False, False), (False, True), (True, True)])
+def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, monkeypatch, empty, known_run):
+    import classify_job
+
+    photo_id, ids, path = subject_photo
+    analyze_photo(db, photo_id, path)
+    db.conn.execute("UPDATE photos SET mask_path='old.png', eye_x=.7, dino_subject_embedding=X'01' WHERE id=?", (photo_id,))
+    if empty:
+        db.clear_detections(photo_id)
+        db.write_detection_batch(photo_id, "megadetector-v6", [])
+    else:
+        db.conn.execute("UPDATE detections SET detector_confidence=.1 WHERE photo_id=?", (photo_id,))
+    db.conn.commit()
+    path.unlink()  # Cleanup requires no source read or detector module.
+    monkeypatch.setattr(classify_job, "detect_animals", None)
+    photo = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
+    classify_job._detect_batch([photo], {photo["folder_id"]: str(path.parent)},
+        None, {"id": 1}, False, db, det_conf_threshold=.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6") if known_run else set())
+    row = db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+    for column in ("mask_path", "eye_x", "dino_subject_embedding", "quality_score"):
+        assert row[column] is None
+    assert db.conn.execute("SELECT 1 FROM photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone() is None
