@@ -219,7 +219,7 @@ def platform_support_info(config: dict | None = None) -> dict:
         windows_11 = windows_11 or windows_release == "11"
     return {
         "support_tier": (
-            "public_beta" if windows_11 else "unsupported"
+            "supported" if windows_11 else "unsupported"
         ) if os.name == "nt" else "supported",
         "platform": sys.platform,
         "windows_release": windows_release,

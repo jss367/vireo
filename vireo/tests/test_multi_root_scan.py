@@ -9,8 +9,8 @@ import os
 import threading
 import time
 
-import pytest
 from PIL import Image
+from wait import wait_for_job_via_client
 
 
 def _make_photo(folder, name):
@@ -18,18 +18,9 @@ def _make_photo(folder, name):
     Image.new("RGB", (100, 100), color="red").save(os.path.join(folder, name))
 
 
-def _wait_for_terminal(client, job_id, timeout=15.0):
-    """Poll /api/jobs/<id> until status is completed/failed/cancelled."""
-    deadline = time.time() + timeout
-    last = None
-    while time.time() < deadline:
-        resp = client.get(f"/api/jobs/{job_id}")
-        data = resp.get_json()
-        last = data
-        if data["status"] in ("completed", "failed", "cancelled"):
-            return data
-        time.sleep(0.1)
-    pytest.fail(f"job {job_id} did not terminate within {timeout}s: last={last}")
+def _wait_for_terminal(client, job_id):
+    """Use the shared timeout budget for loaded Windows CI runners."""
+    return wait_for_job_via_client(client, job_id)
 
 
 def test_scan_handles_multiple_roots_serially(app_and_db, tmp_path):
