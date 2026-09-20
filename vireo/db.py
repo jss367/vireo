@@ -12048,7 +12048,7 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def set_active_mask_variant(self, photo_id, variant, _commit=True):
+    def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
         """Mark `variant` as active for `photo_id` and denormalize its
         fields into the photos row (mask_path + per-mask features) so
         downstream readers (scoring, pipeline) see the active mask.
@@ -12071,6 +12071,12 @@ class Database:
         from subjects import primary_order_sql
         effective = self.get_effective_config(cfg.load())
         min_conf = effective.get("detector_confidence", 0.2)
+        detector_filter = ""
+        if weak_rescue_min_conf is not None:
+            # Only the pipeline's validated contextual rescue may lower the
+            # floor. Bulk activation has no such context and rejects by default.
+            min_conf = weak_rescue_min_conf
+            detector_filter = "AND detector_model='megadetector-v6' "
         row = self.conn.execute(
             f"SELECT pm.*, d.detector_model AS primary_model, "
             f"d.box_x AS primary_x, d.box_y AS primary_y, "
@@ -12078,6 +12084,7 @@ class Database:
             f"FROM photo_masks pm LEFT JOIN detections d ON d.id=("
             f"SELECT id FROM detections WHERE photo_id=pm.photo_id "
             f"AND detector_confidence>=? AND detector_model!='full-image' "
+            f"AND category='animal' {detector_filter} "
             f"ORDER BY {primary_order_sql()} LIMIT 1) "
             f"WHERE pm.photo_id=? AND pm.variant=?",
             (min_conf, photo_id, variant),
@@ -12094,59 +12101,16 @@ class Database:
                     or any(row["prompt_" + k] != row["primary_" + k] for k in "xywh")):
                 raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
         else:
-            # LEFT JOIN found no primary above the floor. Reject when the
-            # mask's stored prompt also matches no real detection at all
-            # — reclassification wiped the backing detection, so the
-            # cached mask is orphaned and reactivating it would repopulate
-            # mask_path plus the mask-derived quality fields for a photo
-            # with no eligible subject (Codex r4056687363). The
-            # extract-masks pipeline legitimately activates masks for
-            # weak-rescued detections that live below detector_confidence
-            # but still exist as rows, so a matching detection at any
-            # confidence is enough to accept.
-            #
-            # The zero-detection case is also an orphaned reactivation
-            # whenever detection has actually run on this photo:
-            # ``clear_detections`` — the reclassify path — deletes both
-            # ``detections`` AND ``detector_runs`` for the photo, then
-            # ``write_detection_batch`` writes a fresh ``detector_runs``
-            # row (with ``box_count=0`` for an empty scene). So a photo
-            # with a ``detector_runs`` row and zero non-full-image
-            # detections is a reclassified photo whose detections were
-            # replaced or wiped — its ``photo_masks`` row is orphaned,
-            # and a bulk ``api_pipeline_active_mask_variant`` sweep
-            # reactivating it would repopulate ``mask_path`` plus the
-            # mask-derived quality fields for a photo with no eligible
-            # subject (Codex r4056773217). Migration and unit-test
-            # setups that seed a mask without any detection at all
-            # never wrote a ``detector_runs`` row, so they still fall
-            # through — no "obsolete subject" to protect against.
-            match = self.conn.execute(
-                "SELECT 1 FROM detections WHERE photo_id=? "
-                "AND detector_model=? "
-                "AND box_x=? AND box_y=? AND box_w=? AND box_h=? "
-                "AND detector_model!='full-image' LIMIT 1",
-                (photo_id, row["detector_model"],
-                 row["prompt_x"], row["prompt_y"],
-                 row["prompt_w"], row["prompt_h"]),
+            # Preserve pre-detection migration rows, but never reactivate an
+            # orphan or a below-floor detection without explicit rescue context.
+            has_detection_context = self.conn.execute(
+                "SELECT 1 WHERE EXISTS (SELECT 1 FROM detections WHERE photo_id=? "
+                "AND detector_model!='full-image') OR EXISTS (SELECT 1 FROM detector_runs "
+                "WHERE photo_id=? AND detector_model!='full-image')",
+                (photo_id, photo_id),
             ).fetchone()
-            if match is None:
-                has_real_detection = self.conn.execute(
-                    "SELECT 1 FROM detections WHERE photo_id=? "
-                    "AND detector_model!='full-image' LIMIT 1",
-                    (photo_id,),
-                ).fetchone() is not None
-                # A detector_runs row for a non-full-image detector proves
-                # detection has actually been run on this photo — a wiped
-                # or replaced detection set is a reclassify orphan, not a
-                # pre-detection migration.
-                has_detector_run = self.conn.execute(
-                    "SELECT 1 FROM detector_runs WHERE photo_id=? "
-                    "AND detector_model!='full-image' LIMIT 1",
-                    (photo_id,),
-                ).fetchone() is not None
-                if has_real_detection or has_detector_run:
-                    raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
+            if has_detection_context:
+                raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "

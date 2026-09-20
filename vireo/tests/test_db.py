@@ -24557,10 +24557,7 @@ def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
 def test_set_active_mask_variant_allows_weak_detection_below_floor(
     tmp_path,
 ):
-    """Extract-masks legitimately activates masks for weak-rescued
-    detections that sit below the workspace's detector_confidence.
-    A detection matching the mask's prompt at any confidence keeps
-    the mask non-orphaned, so activation must succeed."""
+    """Only explicit contextual rescue may activate an eligible weak mask."""
     import config as cfg
     from db import Database
     db = Database(str(tmp_path / "v.db"))
@@ -24583,7 +24580,12 @@ def test_set_active_mask_variant_allows_weak_detection_below_floor(
     original = cfg.load()
     try:
         cfg.save({**original, "detector_confidence": 0.5})
-        db.set_active_mask_variant(1, "sam2-large")
+        import pytest
+        with pytest.raises(ValueError, match="another subject"):
+            db.set_active_mask_variant(1, "sam2-large")
+        with pytest.raises(ValueError, match="another subject"):
+            db.set_active_mask_variant(1, "sam2-large", weak_rescue_min_conf=.19)
+        db.set_active_mask_variant(1, "sam2-large", weak_rescue_min_conf=.12)
         row = db.conn.execute(
             "SELECT active_mask_variant, subject_size FROM photos WHERE id=1"
         ).fetchone()

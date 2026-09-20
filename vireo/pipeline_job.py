@@ -7814,6 +7814,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             thread_db.set_active_mask_variant(
                                 photo_id, sam2_variant, _commit=False,
+                                weak_rescue_min_conf=(weak_detection_confidence
+                                    if photo_id in contextual_weak_ids else None),
                             )
                             # Remaining (non-mask) per-photo features still land
                             # on the photos row.  mask_path / crop_complete /
