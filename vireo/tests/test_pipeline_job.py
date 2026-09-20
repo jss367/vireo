@@ -4261,8 +4261,9 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     assert 42 in processed
 
 
+@pytest.mark.parametrize("raw_subject_analysis", [False, True])
 def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, raw_subject_analysis,
 ):
     """classify_stage must pass every qualifying detection dict (with
     box_x/y/w/h keys) to _prepare_image, not the raw {photo_id: [dets]}
@@ -4330,7 +4331,8 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
 
     captured = []
 
-    def capturing_prepare_image(photo, folders, detection, vireo_dir=None):
+    def capturing_prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None):
+        assert (raw_analysis is not None) == raw_subject_analysis
         captured.append(detection)
         # Returning (None, ...) tells the caller this photo failed to load,
         # which short-circuits _flush_batch.  We only care about the
@@ -4368,6 +4370,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
         model_ids=[model_id],
         skip_extract_masks=True,
         skip_regroup=True,
+        raw_subject_analysis=raw_subject_analysis,
     )
 
     runner = FakeRunner()
@@ -4399,6 +4402,79 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     assert not any("'box_w'" in e for e in job["errors"]), (
         f"KeyError 'box_w' leaked into job errors: {job['errors']}"
     )
+
+
+@pytest.mark.parametrize("species", ["Robin", "Warbler"])
+def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, species):
+    import classifier
+    import classify_job
+    import config as cfg
+    import labels_fingerprint
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    db_path = str(tmp_path / "refresh.db")
+    db = Database(db_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    folder = db.add_folder(folder_path)
+    photo = db.add_photo(folder, "bird.jpg", ".jpg", 1000, 1)
+    _drop_jpeg(folder_path, "bird.jpg")
+    detection = db.save_detections(photo, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.add_prediction(detection, "Robin", 0.2, "BioCLIP", status="accepted")
+    db.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
+    collection = db.add_collection("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
+    model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    monkeypatch.setattr(labels_fingerprint, "compute_fingerprint", lambda *a, **k: "legacy")
+    monkeypatch.setattr(classifier, "Classifier", lambda *a, **k: object())
+    monkeypatch.setattr(classify_job, "_detect_batch", lambda photos, *a, **k: (
+        {p["id"]: [{**dict(d), "confidence": d["detector_confidence"]} for d in db.get_detections(p["id"])] for p in photos}, len(photos), {p["id"] for p in photos},
+    ))
+    monkeypatch.setattr(classify_job, "_prepare_image", lambda *a, **k: (
+        Image.new("RGB", (100, 100)), folder_path, os.path.join(folder_path, "bird.jpg"),
+    ))
+
+    inferred = []
+
+    def infer(batch, clf, model_type, model_name, thread_db, results, top_k=1):
+        inferred.extend(entry["detection_id"] for entry in batch)
+        for entry in batch:
+            results.append({
+                "photo": entry["photo"], "detection_id": entry["detection_id"],
+                "folder_path": folder_path, "image_path": entry["image_path"],
+                "prediction": species, "confidence": 0.9, "timestamp": None,
+                "filename": "bird.jpg", "embedding": None, "taxonomy": {"genus": "New genus"},
+            })
+        return 0
+
+    monkeypatch.setattr(classify_job, "_flush_batch", infer)
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, PipelineParams(
+        collection_id=collection, model_ids=[model], raw_subject_analysis=True,
+        skip_extract_masks=True, skip_regroup=True,
+    ))
+    rows = db.conn.execute("SELECT id, species, confidence, taxonomy_genus FROM predictions").fetchall()
+    assert len(rows) == 1
+    assert (rows[0]["species"], rows[0]["confidence"], rows[0]["taxonomy_genus"]) == (species, 0.9, "New genus")
+    if species == "Robin":
+        assert db.conn.execute("SELECT status FROM prediction_review WHERE prediction_id=?", (rows[0]["id"],)).fetchone()[0] == "accepted"
+    assert db.conn.execute("SELECT count(*) FROM classifier_runs").fetchone()[0] == 1
+    assert db.conn.execute("SELECT input_recipe FROM classifier_runs").fetchone()[0] is not None
+    assert inferred == [detection]
+    normal = PipelineParams(collection_id=collection, model_ids=[model],
+                            skip_extract_masks=True, skip_regroup=True)
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, normal)
+    assert inferred == [detection, detection]
+    assert db.conn.execute("SELECT input_recipe FROM classifier_runs").fetchone()[0] is None
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, db._active_workspace_id, normal)
+    assert inferred == [detection, detection]
+    if species == "Robin":
+        assert db.conn.execute("SELECT status FROM prediction_review WHERE prediction_id=?", (rows[0]["id"],)).fetchone()[0] == "accepted"
+    db.close()
 
 
 def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold(
@@ -10095,6 +10171,73 @@ def _run_extract_masks_for_test(
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
     return db, runner, generate_mask_calls, photo_ids
+
+
+@pytest.mark.parametrize("switch_variant", [False, True])
+def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, monkeypatch, switch_variant):
+    """Opting in and back out cannot silently reuse the opposite quality recipe."""
+    import masking
+    import numpy as np
+    import quality
+    import raw_analysis
+    from PIL import Image
+
+    real_quality = quality.compute_all_quality_features
+    db, _, calls, ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small",
+        [{"filename": "bird.jpg", "box": (0.1, 0.1, 0.8, 0.8), "model": "megadetector-v6"}],
+    )
+    monkeypatch.setattr(quality, "compute_all_quality_features", real_quality)
+    monkeypatch.setattr(masking, "render_proxy", lambda *a, **k: Image.new("RGB", (64, 64), (30, 30, 30)))
+    monkeypatch.setattr(masking, "generate_mask", lambda *a, **k: np.ones((64, 64), dtype=bool))
+    linear = np.random.default_rng(7).uniform(0.005, 0.02, (64, 64, 3)).astype(np.float32)
+    monkeypatch.setattr(raw_analysis, "decode_linear", lambda *a: linear)
+    collection_id = db.get_collections()[0]["id"]
+
+    def run(enabled):
+        run_pipeline_job(_make_job(), FakeRunner(), str(tmp_path / "test.db"), db._active_workspace_id,
+                         PipelineParams(collection_id=collection_id, skip_classify=True,
+                                        skip_regroup=True, raw_subject_analysis=enabled))
+        return db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
+
+    corrected = run(True)
+    assert corrected["quality_input_recipe"] == raw_analysis.RECIPE
+    report_row = db.conn.execute("SELECT report_json FROM subject_raw_analysis").fetchone()
+    report = json.loads(report_row[0])
+    assert report["exposure_ev"] == 2
+    assert corrected["subject_tenengrad"] == report["corrected_quality"]["subject_tenengrad"]
+    assert corrected["subject_y_median"] == report["original_quality"]["subject_y_median"]
+    if switch_variant:
+        import config as cfg
+
+        settings = cfg.load()
+        settings["pipeline"]["sam2_variant"] = "sam2-large"
+        cfg.save(settings)
+        assert run(False)["quality_input_recipe"] is None
+        db.set_active_mask_variant(ids[0], "sam2-small")
+        restored = db.conn.execute("SELECT quality_input_recipe FROM photos WHERE id=?", (ids[0],)).fetchone()
+        assert restored[0] == raw_analysis.RECIPE
+        restored_features = db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
+        for field in report["corrected_quality"]:
+            assert restored_features[field] == corrected[field]
+        settings["pipeline"]["sam2_variant"] = "sam2-small"
+        cfg.save(settings)
+    normal = run(False)
+    assert normal["quality_input_recipe"] is None
+    assert normal["subject_tenengrad"] == 0
+    assert normal["subject_y_median"] == 30
+    if switch_variant:
+        settings["pipeline"]["sam2_variant"] = "sam2-large"
+        cfg.save(settings)
+        run(True)
+        db.set_active_mask_variant(ids[0], "sam2-small")
+        settings["pipeline"]["sam2_variant"] = "sam2-small"
+        cfg.save(settings)
+        restored_normal = run(False)
+        for field in report["corrected_quality"]:
+            assert restored_normal[field] == normal[field]
+        assert restored_normal["quality_input_recipe"] is None
+    db.close()
 
 
 def test_extract_masks_rolls_back_failed_photo_before_continuing(

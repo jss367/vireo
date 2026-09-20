@@ -29,6 +29,7 @@ class PipelinePlanParams:
     photo_ids: list | None = None
     exclude_photo_ids: list = field(default_factory=list)
     skip_classify: bool = False
+    raw_subject_analysis: bool = False
     skip_extract_masks: bool = False
     skip_eye_keypoints: bool = False
     skip_regroup: bool = False
@@ -384,7 +385,7 @@ def _classify_plan(
         }
 
     stale_total = 0
-    if classifiable_units > 0 and not params.reclassify:
+    if classifiable_units > 0 and not (params.reclassify or params.raw_subject_analysis):
         for m in models:
             info = label_resolution[m["id"]]
             if info.get("blocked"):
@@ -409,7 +410,7 @@ def _classify_plan(
                 min_conf=detector_confidence,
             )
     # Reclassify is a user override, not a settings-change signal.
-    fingerprint_outdated = stale_total > 0 and not params.reclassify
+    fingerprint_outdated = stale_total > 0 and not (params.reclassify or params.raw_subject_analysis)
     fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
 
     if classifiable_units == 0:
@@ -514,7 +515,7 @@ def _classify_plan(
             blocked.append(m["name"])
             continue
         fp = info["fingerprint"]
-        if params.reclassify:
+        if params.reclassify or params.raw_subject_analysis:
             pending = classifiable_units
         else:
             pending = db.count_primary_classify_pending_pairs(
@@ -612,7 +613,7 @@ def _classify_plan(
             },
         }
 
-    if params.reclassify:
+    if params.reclassify or params.raw_subject_analysis:
         summary = (
             f"Re-classify — {pending_total} "
             f"target-model pair{_plural(pending_total)} "
@@ -665,6 +666,22 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
             "summary": "Disabled — stage will be skipped",
         }
     sam2_variant = pipeline_cfg.get("sam2_variant")
+    if params.raw_subject_analysis:
+        return {
+            "state": "will-run",
+            "summary": "Recompute quality with per-subject RAW exposure analysis",
+        }
+    scope_sql, scope_params = db._scope_clause(photo_ids)
+    prior_raw_analysis = db.conn.execute(
+        "SELECT 1 FROM photos p JOIN workspace_folders wf ON wf.folder_id=p.folder_id "
+        "WHERE wf.workspace_id=? AND p.quality_input_recipe IS NOT NULL"
+        + scope_sql + " LIMIT 1", [db._ws_id(), *scope_params],
+    ).fetchone()
+    if prior_raw_analysis:
+        return {
+            "state": "will-run",
+            "summary": "Recompute quality without RAW exposure correction",
+        }
     counts = db.count_photos_pending_masks(
         photo_ids, sam2_variant=sam2_variant,
     )

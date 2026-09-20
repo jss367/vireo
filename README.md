@@ -86,6 +86,43 @@ python vireo/app.py --db ~/.vireo/vireo.db --port 8080
 
 Then open [http://localhost:8080](http://localhost:8080).
 
+### Experimental RAW subject exposure analysis
+
+On the Process page, enable **RAW subject exposure (experimental)** before
+starting a full process run. The pipeline decodes supported RAW files into
+linear, 16-bit-derived RGB and meters each detected subject through its own
+segmentation mask. Exposure changes are limited to ±2 stops and constrained
+by subject highlights. A broad acceptable brightness range helps preserve
+naturally dark and white plumage. Corrected crops are encoded as sRGB for
+species identification. Browsing previews, originals, and edit recipes are
+unchanged.
+
+Each detection's analysis record retains its exposure adjustment, original
+and corrected quality measurements, and clipping estimates. Highlight
+measurements exclude a narrow mask boundary to reduce sky contamination;
+tiny or thin masks fall back to the full mask and record that fact. Clipping
+is measured on the analysis-resolution rendered RGB, not the sensor mosaic;
+it does not establish whether sensor highlights are recoverable. Existing
+photo quality scores use the primary subject's corrected detail/noise
+measurements while retaining its uncorrected exposure measurements.
+
+This option is off by default and applies to the full Process pipeline,
+including API runs with `raw_subject_analysis: true`. It recomputes
+classification and quality instead of reusing normal results. It requires
+the configured subject segmentation model (downloaded on first use), adds
+RAW decoding and masking work, and falls back to the normal image path for
+unsupported RAWs or unavailable subject masks. A one-frame memory cache
+shares the RAW decode across subjects within each stage's pass. JPEGs use
+the normal path. Metering uses a reduced-resolution proxy; classification
+crops come from native 16-bit pixels before resizing, retaining small-subject
+detail. Classification keeps one native 16-bit RGB frame in memory, so large
+RAWs require additional memory. Per-subject reports are stored in the catalog's
+`subject_raw_analysis` table; they are not yet shown in review cards.
+
+Identification accuracy and ranking improvements still need evaluation on
+real backlit, mixed-light, dark-plumage, and white-plumage photographs before
+enabling this by default.
+
 ## Tests
 
 ```bash

@@ -27781,7 +27781,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 and os.path.isfile(existing["path"])):
                             state = thread_db.conn.execute(
                                 "SELECT active_mask_variant, "
-                                "dino_embedding_variant FROM photos "
+                                "dino_embedding_variant, quality_input_recipe FROM photos "
                                 "WHERE id = ?",
                                 (photo_id,),
                             ).fetchone()
@@ -27789,7 +27789,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                     and state["active_mask_variant"]
                                     == sam2_variant
                                     and state["dino_embedding_variant"]
-                                    == dinov2_variant):
+                                    == dinov2_variant
+                                    and state["quality_input_recipe"] is None):
                                 masked += 1
                                 ctx.runner.push_event(
                                     job["id"],
@@ -27895,6 +27896,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         subject_tenengrad=mask_subject_tenengrad,
                         bg_tenengrad=mask_bg_tenengrad,
                         crop_complete=completeness,
+                        quality_input_recipe=None,
+                        subject_clip_high=features.pop("subject_clip_high", None),
+                        subject_clip_low=features.pop("subject_clip_low", None),
+                        subject_y_median=features.pop("subject_y_median", None),
+                        bg_separation=features.pop("bg_separation", None),
+                        phash_crop=features.pop("phash_crop", None),
+                        noise_estimate=features.pop("noise_estimate", None),
                         _commit=False,
                     )
                     thread_db.set_active_mask_variant(

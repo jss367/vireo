@@ -4751,6 +4751,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
     assert result["predictions_stored"] == 1
     assert result["failed"] == 0
     mock_db_instance.add_prediction.assert_called_once()
+    assert mock_db_instance.add_prediction.call_args.kwargs["refresh_output"] is True
 
 
 # ── Task 7: Integration test — route delegates to run_classify_job ─────────

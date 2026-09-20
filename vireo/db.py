@@ -1210,7 +1210,21 @@ class Database:
                 subject_tenengrad REAL,
                 bg_tenengrad      REAL,
                 crop_complete     REAL,
+                quality_input_recipe TEXT,
+                subject_clip_high REAL,
+                subject_clip_low REAL,
+                subject_y_median REAL,
+                bg_separation REAL,
+                phash_crop TEXT,
+                noise_estimate REAL,
                 PRIMARY KEY (photo_id, variant)
+            );
+
+            CREATE TABLE IF NOT EXISTS subject_raw_analysis (
+                detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+                recipe TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS detection_subjects (
@@ -1266,6 +1280,7 @@ class Database:
                 labels_fingerprint   TEXT NOT NULL,
                 labels_fingerprint_full TEXT,
                 runtime_fingerprint TEXT NOT NULL DEFAULT 'legacy',
+                input_recipe TEXT,
                 input_fingerprint TEXT,
                 run_at               TEXT DEFAULT (datetime('now')),
                 prediction_count     INTEGER NOT NULL DEFAULT 0,
@@ -2180,11 +2195,12 @@ class Database:
                 "ALTER TABLE photos "
                 "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
             )
-        # Migration: miss-classifier columns. PHOTO_COLS/get_collection_photos
+        # Migration: quality recipe and miss-classifier columns. PHOTO_COLS/get_collection_photos
         # and misses.py both reference these; without the fallback ALTER, any
         # DB created before the miss-classifier feature fails every photo-list
         # query with "no such column".
         for column, column_type in (
+            ("quality_input_recipe", "TEXT"),
             ("miss_no_subject", "INTEGER"),
             ("miss_clipped", "INTEGER"),
             ("miss_oof", "INTEGER"),
@@ -2195,6 +2211,54 @@ class Database:
             except sqlite3.OperationalError:
                 self.conn.execute(
                     f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
+                )
+        try:
+            self.conn.execute("SELECT quality_input_recipe FROM photo_masks LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE photo_masks ADD COLUMN quality_input_recipe TEXT")
+            self.conn.execute(
+                "UPDATE photo_masks SET quality_input_recipe = ("
+                "SELECT p.quality_input_recipe FROM photos p WHERE p.id=photo_masks.photo_id) "
+                "WHERE variant = (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id)"
+            )
+            # Earlier experimental builds recorded only the active recipe.
+            # Inactive masks on RAW-analyzed photos have unknown provenance;
+            # force a refresh when selected instead of assuming normal scores.
+            self.conn.execute(
+                "UPDATE photo_masks SET quality_input_recipe='unknown-raw-analysis-recipe' "
+                "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id) "
+                "AND photo_id IN (SELECT d.photo_id FROM subject_raw_analysis a "
+                "JOIN detections d ON d.id=a.detection_id)"
+            )
+        try:
+            self.conn.execute("SELECT input_recipe FROM classifier_runs LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE classifier_runs ADD COLUMN input_recipe TEXT")
+            # Older experimental runs did not record recipe ownership.
+            self.conn.execute(
+                "UPDATE classifier_runs SET input_recipe='unknown-raw-recipe' "
+                "WHERE detection_id IN (SELECT detection_id FROM subject_raw_analysis)"
+            )
+        # Quality features belong to the mask/recipe that produced them.
+        # Only the active variant can be backfilled from the old photo row.
+        for column, column_type in (
+            ("subject_clip_high", "REAL"), ("subject_clip_low", "REAL"),
+            ("subject_y_median", "REAL"), ("bg_separation", "REAL"),
+            ("phash_crop", "TEXT"), ("noise_estimate", "REAL"),
+        ):
+            try:
+                self.conn.execute(f"SELECT {column} FROM photo_masks LIMIT 0")
+            except sqlite3.OperationalError:
+                self.conn.execute(f"ALTER TABLE photo_masks ADD COLUMN {column} {column_type}")
+                self.conn.execute(
+                    f"UPDATE photo_masks SET {column}=(SELECT p.{column} FROM photos p "
+                    "WHERE p.id=photo_masks.photo_id) WHERE variant=(SELECT p.active_mask_variant "
+                    "FROM photos p WHERE p.id=photo_masks.photo_id)"
+                )
+                self.conn.execute(
+                    "UPDATE photo_masks SET quality_input_recipe='unknown-mask-quality-recipe' "
+                    "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p "
+                    "WHERE p.id=photo_masks.photo_id)"
                 )
         # Migration: integrity-verification markers. hash_checked_at is when
         # the file's content was last re-hashed against photos.file_hash;
@@ -8881,6 +8945,7 @@ class Database:
                   ON cr.detection_id = d.id
                  AND cr.classifier_model = ?
                  AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                 WHERE d.detector_model != 'full-image'
                   AND d.detector_confidence >= ?
                   AND cr.detection_id IS NULL{scope_sql}""",
@@ -8925,6 +8990,7 @@ class Database:
                     ON cr.detection_id = d.id
                    AND cr.classifier_model = ?
                    AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                  WHERE d.rn = 1
                    AND cr.detection_id IS NULL""",
             (ws, min_conf, *scope_params, classifier_model, labels_fingerprint),
@@ -9111,6 +9177,7 @@ class Database:
                     ON cr.detection_id = f.detection_id
                    AND cr.classifier_model = ?
                    AND cr.labels_fingerprint = ?
+                   AND cr.input_recipe IS NULL
                  WHERE f.detection_id IS NULL
                     OR cr.detection_id IS NULL""",
             (
@@ -12115,10 +12182,13 @@ class Database:
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
-            "crop_complete=? WHERE id=?",
+            "crop_complete=?, quality_input_recipe=?, subject_clip_high=?, subject_clip_low=?, "
+            "subject_y_median=?, bg_separation=?, phash_crop=?, noise_estimate=? WHERE id=?",
             (row["path"], variant, row["subject_size"],
              row["subject_tenengrad"], row["bg_tenengrad"],
-             row["crop_complete"], photo_id),
+             row["crop_complete"], row["quality_input_recipe"],
+             row["subject_clip_high"], row["subject_clip_low"], row["subject_y_median"],
+             row["bg_separation"], row["phash_crop"], row["noise_estimate"], photo_id),
         )
         if _commit:
             commit_with_retry(self.conn)
@@ -12465,6 +12535,9 @@ class Database:
         detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
         subject_size=None, subject_tenengrad=None,
         bg_tenengrad=None, crop_complete=None, _commit=True,
+        quality_input_recipe=None,
+        subject_clip_high=None, subject_clip_low=None, subject_y_median=None,
+        bg_separation=None, phash_crop=None, noise_estimate=None,
     ):
         """Insert or replace a mask row for (photo_id, variant).
 
@@ -12476,9 +12549,10 @@ class Database:
             INSERT INTO photo_masks (
                 photo_id, variant, path, created_at,
                 detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-                subject_size, subject_tenengrad, bg_tenengrad, crop_complete
+                subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
+                subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(photo_id, variant) DO UPDATE SET
                 path=excluded.path,
                 created_at=excluded.created_at,
@@ -12490,11 +12564,30 @@ class Database:
                 subject_size=excluded.subject_size,
                 subject_tenengrad=excluded.subject_tenengrad,
                 bg_tenengrad=excluded.bg_tenengrad,
-                crop_complete=excluded.crop_complete
+                crop_complete=excluded.crop_complete,
+                quality_input_recipe=excluded.quality_input_recipe,
+                subject_clip_high=excluded.subject_clip_high,
+                subject_clip_low=excluded.subject_clip_low,
+                subject_y_median=excluded.subject_y_median,
+                bg_separation=excluded.bg_separation,
+                phash_crop=excluded.phash_crop,
+                noise_estimate=excluded.noise_estimate
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-             subject_size, subject_tenengrad, bg_tenengrad, crop_complete),
+             subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
+             subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate),
+        )
+        if _commit:
+            commit_with_retry(self.conn)
+
+    def save_subject_raw_analysis(self, detection_id, report, _commit=True):
+        """Keep original and corrected measurements together for each detection."""
+        self.conn.execute(
+            "INSERT INTO subject_raw_analysis(detection_id, recipe, report_json, created_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(detection_id) DO UPDATE SET "
+            "recipe=excluded.recipe, report_json=excluded.report_json, created_at=excluded.created_at",
+            (detection_id, report["recipe"], json.dumps(report, allow_nan=False), int(time.time())),
         )
         if _commit:
             commit_with_retry(self.conn)
@@ -12517,6 +12610,7 @@ class Database:
         eye_conf=_UNSET,
         eye_tenengrad=_UNSET,
         eye_kp_fingerprint=_UNSET,
+        quality_input_recipe=_UNSET,
         _commit=True,
     ):
         """Update pipeline feature columns for a photo.
@@ -12541,6 +12635,7 @@ class Database:
             "eye_conf": eye_conf,
             "eye_tenengrad": eye_tenengrad,
             "eye_kp_fingerprint": eye_kp_fingerprint,
+            "quality_input_recipe": quality_input_recipe,
         }
         # Filter to only provided values
         updates = {k: v for k, v in cols.items() if v is not _UNSET}
@@ -19136,6 +19231,7 @@ class Database:
         preserve_manual_review=False,
         match_score=None,
         from_fresh_inference=False,
+        refresh_output=False,
     ):
         """Store a classification prediction for a detection.
 
@@ -19168,6 +19264,8 @@ class Database:
                 value it read back from somewhere else — cache
                 materialization, a backfill — in which case an existing score
                 is left alone and only a NULL is filled.
+            refresh_output: replace the output fields of an existing candidate
+                while retaining its row ID and manual review decisions.
         """
         if detection_id is None:
             raise ValueError(
@@ -19232,6 +19330,18 @@ class Database:
                 (detection_id, model, labels_fingerprint, species),
             ).fetchone()
             pred_id = row["id"] if row else None
+            if pred_id is not None and refresh_output:
+                self.conn.execute(
+                    """UPDATE predictions SET confidence=?, category=?,
+                       taxonomy_kingdom=?, taxonomy_phylum=?, taxonomy_class=?,
+                       taxonomy_order=?, taxonomy_family=?, taxonomy_genus=?,
+                       scientific_name=?, source_taxon_id=?, match_score=?
+                       WHERE id=?""",
+                    (confidence, category, tax.get("kingdom"), tax.get("phylum"),
+                     tax.get("class"), tax.get("order"), tax.get("family"),
+                     tax.get("genus"), tax.get("scientific_name"), tax.get("taxon_id"),
+                     match_score, pred_id),
+                )
             if pred_id is not None and labels_fingerprint_full is not None:
                 self.conn.execute(
                     """UPDATE predictions
@@ -19276,9 +19386,11 @@ class Database:
                     )
         # Write workspace-scoped review state only when the caller actually
         # supplied something beyond the defaults. Keeping pending rows out of
-        # prediction_review is intentional: absence == pending.
+        # prediction_review is intentional: absence == pending. A refreshed
+        # candidate must also clear an earlier automatic alternative status.
         has_review_state = (
-            status != "pending"
+            refresh_output
+            or status != "pending"
             or group_id is not None
             or vote_count is not None
             or total_votes is not None
@@ -19286,7 +19398,7 @@ class Database:
         )
         if pred_id is not None and has_review_state:
             ws_id = self._ws_id()
-            if preserve_manual_review:
+            if preserve_manual_review or refresh_output:
                 review = self.conn.execute(
                     """SELECT status, individual FROM prediction_review
                        WHERE prediction_id = ? AND workspace_id = ?""",
@@ -19297,23 +19409,54 @@ class Database:
                     and review["status"] in {"accepted", "rejected"}
                     and review["individual"] != AUTO_MATCH_REVIEW_MARKER
                 ):
+                    if refresh_output:
+                        # Review decisions survive reinference, but burst
+                        # membership is recomputed for the active workspace.
+                        self.conn.execute(
+                            """UPDATE prediction_review SET group_id=?, vote_count=?,
+                               total_votes=?, individual=?
+                               WHERE prediction_id=? AND workspace_id=?""",
+                            (group_id, vote_count, total_votes,
+                             None if individual == AUTO_MATCH_REVIEW_MARKER else individual,
+                             pred_id, ws_id),
+                        )
                     self.conn.commit()
                     return
+            metadata_updates = ", ".join(
+                f"{field} = excluded.{field}" if refresh_output
+                else f"{field} = COALESCE(excluded.{field}, {field})"
+                for field in ("individual", "group_id", "vote_count", "total_votes")
+            )
             self.conn.execute(
-                """INSERT INTO prediction_review
+                f"""INSERT INTO prediction_review
                      (prediction_id, workspace_id, status, reviewed_at,
                       individual, group_id, vote_count, total_votes)
                    VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)
                    ON CONFLICT(prediction_id, workspace_id)
                    DO UPDATE SET status      = excluded.status,
                                  reviewed_at = excluded.reviewed_at,
-                                 individual  = COALESCE(excluded.individual, individual),
-                                 group_id    = COALESCE(excluded.group_id,   group_id),
-                                 vote_count  = COALESCE(excluded.vote_count, vote_count),
-                                 total_votes = COALESCE(excluded.total_votes,total_votes)""",
+                                 {metadata_updates}""",
                 (pred_id, ws_id, status, individual, group_id,
                  vote_count, total_votes),
             )
+        self.conn.commit()
+
+    def retain_prediction_candidates(self, detection_id, model, labels_fingerprint, species):
+        """Remove obsolete candidates after their replacement outputs were stored.
+
+        Matching candidates keep their IDs and reviews in every workspace.
+        Other detections, models, label sets and classifier run keys are untouched.
+        """
+        retained = {normalize_keyword_display(s) or s for s in species}
+        rows = self.conn.execute(
+            "SELECT id, species FROM predictions WHERE detection_id=? "
+            "AND classifier_model=? AND labels_fingerprint=?",
+            (detection_id, model, labels_fingerprint),
+        ).fetchall()
+        self.conn.executemany(
+            "DELETE FROM predictions WHERE id=?",
+            [(row["id"],) for row in rows if row["species"] not in retained],
+        )
         self.conn.commit()
 
     def reconcile_match_review_state(
@@ -21614,23 +21757,25 @@ class Database:
         labels_fingerprint_full=None,
         runtime_fingerprint="legacy",
         input_fingerprint=None,
+        input_recipe=None,
     ):
         self.conn.execute(
             """INSERT INTO classifier_runs
                  (detection_id, classifier_model, labels_fingerprint,
                   labels_fingerprint_full, runtime_fingerprint,
-                  input_fingerprint, prediction_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                  input_fingerprint, prediction_count, input_recipe)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(detection_id, classifier_model, labels_fingerprint)
                DO UPDATE SET labels_fingerprint_full =
                                  excluded.labels_fingerprint_full,
                              runtime_fingerprint = excluded.runtime_fingerprint,
                              input_fingerprint = excluded.input_fingerprint,
                              prediction_count = excluded.prediction_count,
+                             input_recipe = excluded.input_recipe,
                              run_at = datetime('now')""",
             (detection_id, classifier_model, labels_fingerprint,
              labels_fingerprint_full, runtime_fingerprint,
-             input_fingerprint, prediction_count),
+             input_fingerprint, prediction_count, input_recipe),
         )
         commit_with_retry(self.conn)
 
@@ -21812,13 +21957,16 @@ class Database:
         rows = self.conn.execute(
             """SELECT cr.classifier_model, cr.labels_fingerprint
                FROM classifier_runs cr
-               WHERE cr.detection_id = ?""" + runtime_clause,
+               WHERE cr.detection_id = ? AND cr.input_recipe IS NULL""" + runtime_clause,
             params,
         ).fetchall()
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
     def get_classifier_run_key_gate(self, detection_id, runtime_fingerprint):
         """Return ``(accepted, rejected)`` classifier-run key sets for a detection.
+
+        These gates serve normal-image runs. A RAW recipe always requires
+        fresh normal inference, even when a manual decision pins its species.
 
         ``accepted`` mirrors what ``get_classifier_run_keys(detection_id,
         runtime_fingerprint=runtime_fingerprint)`` returns — keys whose row
@@ -21845,7 +21993,7 @@ class Database:
         rows = self.conn.execute(
             """SELECT cr.classifier_model,
                       cr.labels_fingerprint,
-                      cr.runtime_fingerprint,
+                      cr.runtime_fingerprint, cr.input_recipe,
                       EXISTS (
                           SELECT 1 FROM predictions p
                           JOIN prediction_review pr ON pr.prediction_id = p.id
@@ -21862,7 +22010,7 @@ class Database:
         accepted, rejected = set(), set()
         for row in rows:
             key = (row["classifier_model"], row["labels_fingerprint"])
-            if (
+            if row["input_recipe"] is None and (
                 row["runtime_fingerprint"] == runtime_fingerprint
                 or row["runtime_fingerprint"] == "legacy"
                 or row["has_individual_override"]
@@ -22043,6 +22191,9 @@ class Database:
 
             rt_predicate_sql_cr, rt_predicate_params = _runtime_predicate("cr")
             rt_predicate_sql = rt_predicate_sql_cr
+
+        # RAW outputs cannot satisfy a normal-image run, even when reviewed.
+        rt_predicate_sql += " AND cr.input_recipe IS NULL"
 
         # For photos whose detector iteration completed, mirror the runtime's
         # in-memory target selection rather than querying every detection row

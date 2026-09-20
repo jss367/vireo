@@ -535,7 +535,7 @@ def _all_photos_cache_satisfied(
         return False
     from db import _chunks  # module-level helper, avoids exceeding SQLITE_MAX_VARIABLE_NUMBER
 
-    filter_sql = ""
+    filter_sql = " AND cr.input_recipe IS NULL"
     filter_args = []
     if classifier_model is not None:
         filter_sql += " AND cr.classifier_model = ?"
@@ -1700,7 +1700,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
 _BATCH_SIZE = 16
 
 
-def _prepare_image(photo, folders, detection, vireo_dir=None):
+def _prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None):
     """Load and crop a photo to a specific detection's bounding box.
 
     Args:
@@ -1711,6 +1711,8 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
         vireo_dir: optional path to ~/.vireo/; when set, tries to load the
             pre-extracted working copy JPEG before falling back to the
             original file via load_image().
+        raw_analysis: optional stage-owned RawAnalysisSession for corrected
+            subject crops. Unsupported inputs use the ordinary loading path.
 
     Returns:
         (PIL.Image, folder_path, image_path) or (None, folder_path, image_path) on failure.
@@ -1721,8 +1723,11 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
     image_path = os.path.join(folder_path, photo["filename"])
 
     img = None
+    analysis_report = None
     input_source = "original"
-    if vireo_dir and load_working_image is not None:
+    if raw_analysis is not None:
+        img, analysis_report = raw_analysis.prepare(image_path, detection)
+    if img is None and vireo_dir and load_working_image is not None:
         img, input_source = load_working_image(
             photo, vireo_dir, max_size=None, folders=folders,
             return_source=True,
@@ -1734,7 +1739,7 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
         return None, folder_path, image_path
 
     # Crop to detection bounding box with padding
-    if detection:
+    if detection and not img.info.get("_vireo_subject_crop"):
         iw, ih = img.size
         pad_w = detection["box_w"] * 0.2
         pad_h = detection["box_h"] * 0.2
@@ -1755,6 +1760,8 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
     # source with the in-memory image so quota eviction cannot make a
     # working-copy-backed result look original-backed by clearing the row.
     img.info["_vireo_input_source"] = input_source
+    if analysis_report is not None:
+        img.info["_vireo_raw_analysis"] = analysis_report
     return img, folder_path, image_path
 
 
@@ -2485,6 +2492,7 @@ def _record_batch_classifier_runs(
             did, model_name, labels_fingerprint,
             prediction_count=n,
             labels_fingerprint_full=labels_fingerprint_full,
+            input_recipe=entry.get("input_recipe"),
         )
 
 
@@ -2614,6 +2622,8 @@ def _store_match_prediction(
     the cached top-1 on later non-reclassify runs.
     """
     species = species or item["prediction"]
+    refresh_output = item.get("_replace_prediction_outputs", False) and not item.get("_existing")
+    retained_species = [species]
     confidence = item["confidence"] if confidence is None else confidence
     tax_hierarchy = _prediction_taxonomy(tax, species, taxonomy or item.get("taxonomy"))
     db.add_prediction(
@@ -2627,6 +2637,7 @@ def _store_match_prediction(
         taxonomy=tax_hierarchy,
         labels_fingerprint=labels_fingerprint,
         preserve_manual_review=True,
+        refresh_output=refresh_output,
         match_score=_row_match_score(item, species),
         from_fresh_inference=True,
     )
@@ -2660,6 +2671,7 @@ def _store_match_prediction(
             if alt_key in seen_species:
                 continue
             seen_species.add(alt_key)
+            retained_species.append(alt["species"])
             alt_tax = _prediction_taxonomy(tax, alt["species"], alt.get("taxonomy"))
             db.add_prediction(
                 detection_id=item["detection_id"],
@@ -2671,6 +2683,7 @@ def _store_match_prediction(
                 taxonomy=alt_tax,
                 labels_fingerprint=labels_fingerprint,
                 preserve_manual_review=True,
+                refresh_output=refresh_output,
                 match_score=alt.get("raw_score"),
                 from_fresh_inference=True,
             )
@@ -2682,6 +2695,8 @@ def _store_match_prediction(
         item["detection_id"], model_name, labels_fingerprint,
         species, "match",
     )
+    if refresh_output:
+        db.retain_prediction_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
 
 
 def _recognized_taxon_keywords(keywords, tax):
@@ -2808,6 +2823,8 @@ def _store_pending_detection_prediction(
                 )
             return
 
+    refresh_output = item.get("_replace_prediction_outputs", False) and not item.get("_existing")
+    retained_species = [item["prediction"]]
     db.add_prediction(
         detection_id=item["detection_id"],
         species=item["prediction"],
@@ -2822,6 +2839,7 @@ def _store_pending_detection_prediction(
         labels_fingerprint=labels_fingerprint,
         match_score=_row_match_score(item, item["prediction"]),
         from_fresh_inference=True,
+        refresh_output=refresh_output,
     )
     db.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
@@ -2842,6 +2860,7 @@ def _store_pending_detection_prediction(
         if alt_key in seen_species:
             continue
         seen_species.add(alt_key)
+        retained_species.append(alt["species"])
         alt_tax = _prediction_taxonomy(tax, alt["species"], alt.get("taxonomy"))
         db.add_prediction(
             detection_id=item["detection_id"],
@@ -2854,7 +2873,10 @@ def _store_pending_detection_prediction(
             labels_fingerprint=labels_fingerprint,
             match_score=alt.get("raw_score"),
             from_fresh_inference=True,
+            refresh_output=refresh_output,
         )
+    if refresh_output:
+        db.retain_prediction_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
 
 
 def _store_grouped_predictions(
@@ -2881,6 +2903,12 @@ def _store_grouped_predictions(
     from xmp import read_keywords
 
     resolver = SpeciesResolver(taxonomy=tax)
+
+    # Both standalone and Process jobs reach this storage boundary. Fresh
+    # inference replaces the old recipe's outputs while cached rows survive.
+    for item in raw_results:
+        if not item.get("_existing"):
+            item["_replace_prediction_outputs"] = True
 
     # Before grouping: consensus can replace an item's species with the burst's
     # winner, and the already-labeled check can drop items entirely, but the

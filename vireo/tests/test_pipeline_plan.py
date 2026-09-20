@@ -1145,7 +1145,8 @@ def test_classify_plan_will_run_when_new_model_added(tmp_path, monkeypatch):
     assert "BioCLIP" in classify["summary"]
 
 
-def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch):
+@pytest.mark.parametrize("raw_subject_analysis", [False, True])
+def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch, raw_subject_analysis):
     from labels_fingerprint import TOL_SENTINEL
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
@@ -1162,7 +1163,8 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch):
 
     plan = compute_plan(
         db,
-        _params(model_ids=["m1"], reclassify=True),
+        _params(model_ids=["m1"], reclassify=not raw_subject_analysis,
+                raw_subject_analysis=raw_subject_analysis),
         str(tmp_path / "test.db"),
     )
     classify = plan["stages"]["Classify"]
@@ -2822,6 +2824,22 @@ def test_regroup_plan_will_run_when_no_cache(tmp_path):
 
 # -------- /api/pipeline/plan endpoint --------
 
+def test_extract_plan_restores_normal_quality_only_in_selected_scope(tmp_path):
+    from pipeline_plan import PipelinePlanParams, _extract_plan
+
+    db, folder_id = _make_db(tmp_path)
+    photo_id, _ = _add_photo_with_detection(db, folder_id, "bird.jpg")
+    db.update_photo_pipeline_features(photo_id, quality_input_recipe="linear-raw-subject-v1")
+    params = PipelinePlanParams()
+    config = {"sam2_variant": "sam2-small"}
+    plan = _extract_plan(db, params, [photo_id], config)
+    assert plan["state"] == "will-run"
+    assert "without RAW exposure correction" in plan["summary"]
+    outside = _extract_plan(db, params, [], config)
+    assert "without RAW exposure correction" not in outside["summary"]
+    db.close()
+
+
 def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
@@ -4039,3 +4057,33 @@ def test_exclusions_apply_in_whole_workspace_mode(tmp_path):
     )
     assert plan["stages"]["Extract"]["detail"]["pending"] == 1
     assert plan["scope"]["photo_count"] == 1
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_normal_plan_counts_raw_recipe_as_pending(tmp_path, monkeypatch, fallback):
+    import labels as labels_mod
+    import models as models_mod
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    from raw_analysis import RECIPE
+
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    db, folder = _make_db(tmp_path)
+    photo, detection = _add_photo_with_detection(
+        db, folder, "bird.jpg", detector_model="full-image" if fallback else "megadetector-v6",
+    )
+    if fallback:
+        db.record_detector_run(photo, "megadetector-v6", 0)
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2", "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True, "weights_path": _tol_weights(tmp_path)},
+    ])
+    db.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1, input_recipe=RECIPE)
+    stage = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))["stages"]["Classify"]
+    assert stage["state"] == "will-run"
+    assert stage["detail"]["pending"] == 1
+    db.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1)
+    stage = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))["stages"]["Classify"]
+    assert stage["detail"]["pending"] == 0
+    db.close()
