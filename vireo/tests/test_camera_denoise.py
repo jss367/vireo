@@ -161,3 +161,62 @@ def test_local_denoise_delta_can_disable_camera_denoise_on_subject():
     }
     out = apply_recipe_to_loaded_image(img, recipe, local_mask=mask, camera_metadata=_photo())
     np.testing.assert_array_equal(out, img)
+
+
+@pytest.mark.parametrize('make', [
+    'KONICA MINOLTA',
+    'KONICA MINOLTA CAMERA, INC.',
+    'KONICA MINOLTA PHOTO IMAGING, INC.',
+    'KONICA MINOLTA PHOTO IMAGING INC',
+])
+def test_konica_minolta_dynax_5d_matches_bundled_minolta_profile(make):
+    """Konica Minolta EXIF must resolve to the bundled Minolta measurement.
+
+    The bundled darktable measurement stores the Dynax/Maxxum line under the
+    later "Minolta" brand, but every Dynax 5D sample in the wild carries a
+    KONICA MINOLTA maker string in EXIF. Without an alias the identity key
+    diverges and the camera silently falls through to image-only estimation.
+    """
+    resolved = denoise.resolve_profile(
+        {'camera_make': make, 'camera_model': 'DYNAX 5D', 'iso': 400}
+    )
+    assert resolved['source'] == 'camera'
+    assert resolved['match'] in ('exact', 'interpolated', 'nearest')
+
+
+def test_profile_cache_inputs_returns_none_without_camera_denoise():
+    """Recipes that do not request camera denoise must not carry metadata
+    into signature-based caches (that would over-invalidate on a backfill).
+    """
+    assert denoise.profile_cache_inputs(None, _photo()) is None
+    assert denoise.profile_cache_inputs({}, _photo()) is None
+    assert (
+        denoise.profile_cache_inputs(
+            {'adjustments': {'noise_reduction': 40}}, _photo(),
+        )
+        is None
+    )
+    assert (
+        denoise.profile_cache_inputs(
+            {'adjustments': {'denoise_mode': 'standard'}}, _photo(),
+        )
+        is None
+    )
+
+
+def test_profile_cache_inputs_returns_photo_metadata_for_camera_denoise():
+    """A camera-denoise recipe must expose the fields that pick the profile so
+    a backfill (which changes make/model/ISO without touching the source
+    mtime or the recipe) invalidates any cached render.
+    """
+    recipe = {'adjustments': {'denoise_mode': 'camera'}}
+    inputs = denoise.profile_cache_inputs(recipe, _photo(iso=800))
+    assert inputs == {
+        'camera_make': 'NIKON CORPORATION',
+        'camera_model': 'NIKON Z 8',
+        'iso': 800.0,
+    }
+    # Metadata swap yields a distinct value — the cache signature will
+    # rehash and stop reusing the earlier render.
+    swapped = denoise.profile_cache_inputs(recipe, _photo(iso=1600))
+    assert swapped != inputs

@@ -244,7 +244,14 @@ def _paired_render_state_hash(
     their TTL sweep only fires on the next publish, so keying by state is
     what prevents the shadow cache from returning bytes rendered from a
     prior state.
+
+    Camera-aware denoising selects a bundled noise profile from the photo's
+    ``camera_make`` / ``camera_model`` / ``iso``, so include those inputs
+    (via ``profile_cache_inputs`` — ``None`` when the recipe doesn't request
+    camera denoising) so a metadata backfill without a source or recipe
+    change does not reuse a render built against the prior profile.
     """
+    from camera_denoise import profile_cache_inputs
     from image_edits import EDIT_MATH_VERSION, recipe_to_json
 
     source_state = None
@@ -266,6 +273,7 @@ def _paired_render_state_hash(
             "source_state": source_state,
             "recipe": recipe_to_json(recipe) if recipe else None,
             "edit_math_version": EDIT_MATH_VERSION,
+            "camera_profile": profile_cache_inputs(recipe, photo),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -4419,7 +4427,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         version invalidates bytes produced by older rendering code. Hashing the
         signature into the JPEG filename lets /original safely reuse prepared
         renders without a database table or cross-recipe cache race.
+
+        Camera-aware denoising picks a bundled noise profile from the promoted
+        camera fields on the photo row, so a metadata backfill that changes
+        ``camera_make`` / ``camera_model`` / ``iso`` without touching the
+        source mtime or the recipe would otherwise reuse a render built
+        against the previous profile. ``profile_cache_inputs`` returns ``None``
+        for recipes that don't request camera denoising so unrelated renders
+        aren't invalidated by metadata updates.
         """
+        from camera_denoise import profile_cache_inputs
         from image_edits import EDIT_MATH_VERSION, recipe_to_json
 
         return {
@@ -4431,6 +4448,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "file_state": file_state,
             "recipe": recipe_to_json(recipe),
             "edit_math_version": EDIT_MATH_VERSION,
+            "camera_profile": profile_cache_inputs(recipe, photo),
         }
 
     def _full_resolution_render_path(
@@ -4606,6 +4624,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         sidecar,
                         exc_info=True,
                     )
+            # Camera-aware-denoise variants share the ``<pid>[_source]_cd<hash>``
+            # naming scheme (see ``serve_thumbnail``); a recipe change swaps the
+            # denoise mode or the profile inputs, so any sharded file left
+            # behind would keep serving pixels rendered against the previous
+            # recipe. Listdir once and drop every matching sibling.
+            try:
+                entries = os.listdir(thumb_dir)
+            except OSError:
+                entries = ()
+            for name in entries:
+                if not name.endswith(".jpg"):
+                    continue
+                for prefix in (f"{pid}_cd", f"{pid}_raw_cd", f"{pid}_jpeg_cd"):
+                    if name.startswith(prefix):
+                        variant = os.path.join(thumb_dir, name)
+                        try:
+                            os.remove(variant)
+                        except OSError:
+                            log.warning(
+                                "Failed to remove stale camera-denoise "
+                                "thumbnail %s",
+                                variant, exc_info=True,
+                            )
+                        break
             if clear_thumb_path:
                 db.conn.execute(
                     "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
@@ -20792,12 +20834,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # handoff render: the JPEG is keyed by recipe/source/mtime,
                 # none of which change when only the per-pixel rendering math
                 # changes, so without this we'd keep handing editors the stale
-                # render.
+                # render. Camera-aware denoising resolves the profile from the
+                # photo's promoted metadata, which a backfill could change
+                # without touching mtime/recipe — include those inputs
+                # (``None`` when not using camera denoising) so a metadata
+                # change reliably invalidates this cached handoff too.
+                from camera_denoise import profile_cache_inputs
                 expected_meta = {
                     "recipe": recipe_json,
                     "source_path": source_path,
                     "source_mtime": source_mtime,
                     "edit_math_version": EDIT_MATH_VERSION,
+                    "camera_profile": profile_cache_inputs(recipe, photo),
                 }
                 try:
                     if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -23042,12 +23090,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # cached render — the JPEG is keyed by recipe/source/mtime, none
             # of which change when only the per-pixel rendering math does, so
             # without this we'd keep submitting stale renders to iNaturalist
-            # after a deploy.
+            # after a deploy. Camera-aware denoising resolves the profile from
+            # the photo's promoted metadata, which a backfill could change
+            # without touching mtime/recipe — include those inputs (``None``
+            # when not using camera denoising) so a metadata change reliably
+            # invalidates the upload render too.
+            from camera_denoise import profile_cache_inputs
             expected_meta = {
                 "recipe": recipe_json,
                 "source_path": source_path,
                 "source_mtime": source_mtime,
                 "edit_math_version": EDIT_MATH_VERSION,
+                "camera_profile": profile_cache_inputs(recipe, photo),
             }
             try:
                 if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -26974,8 +27028,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         if pair_source and not pair_source_path:
             return "", 404
+        # Camera-aware denoising picks a bundled noise profile from the
+        # photo's promoted camera fields, and the mtime-only freshness gate
+        # below cannot see a metadata backfill that swaps ``camera_make`` /
+        # ``camera_model`` / ``iso`` without touching the source file. Load
+        # the recipe up front so we can shard the cache filename by those
+        # inputs (the ``_cd`` suffix) and stop reusing a thumbnail rendered
+        # against the previous profile. ``profile_cache_inputs`` returns
+        # ``None`` unless the recipe requests camera denoising, so unrelated
+        # thumbnails keep their existing filenames.
+        cached_recipe = db.get_photo_edit_recipe(photo_id)
+        cached_render_recipe = None if pair_source == "jpeg" else cached_recipe
+        from camera_denoise import profile_cache_inputs
+        camera_profile_inputs = profile_cache_inputs(
+            cached_render_recipe, photo,
+        )
+        cache_suffix = ""
+        if camera_profile_inputs is not None:
+            camera_hash = hashlib.sha256(
+                json.dumps(
+                    camera_profile_inputs, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8"),
+            ).hexdigest()[:12]
+            cache_suffix = f"_cd{camera_hash}"
         cache_filename = (
-            f"{photo_id}_{pair_source}.jpg" if pair_source else filename
+            f"{photo_id}_{pair_source}{cache_suffix}.jpg"
+            if pair_source
+            else (
+                f"{photo_id}{cache_suffix}.jpg" if cache_suffix else filename
+            )
         )
         thumb_path = os.path.join(thumb_dir, cache_filename)
         # Set when a locked stale thumbnail forces regeneration to the
@@ -27112,13 +27193,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {folder_row["id"]: folder_row["path"]} if folder_row else {}
         )
         try:
-            recipe = db.get_photo_edit_recipe(photo_id)
+            # Recipe was already loaded above so the cache filename could
+            # depend on the camera-aware denoise profile inputs; reuse it
+            # rather than issuing a second SELECT per thumbnail request.
+            recipe = cached_recipe
             # Edit recipes and local masks are stored in the primary RAW's
             # coordinate space. A developed companion may already be cropped,
             # rotated, or resized, so applying that geometry again would render
             # the selected JPEG incorrectly. JPEG pair views intentionally show
             # the companion as-authored; RAW pair views retain the catalog edit.
-            render_recipe = None if pair_source == "jpeg" else recipe
+            render_recipe = cached_render_recipe
             thumb_size = cfg.load().get("thumbnail_size", 400)
             if pair_source_path:
                 source = pair_source_path

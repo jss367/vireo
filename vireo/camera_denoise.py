@@ -26,6 +26,12 @@ _MAKERS = {
     "sonycorporation": "sony", "olympusimagingcorp": "olympus",
     "olympuscorporation": "olympus", "omsystem": "omdigitalsolutions",
     "ricohimagingcompanyltd": "pentax",
+    # Konica Minolta sold the Dynax/Maxxum line before rebranding to
+    # "Minolta" in the bundled measurements; without this alias the
+    # KONICA MINOLTA EXIF identity would never match the profile.
+    "konicaminolta": "minolta", "konicaminoltacamerainc": "minolta",
+    "konicaminoltaphotoimagingincorporated": "minolta",
+    "konicaminoltaphotoimaginginc": "minolta",
 }
 
 
@@ -99,6 +105,26 @@ def _profiles():
     except (OSError, ValueError, KeyError, TypeError):
         logging.getLogger(__name__).warning("Camera noise measurements unavailable; using image estimates")
         return {}
+
+
+def profile_cache_inputs(recipe, photo=None, exif_data=None):
+    """Camera metadata that affects rendering of ``recipe`` (or ``None``).
+
+    Callers include the returned dict in their cache signatures so a
+    metadata backfill — which changes ``camera_make``, ``camera_model`` or
+    ``iso`` without touching the source mtime or the recipe — does not
+    silently return a cached render built against the previous profile.
+
+    Returns ``None`` when the recipe does not request camera-aware
+    denoising: camera metadata never reaches the pipeline in that case,
+    so a metadata change should not invalidate the render.
+    """
+    adjustments = None
+    if isinstance(recipe, dict):
+        adjustments = recipe.get("adjustments") or {}
+    if not adjustments or adjustments.get("denoise_mode") != "camera":
+        return None
+    return camera_metadata(photo, exif_data)
 
 
 def resolve_profile(photo=None, exif_data=None):
