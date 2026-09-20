@@ -2904,6 +2904,12 @@ def _store_grouped_predictions(
 
     resolver = SpeciesResolver(taxonomy=tax)
 
+    # Both standalone and Process jobs reach this storage boundary. Fresh
+    # inference replaces the old recipe's outputs while cached rows survive.
+    for item in raw_results:
+        if not item.get("_existing"):
+            item["_replace_prediction_outputs"] = True
+
     # Before grouping: consensus can replace an item's species with the burst's
     # winner, and the already-labeled check can drop items entirely, but the
     # match score describes what the classifier saw on this frame. Record it

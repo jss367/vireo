@@ -372,9 +372,9 @@ def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(
     migrated.close()
 
 
-@pytest.mark.parametrize("kind", ["pending", "match"])
+@pytest.mark.parametrize("kind", ["pending", "match", "grouped"])
 def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, kind):
-    from classify_job import _store_match_prediction, _store_pending_detection_prediction
+    from classify_job import _store_grouped_predictions, _store_match_prediction, _store_pending_detection_prediction
     from db import Database
 
     db = Database(str(tmp_path / "refresh.db"))
@@ -403,7 +403,12 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
         "alternatives": [{"species": "Sparrow", "confidence": 0.1}],
         "_replace_prediction_outputs": True,
     }
-    if kind == "match":
+    if kind == "grouped":
+        item.pop("_replace_prediction_outputs")
+        item.update(photo={"id": photo, "filename": "bird.nef"}, folder_path=str(tmp_path),
+                    filename="bird.nef", timestamp=None, embedding=None)
+        _store_grouped_predictions([item], "job", "model", 10, 0.85, None, db, "labels")
+    elif kind == "match":
         _store_match_prediction(db, item, "model", "labels")
     else:
         _store_pending_detection_prediction(db, item, "model", "labels", "new", group_id="new-group")
