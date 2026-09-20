@@ -19474,6 +19474,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         import config as cfg
 
+        MAX_REVISION = 9007199254740991  # Number.MAX_SAFE_INTEGER
+
         def valid_aspect(value):
             if type(value) not in (int, float) or value <= 0:
                 return False
@@ -19483,7 +19485,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return False
 
         def valid_revision(value):
-            return type(value) is int and 0 < value <= 9007199254740991
+            return type(value) is int and 0 < value <= MAX_REVISION
 
         def normalized_preference(stored):
             result = {"enabled": False, "aspect": None}
@@ -19513,7 +19515,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         with _settings_write_lock:
             current = _read_raw_config_file()
             stored = normalized_preference(current.get("editor_crop_ratio", {}))
-            if revision is not None and revision <= stored.get("revision", 0):
+            stored_revision = stored.get("revision", 0)
+            # A stored revision at the safe-integer ceiling has no valid
+            # successor a browser can produce, so refusing a smaller
+            # revision would wedge the preference forever. Accept the
+            # rollover write and reset the counter to the incoming value.
+            at_ceiling = stored_revision >= MAX_REVISION
+            if (revision is not None
+                    and revision <= stored_revision
+                    and not at_ceiling):
                 return jsonify(stored)
             current["editor_crop_ratio"] = preference
             cfg.save(current)

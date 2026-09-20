@@ -53,6 +53,27 @@ def test_editor_crop_ratio_ignores_late_older_writes(app_and_db):
     assert client.get(endpoint).get_json() == disabled
 
 
+def test_editor_crop_ratio_accepts_rollover_from_max_safe_revision(app_and_db):
+    """A stored revision at Number.MAX_SAFE_INTEGER can never be beaten by a
+    valid JavaScript revision — ``prev + 1`` is no longer a safe integer and
+    the browser can neither compute nor send it. Without a rollover exception
+    the preference would be wedged until the config was hand-repaired; the
+    server must accept the next legitimate write instead of rejecting it as
+    stale (Codex review, PR #1729)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    ceiling = 9007199254740991  # Number.MAX_SAFE_INTEGER
+    at_max = {"enabled": True, "aspect": 1.5, "revision": ceiling}
+    assert client.put(endpoint, json=at_max).get_json() == at_max
+    rolled_over = {"enabled": True, "aspect": 1.3333333333, "revision": 1}
+    assert client.put(endpoint, json=rolled_over).get_json() == rolled_over
+    assert client.get(endpoint).get_json() == rolled_over
+    # Once the counter resets, normal older-write rejection resumes.
+    stale = {"enabled": True, "aspect": 1.5, "revision": 1}
+    assert client.put(endpoint, json=stale).get_json() == rolled_over
+
+
 @pytest.mark.parametrize("body", [
     [], {}, {"enabled": "true"}, {"enabled": True, "aspect": True},
     {"enabled": True, "aspect": 0}, {"enabled": True, "aspect": -1},

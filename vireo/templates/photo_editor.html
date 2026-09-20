@@ -2432,10 +2432,22 @@ function saveCropRatioPreference(preference) {
   cropRatioSave = Promise.all([cropRatioSave, request]);
 }
 
+function nextCropRatioRevision(previous) {
+  // A previous revision at Number.MAX_SAFE_INTEGER has no safe successor.
+  // Fall back to Date.now() so future writes stay within safe-integer
+  // range; the server accepts this rollover instead of rejecting it as
+  // stale.
+  var current = Number(previous) || 0;
+  var candidate = current + 1;
+  if (!Number.isSafeInteger(candidate)) candidate = Date.now();
+  var next = Math.max(Date.now(), candidate);
+  return Number.isSafeInteger(next) ? next : candidate;
+}
+
 function rememberCropRatio(force) {
   if (!cropRatioPreference.enabled && !force) return;
   cropRatioPreference.aspect = cropRatioPreference.enabled ? editorState.cropAspect : null;
-  cropRatioPreference.revision = Math.max(Date.now(), (cropRatioPreference.revision || 0) + 1);
+  cropRatioPreference.revision = nextCropRatioRevision(cropRatioPreference.revision);
   // A reloaded page can issue its GET before this PUT reaches the server.
   // Keep the pending value synchronously until its revision is acknowledged.
   VireoViewPreferences.write('vireo_pending_crop_ratio', JSON.stringify(cropRatioPreference));
