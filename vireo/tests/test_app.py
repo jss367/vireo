@@ -22316,7 +22316,7 @@ var predictions = Array.from({length: 6}, function(_, idx) {
   var collapsedHTML = __list.innerHTML;
   selectionPredictionsExpanded = true;
   renderSelectionPredictions(predictions, 3, {});
-  var button = {disabled: false, textContent: 'Accept on all'};
+  var button = {disabled: false, textContent: 'Accept on all 3'};
   await acceptSelectionPrediction(0, true, button);
   await acceptSelectionPrediction(2, true, button);
   await acceptSelectionPrediction(1);
@@ -22328,8 +22328,8 @@ var predictions = Array.from({length: 6}, function(_, idx) {
 """,
     ])
     result = _run_node(source, [])
-    assert result["collapsedHTML"].count(">Accept on all</button>") == 5
-    assert result["expandedHTML"].count(">Accept on all</button>") == 6
+    assert result["collapsedHTML"].count(">Accept on all 3</button>") == 5
+    assert result["expandedHTML"].count(">Accept on all 3</button>") == 6
     assert result["requests"][0]["body"] == {
         "prediction_ids": [100], "expected_species": "Say's Phoebe", "photo_ids": [11, 12, 13],
     }
@@ -22340,7 +22340,119 @@ var predictions = Array.from({length: 6}, function(_, idx) {
         "prediction_ids": [101], "expected_species": "Species 1",
     }
     assert result["refreshes"] == [[11, 12, 13]] * 3
-    assert result["button"] == {"disabled": False, "textContent": "Accept on all"}
+    # The in-flight label is restored to what the row rendered, count and
+    # all, rather than to a hardcoded "Accept on all" that would drop the
+    # number off every button the user has already clicked once.
+    assert result["button"] == {"disabled": False, "textContent": "Accept on all 3"}
+
+
+def test_selection_prediction_accept_on_all_leads_and_names_its_count(app_and_db):
+    """"Accept on all" is the primary action, and it says how many photos.
+
+    A selection in Browse is normally one bird event, so accepting the
+    species across the whole selection is the button that actually gets
+    clicked; the narrower "Accept on N" is the exception. The panel
+    therefore renders the whole-selection accept first and in the accent
+    fill, with the subset accept outlined beneath it.
+
+    That promotion only stays honest if the promoted button names its own
+    size. "Accept on all" under "Predicted on 14 of 15" is a rounding error
+    on the prediction; the same words under "Predicted on 2 of 70" claim a
+    species on 68 photos that never predicted it, and nothing in the button
+    would have said so. So the label carries the selection count.
+
+    And when every selected photo already predicts the species
+    unambiguously, the two buttons submit identical work — same rows, same
+    keywords, same single undo entry. The panel drops the duplicate rather
+    than asking the user to choose between two spellings of one action.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+    source = "\n".join([
+        _PANEL_DOM_STUB.replace(
+            "id === 'detailPredictions'", "id === 'selectionPredictions'",
+        ),
+        _browse_escape_helpers(),
+        _browse_js_function_body(html, "function formatPredictionConfidence("),
+        _browse_js_function_body(html, "function renderSelectionPredictions("),
+        _browse_js_function_body(html, "async function acceptSelectionPrediction("),
+        """
+var selectionPredictionsExpanded = true;
+var selectionPredictionAcceptableById = {};
+var selectionPredictionSpeciesByIdx = {};
+var selectionPredictionPhotoIdsByIdx = {};
+var requests = [];
+var selection = [];
+for (var i = 1; i <= 15; i++) selection.push(i);
+function getActiveSelection() { return selection.slice(); }
+async function safeFetch(url, opts) {
+  requests.push({url: url, body: JSON.parse(opts.body)});
+  return {accepted: 15};
+}
+async function _afterPredictionMutation() {}
+function _reportSkippedAccepts() {}
+var predictions = [
+  {species: 'Saffron Finch', predicted_count: 14, predicted_photo_ids: [],
+   acceptable_photo_count: 14,
+   acceptable_prediction_ids: [101], ambiguous_photo_ids: [],
+   min_confidence: 0.03, max_confidence: 1.0},
+  {species: 'Blue-breasted Quail', predicted_count: 2, predicted_photo_ids: [],
+   acceptable_photo_count: 2,
+   acceptable_prediction_ids: [102], ambiguous_photo_ids: [],
+   min_confidence: 0.9, max_confidence: 0.95},
+  {species: 'Common Gallinule', predicted_count: 15, predicted_photo_ids: [],
+   acceptable_photo_count: 15,
+   acceptable_prediction_ids: [103], ambiguous_photo_ids: [],
+   min_confidence: 0.8, max_confidence: 0.99},
+];
+(async function() {
+  renderSelectionPredictions(predictions, 15, {});
+  var rendered = __list.innerHTML;
+  // Click the single button on the row whose subset accept was dropped.
+  var button = {disabled: false, textContent: 'Accept on all 15'};
+  await acceptSelectionPrediction(2, true, button);
+  process.stdout.write(JSON.stringify({
+    html: rendered, requests: requests, button: button,
+  }));
+})();
+""",
+    ])
+    result = _run_node(source, [])
+    rows = result["html"].split('class="prediction-row')[1:]
+    assert len(rows) == 3, result["html"]
+
+    # Every row leads with the whole-selection accept, and every accept
+    # button — both kinds — carries the photo count it would write to.
+    for row in rows:
+        assert ">Accept on all 15</button>" in row, row
+    assert ">Accept on 14</button>" in rows[0]
+    assert ">Accept on 2</button>" in rows[1]
+    # The promoted button comes first in each row, so the accent-filled
+    # button under the cursor is the one that gets clicked most.
+    assert rows[0].index("Accept on all 15") < rows[0].index("Accept on 14")
+    assert rows[1].index("Accept on all 15") < rows[1].index("Accept on 2")
+    # Primary vs secondary chrome, not just order.
+    assert rows[0].count("prediction-accept-all") == 1
+    assert rows[0].count("prediction-accept-subset") == 1
+
+    # Predicted on all 15 of 15: the subset accept would submit the exact
+    # same work, so it is not rendered at all.
+    assert "prediction-accept-subset" not in rows[2], rows[2]
+    assert rows[2].count("<button") == 1, rows[2]
+    assert "all 15 selected photos" in rows[2]
+
+    # And the surviving button still runs the whole-selection accept.
+    assert result["requests"] == [{
+        "url": "/api/predictions/batch-accept",
+        "body": {
+            "prediction_ids": [103],
+            "expected_species": "Common Gallinule",
+            "photo_ids": list(range(1, 16)),
+        },
+    }]
+    assert result["button"] == {
+        "disabled": False, "textContent": "Accept on all 15",
+    }
 
 
 def test_selection_prediction_show_button_opens_only_that_species_photos(app_and_db):
