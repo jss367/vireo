@@ -4632,7 +4632,12 @@ async function initEditor() {
   if (pending) cropRatioPreference = pending;
   try {
     var saved = await safeFetch('/api/editor/crop-ratio', {}, {toast: false});
-    pending = pendingCropRatioPreference();
+    // Another tab can acknowledge and clear the shared pending slot while
+    // this GET is in flight. Keep the newer evidence captured before it.
+    var latestPending = pendingCropRatioPreference();
+    if (latestPending && (!pending || latestPending.revision > pending.revision)) {
+      pending = latestPending;
+    }
     if (pending && pending.revision > (saved.revision || 0)) {
       cropRatioPreference = pending;
       saveCropRatioPreference(pending);

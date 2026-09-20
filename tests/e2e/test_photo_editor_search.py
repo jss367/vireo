@@ -528,6 +528,45 @@ def test_photo_editor_restores_pending_ratio_on_immediate_reload(live_server, pa
     assert saved["aspect"] == (1.5 if enabled else None)
 
 
+def test_photo_editor_keeps_pending_snapshot_when_another_tab_acknowledges(live_server, page):
+    """A stale GET cannot win when another tab clears the pending save slot."""
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    page.context.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{photo_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspect32Btn").click()
+    pending = []
+    page.route("**/api/editor/crop-ratio", lambda route: pending.append(route))
+    with page.expect_request(lambda request: request.method == "PUT"):
+        page.get_by_label("Remember crop ratio").check()
+
+    other = page.context.new_page()
+
+    def stale_get_after_acknowledgement(route):
+        if route.request.method != "GET":
+            route.continue_()
+            return
+        response = route.fetch()
+        pending[0].continue_()
+        page.evaluate("() => cropRatioSave")
+        assert page.evaluate("() => pendingCropRatioPreference()") is None
+        route.fulfill(response=response)
+
+    other.route("**/api/editor/crop-ratio", stale_get_after_acknowledgement)
+    other.goto(f"{url}/edit/{photo_id}")
+    expect(other.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    expect(other.get_by_label("Remember crop ratio")).to_be_checked()
+    expect(other.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    other.close()
+
+
 def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
     """A remembered ratio must not recrop an existing edit just by opening it."""
     url = live_server["url"]
