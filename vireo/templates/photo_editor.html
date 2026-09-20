@@ -511,6 +511,15 @@ body {
   font-size: 11px;
   line-height: 1.35;
 }
+.crop-remember {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
 .crop-meta {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -703,6 +712,10 @@ body {
         <button class="editor-btn" type="button" id="aspect43Btn" onclick="setAspect(1.3333333333)" title="Set a 4:3 crop and lock the ratio; click again to unlock">4:3</button>
         <button class="editor-btn" type="button" id="aspect11Btn" onclick="setAspect(1)" title="Set a 1:1 crop and lock the ratio; click again to unlock">1:1</button>
       </div>
+      <label class="crop-remember" title="Start each photo with your last ratio lock. Saved crops stay unchanged until you resize them.">
+        <input id="rememberCropRatio" type="checkbox" onchange="setRememberCropRatio(this.checked)">
+        Remember crop ratio
+      </label>
       <div class="crop-meta">
         <div><label for="cropX">x</label><input id="cropX" type="number" min="0" max="100" step="0.1" value="0" onfocus="beginCropEdit()" onchange="setCropField('x', this.value)" aria-label="Crop x (percent)"></div>
         <div><label for="cropY">y</label><input id="cropY" type="number" min="0" max="100" step="0.1" value="0" onfocus="beginCropEdit()" onchange="setCropField('y', this.value)" aria-label="Crop y (percent)"></div>
@@ -1149,6 +1162,8 @@ body {
 <script src="/static/vireo-export-presets.js"></script>
 
 <script>
+var cropRatioPreference = {enabled: false, aspect: null};
+var cropRatioSave = Promise.resolve();
 var editorState = {
   photoId: null,
   photo: null,
@@ -2382,7 +2397,31 @@ function setStraighten(value) {
   markChanged(true);
 }
 
+function rememberCropRatio(force) {
+  if (!cropRatioPreference.enabled && !force) return;
+  cropRatioPreference.aspect = cropRatioPreference.enabled ? editorState.cropAspect : null;
+  var body = JSON.stringify(cropRatioPreference);
+  // Serialize rapid choices so an older request cannot overwrite the last
+  // ratio. Configuration survives the desktop app's changing server port.
+  cropRatioSave = cropRatioSave.then(function() {
+    return safeFetch('/api/editor/crop-ratio', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: body,
+      keepalive: true,
+    }, {toast: false});
+  }).catch(function() {
+    showToast('Could not remember the crop ratio. Please try again.', 'error');
+  });
+}
+
+function setRememberCropRatio(enabled) {
+  cropRatioPreference.enabled = enabled;
+  rememberCropRatio(true);
+}
+
 function updateAspectButtons() {
+  document.getElementById('rememberCropRatio').checked = cropRatioPreference.enabled;
   var map = { aspect32Btn: 1.5, aspect43Btn: 1.3333333333, aspect11Btn: 1 };
   setButtonActive('aspectLockBtn', !!editorState.cropAspect);
   setButtonDisabled('aspectLockBtn', !!editorState.showBefore || !!editorState.loading);
@@ -2395,6 +2434,7 @@ function updateAspectButtons() {
 function resetCrop() {
   var reopenedCrop = activateCropEditing();
   editorState.cropAspect = null;
+  rememberCropRatio();
   updateAspectButtons();
   editorState.recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
   markChanged(reopenedCrop);
@@ -2413,11 +2453,13 @@ function setAspect(aspect) {
   if (Math.abs(Number(editorState.cropAspect || 0) - aspect) < 0.0001) {
     // Second click on the active ratio unlocks it and leaves the crop alone.
     editorState.cropAspect = null;
+    rememberCropRatio();
     updateAspectButtons();
     if (reopenedCrop) updatePreview();
     return;
   }
   editorState.cropAspect = aspect;
+  rememberCropRatio();
   updateAspectButtons();
   var imageAspect = imageWidth / imageHeight;
   var normalizedRatio = aspect / imageAspect;
@@ -2437,6 +2479,7 @@ function toggleAspectLock() {
     if (!aspect) return;
     editorState.cropAspect = aspect;
   }
+  rememberCropRatio();
   updateAspectButtons();
   if (reopenedCrop) updatePreview();
 }
@@ -4404,7 +4447,9 @@ async function loadPhoto(photoId, opts) {
   });
   editorState.showBefore = false;
   editorState.cropEditing = true;
-  editorState.cropAspect = null;
+  // Restore only the resizing constraint; opening a photo must not change
+  // its saved crop or create an unsaved edit.
+  editorState.cropAspect = cropRatioPreference.enabled ? cropRatioPreference.aspect : null;
   updateAspectButtons();
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   // Keep the URL in sync so refresh / bookmark / Back behave sensibly.
@@ -4543,6 +4588,13 @@ function initEditorKeyboard() {
 }
 
 async function initEditor() {
+  setEditorLoading(true);
+  try {
+    cropRatioPreference = await safeFetch('/api/editor/crop-ratio', {}, {toast: false});
+  } catch (_) {
+    showToast('Could not load your remembered crop ratio.', 'error');
+  }
+  setEditorLoading(false);
   initCropDrag();
   initEditorKeyboard();
   initEditorContextMenu();

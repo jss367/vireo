@@ -19468,6 +19468,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify(cfg.load())
 
+    @app.route("/api/editor/crop-ratio", methods=["GET", "PUT"])
+    def api_editor_crop_ratio():
+        import math
+
+        import config as cfg
+
+        def valid_aspect(value):
+            return (
+                type(value) in (int, float)
+                and math.isfinite(value)
+                and value > 0
+            )
+
+        if request.method == "GET":
+            stored = cfg.load().get("editor_crop_ratio", {})
+            if not isinstance(stored, dict) or stored.get("enabled") is not True:
+                return jsonify(enabled=False, aspect=None)
+            aspect = stored.get("aspect")
+            return jsonify(enabled=True, aspect=aspect if valid_aspect(aspect) else None)
+
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or type(body.get("enabled")) is not bool:
+            return json_error("enabled must be a boolean", status=400)
+        aspect = body.get("aspect")
+        if aspect is not None and not valid_aspect(aspect):
+            return json_error("aspect must be a positive finite number or null", status=400)
+        preference = {"enabled": body["enabled"], "aspect": aspect if body["enabled"] else None}
+        with _settings_write_lock:
+            current = cfg.load()
+            current["editor_crop_ratio"] = preference
+            cfg.save(current)
+        return jsonify(preference)
+
     def _working_copy_quota_confirmation_required(
         previous, requested_quota_mb, confirmed=False,
     ):

@@ -377,6 +377,99 @@ def test_photo_editor_aspect_uses_current_crop(live_server, page):
         assert (minimum_crop["w"] / minimum_crop["h"]) == pytest.approx(1.5)
 
 
+def test_photo_editor_remembers_crop_ratio_across_photos_and_reload(live_server, page):
+    """Opting in restores the resizing lock without changing the next photo."""
+    url = live_server["url"]
+    first_id, second_id = live_server["data"]["photos"][:2]
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{first_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    remember = page.get_by_label("Remember crop ratio")
+    expect(remember).not_to_be_checked()
+    page.locator("#aspect32Btn").click()
+    remember.check()
+
+    # Navigation inside the editor must restore the preference, too.
+    page.evaluate("photoId => loadPhoto(photoId)", second_id)
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    expect(page.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator("#saveBtn")).to_be_disabled()
+    assert page.evaluate("() => editorState.recipe.crop") == {"x": 0, "y": 0, "w": 1, "h": 1}
+
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    page.wait_for_function("() => !editorState.loading && document.getElementById('editorImg').naturalWidth > 0")
+    expect(remember).to_be_checked()
+    expect(page.locator("#aspectLockBtn")).to_have_class(re.compile(r"\bactive\b"))
+    page.locator("#cropW").fill("60")
+    page.locator("#cropW").press("Tab")
+    assert page.evaluate("() => currentCropAspect()") == pytest.approx(1.5)
+
+    # Subsequent choices replace the remembered ratio, including custom locks.
+    page.locator("#aspect43Btn").click()
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#aspect43Btn")).to_have_class(re.compile(r"\bactive\b"))
+    page.wait_for_function("() => !editorState.loading && document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspectLockBtn").click()
+    page.locator("#cropW").fill("70")
+    page.locator("#cropW").press("Tab")
+    page.locator("#aspectLockBtn").click()
+    custom_aspect = page.evaluate("() => currentCropAspect()")
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    assert page.evaluate("() => editorState.cropAspect") == pytest.approx(custom_aspect)
+
+    # Explicitly unlocking is remembered; opting out keeps this photo's lock
+    # but makes subsequent visits start unlocked again.
+    page.locator("#aspectLockBtn").click()
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    expect(remember).to_be_checked()
+    expect(page.locator("#aspectLockBtn")).not_to_have_class(re.compile(r"\bactive\b"))
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspect11Btn").click()
+    remember.uncheck()
+    expect(page.locator("#aspect11Btn")).to_have_class(re.compile(r"\bactive\b"))
+    page.evaluate("() => cropRatioSave")
+    page.reload()
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    expect(remember).not_to_be_checked()
+    expect(page.locator("#aspectLockBtn")).not_to_have_class(re.compile(r"\bactive\b"))
+
+
+def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
+    """A remembered ratio must not recrop an existing edit just by opening it."""
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    saved_crop = {"x": 0.1, "y": 0.2, "w": 0.5, "h": 0.5}
+
+    def photo_with_crop(route):
+        response = route.fetch()
+        photo = response.json()
+        photo["edit_recipe"] = {"crop": saved_crop}
+        route.fulfill(response=response, json=photo)
+
+    page.route(f"**/api/photos/{photo_id}", photo_with_crop)
+    response = page.request.put(
+        f"{url}/api/editor/crop-ratio", data={"enabled": True, "aspect": 1.5},
+    )
+    assert response.ok
+    page.goto(f"{url}/edit/{photo_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    expect(page.locator("#aspect32Btn")).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator("#saveBtn")).to_be_disabled()
+    assert page.evaluate("() => editorState.recipe.crop") == saved_crop
+
+
 def test_photo_editor_continuous_zoom_has_fit_and_native_stops(live_server, page):
     """The editor zoom slider scales continuously and keeps exact Fit/100% actions."""
     url = live_server["url"]

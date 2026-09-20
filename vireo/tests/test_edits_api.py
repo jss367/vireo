@@ -1,5 +1,39 @@
 import os
 
+import pytest
+
+
+def test_editor_crop_ratio_persists_in_config(app_and_db):
+    import config as cfg
+
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    assert client.get(endpoint).get_json() == {"enabled": False, "aspect": None}
+    preference = {"enabled": True, "aspect": 1.5}
+    assert client.put(endpoint, json=preference).get_json() == preference
+    assert cfg.load()["editor_crop_ratio"] == preference
+    # A new client has no browser storage, as after the desktop port changes.
+    assert app.test_client().get(endpoint).get_json() == preference
+    response = client.put(endpoint, json={"enabled": False, "aspect": 1.5})
+    assert response.get_json() == {"enabled": False, "aspect": None}
+    assert cfg.load()["editor_crop_ratio"] == {"enabled": False, "aspect": None}
+
+
+@pytest.mark.parametrize("body", [
+    [], {}, {"enabled": "true"}, {"enabled": True, "aspect": True},
+    {"enabled": True, "aspect": 0}, {"enabled": True, "aspect": -1},
+    {"enabled": True, "aspect": "1.5"}, {"enabled": True, "aspect": float("inf")},
+])
+def test_editor_crop_ratio_rejects_invalid_values(app_and_db, body):
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    preference = {"enabled": True, "aspect": 1.5}
+    client.put(endpoint, json=preference)
+    assert client.put(endpoint, json=body).status_code == 400
+    assert client.get(endpoint).get_json() == preference
+
 
 def test_set_color_label(app_and_db):
     """POST /api/photos/<id>/color_label sets the color label."""
