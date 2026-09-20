@@ -25285,7 +25285,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
         def work(job):
-            from offline_cache import cache_photo_original
+            from offline_cache import cache_photo_original, original_preparation_guard
 
             thread_db = ctx.thread_db()
             try:
@@ -25306,92 +25306,95 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for index, photo_id in enumerate(photo_ids, start=1):
                     if ctx.runner.is_cancelled(job["id"]):
                         break
-                    # Re-read each photo: deletion may have run while this
-                    # job was preparing earlier selections.
-                    photo = selected_photos.get(photo_id)
-                    current_photo = thread_db.get_photo(photo_id)
-                    filename = photo["filename"] if photo else f"Photo {photo_id}"
-                    error = None
-                    cached = None
-                    attempted = same_source(photo, current_photo)
-                    if attempted:
-                        try:
-                            cached = cache_photo_original(
-                                thread_db, photo, vireo_dir, folders,
-                            )
-                            cache_status = cached.get("status")
-                            if cache_status not in ("cached", "skipped"):
-                                error = cache_status or "source could not be cached"
-
-                            if error is None and same_source(
-                                photo, thread_db.get_photo(photo_id),
-                            ):
-                                # Execute the canonical renderer inside an
-                                # isolated request context. This avoids a
-                                # second implementation drifting from the
-                                # lightbox's RAW/companion/edit fallbacks.
-                                with app.test_request_context(
-                                    f"/photos/{photo_id}/original"
-                                ):
-                                    request_db = _get_db()
-                                    request_db.set_active_workspace(ctx.workspace_id)
-                                    response = app.make_response(
-                                        serve_original_photo(photo_id)
-                                    )
-                                    try:
-                                        if not 200 <= response.status_code < 300:
-                                            response.direct_passthrough = False
-                                            detail = response.get_data(
-                                                as_text=True,
-                                            ).strip()
-                                            error = detail or (
-                                                "full-resolution render failed "
-                                                f"with status {response.status_code}"
-                                            )
-                                    finally:
-                                        response.close()
-                        except Exception as exc:
-                            thread_db.conn.rollback()
-                            error = str(exc) or exc.__class__.__name__
-                            if same_source(photo, thread_db.get_photo(photo_id)):
-                                log.warning(
-                                    "Full-resolution preparation failed for %s: %s",
-                                    filename, exc, exc_info=True,
-                                )
-
-                    # Serialize this final identity check and cache cleanup
-                    # against catalog writers. An import can reuse a deleted
-                    # ID; any cache written by this iteration is then suspect,
-                    # including the offline row attached to that replacement.
-                    # Purge disposable caches only if we actually attempted
-                    # work, leaving replacements found before our turn alone.
-                    with thread_db.conn:
-                        thread_db.conn.execute("BEGIN IMMEDIATE")
+                    # The lock must precede database transactions: other
+                    # writers publish files before inserting their cache row.
+                    with original_preparation_guard(vireo_dir, photo_id):
+                        # Re-read each photo: deletion may have run while this
+                        # job was preparing earlier selections.
+                        photo = selected_photos.get(photo_id)
                         current_photo = thread_db.get_photo(photo_id)
-                        if not attempted or not same_source(photo, current_photo):
-                            from preview_cache import cleanup_cached_files_for_deleted_photos
+                        filename = photo["filename"] if photo else f"Photo {photo_id}"
+                        error = None
+                        cached = None
+                        attempted = same_source(photo, current_photo)
+                        if attempted:
+                            try:
+                                cached = cache_photo_original(
+                                    thread_db, photo, vireo_dir, folders,
+                                )
+                                cache_status = cached.get("status")
+                                if cache_status not in ("cached", "skipped"):
+                                    error = cache_status or "source could not be cached"
 
-                            skipped_deleted += 1
-                            if attempted:
-                                thread_db.conn.execute(
-                                    "DELETE FROM offline_originals WHERE photo_id=?",
-                                    (photo_id,),
-                                )
-                                cleanup_cached_files_for_deleted_photos(
-                                    app.config["THUMB_CACHE_DIR"],
-                                    [{"photo_id": photo_id}],
-                                    vireo_dir=vireo_dir,
-                                )
-                        elif error is None:
-                            ready += 1
-                            if cached["status"] == "cached":
-                                copied += 1
-                                copied_bytes += int(cached.get("bytes") or 0)
-                            elif cached["status"] == "skipped":
-                                reused += 1
-                        else:
-                            failed += 1
-                            job["errors"].append(f"{filename}: {error}")
+                                if error is None and same_source(
+                                    photo, thread_db.get_photo(photo_id),
+                                ):
+                                    # Execute the canonical renderer inside an
+                                    # isolated request context. This avoids a
+                                    # second implementation drifting from the
+                                    # lightbox's RAW/companion/edit fallbacks.
+                                    with app.test_request_context(
+                                        f"/photos/{photo_id}/original"
+                                    ):
+                                        request_db = _get_db()
+                                        request_db.set_active_workspace(ctx.workspace_id)
+                                        response = app.make_response(
+                                            serve_original_photo(photo_id)
+                                        )
+                                        try:
+                                            if not 200 <= response.status_code < 300:
+                                                response.direct_passthrough = False
+                                                detail = response.get_data(
+                                                    as_text=True,
+                                                ).strip()
+                                                error = detail or (
+                                                    "full-resolution render failed "
+                                                    f"with status {response.status_code}"
+                                                )
+                                        finally:
+                                            response.close()
+                            except Exception as exc:
+                                thread_db.conn.rollback()
+                                error = str(exc) or exc.__class__.__name__
+                                if same_source(photo, thread_db.get_photo(photo_id)):
+                                    log.warning(
+                                        "Full-resolution preparation failed for %s: %s",
+                                        filename, exc, exc_info=True,
+                                    )
+
+                        # Serialize this final identity check and cache cleanup
+                        # against catalog writers. An import can reuse a deleted
+                        # ID; any cache written by this iteration is then suspect,
+                        # including the offline row attached to that replacement.
+                        # Purge disposable caches only if we actually attempted
+                        # work, leaving replacements found before our turn alone.
+                        with thread_db.conn:
+                            thread_db.conn.execute("BEGIN IMMEDIATE")
+                            current_photo = thread_db.get_photo(photo_id)
+                            if not attempted or not same_source(photo, current_photo):
+                                from preview_cache import cleanup_cached_files_for_deleted_photos
+
+                                skipped_deleted += 1
+                                if attempted:
+                                    thread_db.conn.execute(
+                                        "DELETE FROM offline_originals WHERE photo_id=?",
+                                        (photo_id,),
+                                    )
+                                    cleanup_cached_files_for_deleted_photos(
+                                        app.config["THUMB_CACHE_DIR"],
+                                        [{"photo_id": photo_id}],
+                                        vireo_dir=vireo_dir,
+                                    )
+                            elif error is None:
+                                ready += 1
+                                if cached["status"] == "cached":
+                                    copied += 1
+                                    copied_bytes += int(cached.get("bytes") or 0)
+                                elif cached["status"] == "skipped":
+                                    reused += 1
+                            else:
+                                failed += 1
+                                job["errors"].append(f"{filename}: {error}")
 
                     progress = {
                         "current": index,

@@ -696,3 +696,84 @@ def test_preparation_does_not_count_deleted_reused_cache(client_with_photo, monk
     assert job["result"]["reused"] == 0
     assert job["result"]["copied"] == 0
     assert job["result"]["bytes"] == 0
+
+
+@pytest.mark.parametrize("replacement_endpoint", ["prepare-full-resolution", "offline-cache"])
+def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
+    client_with_photo, monkeypatch, replacement_endpoint,
+):
+    import contextlib
+    import threading
+
+    import offline_cache
+    from preview_cache import cleanup_cached_files_for_deleted_photos
+
+    app, db, photo_id = client_with_photo
+    selected = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (selected["folder_id"],),
+    ).fetchone()["path"]
+    old_copy_waiting = threading.Event()
+    release_old_copy = threading.Event()
+    replacement_created = threading.Event()
+    replacement_attempted = threading.Event()
+    replacement_published = threading.Event()
+    original_copy = offline_cache._copy_atomic
+    original_guard = offline_cache.original_preparation_guard
+
+    def hold_old_copy(src, dst):
+        if os.path.basename(src) == selected["filename"]:
+            old_bytes = Path(src).read_bytes()
+            old_copy_waiting.set()
+            assert release_old_copy.wait(10)
+            # Publish after the deletion and recycled-ID cleanup have run.
+            Path(dst).parent.mkdir(parents=True, exist_ok=True)
+            Path(dst).write_bytes(old_bytes)
+        else:
+            original_copy(src, dst)
+            replacement_published.set()
+
+    @contextlib.contextmanager
+    def observe_guard(vireo_dir, pid):
+        if replacement_created.is_set():
+            replacement_attempted.set()
+        with original_guard(vireo_dir, pid):
+            yield
+
+    monkeypatch.setattr(offline_cache, "_copy_atomic", hold_old_copy)
+    monkeypatch.setattr(offline_cache, "original_preparation_guard", observe_guard)
+    client = app.test_client()
+    first = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
+    try:
+        assert old_copy_waiting.wait(10)
+        deleted = db.delete_photos([photo_id])
+        cleanup_cached_files_for_deleted_photos(app.config["THUMB_CACHE_DIR"], deleted["files"])
+        replacement = Path(folder) / "replacement.jpg"
+        Image.new("RGB", (800, 600), "blue").save(replacement)
+        new_id = db.add_photo(
+            folder_id=selected["folder_id"], filename=replacement.name, extension=".jpg",
+            file_size=replacement.stat().st_size, file_mtime=replacement.stat().st_mtime,
+            width=800, height=600,
+        )
+        assert new_id == photo_id
+        replacement_created.set()
+        second = client.post(f"/api/jobs/{replacement_endpoint}", json={"photo_ids": [photo_id]})
+        assert second.status_code == 200
+        assert replacement_attempted.wait(10)
+        assert not replacement_published.wait(0.1)
+    finally:
+        release_old_copy.set()
+    stale_job = wait_for_job_via_client(client, first.get_json()["job_id"])
+    replacement_job = wait_for_job_via_client(client, second.get_json()["job_id"])
+    assert stale_job["status"] == "completed", stale_job
+    assert stale_job["result"]["skipped_deleted"] == 1
+    assert replacement_job["status"] == "completed", replacement_job
+    assert replacement_published.is_set()
+    cached = db.offline_original_get(photo_id)
+    assert cached["status"] == "cached"
+    cached_path = Path(app.config["THUMB_CACHE_DIR"]).parent / cached["original_path"]
+    assert cached_path.read_bytes() == replacement.read_bytes()
+    assert replacement_job["result"]["bytes"] == replacement.stat().st_size
+    if replacement_endpoint == "prepare-full-resolution":
+        assert replacement_job["result"]["ready"] == 1
+        assert replacement_job["result"]["copied"] == 1
