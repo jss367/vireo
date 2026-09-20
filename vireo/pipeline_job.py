@@ -4694,6 +4694,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         params.reclassify, thread_db,
                         already_detected_ids=already_detected,
                         cached_detections=None,
+                        vireo_dir=effective_vireo_dir,
                     )
                     total_detected += det_count
                     already_detected.update(det_processed)

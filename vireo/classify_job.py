@@ -956,7 +956,7 @@ def describe_label_source(
 
 def _detect_batch(photos, folders, runner, job, reclassify, db,
                    det_conf_threshold=None, already_detected_ids=None,
-                   cached_detections=None):
+                   cached_detections=None, vireo_dir=None):
     """Run MegaDetector on a batch of photos.
 
     Same interface as _detect_subjects but designed to be called with
@@ -975,6 +975,13 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             entries are used instead of db.get_detections() so that
             model 2+ binds to the exact detection rows from this run,
             not stale rows from a previous pipeline pass.
+        vireo_dir: optional path to ~/.vireo/; when set, the subject
+            analysis loop resolves each photo through the working-copy
+            JPEG when its source folder is offline, matching the
+            on-demand ``/api/photos/<id>/subjects/analyze`` route.
+            Without this, an offline NAS would leave cached-detection
+            photos permanently missing their subject quality, crop and
+            exposure data.
 
     Returns:
         (detection_map, detected_count, processed_ids) where detection_map
@@ -1320,11 +1327,23 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 "Cancelled during subject analysis"
             )
 
+    # Resolve the working-copy JPEG first when the caller supplied a
+    # ``vireo_dir``: cached-detection photos on an offline NAS still
+    # have a usable local preview, and the on-demand Analyze route
+    # already reads from it. Building only the source folder path
+    # would fail ``os.stat`` inside ``analyze_photo`` and leave those
+    # photos permanently without subject quality/crop/exposure data.
+    if vireo_dir:
+        from image_loader import get_canonical_image_path
+
     for photo in photos:
         if photo["id"] not in processed_ids or photo["id"] in cached_detections:
             continue
         _subject_analysis_checkpoint()
-        image_path = os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
+        if vireo_dir:
+            image_path = get_canonical_image_path(photo, vireo_dir, folders)
+        else:
+            image_path = os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
         try:
             analyze_photo(db, photo["id"], image_path,
                           min_conf=det_conf_threshold, force=reclassify,
@@ -1338,7 +1357,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     return detection_map, detected, processed_ids
 
 
-def _detect_subjects(photos, folders, runner, job, reclassify, db):
+def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
     """Run MegaDetector on photos, storing quality metrics.
 
     Wraps _detect_batch with progress reporting for the standalone classify job.
@@ -1351,6 +1370,10 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     mid-classify cancel (or a detection-setup failure that skips this loop
     entirely) doesn't strand photos with cleared predictions and no
     replacement.
+
+    ``vireo_dir``: forwarded to ``_detect_batch`` so the subject analysis
+    loop resolves through the working-copy JPEG when the source folder is
+    offline.
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -1530,6 +1553,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 [photo], folders, runner, job, reclassify, db,
                 det_conf_threshold=det_conf_threshold,
                 already_detected_ids=already_detected_ids,
+                vireo_dir=vireo_dir,
             )
             detection_map.update(batch_map)
             detected += batch_detected
@@ -3973,6 +3997,7 @@ def run_classify_job(
             job=job,
             reclassify=params.reclassify,
             db=thread_db,
+            vireo_dir=vireo_dir,
         )
         cancelled_after_detect = runner.is_cancelled(job["id"])
         # In reclassify mode, ``_detect_subjects`` clears each processed

@@ -3618,7 +3618,7 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det = {
             "id": raw_detection_id,
             "box_x": raw_detection["box"]["x"],
@@ -3735,7 +3735,7 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det = {
             "id": person_det_id,
             "box_x": person_det["box"]["x"],
@@ -3859,7 +3859,7 @@ def test_pipeline_precreates_full_image_anchor_for_noise_only_photo(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det = {
             "id": raw_detection_id,
             "box_x": raw_detection["box"]["x"],
@@ -4140,7 +4140,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         detect_calls.append({
             "already_detected_ids": frozenset(already_detected_ids or set()),
             "cached_detections": dict(cached_detections) if cached_detections else {},
@@ -4319,7 +4319,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {
             p["id"]: [primary_det, secondary_det, below_threshold_det]
             for p in batch
@@ -4532,7 +4532,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     # _detect_batch stub: reclassify finds no animals this time (false pos fixed).
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -4638,7 +4638,7 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
     # Reclassify re-detects the SAME box → content-addressed id == prior_id.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         dmap = {}
         for p in batch:
             ids = db_.write_detection_batch(
@@ -4749,7 +4749,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         detect_calls.append({
             "already_detected_ids": frozenset(already_detected_ids or set()),
             "batch_ids": [p["id"] for p in batch],
@@ -4899,7 +4899,7 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         detect_call_count[0] += 1
         return {}, 0, {p["id"] for p in batch}
 
@@ -5038,7 +5038,7 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
     # it into processed_ids.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {photo1_id}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -5155,7 +5155,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
     # has a FK to detections.id).
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -5362,7 +5362,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -5511,7 +5511,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -5685,7 +5685,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -5834,7 +5834,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             existing = db_.get_detections(p["id"])
@@ -6362,7 +6362,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             if p["id"] == photo_with_det:
@@ -6529,7 +6529,7 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     # No real MegaDetector hits in this pipeline pass, either.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -6641,7 +6641,7 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -6750,7 +6750,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -6863,7 +6863,7 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {p["id"]: det_rows[p["id"]] for p in batch}
         return det_map, len(det_map), {p["id"] for p in batch}
 
@@ -7173,7 +7173,7 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         events.append(("detect", [p["id"] for p in batch]))
         det_map = {}
         for p in batch:
@@ -8071,7 +8071,7 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
     # photo fed to classify so _flush_batch has a valid FK to bind to.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         processed = set()
         for p in batch:
@@ -14066,7 +14066,7 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -14332,7 +14332,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             # The classify loop expects plain dicts (the real _detect_batch
@@ -15281,7 +15281,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -15463,7 +15463,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -15669,7 +15669,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -15860,7 +15860,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -15972,7 +15972,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16134,7 +16134,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16361,7 +16361,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16556,7 +16556,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16693,7 +16693,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -16824,7 +16824,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -17035,7 +17035,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -17244,7 +17244,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -17481,7 +17481,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             if p["id"] == gone_photo_id:
@@ -17667,7 +17667,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -17863,7 +17863,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -18092,7 +18092,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -18271,7 +18271,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
@@ -18406,7 +18406,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
+                          cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
             det_map[p["id"]] = [{
