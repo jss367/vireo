@@ -30,7 +30,7 @@ Unsigned installers can show an "unknown publisher" warning on Windows.
 
 To certify a build before publishing, manually run **Build & Release** from the
 protected `main` branch, leave `tag_name` blank, and enable
-`sign_windows_candidate` after configuring all signing values above. This uses the repository version, signs and
-smoke-tests the Windows application and installers, and retains the signed
+`sign_windows_candidate` after configuring all signing values above. This uses
+the repository version, signs and smoke-tests the Windows application and installers, and retains the signed
 candidate artifact for 30 days. It does not create a tag or GitHub release and
 does not update the website.
