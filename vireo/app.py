@@ -5121,13 +5121,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _reserve_workspace_mutation():
         if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.path.startswith("/api/"):
             return None
-        # Sending establishes its own exclusive reservation. Control requests
-        # must remain available while a transfer holds the workspace.
+        # Sending and source cleanup establish their own exclusive reservations.
+        # Control requests remain available while a transfer holds the workspace.
         if request.endpoint in {
             "imports.api_send_pending_archive", "api_activate_workspace",
             "api_shutdown", "api_v1_shutdown",
             "jobs.api_job_cancel", "jobs.api_job_pause", "jobs.api_job_resume",
             "jobs.api_jobs_cancel_queued",
+            "move_cleanup.source_cleanup",
         }:
             return None
         target_ws = (request.view_args or {}).get("ws_id")
@@ -31941,6 +31942,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
     )
     app.register_blueprint(create_photo_review_blueprint(_get_db, json_error))
+    from web.move_cleanup import create_move_cleanup_blueprint
+    app.register_blueprint(create_move_cleanup_blueprint(
+        _get_db, lambda: app._job_runner, json_error,
+        lambda paths: _trash_paths(paths), _move_folder_guard_error,
+    ))
     app.register_blueprint(
         create_card_cleanup_blueprint(
             _get_db, json_error, lambda: app._job_runner, db_path, app.config,

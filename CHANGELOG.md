@@ -40,6 +40,13 @@ All notable changes to Vireo are documented in this file.
   list instead of scrolling out of reach.
 
 ### Added
+- **Clean up the original folder after organizing photos by date.** Completed
+  moves show how many files remain and offer a review in Jobs, including for
+  earlier completed moves. An optional, initially unchecked action sends the
+  reviewed files to Trash and removes the empty folder. Changed files require
+  a fresh review, and folders containing cataloged photos are protected. A
+  successful move automatically removes an already-empty source folder while
+  leaving its parents in place.
 - **Sort Browse by prediction confidence.** The sort menu gains *Prediction
   confidence (highest)* and *(lowest)*. Both rank each photo by its strongest
   current species prediction — the one Vireo would show you — ignoring guesses
