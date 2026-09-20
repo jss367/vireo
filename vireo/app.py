@@ -25330,13 +25330,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("no photos in the current workspace can be prepared")
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        # Preserve the selected source identity even if SQLite recycles its
+        # numeric ID before this job reaches it.
+        selected_photos = db.get_photos_by_ids(photo_ids)
 
         def work(job):
-            from offline_cache import cache_photo_original
+            from offline_cache import (
+                cache_photo_original,
+                cleanup_preparation_offline_files,
+                original_preparation_guard,
+                photo_source_matches,
+            )
 
             thread_db = ctx.thread_db()
             try:
-                photos_map = thread_db.get_photos_by_ids(photo_ids)
                 folders = {
                     folder["id"]: folder["path"]
                     for folder in thread_db.get_folder_tree()
@@ -25345,6 +25352,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 copied = 0
                 reused = 0
                 failed = 0
+                skipped_deleted = 0
                 copied_bytes = 0
                 total = len(photo_ids)
                 job["_start_time"] = time.time()
@@ -25353,63 +25361,102 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for index, photo_id in enumerate(photo_ids, start=1):
                     if ctx.runner.is_cancelled(job["id"]):
                         break
-                    photo = photos_map.get(photo_id)
-                    filename = photo["filename"] if photo else f"Photo {photo_id}"
-                    error = None
-                    if not photo:
-                        error = "photo was not found"
-                    else:
-                        try:
-                            cached = cache_photo_original(
-                                thread_db, photo, vireo_dir, folders,
-                            )
-                            cache_status = cached.get("status")
-                            if cache_status == "cached":
-                                copied += 1
-                                copied_bytes += int(cached.get("bytes") or 0)
-                            elif cache_status == "skipped":
-                                reused += 1
-                            else:
-                                error = cache_status or "source could not be cached"
+                    # The lock must precede database transactions: other
+                    # writers publish files before inserting their cache row.
+                    with original_preparation_guard(vireo_dir, photo_id):
+                        # Re-read each photo: deletion may have run while this
+                        # job was preparing earlier selections.
+                        photo = selected_photos.get(photo_id)
+                        current_photo = thread_db.get_photo(photo_id)
+                        filename = photo["filename"] if photo else f"Photo {photo_id}"
+                        error = None
+                        cached = None
+                        attempted = photo_source_matches(photo, current_photo)
+                        if attempted:
+                            try:
+                                cached = cache_photo_original(
+                                    thread_db, photo, vireo_dir, folders,
+                                )
+                                cache_status = cached.get("status")
+                                if cache_status not in ("cached", "skipped"):
+                                    error = cache_status or "source could not be cached"
 
-                            if error is None:
-                                # Execute the canonical renderer inside an
-                                # isolated request context. This avoids a
-                                # second implementation drifting from the
-                                # lightbox's RAW/companion/edit fallbacks.
-                                with app.test_request_context(
-                                    f"/photos/{photo_id}/original"
+                                if error is None and photo_source_matches(
+                                    photo, thread_db.get_photo(photo_id),
                                 ):
-                                    request_db = _get_db()
-                                    request_db.set_active_workspace(ctx.workspace_id)
-                                    response = app.make_response(
-                                        serve_original_photo(photo_id)
+                                    # Execute the canonical renderer inside an
+                                    # isolated request context. This avoids a
+                                    # second implementation drifting from the
+                                    # lightbox's RAW/companion/edit fallbacks.
+                                    with app.test_request_context(
+                                        f"/photos/{photo_id}/original"
+                                    ):
+                                        request_db = _get_db()
+                                        request_db.set_active_workspace(ctx.workspace_id)
+                                        response = app.make_response(
+                                            serve_original_photo(photo_id, _prepare_source=photo)
+                                        )
+                                        try:
+                                            if not 200 <= response.status_code < 300:
+                                                response.direct_passthrough = False
+                                                detail = response.get_data(
+                                                    as_text=True,
+                                                ).strip()
+                                                error = detail or (
+                                                    "full-resolution render failed "
+                                                    f"with status {response.status_code}"
+                                                )
+                                        finally:
+                                            response.close()
+                            except Exception as exc:
+                                thread_db.conn.rollback()
+                                error = str(exc) or exc.__class__.__name__
+                                if photo_source_matches(photo, thread_db.get_photo(photo_id)):
+                                    log.warning(
+                                        "Full-resolution preparation failed for %s: %s",
+                                        filename, exc, exc_info=True,
                                     )
-                                    try:
-                                        if not 200 <= response.status_code < 300:
-                                            response.direct_passthrough = False
-                                            detail = response.get_data(
-                                                as_text=True,
-                                            ).strip()
-                                            error = detail or (
-                                                "full-resolution render failed "
-                                                f"with status {response.status_code}"
-                                            )
-                                    finally:
-                                        response.close()
-                        except Exception as exc:
-                            thread_db.conn.rollback()
-                            error = str(exc) or exc.__class__.__name__
-                            log.warning(
-                                "Full-resolution preparation failed for %s: %s",
-                                filename, exc, exc_info=True,
-                            )
 
-                    if error is None:
-                        ready += 1
-                    else:
-                        failed += 1
-                        job["errors"].append(f"{filename}: {error}")
+                        # Serialize this final identity check and cache cleanup
+                        # against catalog writers. An import can reuse a deleted
+                        # ID; any cache written by this iteration is then suspect,
+                        # including the offline row attached to that replacement.
+                        # Purge disposable caches only if we actually attempted
+                        # work, leaving replacements found before our turn alone.
+                        with thread_db.conn:
+                            thread_db.conn.execute("BEGIN IMMEDIATE")
+                            current_photo = thread_db.get_photo(photo_id)
+                            if not attempted or not photo_source_matches(photo, current_photo):
+                                from preview_cache import cleanup_cached_files_for_deleted_photos
+
+                                skipped_deleted += 1
+                                if attempted:
+                                    thread_db.conn.execute(
+                                        "DELETE FROM offline_originals WHERE photo_id=?",
+                                        (photo_id,),
+                                    )
+                                    if current_photo is None:
+                                        cleanup_cached_files_for_deleted_photos(
+                                            app.config["THUMB_CACHE_DIR"],
+                                            [{"photo_id": photo_id}],
+                                            vireo_dir=vireo_dir,
+                                        )
+                                    else:
+                                        # Other cache families may already
+                                        # belong to the replacement photo.
+                                        cleanup_preparation_offline_files(
+                                            vireo_dir, photo_id,
+                                        )
+                            elif error is None:
+                                ready += 1
+                                if cached["status"] == "cached":
+                                    copied += 1
+                                    copied_bytes += int(cached.get("bytes") or 0)
+                                elif cached["status"] == "skipped":
+                                    reused += 1
+                            else:
+                                failed += 1
+                                job["errors"].append(f"{filename}: {error}")
 
                     progress = {
                         "current": index,
@@ -25431,6 +25478,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "copied": copied,
                     "reused": reused,
                     "failed": failed,
+                    "skipped_deleted": skipped_deleted,
                     "total": total,
                     "bytes": copied_bytes,
                     "errors": list(job["errors"]),
@@ -30506,12 +30554,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return Response(buf.getvalue(), mimetype="image/jpeg")
 
     @app.route("/photos/<int:photo_id>/original")
-    def serve_original_photo(photo_id, *, _artifact_flight_guarded=False):
+    def serve_original_photo(photo_id, *, _artifact_flight_guarded=False, _prepare_source=None):
         """Serve full-resolution image for 1:1 zoom."""
         import config as cfg
         from flask import send_file
 
         db = _get_db()
+
+        @contextlib.contextmanager
+        def preparation_publication():
+            # Refuse late preparation writes after deletion/reimport. Decode
+            # and encode stay outside this short catalog-writer transaction.
+            if _prepare_source is None:
+                yield
+                return
+            from offline_cache import photo_source_matches
+
+            def check_source():
+                if not photo_source_matches(_prepare_source, db.get_photo(photo_id)):
+                    raise _ArtifactResponseError(make_response(("Photo source changed", 404)))
+
+            if db.conn.in_transaction:
+                check_source()
+                yield
+            else:
+                with db.conn:
+                    db.conn.execute("BEGIN IMMEDIATE")
+                    check_source()
+                    yield
+
         # verify_workspace: mirrors serve_thumbnail — full-res bytes must not
         # leak across workspaces.
         photo = db.get_photo(photo_id, verify_workspace=True)
@@ -30638,7 +30709,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # serves it via send_file — no second decode.
                 response = make_response(
                     serve_original_photo(
-                        photo_id, _artifact_flight_guarded=True,
+                        photo_id, _artifact_flight_guarded=True, _prepare_source=_prepare_source,
                     )
                 )
                 if response.status_code >= 400:
@@ -30737,7 +30808,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             def coordinated_request(*, guarded):
                 response = make_response(
                     serve_original_photo(
-                        photo_id, _artifact_flight_guarded=guarded,
+                        photo_id, _artifact_flight_guarded=guarded, _prepare_source=_prepare_source,
                     )
                 )
                 if response.status_code >= 400:
@@ -31116,8 +31187,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             os.close(fd)
             try:
                 img.save(tmp_path, format="JPEG", quality=quality)
-                os.replace(tmp_path, cache_path)
-                _peg_render_mtime_to_source(cache_path, photo)
+                with preparation_publication():
+                    os.replace(tmp_path, cache_path)
+                    _peg_render_mtime_to_source(cache_path, photo)
             except Exception:
                 with contextlib.suppress(OSError):
                     os.unlink(tmp_path)
@@ -31326,26 +31398,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             re-decode on every request under clock skew or preserved-
             forward archive timestamps.
             """
-            os.replace(tmp_path, wc_abs)
-            if primary_is_raw:
-                # The display cache-hit check compares against
-                # ``max(mtime(image_path), mtime(companion))``.
-                # Leaving wall-clock mtime here fails that check
-                # whenever either live source has a future mtime
-                # (clock skew, archives that preserve future
-                # timestamps), and every request re-decodes the RAW
-                # and companion. Peg to the same max the check
-                # consults. Use ``raw_source_path`` — the RAW resolved
-                # before the has_current_raw_failure branch rewrote
-                # ``image_path`` to the companion — so a newer RAW
-                # mtime doesn't fail the gate and re-extract on every
-                # hit.
-                _peg_display_cache_mtime(
-                    wc_abs,
-                    (raw_source_path, companion_for_extraction),
-                )
+            try:
+                with preparation_publication():
+                    os.replace(tmp_path, wc_abs)
+                    if primary_is_raw:
+                        # The display cache-hit check compares against
+                        # ``max(mtime(image_path), mtime(companion))``.
+                        # Leaving wall-clock mtime here fails that check
+                        # whenever either live source has a future mtime
+                        # (clock skew, archives that preserve future
+                        # timestamps), and every request re-decodes the RAW
+                        # and companion. Peg to the same max the check
+                        # consults. Use ``raw_source_path`` — the RAW resolved
+                        # before the has_current_raw_failure branch rewrote
+                        # ``image_path`` to the companion — so a newer RAW
+                        # mtime doesn't fail the gate and re-extract on every
+                        # hit.
+                        _peg_display_cache_mtime(
+                            wc_abs,
+                            (raw_source_path, companion_for_extraction),
+                        )
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+                raise
 
         def _serve_generated_original(tmp_path, uw, uh):
+            # Lock order matches the existing publication path: working-copy
+            # guard first, then SQLite, including nested extraction commits.
+            try:
+                with working_copy_publication_guard(), preparation_publication():
+                    return _serve_generated_original_current(tmp_path, uw, uh)
+            except BaseException:
+                if tmp_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp_path)
+                raise
+
+        def _serve_generated_original_current(tmp_path, uw, uh):
             """Publish to the cache, or stream the private tmp transiently.
 
             ``tmp_path`` is the private rendition from
@@ -31762,19 +31852,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         os.close(fd)
         try:
             img.save(tmp_path, format="JPEG", quality=quality)
-            os.replace(tmp_path, cache_path)
-            if primary_is_raw:
-                # The unedited RAW display cache-hit check compares
-                # against ``max(mtime(image_path), mtime(companion))``.
-                # Pegging to ``photo['file_mtime']`` alone (as the
-                # signature-keyed prepared render does) would fail that
-                # check on every request when the paired companion is
-                # newer than the RAW row.
-                _peg_display_cache_mtime(
-                    cache_path, (image_path, companion_for_extraction),
-                )
-            else:
-                _peg_render_mtime_to_source(cache_path, photo)
+            with preparation_publication():
+                os.replace(tmp_path, cache_path)
+                if primary_is_raw:
+                    # The unedited RAW display cache-hit check compares
+                    # against ``max(mtime(image_path), mtime(companion))``.
+                    # Pegging to ``photo['file_mtime']`` alone (as the
+                    # signature-keyed prepared render does) would fail that
+                    # check on every request when the paired companion is
+                    # newer than the RAW row.
+                    _peg_display_cache_mtime(
+                        cache_path, (image_path, companion_for_extraction),
+                    )
+                else:
+                    _peg_render_mtime_to_source(cache_path, photo)
         except Exception:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)

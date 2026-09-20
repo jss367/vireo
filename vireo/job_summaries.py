@@ -300,6 +300,9 @@ def _prepare_full_resolution(result: dict, config: dict) -> tuple[str, list[str]
         summary += " (" + ", ".join(extras) + ")"
     if failed:
         summary += f", {failed:,} failed"
+    skipped_deleted = _int(result, "skipped_deleted")
+    if skipped_deleted:
+        summary += f", {skipped_deleted:,} skipped (deleted during preparation)"
     return summary, _error_details(result)
 
 
