@@ -88,6 +88,8 @@ window.VireoBatchEdits = (function() {
     return message;
   }
   async function apply(ids, recipe, selectedFields, mode, description) {
+    var status = activeDialog && activeDialog.querySelector('.development-status');
+    if (status) status.textContent = 'Applying…';
     var data = await safeFetch('/api/photos/edit-recipe/apply', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids, recipe: recipe, fields: selectedFields, mode: mode || 'merge', description: description}),
@@ -172,7 +174,7 @@ window.VireoBatchEdits = (function() {
     function setBusy(value) { busy = value; controls.disabled = value; more.disabled = value; done.disabled = value; }
     async function perform(action) {
       if (busy) return;
-      setBusy(true); status.classList.remove('error'); status.textContent = 'Applying…';
+      setBusy(true); status.classList.remove('error'); status.textContent = '';
       try {
         var data = await action();
         if (data) {
