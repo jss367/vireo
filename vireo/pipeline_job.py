@@ -4699,6 +4699,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         params.reclassify, thread_db,
                         already_detected_ids=already_detected,
                         cached_detections=None,
+                        vireo_dir=effective_vireo_dir,
                     )
                     total_detected += det_count
                     already_detected.update(det_processed)
@@ -7199,7 +7200,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         len(dropped_ids), len(still_offline_folder_ids),
                     )
 
-                # Build a map of photo_id -> primary detection (highest confidence)
+                # Build a map of photo_id -> selected primary detection
                 # from the detections table. Only photos with detections and without
                 # masks need processing.
                 #
@@ -7264,7 +7265,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         ]
                     if dets:
                         photos_with_detections += 1
-                        primary = dets[0]  # already ordered by confidence DESC
+                        primary = dets[0]  # selected primary first
                         photo_det_map[p["id"]] = {
                             "photo": p,
                             "det_box": {
@@ -7573,6 +7574,32 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         with bind_resource_cancel_check(
                             _pause_or_cancel_pending,
                         ), acquire_photo_mask(photo_id):
+                            # Resolve both state and extraction against the same
+                            # candidate set, including MDv6-only weak rescue.
+                            # Synchronizing under the lock clears old eye/DINO
+                            # results when the effective primary changed.
+                            from subjects import retained, sync_primary
+                            subject_floor = (weak_detection_confidence
+                                if photo_id in contextual_weak_ids else detector_confidence)
+                            subject_detector = ("megadetector-v6"
+                                if photo_id in contextual_weak_ids else None)
+                            sync_primary(
+                                thread_db, photo_id, min_conf=subject_floor,
+                                detector_model=subject_detector,
+                            )
+                            commit_with_retry(thread_db.conn)
+                            current = retained(
+                                thread_db, photo_id, min_conf=subject_floor,
+                                detector_model=subject_detector,
+                            )
+                            if not current:
+                                skipped += 1
+                                i += 1
+                                continue
+                            selected = current[0]
+                            det_box = {k: selected["box_" + k] for k in "xywh"}
+                            entry["detector_model"] = selected["detector_model"]
+                            entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
                             # Cache hit: a row already exists for (photo, variant)
                             # AND its stored prompt + detector still match the
                             # current primary detection AND the file is on disk.
@@ -7612,6 +7639,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     # fall through to the full recompute, which
                                     # writes set_active_mask_variant +
                                     # update_photo_embeddings together.
+                                    # Subject switching (subjects.sync_primary)
+                                    # clears both active_mask_variant AND
+                                    # dino_subject_embedding atomically inside
+                                    # ``_clear_primary_features``, so an
+                                    # active_mask_variant that still equals
+                                    # sam2_variant is enough to prove the
+                                    # denormalised subject state is fresh —
+                                    # a subject A→B→A round-trip would have
+                                    # nulled the variant here before the
+                                    # embedding could go stale (Codex P2
+                                    # r4056402007).
                                     state = thread_db.conn.execute(
                                         "SELECT active_mask_variant, "
                                         "dino_embedding_variant FROM photos "
@@ -7781,6 +7819,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             thread_db.set_active_mask_variant(
                                 photo_id, sam2_variant, _commit=False,
+                                weak_rescue_min_conf=(weak_detection_confidence
+                                    if photo_id in contextual_weak_ids else None),
                             )
                             # Remaining (non-mask) per-photo features still land
                             # on the photos row.  mask_path / crop_complete /

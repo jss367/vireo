@@ -17,6 +17,7 @@ Vireo helps wildlife photographers triage thousands of photos using machine lear
 - **Species classification** — Multiple models including BioCLIP, BioCLIP-2, BioCLIP-2.5, and an iNat21 fine-tuned classifier covering 10K+ species
 - **Wildlife detection** — MegaDetector v6 for animal/person/vehicle localization
 - **Automated triage pipeline** — Groups photos into encounters and bursts, scores quality (sharpness, exposure, composition, noise), and labels each photo KEEP/REVIEW/REJECT
+- **Selectable subjects** — Each retained animal gets a suggested crop, species predictions, a quality score, and an exposure suggestion. Vireo chooses the best-quality subject; choose another in the lightbox without changing your saved edits.
 - **Subject-aware quality scoring** — Uses SAM2 segmentation masks and DINOv2 embeddings to evaluate the actual subject, not just the frame
 - **iNaturalist integration** — Taxonomy lookup and direct observation uploads
 - **Browse, review, and cull** — Filter, search, rate, keyword, and flag photos in a responsive web UI

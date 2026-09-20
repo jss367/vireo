@@ -1095,7 +1095,8 @@ def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
 
     with patch("classify_job.detect_animals", return_value=fake_detections), \
          patch("classify_job.get_primary_detection", return_value=fake_detections[1]), \
-         patch("classify_job.compute_sharpness", return_value=50.0):
+         patch("classify_job.compute_sharpness", return_value=50.0), \
+         patch("subjects.analyze_photo", return_value=0):
         detection_map, detected, _processed = _detect_batch(
             photos=photos,
             folders=folders,
@@ -1339,6 +1340,79 @@ def test_detect_batch_scores_normally_when_primary_at_threshold(
     ).fetchone()
     assert row["quality_score"] is not None and row["quality_score"] > 0
     assert row["subject_size"] is not None
+
+
+def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
+    tmp_path, monkeypatch
+):
+    """When ``vireo_dir`` is supplied and a cached-detection photo's source
+    folder is offline, the subject-analysis loop must resolve the image
+    through the working-copy JPEG rather than the source path. Without
+    this the automatic backfill fails at ``os.stat`` and the photo never
+    gets subject quality, crop, or exposure data — even though the
+    on-demand Analyze route can process it just fine.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _detect_batch
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    offline_dir = "/mnt/offline-nas/photos"
+    folder_id = db.add_folder(offline_dir)
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+
+    # Working copy lives under vireo_dir. Source folder does NOT exist.
+    vireo_dir = tmp_path / "vireo"
+    wc_dir = vireo_dir / "working"
+    wc_dir.mkdir(parents=True)
+    wc_rel = "working/bird.jpg"
+    Image.new("RGB", (200, 200), color="green").save(str(vireo_dir / wc_rel))
+
+    photo_id = db.add_photo(
+        folder_id, "bird.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?", (wc_rel, photo_id),
+    )
+    db.conn.commit()
+
+    # Seed a cached detector run so this photo goes through the
+    # already-detected branch — the exact case where the source is
+    # offline but subject analysis should still succeed.
+    db.write_detection_batch(
+        photo_id, "megadetector-v6",
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+    )
+
+    photo = dict(db.get_photo(photo_id))
+    photos = [photo]
+    folders = {folder_id: offline_dir}
+    already_detected_ids = db.get_detector_run_photo_ids("megadetector-v6")
+
+    seen_paths = []
+    def fake_analyze_photo(db_arg, photo_arg, image_path, **kwargs):
+        seen_paths.append(image_path)
+        return 0
+
+    with patch("subjects.analyze_photo", side_effect=fake_analyze_photo):
+        _detect_batch(
+            photos=photos, folders=folders, runner=None, job={"id": 0},
+            reclassify=False, db=db,
+            det_conf_threshold=0.2,
+            already_detected_ids=already_detected_ids,
+            vireo_dir=str(vireo_dir),
+        )
+
+    assert seen_paths, "subject analysis loop did not run"
+    assert seen_paths[0] == str(vireo_dir / wc_rel), (
+        "subject analysis must resolve through the working-copy JPEG "
+        "when the source folder is offline"
+    )
 
 
 def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
@@ -4908,7 +4982,7 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
 
     captured_photos = []
 
-    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db):
+    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
         captured_photos.extend([p["id"] for p in photos])
         return ({}, 0)
 
@@ -6427,7 +6501,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     # detection. Flip cancel on as it returns.
     detect_called = {"n": 0}
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
         detect_called["n"] += 1
         assert reclassify is True
         runner.flipped = True
@@ -6571,7 +6645,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
 
     mock_clf = ProbeCheckingClassifier()
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
         assert reclassify is True
         runner.flipped = True
         return ({1: [{"id": 101, "box_x": 0, "box_y": 0,
@@ -6953,7 +7027,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     # — using detection_map.keys() alone would miss it.
     detect_called = {"n": 0}
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
         detect_called["n"] += 1
         assert reclassify is True
         # Mirror what production _detect_subjects does: stash the processed

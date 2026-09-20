@@ -956,7 +956,7 @@ def describe_label_source(
 
 def _detect_batch(photos, folders, runner, job, reclassify, db,
                    det_conf_threshold=None, already_detected_ids=None,
-                   cached_detections=None):
+                   cached_detections=None, vireo_dir=None):
     """Run MegaDetector on a batch of photos.
 
     Same interface as _detect_subjects but designed to be called with
@@ -975,6 +975,13 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             entries are used instead of db.get_detections() so that
             model 2+ binds to the exact detection rows from this run,
             not stale rows from a previous pipeline pass.
+        vireo_dir: optional path to ~/.vireo/; when set, the subject
+            analysis loop resolves each photo through the working-copy
+            JPEG when its source folder is offline, matching the
+            on-demand ``/api/photos/<id>/subjects/analyze`` route.
+            Without this, an offline NAS would leave cached-detection
+            photos permanently missing their subject quality, crop and
+            exposure data.
 
     Returns:
         (detection_map, detected_count, processed_ids) where detection_map
@@ -992,11 +999,44 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     if cached_detections is None:
         cached_detections = {}
 
+    def sync_reclassified_subjects():
+        # Reclassification already committed detection replacements (or a
+        # clear in the standalone caller). Cleanup is required even on Stop;
+        # it performs no image decoding or additional inference.
+        if not reclassify:
+            return
+        from db import commit_with_retry
+        from pipeline_locks import acquire_photo_mask
+        from subjects import sync_primary
+        for photo in photos:
+            with acquire_photo_mask(photo["id"]):
+                sync_primary(db, photo["id"], min_conf=det_conf_threshold)
+                commit_with_retry(db.conn)
+
     try:
         if detect_animals is None or get_primary_detection is None:
-            return detection_map, detected, processed_ids
+            # Detector module unavailable. Skip the detection call itself,
+            # but the subject-analysis backfill below can still run over
+            # photos that already have cached detection rows — analyzing
+            # cached boxes doesn't require detect_animals/get_primary_detection,
+            # so cached-only installations must still receive subject
+            # quality/crop/exposure data (Codex r4056698679).
+            for photo in photos:
+                if photo["id"] in cached_detections:
+                    continue
+                try:
+                    if (photo["id"] in already_detected_ids
+                            or db.get_detections(photo["id"], min_conf=0)):
+                        # Empty and now-subthreshold cached runs still need
+                        # to clear outputs from their former primary.
+                        processed_ids.add(photo["id"])
+                except Exception:
+                    pass
+            detection_photos: list = []
+        else:
+            detection_photos = photos
 
-        for photo in photos:
+        for photo in detection_photos:
             folder_path = folders.get(photo["folder_id"], "")
             image_path = os.path.join(folder_path, photo["filename"])
 
@@ -1153,10 +1193,10 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                             },
                             "confidence": row["detector_confidence"],
                             "category": row["category"],
-                        } for row in db.get_detections(
+                        } for row in sorted(db.get_detections(
                             photo["id"], min_conf=0,
                             detector_model="megadetector-v6",
-                        )]
+                        ), key=lambda row: (-row["detector_confidence"], row["id"]))]
                         # Reconstruct the configured ArtifactStore from
                         # the path stashed by ``run_classify_job`` /
                         # ``run_pipeline_job`` so newly published detector
@@ -1292,6 +1332,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         # committed catalog change even though the user pressed Stop.
         # ``ResourceWaitCancelled`` subclasses ``RuntimeError``, so
         # this narrow arm MUST precede the broad one.
+        sync_reclassified_subjects()
         raise
     except (ImportError, RuntimeError) as e:
         # Detection unavailable (missing weights/backend) — non-fatal, the
@@ -1302,10 +1343,74 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     except Exception:
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 
+    sync_reclassified_subjects()
+
+    # Analyze every retained subject, including cached detector runs from older
+    # libraries. Detection/classification results remain usable if a source goes
+    # offline; missing analyses are retried on the next run.
+    #
+    # Cancellation participates cooperatively: the outer detect loop honors
+    # ``runner.is_cancelled`` and re-classify has already cleared the prior
+    # detection rows for photos the user asked to stop. Committing more
+    # subject analyses after cancel would silently publish work past the
+    # stop button, so probe before each photo and inside ``analyze_photo``'s
+    # lock-guarded commit points via the checkpoint callback.
+    from subjects import analyze_photo
+
+    def _subject_analysis_checkpoint():
+        if runner is not None and runner.is_cancelled(job["id"]):
+            raise ResourceWaitCancelled(
+                "Cancelled during subject analysis"
+            )
+
+    # Resolve the working-copy JPEG first when the caller supplied a
+    # ``vireo_dir``: cached-detection photos on an offline NAS still
+    # have a usable local preview, and the on-demand Analyze route
+    # already reads from it. Building only the source folder path
+    # would fail ``os.stat`` inside ``analyze_photo`` and leave those
+    # photos permanently without subject quality/crop/exposure data.
+    if vireo_dir:
+        from image_loader import get_canonical_image_path
+
+    for photo in photos:
+        if photo["id"] in cached_detections:
+            continue
+        # ``processed_ids`` only tracks photos whose detection loop reached
+        # ``processed_ids.add(...)`` — i.e. detection ran to completion or
+        # produced an empty scene. In a reclassify batch, ``_detect_subjects``
+        # calls ``clear_detections(photo["id"])`` *before* calling us, so a
+        # photo whose ``detect_animals()`` returned None (decode failure) or
+        # raised a swallowed error is now absent from ``processed_ids`` AND
+        # has no detections in the DB, yet its old mask, DINO embedding,
+        # eye_* fields, and ``photo_subject_state`` still point at the
+        # deleted subject. Skipping subject analysis for those photos would
+        # let that stale state affect subsequent review/scoring under the
+        # full-image classifier fallback. Fall through to ``analyze_photo``
+        # for reclassified-but-undetected photos: its ``if not detections``
+        # branch runs before ``os.stat``, so an offline source doesn't
+        # crash, and its ``sync_primary`` clears the stale derived state
+        # (Codex r4056646676).
+        if photo["id"] not in processed_ids and not reclassify:
+            continue
+        _subject_analysis_checkpoint()
+        if vireo_dir:
+            image_path = get_canonical_image_path(photo, vireo_dir, folders)
+        else:
+            image_path = os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
+        try:
+            analyze_photo(db, photo["id"], image_path,
+                          min_conf=det_conf_threshold, force=reclassify,
+                          checkpoint=_subject_analysis_checkpoint)
+        except ResourceWaitCancelled:
+            raise
+        except Exception:
+            db.conn.rollback()
+            log.warning("Subject analysis unavailable for photo %s", photo["id"], exc_info=True)
+
     return detection_map, detected, processed_ids
 
 
-def _detect_subjects(photos, folders, runner, job, reclassify, db):
+def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
     """Run MegaDetector on photos, storing quality metrics.
 
     Wraps _detect_batch with progress reporting for the standalone classify job.
@@ -1318,6 +1423,10 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     mid-classify cancel (or a detection-setup failure that skips this loop
     entirely) doesn't strand photos with cleared predictions and no
     replacement.
+
+    ``vireo_dir``: forwarded to ``_detect_batch`` so the subject analysis
+    loop resolves through the working-copy JPEG when the source folder is
+    offline.
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -1358,6 +1467,22 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
 
     try:
         if detect_animals is None or get_primary_detection is None:
+            # Cached-detection rows still deserve subject-analysis
+            # backfill even when the detector module is unavailable —
+            # analyzing cached boxes doesn't require detect_animals or
+            # get_primary_detection. ``_detect_batch`` handles this
+            # detector-less branch internally by iterating only cached
+            # rows, so route through it before signalling the missing
+            # detector to the outer handler (Codex r4056724369).
+            import config as cfg
+            effective_cfg = db.get_effective_config(cfg.load())
+            det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+            _detect_batch(
+                photos, folders, runner, job, reclassify, db,
+                det_conf_threshold=det_conf_threshold,
+                already_detected_ids=already_detected_ids,
+                vireo_dir=vireo_dir,
+            )
             raise ImportError(
                 "MegaDetector ONNX model not available — cannot run detection"
             )
@@ -1497,6 +1622,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 [photo], folders, runner, job, reclassify, db,
                 det_conf_threshold=det_conf_threshold,
                 already_detected_ids=already_detected_ids,
+                vireo_dir=vireo_dir,
             )
             detection_map.update(batch_map)
             detected += batch_detected
@@ -3940,6 +4066,7 @@ def run_classify_job(
             job=job,
             reclassify=params.reclassify,
             db=thread_db,
+            vireo_dir=vireo_dir,
         )
         cancelled_after_detect = runner.is_cancelled(job["id"])
         # In reclassify mode, ``_detect_subjects`` clears each processed

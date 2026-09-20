@@ -621,9 +621,11 @@ def test_count_photos_pending_masks_ignores_photos_without_real_detections(tmp_p
 
 def test_count_eye_keypoint_eligible_requires_mask_and_prediction(tmp_path):
     db, folder_id = _make_db(tmp_path)
-    # Photo A: real det, mask, prediction → eligible
+    # Photo A: real det, active mask on the selected primary,
+    # prediction on that primary → eligible.
     pid_a, did_a = _add_photo_with_detection(db, folder_id, "a.jpg")
     db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid_a,))
+    _mark_sam_done(db, pid_a, "/m/a.png")
     db.conn.execute(
         """INSERT INTO predictions
             (detection_id, classifier_model, labels_fingerprint,
@@ -643,6 +645,7 @@ def test_count_eye_keypoint_eligible_requires_mask_and_prediction(tmp_path):
     # Photo C: real det, mask, no prediction → NOT eligible
     pid_c, _ = _add_photo_with_detection(db, folder_id, "c.jpg")
     db.conn.execute("UPDATE photos SET mask_path='/m/c.png' WHERE id=?", (pid_c,))
+    _mark_sam_done(db, pid_c, "/m/c.png")
     db.conn.commit()
 
     assert db.count_eye_keypoint_eligible() == 1
@@ -660,6 +663,7 @@ def test_count_eye_keypoint_stale_zero_when_all_current(tmp_path):
         "eye_tenengrad=12.0, eye_kp_fingerprint=? WHERE id=?",
         (EYE_KP_FINGERPRINT_VERSION, pid),
     )
+    _mark_sam_done(db, pid, "/m/a.png")
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
         "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
@@ -680,6 +684,7 @@ def test_count_eye_keypoint_stale_counts_old_fingerprint(tmp_path):
         "eye_tenengrad=12.0, eye_kp_fingerprint='superanimal-old' WHERE id=?",
         (pid,),
     )
+    _mark_sam_done(db, pid, "/m/a.png")
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
         "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
@@ -699,12 +704,97 @@ def test_count_eye_keypoint_stale_ignores_never_processed(tmp_path):
     db.conn.execute(
         "UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,),
     )
+    _mark_sam_done(db, pid, "/m/a.png")
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
         "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
         (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
     )
     db.conn.commit()
+    assert db.count_eye_keypoint_stale() == 0
+
+
+def test_count_eye_keypoint_eligible_ignores_predictions_on_non_primary(
+    tmp_path,
+):
+    """When the selected primary detection has no prediction but a
+    secondary detection does, the eye stage cannot produce keypoints for
+    that photo. The count must reflect what the stage will actually run
+    (Codex r4056621190); otherwise the plan flips to Already done while
+    review readiness keeps reporting missing keypoints.
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    pid = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # High-confidence primary at (0.1, 0.1, 0.5, 0.5); lower-confidence
+    # secondary at (0.6, 0.6, 0.2, 0.2). primary_order_sql ranks the
+    # first ahead by detector_confidence, so it is the selected primary.
+    det_ids = db.save_detections(
+        pid,
+        [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.9, "category": "animal"},
+            {"box": {"x": 0.6, "y": 0.6, "w": 0.2, "h": 0.2},
+             "confidence": 0.4, "category": "animal"},
+        ],
+        detector_model="megadetector-v6",
+    )
+    primary_did, secondary_did = det_ids
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    _mark_sam_done(db, pid, "/m/a.png")
+    # Only the secondary carries a prediction; the primary has none.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (secondary_did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+
+    # list_photos_for_eye_keypoint_stage cannot produce work here — the
+    # count must agree.
+    assert db.list_photos_for_eye_keypoint_stage() == []
+    assert db.count_eye_keypoint_eligible() == 0
+
+
+def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
+    """When the active mask was extracted from a detection that no longer
+    matches the selected primary's prompt, the standalone eye stage
+    cannot run for this photo. The count must exclude it so the plan
+    doesn't report the stage as complete (Codex r4056621190).
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    # Cache a mask for a *different* prompt than the primary detection
+    # (0.1, 0.1, 0.5, 0.5). set_active_mask_variant refuses to activate a
+    # prompt-mismatched mask (its guard is exactly what production relies
+    # on), so we simulate the stale state directly — this is precisely
+    # what happens when the effective primary shifts (a detector_confidence
+    # change or a subject-choice override) after an earlier extraction:
+    # the photos row keeps pointing at the old variant, and only the
+    # count query's prompt join catches it.
+    db.upsert_photo_mask(
+        pid, "sam2-small", "/m/a.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.9, prompt_y=0.9, prompt_w=0.05, prompt_h=0.05,
+    )
+    db.conn.execute(
+        "UPDATE photos SET active_mask_variant=? WHERE id=?",
+        ("sam2-small", pid),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+
+    assert db.list_photos_for_eye_keypoint_stage() == []
+    assert db.count_eye_keypoint_eligible() == 0
     assert db.count_eye_keypoint_stale() == 0
 
 
@@ -2204,9 +2294,9 @@ def test_eye_keypoints_plan_done_prior_when_all_processed(tmp_path, monkeypatch)
         lambda config: None,
     )
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/a.png', eye_tenengrad=0.5, "
-        "eye_kp_fingerprint=? WHERE id=?",
+        "UPDATE photos SET eye_tenengrad=0.5, eye_kp_fingerprint=? WHERE id=?",
         (EYE_KP_FINGERPRINT_VERSION, pid),
     )
     db.conn.execute(
@@ -2235,9 +2325,10 @@ def test_eye_keypoints_plan_will_run_when_fingerprint_outdated(tmp_path, monkeyp
         lambda config: None,
     )
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
     # Old fingerprint string — definitely doesn't match current.
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/a.png', eye_tenengrad=0.5, "
+        "UPDATE photos SET eye_tenengrad=0.5, "
         "eye_kp_fingerprint='superanimal-old' WHERE id=?",
         (pid,),
     )
@@ -2268,14 +2359,13 @@ def test_eye_keypoints_plan_will_run_when_some_pending(tmp_path, monkeypatch):
     from pipeline import EYE_KP_FINGERPRINT_VERSION
     pid_done, did_done = _add_photo_with_detection(db, folder_id, "done.jpg")
     pid_todo, did_todo = _add_photo_with_detection(db, folder_id, "todo.jpg")
+    _mark_sam_done(db, pid_done, "/m/d.png")
+    _mark_sam_done(db, pid_todo, "/m/t.png")
     # done.jpg: processed with current fingerprint → not stale, not pending
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/d.png', eye_tenengrad=0.5, "
+        "UPDATE photos SET eye_tenengrad=0.5, "
         "eye_kp_fingerprint=? WHERE id=?",
         (EYE_KP_FINGERPRINT_VERSION, pid_done),
-    )
-    db.conn.execute(
-        "UPDATE photos SET mask_path='/m/t.png' WHERE id=?", (pid_todo,),
     )
     for did in (did_done, did_todo):
         db.conn.execute(
@@ -2308,9 +2398,10 @@ def test_eye_keypoints_plan_emits_fingerprint_outdated_when_stale(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/a.png', "
-        "eye_tenengrad=12.0, eye_kp_fingerprint='superanimal-old' WHERE id=?",
+        "UPDATE photos SET eye_tenengrad=12.0, eye_kp_fingerprint='superanimal-old' "
+        "WHERE id=?",
         (pid,),
     )
     db.conn.execute(
@@ -2338,9 +2429,9 @@ def test_eye_keypoints_plan_no_outdated_flag_when_all_current(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/a.png', "
-        "eye_tenengrad=12.0, eye_kp_fingerprint=? WHERE id=?",
+        "UPDATE photos SET eye_tenengrad=12.0, eye_kp_fingerprint=? WHERE id=?",
         (EYE_KP_FINGERPRINT_VERSION, pid),
     )
     db.conn.execute(

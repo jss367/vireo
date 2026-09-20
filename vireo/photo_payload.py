@@ -73,7 +73,7 @@ def attach_detections(db, photo_dicts):
     """Attach detection bounding boxes to a list of photo dicts (in-place).
 
     Each photo gets a `detections` list of {x, y, w, h, confidence,
-    category} dicts, ordered by confidence DESC. Photos with no
+    category} dicts, with the selected primary first. Photos with no
     detections get an empty list.
     """
     if not photo_dicts:
