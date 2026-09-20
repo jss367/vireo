@@ -16410,6 +16410,8 @@ class Database:
             # ``species_replace`` the parent and item always agree, so
             # dropping the parent match only widens coverage where it was
             # under-matching before.
+            # Status-only accepts must retain their prediction undo record,
+            # and do not count as earlier/later tag additions in these checks.
             self.conn.execute(
                 f"""DELETE FROM edit_history_items
                     WHERE new_value = ?
@@ -16417,8 +16419,10 @@ class Database:
                       AND edit_id IN (
                           SELECT id FROM edit_history
                           WHERE action_type IN (
-                              'keyword_add', 'prediction_accept',
-                              'species_replace'
+                              'keyword_add', 'species_replace'
+                          ) OR (
+                              action_type = 'prediction_accept'
+                              AND COALESCE(edit_history_items.old_value, '') NOT LIKE '%"no_tag"%'
                           )
                       )
                       AND NOT EXISTS (
@@ -16433,6 +16437,8 @@ class Database:
                                 'prediction_accept',
                                 'species_replace'
                             )
+                            AND (eh2.action_type != 'prediction_accept'
+                                 OR COALESCE(ehi2.old_value, '') NOT LIKE '%"no_tag"%')
                             AND ehi2.id > edit_history_items.id
                       )""",
                 [src_str, *chunk, src_str, dst_str],
@@ -16457,8 +16463,9 @@ class Database:
                       AND new_value IN (?, ?)
                       AND edit_id IN (
                           SELECT id FROM edit_history
-                          WHERE action_type IN (
-                              'keyword_add', 'prediction_accept'
+                          WHERE action_type = 'keyword_add' OR (
+                              action_type = 'prediction_accept'
+                              AND COALESCE(edit_history_items.old_value, '') NOT LIKE '%"no_tag"%'
                           )
                       )
                       AND EXISTS (
@@ -16471,6 +16478,8 @@ class Database:
                             AND eh1.action_type IN (
                                 'keyword_add', 'prediction_accept'
                             )
+                            AND (eh1.action_type != 'prediction_accept'
+                                 OR COALESCE(ehi1.old_value, '') NOT LIKE '%"no_tag"%')
                             AND ehi1.id < edit_history_items.id
                       )""",
                 [*chunk, src_str, dst_str, src_str],
@@ -16517,6 +16526,8 @@ class Database:
                                 'prediction_accept',
                                 'species_replace'
                             )
+                            AND (eh2.action_type != 'prediction_accept'
+                                 OR COALESCE(ehi2.old_value, '') NOT LIKE '%"no_tag"%')
                             AND ehi2.id > edit_history_items.id
                       )""",
                 [src_str, *chunk, src_str, src_str, dst_str],

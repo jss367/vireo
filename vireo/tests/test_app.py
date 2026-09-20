@@ -26267,6 +26267,61 @@ def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db
     assert not db.get_photo_keywords(photo_a)
 
 
+@pytest.mark.parametrize("earlier_source_add", [False, True])
+def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_source_add):
+    """A no-tag accept remains undoable after its alias is merged away."""
+    app, db = app_and_db
+    client = app.test_client()
+    common, alias = "Common Starling", "European Starling"
+    local_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (14850, 'Sturnus vulgaris', ?, 'species')", (common,),
+    ).lastrowid
+    db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
+    db.set_meta("common_name_identity_version", "1")
+    alias_id = db.add_keyword(alias, is_species=True)
+    common_id = db.add_keyword(common, is_species=True)
+    photo_a, _ = _seed_prediction_photo(db, "alias-status.jpg", alias, .95)
+    photo_b, _ = _seed_prediction_photo(db, "common-status.jpg", common, .96)
+    pred_ids = [_prediction_id(db, photo_a, alias), _prediction_id(db, photo_b, common)]
+    # Either the survivor was manually tagged before acceptance, or the
+    # source has an older tag-adding edit and the survivor is added later.
+    # These exercise both merge-history cleanup DELETEs.
+    db.tag_photo(photo_b, common_id if earlier_source_add else alias_id)
+    if earlier_source_add:
+        db.record_edit("keyword_add", "Add source", str(common_id), [{
+            "photo_id": photo_b, "old_value": "", "new_value": str(common_id),
+        }])
+    response = client.post("/api/predictions/batch-accept", json={"prediction_ids": pred_ids})
+    assert response.status_code == 200, response.get_data(as_text=True)
+    accept_id = next(e["id"] for e in db.get_edit_history() if e["action_type"] == "prediction_accept")
+    item = db.conn.execute(
+        "SELECT old_value, new_value FROM edit_history_items WHERE edit_id = ? AND photo_id = ?",
+        (accept_id, photo_b),
+    ).fetchone()
+    assert json.loads(item["old_value"])["no_tag"] is True
+    assert item["new_value"] == str(common_id)
+    if earlier_source_add:
+        db.tag_photo(photo_b, alias_id)
+        later_edit = db.record_edit("keyword_add", "Add survivor", str(alias_id), [{
+            "photo_id": photo_b, "old_value": "", "new_value": str(alias_id),
+        }])
+    db._merge_keyword_into(common_id, alias_id)
+    db.conn.commit()
+    if earlier_source_add:
+        # The later redundant add is retained as an empty history entry.
+        assert not db.conn.execute("SELECT 1 FROM edit_history_items WHERE edit_id = ?", (later_edit,)).fetchone()
+        assert client.post("/api/undo").status_code == 200
+        assert [k["id"] for k in db.get_photo_keywords(photo_b)] == [alias_id]
+    assert client.post("/api/undo").status_code == 200
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"pending"}
+    assert not db.get_photo_keywords(photo_a)
+    assert [k["id"] for k in db.get_photo_keywords(photo_b)] == [alias_id]
+    assert client.post("/api/redo").status_code == 200
+    assert {r["status"] for r in db.get_predictions(photo_ids=[photo_a, photo_b])} == {"accepted"}
+    assert all([k["id"] for k in db.get_photo_keywords(p)] == [alias_id] for p in [photo_a, photo_b])
+
+
 def test_selection_prediction_species_identity_keeps_homonyms_separate(app_and_db):
     app, db = app_and_db
     client = app.test_client()
