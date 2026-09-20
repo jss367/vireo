@@ -17,6 +17,7 @@ def review_source(db, source, expected_device=None, expected_inode=None):
     """Inventory without following links; protect catalog photos in all workspaces."""
     source = os.path.abspath(source)
     resolved = os.path.realpath(source)
+    _protect_local_sources(db, source)
     if os.path.islink(source) or os.path.ismount(source):
         raise ValueError("Cannot clean up a linked folder or volume root")
     try:
@@ -83,6 +84,22 @@ def review_source(db, source, expected_device=None, expected_inode=None):
         "source_device": source_stat.st_dev,
         "source_inode": source_stat.st_ino,
     }
+
+
+def _protect_local_sources(db, source):
+    """Protect original and managed paths even after staging rebases the catalog."""
+    try:
+        from .path_guard import path_contains
+    except ImportError:
+        from path_guard import path_contains
+    mappings = db.conn.execute(
+        "SELECT source_path, local_path FROM local_workspace_folders "
+        "UNION SELECT source_path, local_path FROM local_folder_mappings"
+    )
+    for mapping in mappings:
+        for path in (mapping["source_path"], mapping["local_path"]):
+            if path_contains(source, path) or path_contains(path, source):
+                raise ValueError("The original folder is used by Work Locally; sync or discard the local copy before cleanup")
 
 
 def _source_folder_rows(db, source):

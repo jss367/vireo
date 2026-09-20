@@ -372,6 +372,34 @@ def test_auto_cleanup_keeps_replacement_directory(cleanup_case, monkeypatch):
     assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
 
 
+@pytest.mark.parametrize("kind", ["workspace", "folder"])
+@pytest.mark.parametrize("location", ["same", "ancestor", "descendant"])
+def test_staged_source_mappings_block_cleanup_after_catalog_rebase(cleanup_case, monkeypatch, kind, location):
+    app, db, source, folder_id = cleanup_case
+    client = app.test_client()
+    token = client.get(URL).json["review_token"]
+    managed = str(source.parent / "managed-copy")
+    mapped_source = {"same": str(source), "ancestor": str(source.parent),
+                     "descendant": str(source / "child")}[location]
+    db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (managed, folder_id))
+    if kind == "workspace":
+        db.conn.execute("INSERT INTO local_workspaces (workspace_id, state) VALUES (?, 'active')",
+                        (db._active_workspace_id,))
+        db.conn.execute("INSERT INTO local_workspace_folders (workspace_id, folder_id, source_path, local_path) "
+                        "VALUES (?, ?, ?, ?)", (db._active_workspace_id, folder_id, mapped_source, managed))
+    else:
+        db.conn.execute("INSERT INTO local_folders (root_folder_id, state) VALUES (?, 'active')", (folder_id,))
+        db.conn.execute("INSERT INTO local_folder_mappings (root_folder_id, folder_id, source_path, local_path) "
+                        "VALUES (?, ?, ?, ?)", (folder_id, folder_id, mapped_source, managed))
+    db.conn.commit()
+    monkeypatch.setattr("app._trash_paths", lambda paths: pytest.fail("Trash called for staged source"))
+    for response in [client.get(URL), client.post(URL, json={"confirm_trash": True, "review_token": token})]:
+        assert response.status_code == 409
+        assert "Work Locally" in response.json["error"]
+    assert (source / "orphan.xmp").exists()
+    assert finish_source(db, str(source))["state"] == "unavailable"
+
+
 def test_cleanup_is_blocked_while_workspace_job_runs(cleanup_case, monkeypatch):
     import threading
 
