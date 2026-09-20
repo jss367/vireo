@@ -400,6 +400,47 @@ def test_staged_source_mappings_block_cleanup_after_catalog_rebase(cleanup_case,
     assert finish_source(db, str(source))["state"] == "unavailable"
 
 
+@pytest.mark.parametrize("removed", [False, True])
+def test_recursive_workspace_ownership_respects_explicit_removal(cleanup_case, removed):
+    app, db, source, folder_id = cleanup_case
+    parent_id = db.add_folder(str(source.parent), name="Library root")
+    other = db.create_workspace("Recursive library")
+    db.add_workspace_folder(other, parent_id)
+    # Model a descendant whose inherited membership has not materialized yet.
+    db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?", (other, folder_id))
+    db.conn.commit()
+    if removed:
+        db.remove_workspace_folder_tree(other, folder_id)
+    response = app.test_client().get(URL)
+    if removed:
+        assert response.status_code == 200, response.json
+        (source / "orphan.xmp").unlink()
+        assert finish_source(db, str(source))["state"] == "removed"
+        assert db.conn.execute("SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                               (other, parent_id)).fetchone()
+    else:
+        assert response.status_code == 409
+        assert "another workspace" in response.json["error"]
+        assert (source / "orphan.xmp").exists()
+
+
+def test_review_rejects_replacement_using_saved_source_inode(cleanup_case):
+    app, db, source, _ = cleanup_case
+    identity = source.stat()
+    result = {"moved": 1, "errors": [], "source_cleanup": {
+        "state": "remaining", "source_device": identity.st_dev, "source_inode": identity.st_ino,
+    }}
+    db.conn.execute("UPDATE job_history SET result = ? WHERE id = 'old-move'", (json.dumps(result),))
+    db.conn.commit()
+    source.rename(source.parent / "previous-source")
+    source.mkdir()
+    (source / "unrelated.xmp").write_text("unrelated settings")
+    response = app.test_client().get(URL)
+    assert response.status_code == 409
+    assert "replaced" in response.json["error"]
+    assert (source / "unrelated.xmp").read_text() == "unrelated settings"
+
+
 def test_cleanup_is_blocked_while_workspace_job_runs(cleanup_case, monkeypatch):
     import threading
 

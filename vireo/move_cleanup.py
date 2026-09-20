@@ -41,12 +41,8 @@ def review_source(db, source, expected_device=None, expected_inode=None):
         if db.conn.execute("SELECT 1 FROM photos WHERE folder_id = ? LIMIT 1", (row["id"],)).fetchone():
             raise ValueError("The original folder still contains cataloged photos")
 
-    for row in source_rows:
-        if db.conn.execute(
-            "SELECT 1 FROM workspace_folders WHERE folder_id = ? "
-            "AND workspace_id IS NOT ? LIMIT 1",
-            (row["id"], db._active_workspace_id),
-        ).fetchone():
+    for row in source_rows or [{"id": None, "path": source}]:
+        if _folder_owned_elsewhere(db, row):
             raise ValueError("The original folder is still used by another workspace")
 
     files, directories, identities = [], [], []
@@ -102,6 +98,31 @@ def _protect_local_sources(db, source):
                 raise ValueError("The original folder is used by Work Locally; sync or discard the local copy before cleanup")
 
 
+def _folder_owned_elsewhere(db, folder):
+    """Include inherited root membership without recreating explicitly removed links."""
+    try:
+        from .move import _path_equal_or_descends
+    except ImportError:
+        from move import _path_equal_or_descends
+    if folder["id"] is not None and any(
+        workspace["id"] != db._active_workspace_id
+        for workspace in db.get_folder_workspaces(folder["id"])
+    ):
+        return True
+    # The database accessor above uses stored path strings. Also cover physical
+    # aliases of recursive roots while honoring the same removal view.
+    for root in db.conn.execute(
+        "SELECT wf.workspace_id, f.path FROM workspace_folders wf "
+        "JOIN folders f ON f.id = wf.folder_id "
+        "WHERE wf.is_root = 1 AND wf.workspace_id IS NOT ?", (db._active_workspace_id,),
+    ):
+        if folder["id"] in db._removed_workspace_folder_ids(root["workspace_id"]):
+            continue
+        if _path_equal_or_descends(folder["path"], root["path"], case_insensitive_root=None):
+            return True
+    return False
+
+
 def _source_folder_rows(db, source):
     """Find catalog rows under the selected physical source, including aliases."""
     try:
@@ -130,10 +151,7 @@ def _remove_empty_source(db, source, expected_device, expected_inode):
             # A missing directory still needs the same catalog protections.
             if db.conn.execute("SELECT 1 FROM photos WHERE folder_id = ? LIMIT 1", (row["id"],)).fetchone():
                 raise ValueError("The original folder still contains cataloged photos")
-            if db.conn.execute(
-                "SELECT 1 FROM workspace_folders WHERE folder_id = ? AND workspace_id IS NOT ? LIMIT 1",
-                (row["id"], db._active_workspace_id),
-            ).fetchone():
+            if _folder_owned_elsewhere(db, row):
                 raise ValueError("The original folder is still used by another workspace")
             db.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (row["id"],))
             db.conn.execute("DELETE FROM folders WHERE id = ?", (row["id"],))
@@ -164,6 +182,8 @@ def finish_source(db, source, expected_device=None, expected_inode=None):
         result = {"state": "unavailable", "source_path": source, "error": str(exc)}
         if expected_device is not None:
             result["source_device"] = expected_device
+        if expected_inode is not None:
+            result["source_inode"] = expected_inode
         return result
 
 

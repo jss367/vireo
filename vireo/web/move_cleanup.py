@@ -62,11 +62,12 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                 if request.method == "GET":
                     receipt = result.get("source_cleanup")
                     device = receipt.get("source_device") if isinstance(receipt, dict) else None
+                    inode = receipt.get("source_inode") if isinstance(receipt, dict) else None
                     # Existing files can be freshly reviewed after a legitimate
                     # remount. A missing source needs the saved device evidence.
                     if os.path.lexists(source):
                         device = None
-                    review = review_source(db, source, device)
+                    review = review_source(db, source, device, inode)
                     if request.args.get("summary") == "1":
                         review = {key: review[key] for key in
                                   ("state", "source_path", "file_count", "xmp_count") if key in review}
