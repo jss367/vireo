@@ -152,3 +152,42 @@ def test_denoise_method_survives_selective_presets_and_can_reset():
     assert result["adjustments"] == {"denoise_mode": "camera", "noise_reduction": 70}
     reset = compose_recipe(result, {}, fields, "merge")
     assert reset["adjustments"] == {"noise_reduction": 70}
+
+
+def test_summary_bulk_loads_visible_recipes_without_full_metadata(app_and_db):
+    app, db = app_and_db
+    folder_id = db.add_folder('/large-selection')
+    ids = [db.add_photo(folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
+                        file_size=1, file_mtime=1) for i in range(1601)]
+    db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
+    original_ws = db._active_workspace_id
+    other_ws = db.create_workspace('Other photos')
+    db.set_active_workspace(other_ws)
+    hidden_folder = db.add_folder('/hidden-selection')
+    hidden_id = db.add_photo(folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
+                             file_size=1, file_mtime=1)
+    db.set_photo_edit_recipe(hidden_id, {"adjustments": {"contrast": 90}})
+    db.set_active_workspace(original_ws)
+    from db import Database
+    from flask import g
+
+    queries = []
+
+    @app.before_request
+    def trace_summary_queries():
+        if "db" not in g:
+            g.db = Database(app.config["DB_PATH"], initialize_schema=False)
+        g.db.conn.set_trace_callback(queries.append)
+
+    response = app.test_client().post('/api/photos/edit-recipe/summary', json={
+        'photo_ids': ids + [ids[0], hidden_id, 999999],
+    })
+    assert response.status_code == 200
+    assert response.json['count'] == len(ids)
+    assert response.json['values']['adjustments.exposure'] is None
+    assert response.json['values']['adjustments.contrast'] == 0
+    membership_reads = [sql for sql in queries if 'workspace_folders' in sql]
+    recipe_reads = [sql for sql in queries if 'SELECT' in sql and 'photo_edit_recipes' in sql]
+    assert 1 <= len(membership_reads) <= 4
+    assert 1 <= len(recipe_reads) <= 3
+    assert not any('exif_data' in sql for sql in queries)

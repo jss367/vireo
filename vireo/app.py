@@ -9231,8 +9231,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(ids, list) or not ids or any(type(pid) is not int for pid in ids):
             return json_error("photo_ids must be a non-empty list of integers")
         db = _get_db()
-        recipes = [db.get_photo_edit_recipe(pid) for pid in dict.fromkeys(ids)
-                   if db.get_photo(pid, verify_workspace=True)]
+        visible_ids = db.filter_photo_ids_in_workspace(ids)
+        recipe_map = db.get_photo_edit_recipes(visible_ids)
+        recipes = [recipe_map.get(pid) for pid in visible_ids]
         values = {}
         for field in FIELDS:
             if "min" not in field:
