@@ -9,7 +9,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryFile, mkdtemp
 
-from export import _DevelopedDirIndex, _get_photo_exif_data, load_export_image
+from export import (
+    _DevelopedDirIndex,
+    _get_photo_exif_data,
+    _get_photo_render_camera_fields,
+    load_export_image,
+)
 from site_publish import _write_json, slugify
 
 README = """# Photo site export
@@ -116,6 +121,7 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
         photos = db.get_photos_by_ids(batch)
         recipes = db.get_photo_edit_recipes(batch)
         exif = _get_photo_exif_data(db, batch)
+        render_camera = _get_photo_render_camera_fields(db, batch)
         keywords = db.get_keywords_for_photos(batch)
         species = db.get_species_keywords_for_photos(batch, include_identities=True)
         locations = db.get_effective_photo_locations(
@@ -123,6 +129,12 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
         ) if include_locations else {}
         for pid in batch:
             photo = dict(photos[pid])
+            # PHOTO_COLS omits camera_make/camera_model/iso; camera-aware
+            # denoising resolves the same profile every other render path
+            # sees only when this snapshot carries those promoted columns.
+            for key, value in (render_camera.get(pid) or {}).items():
+                if photo.get(key) is None:
+                    photo[key] = value
             record = {key: photo.get(key) for key in (
                 "id", "filename", "timestamp", "rating", "flag",
             )}

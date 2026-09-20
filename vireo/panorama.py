@@ -4,7 +4,12 @@ import contextlib
 import os
 
 import numpy as np
-from export import _claim_export_path, _get_photo_exif_data, load_export_image
+from export import (
+    _claim_export_path,
+    _get_photo_exif_data,
+    _get_photo_render_camera_fields,
+    load_export_image,
+)
 from PIL import Image
 
 MAX_PHOTOS = 12
@@ -71,6 +76,7 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
 
     recipes = db.get_photo_edit_recipes(photo_ids)
     exif = _get_photo_exif_data(db, photo_ids)
+    render_camera = _get_photo_render_camera_fields(db, photo_ids)
     images = []
     total = len(photo_ids) + 3
     for i, pid in enumerate(photo_ids):
@@ -87,6 +93,7 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
                 max_size=input_size,
                 wc_max=config.get("working_copy_max_size", 4096),
                 developed_dir=config.get("darktable_output_dir", "") or "",
+                camera_fields=render_camera.get(pid),
             ) as img:
                 # The renderer may return a full-size developed image.
                 img.thumbnail((input_size, input_size), Image.Resampling.LANCZOS)

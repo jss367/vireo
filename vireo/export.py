@@ -355,12 +355,20 @@ def resolve_template(template, photo, species=None, seq=1):
 
 def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
                       max_size=None, wc_max=4096, developed_dir="",
-                      developed_index=None, output_ext="jpg"):
+                      developed_index=None, output_ext="jpg",
+                      camera_fields=None):
     """Load the final export pixels, including edits and source fallbacks.
 
     The caller owns the returned image and must close it. Both photo exports
     and website publishing use this renderer so working-copy sizing, RAW
     fallback, local masks, and developed-output selection stay consistent.
+
+    ``camera_fields`` supplies the promoted ``camera_make``/``camera_model``/
+    ``iso`` columns that ``PHOTO_COLS`` omits (see
+    :func:`_get_photo_render_camera_fields`). Callers should pass it whenever
+    their ``photo`` came from ``get_photos_by_ids`` so camera-aware denoising
+    resolves the same profile that previews and thumbnails see for the same
+    recipe.
     """
     pid = photo["id"]
     if developed_index is None:
@@ -535,12 +543,22 @@ def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
             raise ValueError("failed to load image")
         if recipe:
             import local_masks
+            camera_metadata = {**dict(photo)}
+            # PHOTO_COLS omits camera_make/camera_model/iso, so callers
+            # that fetch photos via ``get_photos_by_ids`` supply those
+            # columns here. Fill only what the row is missing so a caller
+            # already carrying promoted values (e.g. get_photo detail)
+            # keeps them.
+            for key, value in (camera_fields or {}).items():
+                if camera_metadata.get(key) is None:
+                    camera_metadata[key] = value
+            camera_metadata["exif_data"] = (
+                exif_data if exif_data is not None
+                else _photo_value(photo, "exif_data")
+            )
             img = apply_recipe_to_loaded_image(
                 img, recipe, max_size=max_size,
-                camera_metadata={
-                    **dict(photo),
-                    "exif_data": exif_data if exif_data is not None else _photo_value(photo, "exif_data"),
-                },
+                camera_metadata=camera_metadata,
                 native_size=_recipe_source_dimensions(photo, exif_data),
                 local_mask=local_masks.load_snapshot(
                     vireo_dir, pid, recipe,
@@ -641,6 +659,9 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
     camera_data_map = (
         _get_photo_camera_data(db, photo_ids) if "camera" in metadata_fields else {}
     )
+    # PHOTO_COLS omits camera_make/camera_model/iso, so camera-aware
+    # denoising needs an independent fetch; embedding is a separate concern.
+    render_camera_map = _get_photo_render_camera_fields(db, photo_ids)
     location_map = (
         db.get_effective_photo_locations(photo_ids, verify_workspace=False)
         if "location" in metadata_fields else {}
@@ -765,6 +786,7 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
                 exif_data=exif_data_map.get(pid), max_size=max_size,
                 wc_max=wc_max, developed_dir=developed_dir,
                 developed_index=developed_index, output_ext=output_ext,
+                camera_fields=render_camera_map.get(pid),
             )
             try:
                 out_path, output_stream = _claim_export_path(out_path)
@@ -915,6 +937,39 @@ def _get_photo_camera_data(db, photo_ids):
         ).fetchall()
         for row in rows:
             out[row["id"]] = dict(row)
+    return out
+
+
+def _get_photo_render_camera_fields(db, photo_ids):
+    """Return the promoted camera identity columns camera-aware renders need.
+
+    ``PHOTO_COLS`` omits ``camera_make``/``camera_model``/``iso`` to keep list
+    queries light, and when ``pipeline.extract_full_metadata`` is disabled
+    ``exif_data`` is stored as ``{}`` too. Every export path (photo exports,
+    panoramas, site publishing, site exports) fetches its photos through
+    ``get_photos_by_ids`` and would otherwise supply no camera identity to
+    ``resolve_profile()``, silently falling back to the image-only estimate
+    and diverging from previews/thumbnails on the same recipe. Callers merge
+    the returned mapping into the photo dict independent of whether camera
+    metadata is being embedded in the exported file.
+    """
+    if not photo_ids or not hasattr(db, "conn"):
+        return {}
+    out = {}
+    for i in range(0, len(photo_ids), 999):
+        chunk = photo_ids[i:i + 999]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = db.conn.execute(
+            f"""SELECT id, camera_make, camera_model, iso
+                FROM photos WHERE id IN ({placeholders})""",
+            list(chunk),
+        ).fetchall()
+        for row in rows:
+            out[row["id"]] = {
+                "camera_make": row["camera_make"],
+                "camera_model": row["camera_model"],
+                "iso": row["iso"],
+            }
     return out
 
 

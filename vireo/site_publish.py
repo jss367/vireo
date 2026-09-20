@@ -17,6 +17,7 @@ from weakref import WeakValueDictionary
 from export import (
     _DevelopedDirIndex,
     _get_photo_exif_data,
+    _get_photo_render_camera_fields,
     load_export_image,
 )
 
@@ -70,7 +71,7 @@ def _rel_image_path(photo, context):
 
 
 def _export_image(vireo_dir, photo, rel_path, destination, options, folders, index,
-                  recipe, exif_data):
+                  recipe, exif_data, camera_fields=None):
     max_size = options.get("max_size")
     if max_size is not None:
         max_size = int(max_size)
@@ -79,6 +80,7 @@ def _export_image(vireo_dir, photo, rel_path, destination, options, folders, ind
             photo, vireo_dir, folders, recipe=recipe, exif_data=exif_data,
             max_size=max_size, wc_max=int(options.get("working_copy_max_size", 4096)),
             developed_dir=options.get("developed_dir") or "", developed_index=index,
+            camera_fields=camera_fields,
         )
     except Exception as exc:
         return False, f"{photo.get('filename') or photo.get('id')}: {exc}"
@@ -169,6 +171,7 @@ def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
     photos_map = db.get_photos_by_ids(photo_ids) if photo_ids else {}
     recipes = db.get_photo_edit_recipes(photo_ids)
     exif_data = _get_photo_exif_data(db, photo_ids)
+    render_camera = _get_photo_render_camera_fields(db, photo_ids)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     index = _DevelopedDirIndex()
     exported = 0
@@ -198,6 +201,7 @@ def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
             index,
             recipes.get(photo_id),
             exif_data.get(photo_id),
+            camera_fields=render_camera.get(photo_id),
         )
         if ok:
             exported += 1
