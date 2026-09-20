@@ -12557,22 +12557,28 @@ class Database:
             caller scope the stage to a collection so a pipeline run doesn't
             touch unrelated photos elsewhere in the workspace
 
-        Returns one row per photo. Once subject analysis records a primary,
-        only that detection can supply eye predictions. For legacy photos,
-        the row chosen is the highest-confidence
-        prediction on the highest-confidence real detection **among
-        predictions that carry routable taxonomy info** (taxonomy_class or
-        scientific_name set); predictions missing both fields are only
-        chosen when nothing else is available. This prevents a top-ranked
-        but taxonomy-less prediction from masking a lower-ranked prediction
-        that ``_resolve_keypoint_model`` could actually route. Each row is
-        a dict with the fields the eye stage needs to run without further
+        Returns one row per photo. Only the effective primary detection
+        can supply eye predictions, resolved with the same
+        threshold-aware ordering (``subjects.primary_order_sql``) that
+        mask extraction and ``set_active_mask_variant`` use: user
+        override in ``photo_subject_choices`` → subject-analysis quality
+        score → detector confidence. Anchoring on the current floor
+        (not the cached ``photo_subject_state``) means a workspace
+        raising ``detector_confidence`` above the previously stored
+        subject still surfaces the new primary for the eye stage.
+        Within the chosen detection, predictions carrying routable
+        taxonomy info (``taxonomy_class`` or ``scientific_name`` set)
+        rank ahead of predictions missing both, so a top-confidence but
+        taxonomy-less prediction never masks a routable one that
+        ``_resolve_keypoint_model`` could actually run. Each row is a
+        dict with the fields the eye stage needs to run without further
         DB calls: id, folder_id, filename, width, height, mask_path,
         box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
         scientific_name, species.
         """
         import config as cfg
         from pipeline import EYE_KP_FINGERPRINT_VERSION
+        from subjects import primary_order_sql
         ws_id = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -12582,7 +12588,21 @@ class Database:
             if not photo_ids:
                 return []
         extra_where, scope_params = self._scope_clause(photo_ids)
-        params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION, *scope_params)
+        # Resolve the effective primary the same way mask extraction and
+        # ``set_active_mask_variant`` do: the top-ordered non-full-image
+        # detection above the workspace's current detector_confidence.
+        # ``photo_subject_state.detection_id`` can lag when the floor
+        # changes (workspace override, or a peer workspace sharing this
+        # photo runs with a different floor), so joining against the
+        # cached state would exclude every detection — the stored
+        # subject fails the confidence join while the current above-
+        # floor primary fails the state-ID check — and the photo would
+        # never advance to the eye stage until analysis or selection
+        # happened to refresh the cache.
+        params = (
+            ws_id, min_conf, min_conf, EYE_KP_FINGERPRINT_VERSION,
+            *scope_params,
+        )
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
@@ -12601,8 +12621,14 @@ class Database:
                 AND d.detector_confidence >= ?
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
-                 AND (NOT EXISTS (SELECT 1 FROM photo_subject_state ss WHERE ss.photo_id=p.id)
-                      OR d.id=(SELECT ss.detection_id FROM photo_subject_state ss WHERE ss.photo_id=p.id))
+                 AND d.id = (
+                    SELECT d2.id FROM detections d2
+                    WHERE d2.photo_id = p.id
+                      AND d2.detector_confidence >= ?
+                      AND d2.detector_model != 'full-image'
+                    ORDER BY {primary_order_sql("d2")}
+                    LIMIT 1
+                 )
                  AND (p.eye_kp_fingerprint IS NULL
                       OR p.eye_kp_fingerprint != ?){extra_where}
                  AND pr.labels_fingerprint = (

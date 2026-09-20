@@ -250,6 +250,39 @@ def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident
     assert rows[0]['box_x'] == .6
 
 
+def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
+    """The eye-stage predicate resolves the primary against the current
+    ``detector_confidence`` floor, not the cached ``photo_subject_state``.
+    A workspace raising the floor above the stored subject — or a peer
+    workspace sharing the photo writing that state at a different floor —
+    would otherwise exclude every detection: the stored subject fails
+    the confidence join and the current above-floor primary fails the
+    state-ID check. Both mask-extraction paths already re-resolve the
+    primary at the current floor, so the eye stage must too or it would
+    never compute eye focus for the new primary until analysis or
+    selection refreshed the cache.
+    """
+    photo_id, ids, path = subject_photo
+    analyze_photo(db, photo_id, path)
+    for detection_id in ids[:2]:
+        db.add_prediction(detection_id, 'Test', .9, 'bioclip',
+                          taxonomy={'class': 'Aves', 'scientific_name': 'Test bird'})
+    db.conn.execute("UPDATE photos SET mask_path='mask.png' WHERE id=?", (photo_id,))
+    # Baseline: cached state names ids[1] (initial primary at floor 0.2);
+    # eye stage surfaces the photo on ids[1]'s box.
+    baseline = db.list_photos_for_eye_keypoint_stage([photo_id])
+    assert len(baseline) == 1 and baseline[0]['box_x'] == .6
+    # Raise the workspace's floor above ids[1]'s 0.7. ids[0] (0.95) is
+    # now the effective primary, but photo_subject_state still names
+    # ids[1] — which now falls below the confidence join. Under the old
+    # predicate every detection would be excluded; under the fix, ids[0]
+    # surfaces immediately.
+    db.update_workspace(db._ws_id(), config_overrides={'detector_confidence': 0.8})
+    rows = db.list_photos_for_eye_keypoint_stage([photo_id])
+    assert len(rows) == 1
+    assert rows[0]['box_x'] == .05
+
+
 def test_empty_redetection_clears_previous_subject_quality(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
