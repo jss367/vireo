@@ -15,6 +15,10 @@ def test_detect_batch_returns_detection_map():
 
     mock_db = MagicMock()
     mock_runner = MagicMock()
+    # MagicMock().is_cancelled(...) returns a truthy MagicMock by default,
+    # which would trip the subject-analysis cancel checkpoint added for the
+    # reclassify Stop path. This unit test never asks for cancellation.
+    mock_runner.is_cancelled.return_value = False
     mock_job = {"id": "test-1", "progress": {}, "errors": [], "_start_time": 1.0}
 
     with patch("classify_job.detect_animals", return_value=[]):
@@ -41,6 +45,9 @@ def test_detect_batch_uses_cached_detection():
          "detector_confidence": 0.95, "category": "animal"},
     ]
     mock_runner = MagicMock()
+    # See test_detect_batch_returns_detection_map for why the cancel probe
+    # needs an explicit False return here.
+    mock_runner.is_cancelled.return_value = False
     mock_job = {"id": "test-1", "progress": {}, "errors": [], "_start_time": 1.0}
 
     detection_map, detected, processed_ids = _detect_batch(
