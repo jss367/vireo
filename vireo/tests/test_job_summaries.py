@@ -477,3 +477,17 @@ def test_runner_history_and_snapshot_carry_prose(tmp_path):
     assert row["summary"] == snap["summary"]
     assert row["result_details"] == snap["result_details"]
     assert "{" not in row["summary"]
+
+
+def test_full_resolution_summary_explains_deleted_photos():
+    out = describe_result(
+        "prepare-full-resolution",
+        {"ok": True, "ready": 1011, "total": 1017, "failed": 0,
+         "skipped_deleted": 6, "errors": []},
+    )
+    assert out["summary"] == (
+        "1,011 of 1,017 full-resolution files ready, "
+        "6 skipped (deleted during preparation)"
+    )
+    assert out["error"] is None
+    assert out["details"] == []

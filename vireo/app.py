@@ -25280,7 +25280,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             thread_db = ctx.thread_db()
             try:
-                photos_map = thread_db.get_photos_by_ids(photo_ids)
                 folders = {
                     folder["id"]: folder["path"]
                     for folder in thread_db.get_folder_tree()
@@ -25289,6 +25288,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 copied = 0
                 reused = 0
                 failed = 0
+                skipped_deleted = 0
                 copied_bytes = 0
                 total = len(photo_ids)
                 job["_start_time"] = time.time()
@@ -25297,7 +25297,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for index, photo_id in enumerate(photo_ids, start=1):
                     if ctx.runner.is_cancelled(job["id"]):
                         break
-                    photo = photos_map.get(photo_id)
+                    # Re-read each photo: deletion may have run while this
+                    # job was preparing earlier selections.
+                    photo = thread_db.get_photo(photo_id)
                     filename = photo["filename"] if photo else f"Photo {photo_id}"
                     error = None
                     if not photo:
@@ -25344,12 +25346,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         except Exception as exc:
                             thread_db.conn.rollback()
                             error = str(exc) or exc.__class__.__name__
-                            log.warning(
-                                "Full-resolution preparation failed for %s: %s",
-                                filename, exc, exc_info=True,
-                            )
+                            if thread_db.get_photo(photo_id) is not None:
+                                log.warning(
+                                    "Full-resolution preparation failed for %s: %s",
+                                    filename, exc, exc_info=True,
+                                )
 
-                    if error is None:
+                    # Recheck after copy/render too: a concurrent deletion
+                    # can cause an FK error, a render 404, or finish before
+                    # a successful render publishes its cache file. Only a
+                    # missing catalog row makes this an expected skip.
+                    if photo is None or thread_db.get_photo(photo_id) is None:
+                        from preview_cache import cleanup_cached_files_for_deleted_photos
+
+                        skipped_deleted += 1
+                        cleanup_cached_files_for_deleted_photos(
+                            app.config["THUMB_CACHE_DIR"],
+                            [{"photo_id": photo_id}],
+                            vireo_dir=vireo_dir,
+                        )
+                    elif error is None:
                         ready += 1
                     else:
                         failed += 1
@@ -25375,6 +25391,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "copied": copied,
                     "reused": reused,
                     "failed": failed,
+                    "skipped_deleted": skipped_deleted,
                     "total": total,
                     "bytes": copied_bytes,
                     "errors": list(job["errors"]),

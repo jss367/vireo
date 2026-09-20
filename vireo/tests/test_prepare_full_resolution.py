@@ -1,7 +1,9 @@
 import io
 import os
 import time
+from pathlib import Path
 
+import pytest
 from PIL import Image
 from wait import wait_for_job_via_client
 
@@ -419,3 +421,155 @@ def test_prepared_render_not_regenerated_every_request_for_future_mtime(
         "the second request rewrote the prepared render instead of "
         "serving the cached one"
     )
+
+
+@pytest.mark.parametrize(
+    "deletion_stage",
+    ["before_turn", "missing_source", "after_copy", "before_render", "during_render"],
+)
+def test_preparation_skips_concurrently_deleted_photos(
+    client_with_photo, monkeypatch, deletion_stage,
+):
+    """Delete through a separate connection at deterministic job boundaries."""
+    import image_loader
+    import offline_cache
+    from db import Database
+    from preview_cache import cleanup_cached_files_for_deleted_photos
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
+    ).fetchone()["path"]
+    # A later photo proves rollback/skip allows the job to keep working.
+    other_path = os.path.join(folder, "survivor.jpg")
+    Image.new("RGB", (80, 60), "blue").save(other_path)
+    other_id = db.add_photo(
+        folder_id=photo["folder_id"], filename="survivor.jpg", extension=".jpg",
+        file_size=os.path.getsize(other_path), file_mtime=os.path.getmtime(other_path),
+        width=80, height=60,
+    )
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    deleted = []
+
+    def delete_selected():
+        with_db = Database(app.config["DB_PATH"])
+        try:
+            result = with_db.delete_photos([photo_id])
+            assert result["deleted"] == 1
+        finally:
+            with_db.close()
+        os.unlink(os.path.join(folder, photo["filename"]))
+        cleanup_cached_files_for_deleted_photos(
+            app.config["THUMB_CACHE_DIR"], result["files"], vireo_dir=vireo_dir,
+        )
+        deleted.append(photo_id)
+
+    original_cache = offline_cache.cache_photo_original
+
+    def cache_with_deletion(thread_db, selected, *args, **kwargs):
+        if selected["id"] == photo_id and deletion_stage == "missing_source":
+            delete_selected()
+        result = original_cache(thread_db, selected, *args, **kwargs)
+        if selected["id"] == photo_id and deletion_stage == "before_render":
+            delete_selected()
+        return result
+
+    monkeypatch.setattr(offline_cache, "cache_photo_original", cache_with_deletion)
+    if deletion_stage == "before_turn":
+        original_tree = Database.get_folder_tree
+
+        def folder_tree_with_deletion(self, *args, **kwargs):
+            result = original_tree(self, *args, **kwargs)
+            if not deleted:
+                delete_selected()
+            return result
+
+        monkeypatch.setattr(Database, "get_folder_tree", folder_tree_with_deletion)
+    elif deletion_stage == "after_copy":
+        original_copy = offline_cache._copy_atomic
+
+        def copy_with_deletion(src, dst):
+            original_copy(src, dst)
+            if not deleted:
+                delete_selected()
+                # Simulate a copy publishing after deletion's cache cleanup.
+                Image.new("RGB", (800, 600), "red").save(dst)
+
+        monkeypatch.setattr(offline_cache, "_copy_atomic", copy_with_deletion)
+    elif deletion_stage == "during_render":
+        db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+        original_load = image_loader.load_image
+
+        def load_with_deletion(*args, **kwargs):
+            result = original_load(*args, **kwargs)
+            if not deleted:
+                delete_selected()
+            return result
+
+        monkeypatch.setattr(image_loader, "load_image", load_with_deletion)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id, other_id]},
+    )
+    assert response.status_code == 200
+    job = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert deleted == [photo_id]
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["ok"] is True
+    assert result["skipped_deleted"] == 1
+    assert result["ready"] == 1
+    assert result["failed"] == 0
+    assert result["total"] == 2
+    assert result["errors"] == []
+    assert job["progress"]["current"] == 2
+    assert db.offline_original_get(photo_id) is None
+    assert db.offline_original_get(other_id)["status"] == "cached"
+    for subdir in ("offline/originals", "originals"):
+        directory = Path(vireo_dir) / subdir
+        assert not list(directory.glob(f"{photo_id}.*"))
+        assert not list(directory.glob(f"{photo_id}_*"))
+
+
+@pytest.mark.parametrize("failure", ["missing_source", "copy_error", "render_error", "integrity_error"])
+def test_preparation_preserves_errors_for_existing_photos(
+    client_with_photo, monkeypatch, failure,
+):
+    import sqlite3
+
+    import image_loader
+    import offline_cache
+
+    app, db, photo_id = client_with_photo
+    if failure == "missing_source":
+        photo = db.get_photo(photo_id)
+        folder = db.conn.execute(
+            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
+        ).fetchone()["path"]
+        os.unlink(os.path.join(folder, photo["filename"]))
+    elif failure == "render_error":
+        db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+        monkeypatch.setattr(image_loader, "load_image", lambda *a, **kw: None)
+    else:
+        def fail_cache(*args, **kwargs):
+            if failure == "integrity_error":
+                raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+            raise OSError("copy failed")
+
+        monkeypatch.setattr(offline_cache, "cache_photo_original", fail_cache)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert job["status"] == "failed", job
+    result = job["result"]
+    assert result["ok"] is False
+    assert result["failed"] == 1
+    assert result["skipped_deleted"] == 0
+    assert result["ready"] == 0
+    assert len(result["errors"]) == 1
+    assert db.get_photo(photo_id) is not None

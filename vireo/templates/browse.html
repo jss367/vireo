@@ -16109,6 +16109,10 @@ async function prepareFullResolutionSelection(photoIds) {
         var copied = result.copied || 0;
         var summary = ready.toLocaleString() + ' ready';
         if (copied) summary += ', ' + copied.toLocaleString() + ' copied locally';
+        var skippedDeleted = result.skipped_deleted || 0;
+        if (skippedDeleted) {
+          summary += ', ' + skippedDeleted.toLocaleString() + ' skipped (deleted during preparation)';
+        }
         if (failed) summary += ', ' + failed.toLocaleString() + ' failed';
         showToast(
           'Full-resolution preparation complete: ' + summary,
