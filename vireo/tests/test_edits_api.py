@@ -1,4 +1,93 @@
+import json
 import os
+
+import pytest
+
+
+def test_editor_crop_ratio_persists_in_config(app_and_db):
+    import config as cfg
+
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    assert client.get(endpoint).get_json() == {"enabled": False, "aspect": None}
+    preference = {"enabled": True, "aspect": 1.5}
+    assert client.put(endpoint, json=preference).get_json() == preference
+    assert cfg.load()["editor_crop_ratio"] == preference
+    # A new client has no browser storage, as after the desktop port changes.
+    assert app.test_client().get(endpoint).get_json() == preference
+    response = client.put(endpoint, json={"enabled": False, "aspect": 1.5})
+    assert response.get_json() == {"enabled": False, "aspect": None}
+    assert cfg.load()["editor_crop_ratio"] == {"enabled": False, "aspect": None}
+
+
+@pytest.mark.parametrize("existing", [{}, {"pipeline": {"w_species": 0.4}}])
+def test_editor_crop_ratio_preserves_sparse_config(app_and_db, existing):
+    import config as cfg
+
+    app, _ = app_and_db
+    cfg.save(existing)
+    client = app.test_client()
+    for preference in (
+        {"enabled": True, "aspect": 1.5},
+        {"enabled": False, "aspect": None},
+    ):
+        response = client.put("/api/editor/crop-ratio", json=preference)
+        assert response.status_code == 200
+        with open(cfg.CONFIG_PATH) as config_file:
+            assert json.load(config_file) == {**existing, "editor_crop_ratio": preference}
+
+
+def test_editor_crop_ratio_ignores_late_older_writes(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    newest = {"enabled": True, "aspect": 1.5, "revision": 200}
+    assert client.put(endpoint, json=newest).get_json() == newest
+    older = {"enabled": True, "aspect": None, "revision": 100}
+    assert client.put(endpoint, json=older).get_json() == newest
+    assert client.get(endpoint).get_json() == newest
+    disabled = {"enabled": False, "aspect": None, "revision": 300}
+    assert client.put(endpoint, json=disabled).get_json() == disabled
+    assert client.put(endpoint, json=newest).get_json() == disabled
+    assert client.get(endpoint).get_json() == disabled
+
+
+def test_editor_crop_ratio_accepts_rollover_from_max_safe_revision(app_and_db):
+    """A stored revision at Number.MAX_SAFE_INTEGER can never be beaten by a
+    valid JavaScript revision — ``prev + 1`` is no longer a safe integer and
+    the browser can neither compute nor send it. Without a rollover exception
+    the preference would be wedged until the config was hand-repaired; the
+    server must accept the next legitimate write instead of rejecting it as
+    stale (Codex review, PR #1729)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    ceiling = 9007199254740991  # Number.MAX_SAFE_INTEGER
+    at_max = {"enabled": True, "aspect": 1.5, "revision": ceiling}
+    assert client.put(endpoint, json=at_max).get_json() == at_max
+    rolled_over = {"enabled": True, "aspect": 1.3333333333, "revision": 1}
+    assert client.put(endpoint, json=rolled_over).get_json() == rolled_over
+    assert client.get(endpoint).get_json() == rolled_over
+    # Once the counter resets, normal older-write rejection resumes.
+    stale = {"enabled": True, "aspect": 1.5, "revision": 1}
+    assert client.put(endpoint, json=stale).get_json() == rolled_over
+
+
+@pytest.mark.parametrize("body", [
+    [], {}, {"enabled": "true"}, {"enabled": True, "aspect": True},
+    {"enabled": True, "aspect": 0}, {"enabled": True, "aspect": -1},
+    {"enabled": True, "aspect": "1.5"}, {"enabled": True, "aspect": float("inf")},
+    {"enabled": True, "aspect": 10 ** 309},
+])
+def test_editor_crop_ratio_rejects_invalid_values(app_and_db, body):
+    app, _ = app_and_db
+    client = app.test_client()
+    endpoint = "/api/editor/crop-ratio"
+    preference = {"enabled": True, "aspect": 1.5}
+    client.put(endpoint, json=preference)
+    assert client.put(endpoint, json=body).status_code == 400
+    assert client.get(endpoint).get_json() == preference
 
 
 def test_set_color_label(app_and_db):

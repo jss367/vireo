@@ -210,6 +210,7 @@ GET          /workspace
 GET,POST     /api/edit-presets
 GET,POST     /api/misses
 GET,POST     /api/pipeline/config
+GET,PUT      /api/editor/crop-ratio
 PATCH        /api/settings/global
 PATCH        /api/settings/workspace
 PATCH,POST   /api/species-highlights/order
