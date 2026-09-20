@@ -108,8 +108,10 @@ def test_partial_trash_failure_keeps_folder_and_supports_retry(cleanup_case):
     review = review_source(db, str(source))
 
     def partial(paths):
-        os.unlink(paths[0])
-        return 1, {paths[0]}, [{"path": paths[1], "error": "Trash unavailable"}]
+        if paths[0].endswith("orphan.xmp"):
+            os.unlink(paths[0])
+            return 1, {paths[0]}, []
+        return 0, set(), [{"path": paths[0], "error": "Trash unavailable"}]
 
     result = cleanup_source(db, str(source), review["review_token"], partial)
     assert result["state"] == "remaining"
@@ -439,6 +441,30 @@ def test_review_rejects_replacement_using_saved_source_inode(cleanup_case):
     assert response.status_code == 409
     assert "replaced" in response.json["error"]
     assert (source / "unrelated.xmp").read_text() == "unrelated settings"
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_later_file_changed_during_trash_is_retained(cleanup_case, replace):
+    _, db, source, _ = cleanup_case
+    later = source / "second.xmp"
+    later.write_text("reviewed settings")
+    review = review_source(db, str(source))
+    sent = []
+
+    def trash(paths):
+        sent.extend(paths)
+        os.unlink(paths[0])
+        if replace:
+            later.rename(source / "saved-original.xmp")
+        later.write_text("new settings from editor")
+        return 1, set(paths), []
+
+    result = cleanup_source(db, str(source), review["review_token"], trash)
+    assert result["trashed"] == 1
+    assert sent == [str(source / "orphan.xmp")]
+    assert result["state"] == "remaining"
+    assert "changed since review" in result["failures"][0]["error"]
+    assert later.read_text() == "new settings from editor"
 
 
 def test_cleanup_is_blocked_while_workspace_job_runs(cleanup_case, monkeypatch):

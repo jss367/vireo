@@ -192,13 +192,32 @@ def cleanup_source(db, source, token, trash_paths):
     review = review_source(db, source)
     if not token or token != review.get("review_token"):
         raise ValueError("The folder changed. Review remaining files again before cleaning up")
-    paths = []
+    trashed, failures = 0, []
     for item in review["files"]:
         path = os.path.join(source, item["name"])
-        if _identity(path) != item["identity"]:
-            raise ValueError("The folder changed. Review remaining files again before cleaning up")
-        paths.append(path)
-    trashed, _successful, failures = trash_paths(paths) if paths else (0, set(), [])
+        try:
+            # Do not prevalidate a whole batch and then hand every pathname
+            # to Trash: an editor can replace later files while earlier ones
+            # are being processed. Recheck each file and its directory chain
+            # immediately before the individual Trash operation.
+            root_identity = _identity(source)
+            if root_identity[:2] != [review["source_device"], review["source_inode"]]:
+                raise ValueError("The original folder changed; review again")
+            parent = os.path.dirname(item["name"])
+            while parent:
+                identity = _identity(os.path.join(source, parent))
+                if not stat.S_ISDIR(identity[2]) or identity[:2] != [
+                    review["source_device"], review["directory_inodes"][parent],
+                ]:
+                    raise ValueError("A containing folder changed; review again")
+                parent = os.path.dirname(parent)
+            if _identity(path) != item["identity"]:
+                raise ValueError("File changed since review; review again before moving it to Trash")
+            moved, _successful, failed = trash_paths([path])
+            trashed += moved
+            failures.extend(failed)
+        except (OSError, ValueError) as exc:
+            failures.append({"path": path, "error": str(exc)})
     # rmdir cannot remove a folder containing a new file or a failed Trash item.
     for relative in sorted(review["directories"], key=lambda p: p.count(os.sep), reverse=True):
         finish_source(db, os.path.join(source, relative), review["source_device"],
