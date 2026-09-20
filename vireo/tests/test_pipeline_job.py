@@ -10190,12 +10190,26 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         db.set_active_mask_variant(ids[0], "sam2-small")
         restored = db.conn.execute("SELECT quality_input_recipe FROM photos WHERE id=?", (ids[0],)).fetchone()
         assert restored[0] == raw_analysis.RECIPE
+        restored_features = db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
+        for field in report["corrected_quality"]:
+            assert restored_features[field] == corrected[field]
         settings["pipeline"]["sam2_variant"] = "sam2-small"
         cfg.save(settings)
     normal = run(False)
     assert normal["quality_input_recipe"] is None
     assert normal["subject_tenengrad"] == 0
     assert normal["subject_y_median"] == 30
+    if switch_variant:
+        settings["pipeline"]["sam2_variant"] = "sam2-large"
+        cfg.save(settings)
+        run(True)
+        db.set_active_mask_variant(ids[0], "sam2-small")
+        settings["pipeline"]["sam2_variant"] = "sam2-small"
+        cfg.save(settings)
+        restored_normal = run(False)
+        for field in report["corrected_quality"]:
+            assert restored_normal[field] == normal[field]
+        assert restored_normal["quality_input_recipe"] is None
     db.close()
 
 

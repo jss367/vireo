@@ -325,7 +325,8 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
     db.close()
 
 
-def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(tmp_path):
+@pytest.mark.parametrize("old_quality_columns", [False, True])
+def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(tmp_path, old_quality_columns):
     from db import Database
 
     path = str(tmp_path / "old-masks.db")
@@ -342,12 +343,20 @@ def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(
     db.set_active_mask_variant(photo, "sam2-large")
     db.update_photo_pipeline_features(photo, quality_input_recipe=ra.RECIPE)
     db.conn.execute("ALTER TABLE photo_masks DROP COLUMN quality_input_recipe")
+    if old_quality_columns:
+        for field in ("subject_clip_high", "subject_clip_low", "subject_y_median", "bg_separation", "phash_crop", "noise_estimate"):
+            db.conn.execute(f"ALTER TABLE photo_masks DROP COLUMN {field}")
+        db.update_photo_pipeline_features(photo, bg_separation=42, noise_estimate=5, phash_crop="1234")
     db.conn.commit()
     db.close()
 
     migrated = Database(path)
     assert migrated.get_photo_mask(photo, "sam2-large")["quality_input_recipe"] == ra.RECIPE
-    assert migrated.get_photo_mask(photo, "sam2-small")["quality_input_recipe"] == "unknown-raw-analysis-recipe"
+    expected = "unknown-mask-quality-recipe" if old_quality_columns else "unknown-raw-analysis-recipe"
+    assert migrated.get_photo_mask(photo, "sam2-small")["quality_input_recipe"] == expected
+    if old_quality_columns:
+        active = migrated.get_photo_mask(photo, "sam2-large")
+        assert (active["bg_separation"], active["noise_estimate"], active["phash_crop"]) == (42, 5, "1234")
     migrated.close()
 
 

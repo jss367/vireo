@@ -1211,6 +1211,12 @@ class Database:
                 bg_tenengrad      REAL,
                 crop_complete     REAL,
                 quality_input_recipe TEXT,
+                subject_clip_high REAL,
+                subject_clip_low REAL,
+                subject_y_median REAL,
+                bg_separation REAL,
+                phash_crop TEXT,
+                noise_estimate REAL,
                 PRIMARY KEY (photo_id, variant)
             );
 
@@ -2206,6 +2212,27 @@ class Database:
                 "AND photo_id IN (SELECT d.photo_id FROM subject_raw_analysis a "
                 "JOIN detections d ON d.id=a.detection_id)"
             )
+        # Quality features belong to the mask/recipe that produced them.
+        # Only the active variant can be backfilled from the old photo row.
+        for column, column_type in (
+            ("subject_clip_high", "REAL"), ("subject_clip_low", "REAL"),
+            ("subject_y_median", "REAL"), ("bg_separation", "REAL"),
+            ("phash_crop", "TEXT"), ("noise_estimate", "REAL"),
+        ):
+            try:
+                self.conn.execute(f"SELECT {column} FROM photo_masks LIMIT 0")
+            except sqlite3.OperationalError:
+                self.conn.execute(f"ALTER TABLE photo_masks ADD COLUMN {column} {column_type}")
+                self.conn.execute(
+                    f"UPDATE photo_masks SET {column}=(SELECT p.{column} FROM photos p "
+                    "WHERE p.id=photo_masks.photo_id) WHERE variant=(SELECT p.active_mask_variant "
+                    "FROM photos p WHERE p.id=photo_masks.photo_id)"
+                )
+                self.conn.execute(
+                    "UPDATE photo_masks SET quality_input_recipe='unknown-mask-quality-recipe' "
+                    "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p "
+                    "WHERE p.id=photo_masks.photo_id)"
+                )
         # Migration: integrity-verification markers. hash_checked_at is when
         # the file's content was last re-hashed against photos.file_hash;
         # hash_status records the verdict ('ok', 'modified', 'corrupt',
@@ -12004,7 +12031,9 @@ class Database:
         """
         row = self.conn.execute(
             "SELECT path, subject_size, subject_tenengrad, bg_tenengrad, "
-            "crop_complete, quality_input_recipe FROM photo_masks WHERE photo_id=? AND variant=?",
+            "crop_complete, quality_input_recipe, subject_clip_high, subject_clip_low, "
+            "subject_y_median, bg_separation, phash_crop, noise_estimate "
+            "FROM photo_masks WHERE photo_id=? AND variant=?",
             (photo_id, variant),
         ).fetchone()
         if row is None:
@@ -12014,10 +12043,13 @@ class Database:
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
-            "crop_complete=?, quality_input_recipe=? WHERE id=?",
+            "crop_complete=?, quality_input_recipe=?, subject_clip_high=?, subject_clip_low=?, "
+            "subject_y_median=?, bg_separation=?, phash_crop=?, noise_estimate=? WHERE id=?",
             (row["path"], variant, row["subject_size"],
              row["subject_tenengrad"], row["bg_tenengrad"],
-             row["crop_complete"], row["quality_input_recipe"], photo_id),
+             row["crop_complete"], row["quality_input_recipe"],
+             row["subject_clip_high"], row["subject_clip_low"], row["subject_y_median"],
+             row["bg_separation"], row["phash_crop"], row["noise_estimate"], photo_id),
         )
         if _commit:
             commit_with_retry(self.conn)
@@ -12389,6 +12421,8 @@ class Database:
         subject_size=None, subject_tenengrad=None,
         bg_tenengrad=None, crop_complete=None, _commit=True,
         quality_input_recipe=None,
+        subject_clip_high=None, subject_clip_low=None, subject_y_median=None,
+        bg_separation=None, phash_crop=None, noise_estimate=None,
     ):
         """Insert or replace a mask row for (photo_id, variant).
 
@@ -12400,9 +12434,10 @@ class Database:
             INSERT INTO photo_masks (
                 photo_id, variant, path, created_at,
                 detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-                subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe
+                subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
+                subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(photo_id, variant) DO UPDATE SET
                 path=excluded.path,
                 created_at=excluded.created_at,
@@ -12415,11 +12450,18 @@ class Database:
                 subject_tenengrad=excluded.subject_tenengrad,
                 bg_tenengrad=excluded.bg_tenengrad,
                 crop_complete=excluded.crop_complete,
-                quality_input_recipe=excluded.quality_input_recipe
+                quality_input_recipe=excluded.quality_input_recipe,
+                subject_clip_high=excluded.subject_clip_high,
+                subject_clip_low=excluded.subject_clip_low,
+                subject_y_median=excluded.subject_y_median,
+                bg_separation=excluded.bg_separation,
+                phash_crop=excluded.phash_crop,
+                noise_estimate=excluded.noise_estimate
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-             subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe),
+             subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
+             subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate),
         )
         if _commit:
             commit_with_retry(self.conn)

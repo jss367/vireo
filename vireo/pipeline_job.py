@@ -7843,6 +7843,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 bg_tenengrad=mask_bg_tenengrad,
                                 crop_complete=completeness,
                                 quality_input_recipe=features.pop("quality_input_recipe", None),
+                                subject_clip_high=features.pop("subject_clip_high", None),
+                                subject_clip_low=features.pop("subject_clip_low", None),
+                                subject_y_median=features.pop("subject_y_median", None),
+                                bg_separation=features.pop("bg_separation", None),
+                                phash_crop=features.pop("phash_crop", None),
+                                noise_estimate=features.pop("noise_estimate", None),
                                 _commit=False,
                             )
                             thread_db.set_active_mask_variant(
