@@ -1,6 +1,7 @@
 """Optional source cleanup for completed date-organized folder moves."""
 
 import json
+import os
 import threading
 
 from flask import Blueprint, jsonify, request
@@ -16,10 +17,10 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
     @blueprint.route("/api/jobs/<job_id>/source-cleanup", methods=["GET", "POST"])
     def source_cleanup(job_id):
         db, runner = get_db(), get_runner()
-        job = runner.get(job_id)
-        if job is None:
-            row = db.conn.execute("SELECT * FROM job_history WHERE id = ?", (job_id,)).fetchone()
-            job = dict(row) if row else None
+        # Completed history is authoritative, including cleanup receipts saved
+        # after the worker finished. The runner's snapshot may predate cleanup.
+        row = db.conn.execute("SELECT * FROM job_history WHERE id = ?", (job_id,)).fetchone()
+        job = dict(row) if row else runner.get(job_id)
         if not job or job.get("workspace_id") != db._active_workspace_id:
             return json_error("Move job not found in this workspace", 404)
         config = job.get("config") or {}
@@ -48,7 +49,13 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                     if error:
                         return json_error(error, 409)
                 if request.method == "GET":
-                    review = review_source(db, source)
+                    receipt = result.get("source_cleanup")
+                    device = receipt.get("source_device") if isinstance(receipt, dict) else None
+                    # Existing files can be freshly reviewed after a legitimate
+                    # remount. A missing source needs the saved device evidence.
+                    if os.path.lexists(source):
+                        device = None
+                    review = review_source(db, source, device)
                     if request.args.get("summary") == "1":
                         review = {key: review[key] for key in
                                   ("state", "source_path", "file_count", "xmp_count") if key in review}
@@ -56,7 +63,14 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                 body = request.get_json(silent=True)
                 if not isinstance(body, dict) or body.get("confirm_trash") is not True:
                     return json_error("Confirm moving the reviewed files to Trash", 400)
-                return jsonify(cleanup_source(db, source, body.get("review_token"), trash_paths))
+                if row is None:
+                    return json_error("The move result is still being saved; review again in a moment", 409)
+                cleanup = cleanup_source(db, source, body.get("review_token"), trash_paths)
+                result["source_cleanup"] = cleanup
+                db.conn.execute("UPDATE job_history SET result = ? WHERE id = ?",
+                                (json.dumps(result), job_id))
+                db.conn.commit()
+                return jsonify(cleanup)
         except (ValueError, OSError, WorkspaceBusyError) as exc:
             return json_error(str(exc), 409)
 

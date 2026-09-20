@@ -1889,6 +1889,10 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     """
     source_row = db.conn.execute("SELECT path FROM folders WHERE id = ?", (folder_id,)).fetchone()
     source_path = source_row["path"] if source_row else None
+    source_device = None
+    if source_path:
+        with contextlib.suppress(OSError):
+            source_device = os.stat(source_path).st_dev
     groups = plan_folder_date_moves(
         db, folder_id, destination, folder_template,
     )
@@ -1953,7 +1957,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             from .move_cleanup import finish_source
         except ImportError:
             from move_cleanup import finish_source
-        result["source_cleanup"] = finish_source(db, source_path)
+        result["source_cleanup"] = finish_source(db, source_path, source_device)
     return result
 
 

@@ -60,6 +60,9 @@ def test_review_and_optional_trash_from_old_history(cleanup_case, monkeypatch):
     assert not source.exists()
     assert source.parent.exists()
     assert client.get(URL).json["state"] == "removed"
+    stored = json.loads(db.conn.execute("SELECT result FROM job_history WHERE id = 'old-move'").fetchone()[0])
+    assert stored["source_cleanup"]["source_device"] == source.parent.stat().st_dev
+    assert client.get(URL + "?summary=1").json["state"] == "removed"
 
 
 @pytest.mark.parametrize("change", ["added", "edited", "replaced", "symlink"])
@@ -213,6 +216,68 @@ def test_missing_parent_is_not_reported_as_successful_cleanup(cleanup_case, tmp_
     _, db, _, _ = cleanup_case
     result = finish_source(db, str(tmp_path / "offline-volume" / "source"))
     assert result["state"] == "unavailable"
+
+
+def test_missing_source_without_volume_baseline_keeps_catalog(cleanup_case):
+    _, db, source, folder_id = cleanup_case
+    (source / "orphan.xmp").unlink()
+    source.rmdir()
+    assert finish_source(db, str(source))["state"] == "unavailable"
+    assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
+
+
+def test_disconnect_during_trash_preserves_catalog_and_reports_failure(cleanup_case, monkeypatch):
+    from types import SimpleNamespace
+
+    _, db, source, folder_id = cleanup_case
+    review = review_source(db, str(source))
+    original_stat, original_lstat = os.stat, os.lstat
+    disconnected = False
+
+    def lstat(path, *args, **kwargs):
+        if disconnected and os.fspath(path) == str(source):
+            raise FileNotFoundError(str(source))
+        return original_lstat(path, *args, **kwargs)
+
+    def stat(path, *args, **kwargs):
+        if disconnected and os.fspath(path) == str(source.parent):
+            return SimpleNamespace(st_dev=review["source_device"] + 1)
+        return original_stat(path, *args, **kwargs)
+
+    def trash(paths):
+        nonlocal disconnected
+        disconnected = True
+        return 0, set(), [{"path": paths[0], "error": "volume disconnected"}]
+
+    monkeypatch.setattr("move_cleanup.os.lstat", lstat)
+    monkeypatch.setattr("move_cleanup.os.stat", stat)
+    result = cleanup_source(db, str(source), review["review_token"], trash)
+    assert result["state"] == "unavailable"
+    assert result["failures"][0]["error"] == "volume disconnected"
+    assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
+    assert db.conn.execute("SELECT 1 FROM workspace_folders WHERE folder_id = ?", (folder_id,)).fetchone()
+    disconnected = False
+    assert (source / "orphan.xmp").read_text() == "editing settings"
+
+
+def test_device_change_between_inventory_and_removal_keeps_catalog(cleanup_case, monkeypatch):
+    import move_cleanup
+
+    _, db, source, folder_id = cleanup_case
+    (source / "orphan.xmp").unlink()
+    device = source.stat().st_dev
+    original_review = move_cleanup.review_source
+
+    def changed_review(db, path, expected_device=None):
+        if expected_device is not None:
+            raise ValueError("The original volume changed")
+        return original_review(db, path)
+
+    monkeypatch.setattr(move_cleanup, "review_source", changed_review)
+    assert finish_source(db, str(source))["state"] == "unavailable"
+    assert source.is_dir()
+    assert source.stat().st_dev == device
+    assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
 
 
 def test_cleanup_is_blocked_while_workspace_job_runs(cleanup_case, monkeypatch):

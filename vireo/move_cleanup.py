@@ -13,7 +13,7 @@ def _identity(path):
             info.st_mtime_ns, info.st_ctime_ns]
 
 
-def review_source(db, source):
+def review_source(db, source, expected_device=None):
     """Inventory without following links; protect catalog photos in all workspaces."""
     source = os.path.abspath(source)
     resolved = os.path.realpath(source)
@@ -24,8 +24,13 @@ def review_source(db, source):
     except FileNotFoundError:
         # A disconnected volume or inaccessible parent is not evidence that
         # cleanup succeeded. Surface that error instead of claiming removal.
-        os.stat(os.path.dirname(source))
-        return {"state": "removed", "source_path": source, "files": [], "file_count": 0}
+        parent_stat = os.stat(os.path.dirname(source))
+        if expected_device is None or parent_stat.st_dev != expected_device:
+            raise ValueError("The original volume is unavailable or cannot be verified; reconnect it and review again") from None
+        return {"state": "removed", "source_path": source, "files": [], "file_count": 0,
+                "source_device": expected_device}
+    if expected_device is not None and source_stat.st_dev != expected_device:
+        raise ValueError("The original volume changed; reconnect it and review again")
     if not stat.S_ISDIR(source_stat.st_mode):
         raise ValueError("The original folder has been replaced by a file")
     for row in db.conn.execute(
@@ -73,6 +78,7 @@ def review_source(db, source):
         "source_path": source, "files": files, "file_count": len(files),
         "directories": directories, "review_token": token,
         "xmp_count": sum(item["name"].lower().endswith(".xmp") for item in files),
+        "source_device": source_stat.st_dev,
     }
 
 
@@ -84,13 +90,13 @@ def _source_folder_rows(db, source):
             or path.startswith(resolved + os.sep)]
 
 
-def _remove_empty_source(db, source):
+def _remove_empty_source(db, source, expected_device):
     """Retire empty catalog rows and remove the directory under a writer lock."""
     db.conn.execute("BEGIN IMMEDIATE")
     try:
         # Recheck after obtaining the writer lock: a scanner may have added
         # photos or workspace links since the initial filesystem inventory.
-        review = review_source(db, source)
+        review = review_source(db, source, expected_device)
         if review["state"] not in ("empty", "removed"):
             raise ValueError("The folder changed. Review remaining files again before cleaning up")
         rows = sorted(_source_folder_rows(db, source),
@@ -120,17 +126,20 @@ def _remove_empty_source(db, source):
         db._new_images_cache.invalidate_workspaces(db._db_path, [db._active_workspace_id])
 
 
-def finish_source(db, source):
+def finish_source(db, source, expected_device=None):
     """Remove only the selected source when empty, and report remaining files."""
     try:
-        review = review_source(db, source)
+        review = review_source(db, source, expected_device)
         if review["state"] in ("empty", "removed"):
-            _remove_empty_source(db, source)
+            _remove_empty_source(db, source, review["source_device"])
             review["state"] = "removed"
         return {key: review[key] for key in
-                ("state", "source_path", "file_count", "xmp_count") if key in review}
+                ("state", "source_path", "file_count", "xmp_count", "source_device") if key in review}
     except (OSError, ValueError, sqlite3.Error) as exc:
-        return {"state": "unavailable", "source_path": source, "error": str(exc)}
+        result = {"state": "unavailable", "source_path": source, "error": str(exc)}
+        if expected_device is not None:
+            result["source_device"] = expected_device
+        return result
 
 
 def cleanup_source(db, source, token, trash_paths):
@@ -147,7 +156,7 @@ def cleanup_source(db, source, token, trash_paths):
     trashed, _successful, failures = trash_paths(paths) if paths else (0, set(), [])
     # rmdir cannot remove a folder containing a new file or a failed Trash item.
     for relative in sorted(review["directories"], key=lambda p: p.count(os.sep), reverse=True):
-        finish_source(db, os.path.join(source, relative))
-    result = finish_source(db, source)
+        finish_source(db, os.path.join(source, relative), review["source_device"])
+    result = finish_source(db, source, review["source_device"])
     result.update(trashed=trashed, failures=failures)
     return result
