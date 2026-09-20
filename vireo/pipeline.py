@@ -321,11 +321,15 @@ def load_photo_features(db, collection_id=None, config=None,
     # including detections that do not have a species prediction yet. The
     # latter is important review information: a second box must not disappear
     # merely because classification failed or has not run for that detection.
+    from subjects import primary_order_sql
     subject_det_rows = db.conn.execute(
         f"""SELECT d.id AS detection_id, d.photo_id,
                    d.box_x, d.box_y, d.box_w, d.box_h,
-                   d.detector_confidence, d.category, d.detector_model
+                   d.detector_confidence, d.category, d.detector_model,
+                   ds.crop AS suggested_crop, ds.quality_score AS subject_quality_score,
+                   ds.exposure_ev
             FROM detections d
+            LEFT JOIN detection_subjects ds ON ds.detection_id=d.id
             JOIN photos p ON p.id = d.photo_id
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
             WHERE wf.workspace_id = ?
@@ -333,7 +337,7 @@ def load_photo_features(db, collection_id=None, config=None,
               AND d.detector_model != 'full-image'
               AND d.category = 'animal'
               {scope_sql}
-            ORDER BY d.photo_id, d.detector_confidence DESC, d.id ASC""",
+            ORDER BY d.photo_id, {primary_order_sql("d")}""",
         (ws_id, *detection_floor_params, *scope_params),
     ).fetchall()
     subjects_by_photo = defaultdict(list)
@@ -356,6 +360,10 @@ def load_photo_features(db, collection_id=None, config=None,
             },
             "detection_confidence": det["detector_confidence"],
             "category": det["category"],
+            "is_primary": not subjects_by_photo[det["photo_id"]],
+            "suggested_crop": json.loads(det["suggested_crop"]) if det["suggested_crop"] else None,
+            "quality_score": det["subject_quality_score"],
+            "exposure_ev": det["exposure_ev"],
             "predictions": [],
         }
         subjects_by_photo[det["photo_id"]].append(subject)
@@ -443,7 +451,7 @@ def load_photo_features(db, collection_id=None, config=None,
                 (species, pr["confidence"], pr["model"], identity.key)
             )
 
-    # Load primary detection per photo (highest confidence) via the global
+    # Load the selected primary detection per photo via the global
     # read-time helper. This replaces the old photos.detection_box /
     # photos.detection_conf columns; the helper applies the same threshold
     # resolved above.
@@ -454,7 +462,7 @@ def load_photo_features(db, collection_id=None, config=None,
     for pid, dets in dets_by_photo.items():
         if not dets:
             continue
-        top = dets[0]  # helper returns each list ordered by confidence DESC
+        top = dets[0]  # helper returns the selected primary first
         primary_det_by_photo[pid] = {
             "x": top["x"],
             "y": top["y"],
@@ -2194,6 +2202,11 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     # carry its predecessor path. Re-read and fully load the current active
     # mask under the same photo lock writers hold through predecessor cleanup.
     with acquire_photo_mask(row["id"]):
+        selected = db.conn.execute("""SELECT d.box_x,d.box_y,d.box_w,d.box_h
+            FROM photo_subject_state ss LEFT JOIN detections d ON d.id=ss.detection_id
+            WHERE ss.photo_id=?""", (row["id"],)).fetchone()
+        if selected is not None and any(selected["box_" + k] != row["box_" + k] for k in "xywh"):
+            return
         current_mask = db.conn.execute(
             "SELECT mask_path FROM photos WHERE id = ?", (row["id"],),
         ).fetchone()
@@ -2201,59 +2214,59 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
             return
         mask = _load_mask_array(current_mask["mask_path"])
 
-    # Resize mask to image dims if needed (masks are typically saved at
-    # proxy resolution and must be compared to full-image keypoint coords).
-    if mask.shape != (ih, iw):
-        from PIL import Image as _PIL
-        mask_img = _PIL.fromarray(mask.astype(np.uint8) * 255).resize(
-            (iw, ih), _PIL.NEAREST
+        # Resize mask to image dims if needed (masks are typically saved at
+        # proxy resolution and must be compared to full-image keypoint coords).
+        if mask.shape != (ih, iw):
+            from PIL import Image as _PIL
+            mask_img = _PIL.fromarray(mask.astype(np.uint8) * 255).resize(
+                (iw, ih), _PIL.NEAREST
+            )
+            mask = np.array(mask_img) > 127
+
+        # Gate 3 + 4: eye keypoint conf >= T AND inside the subject mask.
+        eye_candidates = []
+        for k_point in kps:
+            if k_point["name"] not in ("left_eye", "right_eye"):
+                continue
+            if k_point["conf"] < T:
+                continue
+            mx, my = int(k_point["x"]), int(k_point["y"])
+            if not (0 <= mx < mask.shape[1] and 0 <= my < mask.shape[0]):
+                continue
+            if not mask[my, mx]:
+                continue
+            eye_candidates.append(k_point)
+
+        if not eye_candidates:
+            mark_attempted_without_eye()
+            return
+
+        # Pick the eye with the highest windowed tenengrad — "best" eye wins.
+        best = None
+        best_score = -1.0
+        for eye in eye_candidates:
+            score = compute_eye_tenengrad(
+                image, (eye["x"], eye["y"]), bbox, k=k_window
+            )
+            if score > best_score:
+                best_score = score
+                best = eye
+
+        # Persist eye coords normalized to 0-1 against the loaded (oriented)
+        # image dims. Two reasons: (a) EXIF-rotated JPEGs would otherwise
+        # need the oriented dims stored separately for the lightbox to map
+        # pixel coords back to a percentage — photos.width/height come from
+        # the un-oriented sensor tag so the math goes wrong on orientation
+        # 6/8; (b) this matches the detection-box storage convention
+        # (box_x/box_y are also normalized 0-1).
+        db.update_photo_pipeline_features(
+            row["id"],
+            eye_x=best["x"] / float(iw),
+            eye_y=best["y"] / float(ih),
+            eye_conf=best["conf"],
+            eye_tenengrad=best_score,
+            eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
         )
-        mask = np.array(mask_img) > 127
-
-    # Gate 3 + 4: eye keypoint conf >= T AND inside the subject mask.
-    eye_candidates = []
-    for k_point in kps:
-        if k_point["name"] not in ("left_eye", "right_eye"):
-            continue
-        if k_point["conf"] < T:
-            continue
-        mx, my = int(k_point["x"]), int(k_point["y"])
-        if not (0 <= mx < mask.shape[1] and 0 <= my < mask.shape[0]):
-            continue
-        if not mask[my, mx]:
-            continue
-        eye_candidates.append(k_point)
-
-    if not eye_candidates:
-        mark_attempted_without_eye()
-        return
-
-    # Pick the eye with the highest windowed tenengrad — "best" eye wins.
-    best = None
-    best_score = -1.0
-    for eye in eye_candidates:
-        score = compute_eye_tenengrad(
-            image, (eye["x"], eye["y"]), bbox, k=k_window
-        )
-        if score > best_score:
-            best_score = score
-            best = eye
-
-    # Persist eye coords normalized to 0-1 against the loaded (oriented)
-    # image dims. Two reasons: (a) EXIF-rotated JPEGs would otherwise
-    # need the oriented dims stored separately for the lightbox to map
-    # pixel coords back to a percentage — photos.width/height come from
-    # the un-oriented sensor tag so the math goes wrong on orientation
-    # 6/8; (b) this matches the detection-box storage convention
-    # (box_x/box_y are also normalized 0-1).
-    db.update_photo_pipeline_features(
-        row["id"],
-        eye_x=best["x"] / float(iw),
-        eye_y=best["y"] / float(ih),
-        eye_conf=best["conf"],
-        eye_tenengrad=best_score,
-        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
-    )
 
 
 def detect_eye_keypoints_stage(

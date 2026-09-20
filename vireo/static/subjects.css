@@ -1,0 +1,23 @@
+.lb-subject-panel {
+  position: fixed; left: 18px; top: 64px; z-index: 10002;
+  pointer-events: auto; cursor: default;
+  width: min(340px, calc(100vw - 36px)); max-height: calc(100% - 180px);
+  overflow: auto; padding: 12px; border-radius: 10px;
+  color: #eee; background: rgba(12, 20, 26, .95); border: 1px solid #53606b;
+  font-size: 12px; text-align: left;
+}
+.lb-subject-panel[hidden] { display: none; }
+.lb-subject-panel summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+.lb-subject-list { display: flex; gap: 8px; overflow-x: auto; margin: 12px 0; }
+.lb-subject-card { flex: 0 0 92px; min-width: 0; background: #263039; border: 2px solid transparent; border-radius: 6px; padding: 4px; color: inherit; cursor: pointer; }
+.lb-subject-card[aria-pressed="true"] { border-color: #e1ca5b; }
+.lb-subject-card img { width: 80px; height: 64px; object-fit: contain; }
+.lb-subject-card span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-subject-preview { width: 100%; height: 145px; object-fit: contain; margin-bottom: 8px; }
+.lb-subject-panel p { line-height: 1.5; margin: 8px 0; }
+.lb-subject-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.lb-subject-controls button { padding: 5px 8px; border: 1px solid #63727c; border-radius: 5px; color: inherit; background: #263039; cursor: pointer; }
+.lb-subject-panel button:disabled { opacity: .5; cursor: default; }
+.lb-subject-panel button:focus-visible, .lb-subject-panel summary:focus-visible { outline: 2px solid #e1ca5b; outline-offset: 2px; }
+
+.lightbox-overlay.lb-hide-chrome .lb-subject-panel { display: none !important; }

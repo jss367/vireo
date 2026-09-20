@@ -2414,7 +2414,7 @@ def create_pipeline_blueprint(
         dets = [d for d in raw_dets if d["detector_confidence"] >= min_conf]
         result["detections"] = [dict(d) for d in dets]
 
-        # Primary detection = highest-confidence above threshold.
+        # The shared reader orders the chosen primary first, above threshold.
         if dets:
             primary = dets[0]
             result["detection_box"] = {

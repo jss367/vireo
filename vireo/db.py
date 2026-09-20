@@ -1213,6 +1213,23 @@ class Database:
                 PRIMARY KEY (photo_id, variant)
             );
 
+            CREATE TABLE IF NOT EXISTS detection_subjects (
+                detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+                source_key TEXT NOT NULL,
+                crop TEXT NOT NULL,
+                quality_score REAL NOT NULL,
+                exposure_ev REAL NOT NULL,
+                features TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS photo_subject_choices (
+                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+                detection_id INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS photo_subject_state (
+                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+                detection_id INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS predictions (
                 id                   INTEGER PRIMARY KEY,
                 detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
@@ -9523,7 +9540,7 @@ class Database:
 
         Reuses the staleness predicate from ``find_stale_masks`` — a
         mask is fresh only when its stored ``(detector_model,
-        prompt_xywh)`` equals the highest-confidence non-full-image
+        prompt_xywh)`` equals the selected non-full-image
         detection on the same photo (with optional ``detector_confidence``
         floor). Filtered by ``sam2_variant`` so a stale mask under a
         different variant doesn't pollute the count for the currently
@@ -9547,6 +9564,7 @@ class Database:
         """
         import config as cfg
         ws = self._ws_id()
+        from subjects import primary_order_sql
         if detector_confidence is None:
             detector_confidence = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
@@ -9576,7 +9594,7 @@ class Database:
                             WHERE d2.photo_id = pm.photo_id
                               AND d2.detector_model != 'full-image'
                               AND d2.detector_confidence >= ?
-                            ORDER BY d2.detector_confidence DESC, d2.id ASC
+                            ORDER BY {primary_order_sql("d2")}
                             LIMIT 1
                        )
                        AND d.detector_model = pm.detector_model
@@ -11976,14 +11994,22 @@ class Database:
         themselves once the loop completes.
         """
         row = self.conn.execute(
-            "SELECT path, subject_size, subject_tenengrad, bg_tenengrad, "
-            "crop_complete FROM photo_masks WHERE photo_id=? AND variant=?",
+            "SELECT pm.*, ss.detection_id AS selected_id, d.detector_model AS selected_model, "
+            "d.box_x AS selected_x, d.box_y AS selected_y, d.box_w AS selected_w, d.box_h AS selected_h "
+            "FROM photo_masks pm LEFT JOIN photo_subject_state ss ON ss.photo_id=pm.photo_id "
+            "LEFT JOIN detections d ON d.id=ss.detection_id "
+            "WHERE pm.photo_id=? AND pm.variant=?",
             (photo_id, variant),
         ).fetchone()
         if row is None:
             raise ValueError(
                 f"No photo_masks row for photo {photo_id} variant {variant!r}"
             )
+        if row["selected_id"] is not None and (
+            row["detector_model"] != row["selected_model"]
+            or any(row["prompt_" + k] != row["selected_" + k] for k in "xywh")
+        ):
+            raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
@@ -12093,39 +12119,15 @@ class Database:
         return len(rows)
 
     def find_stale_masks(self, detector_confidence=None):
-        """Return photo_masks rows whose stored prompt no longer matches
-        the photo's current primary detection (highest-confidence,
-        non full-image).
+        """Return masks whose prompts differ from the selected primary.
 
-        A mask is fresh only if its stored ``(detector_model, prompt_*)``
-        equals the photo's primary detection — the single
-        highest-confidence non-``full-image`` row. Matching against any
-        detection (e.g., a low-confidence secondary box still carrying
-        the old coordinates, or another retained model's row) would
-        leave stale cache entries lingering after detector/model
-        changes, so we pick exactly one primary row per photo and
-        require the prompt to equal that row.
-
-        Tie-break: when multiple detections share the maximum
-        confidence, both this query and the extraction code in
-        ``api_job_extract_masks`` / ``get_detections`` resolve to the
-        smallest ``detections.id`` (insertion order). Using
-        ``MAX(detector_confidence)`` here would leave the primary
-        ambiguous on ties — a mask matching either tied row could be
-        treated as fresh even though extraction is now using the other
-        one. ``ORDER BY detector_confidence DESC, id ASC LIMIT 1`` keeps
-        stale-detection and extraction in sync.
-
-        ``detector_confidence`` is an optional workspace floor (the same
-        threshold both extraction paths apply when picking detections to
-        run SAM on). When provided, detections below the floor are
-        invisible to this query, so masks whose prompt only matches a
-        below-threshold box — i.e. masks the pipeline would no longer
-        regenerate from that detection — are correctly flagged stale.
-        Without this filter, raising ``detector_confidence`` left the
-        storage card under-counting stale masks and ``delete_stale_masks``
-        leaving them on disk.
+        Selection uses the same manual-choice, quality, confidence, and ID
+        ordering as extraction. When supplied, ``detector_confidence`` hides
+        boxes below the workspace floor before selection. A mask matching a
+        secondary or now-hidden detection is stale even if its row remains
+        cached for later reuse.
         """
+        from subjects import primary_order_sql
         if detector_confidence is None:
             conf_pred = ""
             params = ()
@@ -12146,7 +12148,7 @@ class Database:
                         WHERE d2.photo_id = pm.photo_id
                           AND d2.detector_model != 'full-image'
                           {conf_pred}
-                        ORDER BY d2.detector_confidence DESC, d2.id ASC
+                        ORDER BY {primary_order_sql("d2")}
                         LIMIT 1
                    )
                    AND d.detector_model = pm.detector_model
@@ -12454,7 +12456,7 @@ class Database:
         """Get photos that have detections but no masks yet.
 
         Returns photos that have at least one detection in the current workspace
-        but no mask_path set. Each row includes the primary (highest-confidence)
+        but no mask_path set. Each row includes the selected primary
         detection box.
 
         Args:
@@ -12464,6 +12466,7 @@ class Database:
             list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
         """
         import config as cfg
+        from subjects import primary_order_sql
         ws_id = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -12485,12 +12488,12 @@ class Database:
                     WHERE p.folder_id IN ({placeholders})
                       AND p.mask_path IS NULL
                       AND d.detector_confidence >= ?
-                    ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
+                    ORDER BY p.id, {primary_order_sql("d")}""",
                 [ws_id, *folder_ids, min_conf],
             ).fetchall()
         else:
             rows = self.conn.execute(
-                """SELECT p.id, p.folder_id, p.filename,
+                f"""SELECT p.id, p.folder_id, p.filename,
                           d.box_x, d.box_y, d.box_w, d.box_h,
                           d.detector_confidence
                    FROM photos p
@@ -12499,11 +12502,11 @@ class Database:
                    WHERE wf.workspace_id = ?
                      AND p.mask_path IS NULL
                      AND d.detector_confidence >= ?
-                   ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
+                   ORDER BY p.id, {primary_order_sql("d")}""",
                 (ws_id, min_conf),
             ).fetchall()
 
-        # Deduplicate to one row per photo (primary detection = highest confidence)
+        # Deduplicate to one row per photo (selected primary first)
         import json as _json
         seen = set()
         result = []
@@ -12539,7 +12542,9 @@ class Database:
             caller scope the stage to a collection so a pipeline run doesn't
             touch unrelated photos elsewhere in the workspace
 
-        Returns one row per photo. The row chosen is the highest-confidence
+        Returns one row per photo. Once subject analysis records a primary,
+        only that detection can supply eye predictions. For legacy photos,
+        the row chosen is the highest-confidence
         prediction on the highest-confidence real detection **among
         predictions that carry routable taxonomy info** (taxonomy_class or
         scientific_name set); predictions missing both fields are only
@@ -12581,6 +12586,8 @@ class Database:
                 AND d.detector_confidence >= ?
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
+                 AND (NOT EXISTS (SELECT 1 FROM photo_subject_state ss WHERE ss.photo_id=p.id)
+                      OR d.id=(SELECT ss.detection_id FROM photo_subject_state ss WHERE ss.photo_id=p.id))
                  AND (p.eye_kp_fingerprint IS NULL
                       OR p.eye_kp_fingerprint != ?){extra_where}
                  AND pr.labels_fingerprint = (
@@ -22739,12 +22746,10 @@ class Database:
         if detector_model is not None:
             q += " AND detector_model = ?"
             params.append(detector_model)
-        # Explicit ``id ASC`` tie-break so callers that take the first
-        # row (mask extraction's primary detection picker) agree with
-        # ``find_stale_masks`` on which row is the primary when two
-        # detections share the maximum confidence. Without this,
-        # SQLite's row order on ties is implementation-defined.
-        q += " ORDER BY detector_confidence DESC, id ASC"
+        # The same ordering drives masks, crop previews, and bulk payloads:
+        # manual choice, subject quality, then confidence and stable ID.
+        from subjects import primary_order_sql
+        q += " ORDER BY " + primary_order_sql()
         return self.conn.execute(q, params).fetchall()
 
     def get_detections_for_photos(self, photo_ids, min_conf=None,
@@ -22752,7 +22757,8 @@ class Database:
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
         Each det_dict has keys: id, x, y, w, h, confidence, category, and
-        detector_model. Lists are ordered by confidence DESC. The detections
+        detector_model. Lists put the chosen primary first, then quality and
+        detector confidence. The detections
         table is global — threshold filtering happens at read time. Photos
         with no detections above ``min_conf`` are omitted from the result.
 
@@ -22786,7 +22792,8 @@ class Database:
             if detector_model is not None:
                 q += " AND detector_model = ?"
                 params.append(detector_model)
-            q += " ORDER BY photo_id, detector_confidence DESC"
+            from subjects import primary_order_sql
+            q += " ORDER BY photo_id, " + primary_order_sql()
             rows = self.conn.execute(q, params).fetchall()
             for r in rows:
                 result.setdefault(r["photo_id"], []).append({
@@ -22884,7 +22891,7 @@ class Database:
 
         Excludes photos already flagged as rejected. Scoped to folders
         linked to the active workspace. ``detection_box`` and
-        ``detection_conf`` are sourced from the primary (highest-confidence)
+        ``detection_conf`` are sourced from the selected primary
         row in the ``detections`` table — the legacy ``photos`` columns are
         not populated by normal pipeline runs. ``raw_detection_conf`` exposes
         the best animal candidate even when it is below the effective detector
@@ -22934,6 +22941,7 @@ class Database:
         import json as _json
 
         import config as cfg
+        from subjects import primary_order_sql
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
@@ -22954,11 +22962,13 @@ class Database:
                 f"WHERE photo_id IN ({placeholders}) "
                 f"  AND (detector_model IS NULL OR detector_model != 'full-image') "
                 f"  AND COALESCE(category, 'animal') = 'animal' "
-                f"ORDER BY photo_id, detector_confidence DESC",
+                f"ORDER BY photo_id, {primary_order_sql()}",
                 chunk,
             ).fetchall()
             for d in det_rows:
-                raw_primary.setdefault(d["photo_id"], d)
+                previous = raw_primary.get(d["photo_id"])
+                if previous is None or d["detector_confidence"] > previous["detector_confidence"]:
+                    raw_primary[d["photo_id"]] = d
                 if d["detector_confidence"] >= min_conf:
                     primary.setdefault(d["photo_id"], d)
         for p in photos:
@@ -23109,14 +23119,24 @@ class Database:
         if not detection_ids:
             return
         ids = list(detection_ids)
+        affected_subject_photos = set()
         _CHUNK = 900
         for i in range(0, len(ids), _CHUNK):
             chunk = ids[i : i + _CHUNK]
             placeholders = ",".join("?" * len(chunk))
+            affected_subject_photos.update(row[0] for row in self.conn.execute(
+                f"SELECT DISTINCT d.photo_id FROM detections d "
+                f"JOIN photo_subject_state s ON s.photo_id=d.photo_id "
+                f"WHERE d.id IN ({placeholders})", chunk,
+            ))
             self.conn.execute(
                 f"DELETE FROM detections WHERE id IN ({placeholders})",
                 chunk,
             )
+        if affected_subject_photos:
+            from subjects import sync_primary
+            for photo_id in affected_subject_photos:
+                sync_primary(self, photo_id)
         self.conn.commit()
 
     # -- Pending Changes --

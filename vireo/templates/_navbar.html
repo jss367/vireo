@@ -4026,6 +4026,19 @@ async function createWorkspace() {
   </div>
   <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 160px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
+  <details id="lightboxSubjects" class="lb-subject-panel" hidden onclick="event.stopPropagation();" onmousedown="event.stopPropagation();" onkeydown="event.stopPropagation();">
+    <summary id="lightboxSubjectSummary">Subjects</summary>
+    <div id="lightboxSubjectList" class="lb-subject-list" aria-label="Choose primary subject"></div>
+    <div id="lightboxSubjectDetails"></div>
+    <label><input id="lightboxSubjectCorrected" type="checkbox" checked> Preview suggested exposure</label>
+    <div class="lb-subject-controls">
+      <button id="lightboxSubjectAnalyze" type="button">Analyze subjects</button>
+      <button id="lightboxSubjectUseCrop" type="button">Use crop</button>
+      <button id="lightboxSubjectUseExposure" type="button">Use exposure</button>
+      <button id="lightboxSubjectAutomatic" type="button">Choose automatically</button>
+    </div>
+    <p id="lightboxSubjectStatus" role="status"></p>
+  </details>
   <div class="lightbox-bottom-bar">
     <div class="lightbox-info">
       <div class="lightbox-filename" id="lightboxFilename"
@@ -8086,6 +8099,7 @@ function openLightbox(photoId, filename, photoList, options) {
   wrap.classList.toggle('zoomed', transitionZoom > 1.001);
   wrap.scrollTop = 0;
   wrap.scrollLeft = 0;
+  document.dispatchEvent(new Event('lightbox:subjectreset'));
   // Clear previous detection overlays
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
@@ -15580,3 +15594,6 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
 })();
 </script>
 <script src="/static/help.js"></script>
+
+<link rel="stylesheet" href="/static/subjects.css">
+<script src="/static/subjects.js"></script>

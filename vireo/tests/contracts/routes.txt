@@ -103,6 +103,7 @@ GET          /api/photos/<int:photo_id>/edit-history
 GET          /api/photos/<int:photo_id>/edit-recipe
 GET          /api/photos/<int:photo_id>/pipeline
 GET          /api/photos/<int:photo_id>/similar
+GET          /api/photos/<int:photo_id>/subjects
 GET          /api/photos/<int:pid>/masks
 GET          /api/photos/calendar
 GET          /api/photos/color_labels
@@ -342,6 +343,7 @@ POST         /api/photos/<int:photo_id>/local-mask/snapshot
 POST         /api/photos/<int:photo_id>/location
 POST         /api/photos/<int:photo_id>/location/text
 POST         /api/photos/<int:photo_id>/rating
+POST         /api/photos/<int:photo_id>/subjects/analyze
 POST         /api/photos/<int:photo_id>/wildlife_excluded
 POST         /api/photos/best-batch
 POST         /api/photos/by-ids
@@ -427,6 +429,7 @@ PUT          /api/collections/<int:collection_id>
 PUT          /api/color-label-descriptions/<color>
 PUT          /api/keywords/<int:keyword_id>
 PUT          /api/move-rules/<int:rule_id>
+PUT          /api/photos/<int:photo_id>/primary-subject
 PUT          /api/processes/<int:process_id>
 PUT          /api/workspaces/<int:ws_id>
 PUT          /api/workspaces/<int:ws_id>/subject-types

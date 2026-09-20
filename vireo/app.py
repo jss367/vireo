@@ -18711,6 +18711,62 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         dets = db.get_detections(photo_id)
         return jsonify([dict(d) for d in dets])
 
+    @app.route("/api/photos/<int:photo_id>/subjects")
+    def api_photo_subjects(photo_id):
+        from subjects import payload
+        db = _get_db()
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return json_error("not found", 404)
+        return jsonify(payload(db, photo_id))
+
+    @app.route("/api/photos/<int:photo_id>/subjects/analyze", methods=["POST"])
+    @background_job
+    def api_analyze_photo_subjects(ctx, photo_id):
+        db = _get_db()
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return json_error("not found", 404)
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            from image_loader import get_canonical_image_path
+            from subjects import analyze_photo
+            thread_db = ctx.thread_db()
+            try:
+                ctx.checkpoint(job)
+                photo = thread_db.get_photo(photo_id, verify_workspace=True)
+                if photo is None:
+                    raise ValueError("Photo is no longer in this workspace")
+                folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+                path = get_canonical_image_path(photo, vireo_dir, folders)
+                count = analyze_photo(thread_db, photo_id, path,
+                                      checkpoint=lambda: ctx.checkpoint(job))
+                job["result"] = {"photo_id": photo_id, "subjects_analyzed": count}
+            finally:
+                thread_db.close()
+
+        return ctx.start("analyze-subjects", work, config={"photo_id": photo_id})
+
+    @app.route("/api/photos/<int:photo_id>/primary-subject", methods=["PUT"])
+    def api_primary_subject(photo_id):
+        from subjects import payload, select_primary
+        db = _get_db()
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return json_error("not found", 404)
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or "detection_id" not in body:
+            return json_error("detection_id is required; use null for automatic selection")
+        from pipeline_locks import acquire_photo_mask
+        lock = acquire_photo_mask(photo_id)
+        if not lock.acquire(blocking=False):
+            return json_error("Subject analysis is running for this photo. Try again when it finishes.", 409)
+        try:
+            select_primary(db, photo_id, body["detection_id"])
+        except ValueError as exc:
+            return json_error(str(exc))
+        finally:
+            lock.release()
+        return jsonify(payload(db, photo_id))
+
     def _miss_threshold_config_from_body(db, body):
         """Merge Misses-page threshold overrides into effective config."""
         import config as cfg
@@ -27527,6 +27583,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from pipeline_locks import acquire_photo_mask
             from quality import compute_all_quality_features
             from resource_ledger import ResourceWaitCancelled
+            from subjects import primary_order_sql
 
             thread_db = ctx.thread_db()
 
@@ -27581,7 +27638,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # already masked for this variant".
                 ws_id = thread_db._active_workspace_id
                 rows = thread_db.conn.execute(
-                    """SELECT p.id, p.folder_id, p.filename,
+                    f"""SELECT p.id, p.folder_id, p.filename,
                               d.detector_model,
                               d.box_x, d.box_y, d.box_w, d.box_h,
                               d.detector_confidence
@@ -27592,7 +27649,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         WHERE wf.workspace_id = ?
                           AND d.detector_model != 'full-image'
                           AND d.detector_confidence >= ?
-                        ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
+                        ORDER BY p.id, {primary_order_sql("d")}""",
                     (ws_id, min_detector_conf),
                 ).fetchall()
                 seen = set()
@@ -27658,6 +27715,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     break
                 mask_file_stage = None
                 try:
+                    # A user can change primary after this job was queued.
+                    current = [d for d in thread_db.get_detections(photo_id, min_conf=min_detector_conf)
+                               if d["detector_model"] != "full-image"]
+                    if not current:
+                        skipped += 1
+                        continue
+                    selected = current[0]
+                    photo["detector_model"] = selected["detector_model"]
+                    photo["prompt"] = tuple(selected["box_" + k] for k in "xywh")
+                    photo["detection_box"] = {k: selected["box_" + k] for k in "xywh"}
                     # Cache hit: photo_masks already has a row for
                     # (photo, configured variant) AND its stored prompt
                     # + detector still match the current primary
@@ -29411,6 +29478,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo:
             return "Not found", 404
 
+        # Get primary detection box — global detections table, threshold
+        # resolved from workspace-effective config in get_detections.
+        dets = db.get_detections(photo_id)
+        requested_detection = request.args.get("detection_id")
+        if requested_detection is not None:
+            try:
+                requested_detection = int(requested_detection)
+            except ValueError:
+                return json_error("Invalid detection_id")
+            dets = [d for d in dets if d["id"] == requested_detection
+                    and d["category"] == "animal" and d["detector_model"] != "full-image"]
+            if not dets:
+                return json_error("Subject not found", 404)
+
         # Try working copy first, fall back to original
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         image_path = None
@@ -29449,7 +29530,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # already exists for precisely this race.
             with working_copy_publication_guard():
                 touch_working_copy_access(image_path)
-        img = load_image(image_path, max_size=None)
+        preview_size = 1024 if request.args.get("detection_id") is not None else None
+        img = load_image(image_path, max_size=preview_size)
         if img is None and using_working_copy:
             # Quota enforcement can unlink the working copy after the
             # existence check above but before Pillow opens it. Re-resolve
@@ -29463,13 +29545,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if folder else None
             )
             if original_path and os.path.isfile(original_path):
-                img = load_image(original_path, max_size=None)
+                img = load_image(original_path, max_size=preview_size)
         if img is None:
             return "Could not load image", 500
 
-        # Get primary detection box — global detections table, threshold
-        # resolved from workspace-effective config in get_detections.
-        dets = db.get_detections(photo_id)
         det_box = None
         if dets:
             det_row = dets[0]
@@ -29477,9 +29556,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "x": det_row["box_x"], "y": det_row["box_y"],
                 "w": det_row["box_w"], "h": det_row["box_h"],
             }
+        if requested_detection is not None:
+            from subjects import suggested_crop
+            det_box = suggested_crop(det_row)
         if det_box:
             iw, ih = img.size
-            padding = cfg.load().get("detection_padding", 0.2)
+            padding = 0 if requested_detection is not None else cfg.load().get("detection_padding", 0.2)
             pad_w = det_box["w"] * padding
             pad_h = det_box["h"] * padding
             x1 = max(0, int((det_box["x"] - pad_w) * iw))
@@ -29487,9 +29569,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             x2 = min(iw, int((det_box["x"] + det_box["w"] + pad_w) * iw))
             y2 = min(ih, int((det_box["y"] + det_box["h"] + pad_h) * ih))
             crop = img.crop((x1, y1, x2, y2))
-            if crop.size[0] >= 50 and crop.size[1] >= 50:
+            if requested_detection is not None or (crop.size[0] >= 50 and crop.size[1] >= 50):
                 img = crop
 
+        if requested_detection is not None and request.args.get("suggested") == "1":
+            analysis = db.conn.execute(
+                "SELECT exposure_ev FROM detection_subjects WHERE detection_id=?",
+                (requested_detection,),
+            ).fetchone()
+            if analysis:
+                from image_edits import apply_recipe
+                img = apply_recipe(img, {"adjustments": {"exposure": analysis["exposure_ev"]}})
         img.thumbnail((800, 800), Image.LANCZOS)
         import io
 
@@ -29497,7 +29587,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=preview_quality)
         buf.seek(0)
-        return Response(buf.read(), mimetype="image/jpeg")
+        response = Response(buf.read(), mimetype="image/jpeg")
+        if requested_detection is not None:
+            # URLs include the analysis source fingerprint. Reusing a crop in
+            # the subject strip or toggling correction can use browser cache.
+            response.cache_control.private = True
+            response.cache_control.max_age = 3600 if request.args.get("v") else 0
+            response.add_etag()
+            response.make_conditional(request)
+        return response
 
     def allowed_preview_sizes():
         """Allowlist for /photos/<id>/preview?size=N.

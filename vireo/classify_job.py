@@ -1153,10 +1153,10 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                             },
                             "confidence": row["detector_confidence"],
                             "category": row["category"],
-                        } for row in db.get_detections(
+                        } for row in sorted(db.get_detections(
                             photo["id"], min_conf=0,
                             detector_model="megadetector-v6",
-                        )]
+                        ), key=lambda row: (-row["detector_confidence"], row["id"]))]
                         # Reconstruct the configured ArtifactStore from
                         # the path stashed by ``run_classify_job`` /
                         # ``run_pipeline_job`` so newly published detector
@@ -1301,6 +1301,23 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         log.warning("Detection unavailable for batch (non-fatal): %s", e)
     except Exception:
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
+
+    # Analyze every retained subject, including cached detector runs from older
+    # libraries. Detection/classification results remain usable if a source goes
+    # offline; missing analyses are retried on the next run.
+    from subjects import analyze_photo
+    for photo in photos:
+        if photo["id"] not in processed_ids or photo["id"] in cached_detections:
+            continue
+        image_path = os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
+        try:
+            analyze_photo(db, photo["id"], image_path,
+                          min_conf=det_conf_threshold, force=reclassify)
+        except ResourceWaitCancelled:
+            raise
+        except Exception:
+            db.conn.rollback()
+            log.warning("Subject analysis unavailable for photo %s", photo["id"], exc_info=True)
 
     return detection_map, detected, processed_ids
 

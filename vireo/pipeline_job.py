@@ -7194,7 +7194,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         len(dropped_ids), len(still_offline_folder_ids),
                     )
 
-                # Build a map of photo_id -> primary detection (highest confidence)
+                # Build a map of photo_id -> selected primary detection
                 # from the detections table. Only photos with detections and without
                 # masks need processing.
                 #
@@ -7259,7 +7259,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         ]
                     if dets:
                         photos_with_detections += 1
-                        primary = dets[0]  # already ordered by confidence DESC
+                        primary = dets[0]  # selected primary first
                         photo_det_map[p["id"]] = {
                             "photo": p,
                             "det_box": {
@@ -7568,6 +7568,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         with bind_resource_cancel_check(
                             _pause_or_cancel_pending,
                         ), acquire_photo_mask(photo_id):
+                            # Re-resolve under the lock: primary may have changed
+                            # since photos_to_process was built.
+                            current = [d for d in thread_db.get_detections(
+                                photo_id, min_conf=(weak_detection_confidence
+                                    if photo_id in contextual_weak_ids else detector_confidence),
+                                detector_model="megadetector-v6" if photo_id in contextual_weak_ids else None,
+                            ) if d["detector_model"] != "full-image"]
+                            if not current:
+                                skipped += 1
+                                i += 1
+                                continue
+                            selected = current[0]
+                            det_box = {k: selected["box_" + k] for k in "xywh"}
+                            entry["detector_model"] = selected["detector_model"]
+                            entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
                             # Cache hit: a row already exists for (photo, variant)
                             # AND its stored prompt + detector still match the
                             # current primary detection AND the file is on disk.
