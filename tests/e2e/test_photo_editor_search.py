@@ -593,6 +593,45 @@ def test_photo_editor_acknowledgement_keeps_a_concurrent_pending_write(live_serv
     assert remaining["pending"] == {"enabled": True, "aspect": 1.5, "revision": 200}
 
 
+@pytest.mark.parametrize("revision_delta", [0, 1])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_photo_editor_adopts_the_server_winner_after_a_concurrent_save(
+    live_server, page, revision_delta, enabled,
+):
+    """Future photos use the persisted winner, including equal-revision ties."""
+    url = live_server["url"]
+    first_id, second_id = live_server["data"]["photos"][:2]
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            content_type="image/svg+xml",
+            body="<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'/>",
+        ),
+    )
+    page.goto(f"{url}/edit/{first_id}")
+    page.wait_for_function("() => document.getElementById('editorImg').naturalWidth > 0")
+    page.locator("#aspect32Btn").click()
+    crop = page.evaluate("() => editorState.recipe.crop")
+
+    def another_tab_writes_first(route):
+        preference = route.request.post_data_json
+        winner = {
+            "enabled": enabled, "aspect": 1 if enabled else None,
+            "revision": preference["revision"] + revision_delta,
+        }
+        assert page.request.put(f"{url}/api/editor/crop-ratio", data=winner).ok
+        route.continue_()
+
+    page.route("**/api/editor/crop-ratio", another_tab_writes_first)
+    page.get_by_label("Remember crop ratio").click()
+    page.evaluate("() => cropRatioSave")
+    expect(page.get_by_label("Remember crop ratio")).to_be_checked(checked=enabled)
+    assert page.evaluate("() => editorState.recipe.crop") == crop
+    page.evaluate("photoId => loadPhoto(photoId)", second_id)
+    expect(page.locator("#editorFilename")).to_have_text("hawk2.jpg")
+    assert page.evaluate("() => editorState.cropAspect") == (1 if enabled else None)
+
+
 def test_photo_editor_remembered_ratio_preserves_saved_crop(live_server, page):
     """A remembered ratio must not recrop an existing edit just by opening it."""
     url = live_server["url"]

@@ -2441,6 +2441,12 @@ function saveCropRatioPreference(preference) {
     body: JSON.stringify(preference),
     keepalive: true,
   }, {toast: false}).then(function(saved) {
+    // Another tab may have won with a newer (or tied) revision. Adopt the
+    // persisted preference for future photos without recropping this one.
+    if (saved.revision >= (cropRatioPreference.revision || 0)) {
+      cropRatioPreference = saved;
+      updateAspectButtons();
+    }
     acknowledgeCropRatioPreference(saved.revision);
   }).catch(function() {
     showToast('Could not remember the crop ratio. Please try again.', 'error');
