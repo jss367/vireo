@@ -248,11 +248,11 @@ async function samplePointColorAt(e) {
   // Sample at the input of Point Color, so subsequent color changes cannot
   // move the selection away from its own original sample.
   if (recipe.adjustments) {
-    ['point_color', 'sharpen', 'sharpen_radius', 'noise_reduction'].forEach(function(key) { delete recipe.adjustments[key]; });
+    ['point_color', 'sharpen', 'sharpen_radius', 'noise_reduction', 'denoise_mode'].forEach(function(key) { delete recipe.adjustments[key]; });
   }
   if (recipe.local && recipe.local.regions) {
     recipe.local.regions.forEach(function(region) {
-      ['point_color', 'sharpen', 'sharpen_radius', 'noise_reduction'].forEach(function(key) { delete region.adjustments[key]; });
+      ['point_color', 'sharpen', 'sharpen_radius', 'noise_reduction', 'denoise_mode'].forEach(function(key) { delete region.adjustments[key]; });
     });
     recipe.local.regions = recipe.local.regions.filter(function(region) { return Object.keys(region.adjustments).length; });
     if (!recipe.local.regions.length) delete recipe.local;

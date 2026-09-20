@@ -47,6 +47,8 @@ from artifact_flight import (
     preview_artifact_flights,
     preview_prefetch_slots,
 )
+from camera_denoise import cache_matches as _camera_cache_matches
+from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from classification_readiness import classification_readiness
 from db import (
     _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE,
@@ -266,6 +268,7 @@ def _paired_render_state_hash(
             "source_state": source_state,
             "recipe": recipe_to_json(recipe) if recipe else None,
             "edit_math_version": EDIT_MATH_VERSION,
+            **_camera_render_cache_fields(photo, recipe),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -4431,6 +4434,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "file_state": file_state,
             "recipe": recipe_to_json(recipe),
             "edit_math_version": EDIT_MATH_VERSION,
+            **_camera_render_cache_fields(photo, recipe),
         }
 
     def _full_resolution_render_path(
@@ -7828,6 +7832,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        from camera_denoise import resolve_profile
+        result["denoise_profile"] = resolve_profile(photo)
         # The shared lightbox normally warms /original after /full settles.
         # In full-resolution preview mode /full already redirects to /original,
         # so tell the client not to repeat that potentially expensive RAW work.
@@ -20802,6 +20808,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "source_path": source_path,
                     "source_mtime": source_mtime,
                     "edit_math_version": EDIT_MATH_VERSION,
+                    **_camera_render_cache_fields(photo, recipe),
                 }
                 try:
                     if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -20917,6 +20924,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 rendered = apply_recipe_to_loaded_image(
                     img, recipe,
+                    camera_metadata=photo,
                     native_size=_recipe_source_dimensions(photo),
                     local_mask=_local_masks.load_snapshot(
                         vireo_dir, photo["id"], recipe,
@@ -23051,6 +23059,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "source_path": source_path,
                 "source_mtime": source_mtime,
                 "edit_math_version": EDIT_MATH_VERSION,
+                **_camera_render_cache_fields(photo, recipe),
             }
             try:
                 if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -23159,6 +23168,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rendered = apply_recipe_to_loaded_image(
                 img, recipe,
+                camera_metadata=photo,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=_local_masks.load_snapshot(
                     vireo_dir, photo["id"], recipe,
@@ -26976,6 +26986,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         if pair_source and not pair_source_path:
             return "", 404
+        cache_recipe = None if pair_source == "jpeg" else db.get_photo_edit_recipe(photo_id)
         cache_filename = (
             f"{photo_id}_{pair_source}.jpg" if pair_source else filename
         )
@@ -27009,11 +27020,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 selected_source_mtime is None
                 or cached_mtime >= selected_source_mtime
             )
+            fresh = fresh and _camera_cache_matches(thumb_path, photo, cache_recipe)
             if fresh:
                 return _send_cached(thumb_dir, cache_filename)
             log.info(
-                "Thumbnail for photo %s is stale (cached mtime %.0f < "
-                "source file_mtime %.0f) — regenerating",
+                "Thumbnail for photo %s is stale (cached mtime %s, "
+                "source file_mtime %s, or changed camera profile) — regenerating",
                 photo_id, cached_mtime, selected_source_mtime,
             )
             # ``generate_thumbnail`` short-circuits when the destination
@@ -27056,7 +27068,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if sidecar_mtime is not None and (
                     selected_source_mtime is None
                     or sidecar_mtime >= selected_source_mtime
-                ):
+                ) and _camera_cache_matches(thumb_path, photo, cache_recipe):
                     return _send_cached(thumb_dir, cache_filename)
                 # A stale sidecar has to go before we fall through, for
                 # the same reason as the original: ``generate_thumbnail``
@@ -27183,6 +27195,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 thumb_dir,
                 size=thumb_size,
                 recipe=render_recipe,
+                camera_metadata=photo,
                 raw_decode=raw_decode,
                 min_source_size=min_source_size,
                 native_size=(
@@ -27235,6 +27248,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             thumb_dir,
                             size=thumb_size,
                             recipe=render_recipe,
+                            camera_metadata=photo,
                             native_size=(
                                 _recipe_source_dimensions(photo)
                                 if render_recipe else None
@@ -29600,6 +29614,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stale_after_failed_invalidation = (
             cache_path in _invalid_preview_cache_paths
             or _is_preview_cache_invalid(db, photo_id, size)
+            or (os.path.exists(cache_path) and not _camera_cache_matches(cache_path, photo, render_recipe))
         )
         if (
             not bypass_cache
@@ -30285,6 +30300,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import local_masks
             img = apply_recipe_to_loaded_image(
                 img, recipe_json, max_size=size,
+                camera_metadata=photo,
                 native_size=native_dims,
                 detail_scale=preview_detail_scale,
                 local_mask=local_masks.load_snapshot(
@@ -30381,6 +30397,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = apply_recipe_to_loaded_image(
                         img,
                         recipe,
+                        camera_metadata=photo,
                         native_size=_recipe_source_dimensions(photo),
                         local_mask=local_masks.load_snapshot(
                             vireo_dir, photo_id, recipe,
@@ -30891,6 +30908,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe,
+                camera_metadata=photo,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=local_masks.load_snapshot(
                     vireo_dir, photo_id, recipe,

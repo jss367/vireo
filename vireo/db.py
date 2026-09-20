@@ -8130,7 +8130,8 @@ class Database:
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     subject_sharpness, subject_size, quality_score,
                     latitude, longitude, companion_path, working_copy_path,
-                    wildlife_excluded, miss_no_subject, miss_clipped, miss_oof"""
+                    wildlife_excluded, miss_no_subject, miss_clipped, miss_oof,
+                    camera_make, camera_model, iso"""
 
     # Columns for single-photo detail queries (includes exif_data JSON +
     # eye-focus fields consumed by the review lightbox's crosshair overlay)
