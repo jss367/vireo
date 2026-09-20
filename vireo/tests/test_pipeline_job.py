@@ -10087,7 +10087,8 @@ def _run_extract_masks_for_test(
     return db, runner, generate_mask_calls, photo_ids
 
 
-def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, monkeypatch):
+@pytest.mark.parametrize("switch_variant", [False, True])
+def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, monkeypatch, switch_variant):
     """Opting in and back out cannot silently reuse the opposite quality recipe."""
     import masking
     import numpy as np
@@ -10120,6 +10121,18 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
     assert report["exposure_ev"] == 2
     assert corrected["subject_tenengrad"] == report["corrected_quality"]["subject_tenengrad"]
     assert corrected["subject_y_median"] == report["original_quality"]["subject_y_median"]
+    if switch_variant:
+        import config as cfg
+
+        settings = cfg.load()
+        settings["pipeline"]["sam2_variant"] = "sam2-large"
+        cfg.save(settings)
+        assert run(False)["quality_input_recipe"] is None
+        db.set_active_mask_variant(ids[0], "sam2-small")
+        restored = db.conn.execute("SELECT quality_input_recipe FROM photos WHERE id=?", (ids[0],)).fetchone()
+        assert restored[0] == raw_analysis.RECIPE
+        settings["pipeline"]["sam2_variant"] = "sam2-small"
+        cfg.save(settings)
     normal = run(False)
     assert normal["quality_input_recipe"] is None
     assert normal["subject_tenengrad"] == 0

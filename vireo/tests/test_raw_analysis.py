@@ -323,3 +323,29 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
     db.conn.execute("DELETE FROM detections WHERE photo_id=?", (photo,))
     assert db.conn.execute("SELECT count(*) FROM subject_raw_analysis").fetchone()[0] == 0
     db.close()
+
+
+def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(tmp_path):
+    from db import Database
+
+    path = str(tmp_path / "old-masks.db")
+    db = Database(path)
+    folder = db.add_folder(str(tmp_path))
+    photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
+    detections = db.save_detections(photo, [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")
+    db.save_subject_raw_analysis(detections[0], {"recipe": ra.RECIPE})
+    for variant in ("sam2-small", "sam2-large"):
+        db.upsert_photo_mask(photo, variant, "/mask.png", "megadetector-v6", 0.1, 0.1, 0.8, 0.8)
+    db.set_active_mask_variant(photo, "sam2-large")
+    db.update_photo_pipeline_features(photo, quality_input_recipe=ra.RECIPE)
+    db.conn.execute("ALTER TABLE photo_masks DROP COLUMN quality_input_recipe")
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(path)
+    assert migrated.get_photo_mask(photo, "sam2-large")["quality_input_recipe"] == ra.RECIPE
+    assert migrated.get_photo_mask(photo, "sam2-small")["quality_input_recipe"] == "unknown-raw-analysis-recipe"
+    migrated.close()

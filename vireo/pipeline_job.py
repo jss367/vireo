@@ -7835,6 +7835,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 subject_tenengrad=mask_subject_tenengrad,
                                 bg_tenengrad=mask_bg_tenengrad,
                                 crop_complete=completeness,
+                                quality_input_recipe=features.pop("quality_input_recipe", None),
                                 _commit=False,
                             )
                             thread_db.set_active_mask_variant(

@@ -1210,6 +1210,7 @@ class Database:
                 subject_tenengrad REAL,
                 bg_tenengrad      REAL,
                 crop_complete     REAL,
+                quality_input_recipe TEXT,
                 PRIMARY KEY (photo_id, variant)
             );
 
@@ -2187,6 +2188,24 @@ class Database:
                 self.conn.execute(
                     f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
                 )
+        try:
+            self.conn.execute("SELECT quality_input_recipe FROM photo_masks LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE photo_masks ADD COLUMN quality_input_recipe TEXT")
+            self.conn.execute(
+                "UPDATE photo_masks SET quality_input_recipe = ("
+                "SELECT p.quality_input_recipe FROM photos p WHERE p.id=photo_masks.photo_id) "
+                "WHERE variant = (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id)"
+            )
+            # Earlier experimental builds recorded only the active recipe.
+            # Inactive masks on RAW-analyzed photos have unknown provenance;
+            # force a refresh when selected instead of assuming normal scores.
+            self.conn.execute(
+                "UPDATE photo_masks SET quality_input_recipe='unknown-raw-analysis-recipe' "
+                "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id) "
+                "AND photo_id IN (SELECT d.photo_id FROM subject_raw_analysis a "
+                "JOIN detections d ON d.id=a.detection_id)"
+            )
         # Migration: integrity-verification markers. hash_checked_at is when
         # the file's content was last re-hashed against photos.file_hash;
         # hash_status records the verdict ('ok', 'modified', 'corrupt',
@@ -11985,7 +12004,7 @@ class Database:
         """
         row = self.conn.execute(
             "SELECT path, subject_size, subject_tenengrad, bg_tenengrad, "
-            "crop_complete FROM photo_masks WHERE photo_id=? AND variant=?",
+            "crop_complete, quality_input_recipe FROM photo_masks WHERE photo_id=? AND variant=?",
             (photo_id, variant),
         ).fetchone()
         if row is None:
@@ -11995,10 +12014,10 @@ class Database:
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
-            "crop_complete=? WHERE id=?",
+            "crop_complete=?, quality_input_recipe=? WHERE id=?",
             (row["path"], variant, row["subject_size"],
              row["subject_tenengrad"], row["bg_tenengrad"],
-             row["crop_complete"], photo_id),
+             row["crop_complete"], row["quality_input_recipe"], photo_id),
         )
         if _commit:
             commit_with_retry(self.conn)
@@ -12369,6 +12388,7 @@ class Database:
         detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
         subject_size=None, subject_tenengrad=None,
         bg_tenengrad=None, crop_complete=None, _commit=True,
+        quality_input_recipe=None,
     ):
         """Insert or replace a mask row for (photo_id, variant).
 
@@ -12380,9 +12400,9 @@ class Database:
             INSERT INTO photo_masks (
                 photo_id, variant, path, created_at,
                 detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-                subject_size, subject_tenengrad, bg_tenengrad, crop_complete
+                subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(photo_id, variant) DO UPDATE SET
                 path=excluded.path,
                 created_at=excluded.created_at,
@@ -12394,11 +12414,12 @@ class Database:
                 subject_size=excluded.subject_size,
                 subject_tenengrad=excluded.subject_tenengrad,
                 bg_tenengrad=excluded.bg_tenengrad,
-                crop_complete=excluded.crop_complete
+                crop_complete=excluded.crop_complete,
+                quality_input_recipe=excluded.quality_input_recipe
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-             subject_size, subject_tenengrad, bg_tenengrad, crop_complete),
+             subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe),
         )
         if _commit:
             commit_with_retry(self.conn)
