@@ -8198,6 +8198,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbCurrentEditRecipe = currentFromList && currentFromList.edit_recipe || null;
   if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'edit_recipe')) {
     _lbRememberEditRecipe(photoId, currentFromList.edit_recipe);
+    window.vireoRememberPhotoRenderKey(photoId, currentFromList.render_key);
   }
   var incomingPhoto = Object.assign({}, _lbPhotoDataByPhoto[String(photoId)] || {}, currentFromList || {});
   // Catalog geometry lets us select a tier before the next image has loaded.
@@ -11223,6 +11224,7 @@ function _lbPrimeAdjacentPhotos(sourceKey) {
     if (!photo) return;
     if (Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')) {
       _lbRememberEditRecipe(photo.id, photo.edit_recipe);
+      window.vireoRememberPhotoRenderKey(photo.id, photo.render_key);
     }
     var url = _lbSrcUrl(photo.id, tier, true);
     var cacheKey = String(photo.id) + '|' + url;

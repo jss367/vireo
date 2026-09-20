@@ -16819,6 +16819,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error(f"{name} must be a positive integer")
         return photo_ids, None
 
+    def _attach_comparison_render_keys(db, photos):
+        """Give ID Conflicts rows the fingerprint their thumbnail URLs need.
+
+        The page builds ``/thumbnails/<id>.jpg`` through ``vireoThumbnailUrl``
+        like every other grid, and that URL only carries an ``er`` fingerprint
+        when the photo dict does. Thumbnails answer ``Cache-Control: public,
+        max-age=86400``, so without one a browser that cached a row's
+        thumbnail before an edit keeps showing the pre-edit image for a day.
+
+        These rows are keyed by ``photo_id`` rather than ``id``, so they
+        cannot go through ``attach_edit_recipes``.
+        """
+        if not photos:
+            return photos
+        recipes = db.get_photo_edit_recipes(
+            [photo["photo_id"] for photo in photos],
+        )
+        for photo in photos:
+            recipe = recipes.get(photo["photo_id"])
+            photo["edit_recipe"] = recipe
+            photo["render_key"] = render_key_for_recipe(recipe)
+        return photos
+
     @app.route("/api/predictions/compare")
     def api_predictions_compare():
         """One page of the ID Conflicts comparison, plus every count it shows.
@@ -16861,6 +16884,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             for photo in built["photos"]:
                 id_conflicts.attach_assessment(photo, visible, min_confidence)
+            _attach_comparison_render_keys(db, built["photos"])
             return jsonify(built)
 
         refresh_ids, err = _compare_photo_ids("refresh_photo_id")
@@ -16920,10 +16944,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "models": snapshot.all_models,
             "visible_models": snapshot.models,
             "taxonomy_available": snapshot.taxonomy_available,
-            "photos": id_conflicts.page_rows(
+            "photos": _attach_comparison_render_keys(db, id_conflicts.page_rows(
                 db, collection_id, selection.photo_ids,
                 snapshot.models, snapshot.min_confidence,
-            ),
+            )),
             "page": selection.page,
             "per_page": per_page,
             "total": selection.total,
