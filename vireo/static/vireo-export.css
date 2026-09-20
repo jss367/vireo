@@ -1,0 +1,51 @@
+/* Shared photo export layout for Browse and the Photo Editor. */
+#exportOverlay .export-modal {
+  width: min(1040px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  box-sizing: border-box;
+}
+.export-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(0, 3fr);
+  gap: 24px;
+}
+.export-summary,
+.export-settings,
+.export-settings-group { min-width: 0; }
+#exportOverlay h4 {
+  margin: 0 0 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.export-summary {
+  padding: 16px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  align-self: start;
+}
+#exportPreview { overflow-wrap: anywhere; line-height: 1.6; }
+.export-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  border-top: 1px solid var(--border-secondary);
+  padding-top: 18px;
+}
+#exportOverlay .modal-actions {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border-secondary);
+  padding-top: 16px;
+  margin-top: 20px;
+}
+#exportOverlay .export-metadata-options { grid-template-columns: 1fr; }
+#exportOverlay input[type="range"] { min-width: 0; }
+@media (max-width: 900px) {
+  .export-layout { grid-template-columns: minmax(0, 1fr); }
+  .export-summary { order: 1; }
+}
+@media (max-width: 600px) {
+  #exportOverlay .export-modal { padding: 16px; }
+  .export-settings-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+}
