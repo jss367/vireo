@@ -1001,9 +1001,25 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
     try:
         if detect_animals is None or get_primary_detection is None:
-            return detection_map, detected, processed_ids
+            # Detector module unavailable. Skip the detection call itself,
+            # but the subject-analysis backfill below can still run over
+            # photos that already have cached detection rows — analyzing
+            # cached boxes doesn't require detect_animals/get_primary_detection,
+            # so cached-only installations must still receive subject
+            # quality/crop/exposure data (Codex r4056698679).
+            for photo in photos:
+                if photo["id"] in cached_detections:
+                    continue
+                try:
+                    if db.get_detections(photo["id"]):
+                        processed_ids.add(photo["id"])
+                except Exception:
+                    pass
+            detection_photos: list = []
+        else:
+            detection_photos = photos
 
-        for photo in photos:
+        for photo in detection_photos:
             folder_path = folders.get(photo["folder_id"], "")
             image_path = os.path.join(folder_path, photo["filename"])
 

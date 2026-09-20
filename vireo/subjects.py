@@ -92,7 +92,21 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
 
     detections = retained(db, photo_id, min_conf)
     if not detections:
-        if db.conn.execute("SELECT 1 FROM photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone():
+        # Migrated catalogs have legacy subject-derived fields on ``photos``
+        # without any ``photo_subject_state`` row. Triggering ``sync_primary``
+        # only when that row exists made the intended cleanup a no-op there,
+        # leaving stale mask/quality/DINO/eye state attached to a photo with
+        # no detections. Check either signal (Codex r4056698678).
+        stale = db.conn.execute(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM photo_subject_state WHERE photo_id=?) "
+            "OR EXISTS (SELECT 1 FROM photos WHERE id=? AND ("
+            "mask_path IS NOT NULL OR quality_score IS NOT NULL "
+            "OR subject_sharpness IS NOT NULL OR subject_size IS NOT NULL "
+            "OR dino_subject_embedding IS NOT NULL OR eye_x IS NOT NULL "
+            "OR eye_kp_fingerprint IS NOT NULL))",
+            (photo_id, photo_id),
+        ).fetchone()
+        if stale:
             with acquire_photo_mask(photo_id):
                 if checkpoint:
                     checkpoint()
