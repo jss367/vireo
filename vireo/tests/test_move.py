@@ -137,6 +137,9 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
     assert (archive / "2026-07-13" / "second.jpg").read_bytes() == b"second"
     assert not (src / "first.jpg").exists()
     assert not (src / "second.jpg").exists()
+    assert not src.exists()
+    assert result["source_cleanup"]["state"] == "removed"
+    assert src.parent.exists()
     rows = db.conn.execute(
         """SELECT p.id, f.path FROM photos p
            JOIN folders f ON f.id = p.folder_id

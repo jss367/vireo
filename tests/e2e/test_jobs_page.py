@@ -1,6 +1,79 @@
 from playwright.sync_api import expect
 
 
+def test_completed_move_source_cleanup_requires_review_and_opt_in(live_server, page):
+    job = _move_folder_job(live_server, {"folder_template": "%Y-%m-%d"})
+    job.update(status="completed", result={
+        "moved": 1357, "errors": [],
+        "source_cleanup": {"state": "remaining", "file_count": 2, "xmp_count": 2},
+    })
+    requests = []
+
+    def cleanup(route):
+        requests.append(route.request.method)
+        if route.request.method == "GET":
+            route.fulfill(json={
+                "state": "remaining", "file_count": 2, "xmp_count": 2,
+                "review_token": "reviewed-files", "directories": [],
+                "files": [{"name": "DSC_1808.xmp", "size": 265},
+                          {"name": "DSC_1811.xmp", "size": 18634}],
+            })
+        else:
+            assert route.request.post_data_json == {
+                "confirm_trash": True, "review_token": "reviewed-files",
+            }
+            route.fulfill(json={"state": "removed", "trashed": 2, "failures": []})
+
+    page.route("**/api/jobs/*/source-cleanup", cleanup)
+    _serve_jobs_page(live_server, page, job, history=True)
+    panel = page.get_by_role("region", name="Original folder cleanup")
+    expect(panel).to_contain_text("2 XMP metadata files")
+    expect(panel.get_by_role("checkbox")).to_have_count(0)
+    assert requests == []
+    panel.get_by_role("button", name="Review remaining files").click()
+    checkbox = panel.get_by_role("checkbox")
+    expect(checkbox).not_to_be_checked()
+    button = panel.get_by_role("button", name="Clean up original folder")
+    expect(button).to_be_disabled()
+    expect(panel).to_contain_text("DSC_1811.xmp")
+    assert requests == ["GET"]
+    checkbox.check()
+    expect(button).to_be_enabled()
+    checkbox.uncheck()
+    expect(button).to_be_disabled()
+    checkbox.check()
+    button.click()
+    expect(panel).to_contain_text("The original folder has been removed.")
+    expect(panel.get_by_role("checkbox")).to_have_count(0)
+    assert requests == ["GET", "POST"]
+
+
+def test_source_cleanup_changed_folder_requires_a_new_review(live_server, page):
+    job = _move_folder_job(live_server, {"folder_template": "%Y-%m-%d"})
+    job.update(status="completed", result={"moved": 1, "errors": []})
+
+    def cleanup(route):
+        if route.request.method == "POST":
+            route.fulfill(status=409, json={"error": "The folder changed. Review remaining files again before cleaning up"})
+        else:
+            route.fulfill(json={
+                "state": "remaining", "file_count": 1, "xmp_count": 1,
+                "files": [{"name": "orphan.xmp", "size": 200}],
+                "review_token": "token", "directories": [],
+            })
+
+    page.route("**/api/jobs/*/source-cleanup", cleanup)
+    _serve_jobs_page(live_server, page, job, history=True)
+    panel = page.get_by_role("region", name="Original folder cleanup")
+    panel.get_by_role("button", name="Review remaining files").click()
+    panel.get_by_role("checkbox").check()
+    panel.get_by_role("button", name="Clean up original folder").click()
+    expect(panel.get_by_role("alert")).to_contain_text("The folder changed")
+    expect(panel.get_by_role("checkbox")).to_have_count(0)
+    panel.get_by_role("button", name="Review remaining files").click()
+    expect(panel.get_by_role("checkbox")).not_to_be_checked()
+
+
 def test_keep_awake_reminder_opens_with_keyboard_and_click(live_server, page):
     keeping_awake = True
     page.route(
