@@ -3054,6 +3054,48 @@ def test_eye_stage_persists_when_state_lags_current_primary(tmp_path, monkeypatc
     assert eye_x is not None and eye_y is not None and eye_conf is not None
 
 
+def test_eye_stage_skips_when_primary_disappears_before_lock(tmp_path, monkeypatch):
+    """When every eligible detection is removed (or dropped below the floor)
+    between the worklist build and the per-photo lock, the pre-persistence
+    guard must abort — otherwise ``eye_kp_fingerprint`` and the eye_*
+    coordinates land on the photo attributed to a subject that is no longer
+    the effective primary (Codex P2 r4056478554).
+    """
+    import keypoints as kp
+    from pipeline import _process_photo_for_eye
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    queued = db.list_photos_for_eye_keypoint_stage([pid])
+    assert queued, "fixture must satisfy the worklist"
+    row = queued[0]
+
+    # Simulate a concurrent reclassify (or a workspace floor raise above all
+    # detections) between the worklist build and the per-photo lock.
+    db.conn.execute("DELETE FROM detections WHERE photo_id=?", (pid,))
+    db.conn.commit()
+
+    good = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.88},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.85},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: good)
+
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    _process_photo_for_eye(db, row, folders, C=0.5, T=0.5, k_window=0.08)
+
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] is None, (
+        "Guard must abort when no effective primary remains; otherwise the "
+        "stage persists eye_kp_fingerprint for a subject that no longer "
+        "exists at the current confidence floor."
+    )
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
 def test_eye_stage_gate1_out_of_scope_species_no_write(tmp_path, monkeypatch):
     """Gate 1: species class not in {Aves, Mammalia} → no write."""
     import keypoints as kp

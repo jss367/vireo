@@ -2228,7 +2228,13 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
                  LIMIT 1""",
             (row["id"], min_conf),
         ).fetchone()
-        if selected is not None and any(selected["box_" + k] != row["box_" + k] for k in "xywh"):
+        # ``selected is None`` when a concurrent reclassify removed every
+        # detection, or a workspace raised its confidence floor above all of
+        # them, between the worklist build and this lock. Persisting an
+        # eye_kp_fingerprint against ``row`` in that state would strand the
+        # photo with results attributed to a subject that is no longer the
+        # effective primary (Codex P2 r4056478554).
+        if selected is None or any(selected["box_" + k] != row["box_" + k] for k in "xywh"):
             return
         current_mask = db.conn.execute(
             "SELECT mask_path FROM photos WHERE id = ?", (row["id"],),
