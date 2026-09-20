@@ -170,3 +170,27 @@ def test_local_denoise_delta_can_disable_camera_denoise_on_subject():
     }
     out = apply_recipe_to_loaded_image(img, recipe, local_mask=mask, camera_metadata=_photo())
     np.testing.assert_array_equal(out, img)
+
+
+def test_camera_cache_key_tracks_metadata_and_measurements():
+    recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 80}}
+    assert denoise.render_cache_key(_photo(100), recipe) != denoise.render_cache_key(_photo(3200), recipe)
+    assert denoise.render_cache_key(None, recipe) != denoise.render_cache_key(_photo(), recipe)
+    assert denoise.render_cache_fields(_photo(), {'adjustments': {'noise_reduction': 80}}) == {}
+
+
+def test_camera_cache_marker_is_published_with_pixels(tmp_path):
+    recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 80}}
+    path = tmp_path / 'cached.jpg'
+    image = Image.new('RGB', (32, 32), (100, 120, 150))
+    image.save(path)
+    assert not denoise.cache_matches(path, _photo(), recipe)
+    image.save(path, **denoise.cache_save_options(_photo(), recipe))
+    assert denoise.cache_matches(path, _photo(), recipe)
+    assert not denoise.cache_matches(path, _photo(100), recipe)
+    # A competing writer publishes a different profile and its own marker.
+    image.save(path, **denoise.cache_save_options(_photo(100), recipe))
+    assert denoise.cache_matches(path, _photo(100), recipe)
+    assert not denoise.cache_matches(path, _photo(), recipe)
+    path.write_bytes(b'broken cache')
+    assert not denoise.cache_matches(path, _photo(), recipe)

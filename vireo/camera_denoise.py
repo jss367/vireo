@@ -9,6 +9,7 @@ in-camera processing, or tone edits. Unknown cameras use image estimates.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -125,6 +126,43 @@ def resolve_profile(photo=None, exif_data=None):
         "b": [(1 - t) * x + t * y for x, y in zip(lower["b"], upper["b"], strict=True)],
     })
     return result
+
+
+def render_cache_key(photo, recipe):
+    """Fingerprint the camera-dependent inputs outside the reusable recipe."""
+    if ((recipe or {}).get("adjustments") or {}).get("denoise_mode") != "camera":
+        return None
+    profile = json.dumps(resolve_profile(photo), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(profile.encode("utf-8")).hexdigest()
+
+
+def render_cache_fields(photo, recipe):
+    """Extend keyed render metadata without changing standard cache keys."""
+    key = render_cache_key(photo, recipe)
+    return {"camera_denoise": key} if key else {}
+
+
+def cache_save_options(photo, recipe):
+    """Embed the profile key in the JPEG so pixels and key publish atomically.
+
+    Unlike a separate metadata sidecar, a JPEG comment cannot be associated
+    with bytes from a competing writer that rendered a different profile.
+    Existing cache filenames and cleanup/accounting rules stay unchanged.
+    """
+    key = render_cache_key(photo, recipe)
+    return {"comment": f"vireo-camera-denoise:{key}".encode("ascii")} if key else {}
+
+
+def cache_matches(path, photo, recipe):
+    """Reject unmarked or stale camera-aware JPEGs without decoding pixels."""
+    expected = cache_save_options(photo, recipe)
+    if not expected:
+        return True
+    try:
+        with Image.open(path) as cached:
+            return cached.info.get("comment") == expected["comment"]
+    except (OSError, ValueError):
+        return False
 
 
 def _estimate_noise(rgb):

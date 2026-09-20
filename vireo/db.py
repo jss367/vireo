@@ -8139,6 +8139,7 @@ class Database:
         + ", exif_data, eye_x, eye_y, eye_conf, eye_tenengrad,"
         + " working_copy_failed_at, working_copy_failed_mtime,"
         + " working_copy_failed_source"
+        + ", camera_make, camera_model, iso"
     )
 
     def get_photo(self, photo_id, verify_workspace=False):

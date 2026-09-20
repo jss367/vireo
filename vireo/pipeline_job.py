@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from artifact_flight import ArtifactProducerFailed
+from camera_denoise import cache_matches as _camera_cache_matches
 from classifier_cache import acquire_cached_classifier
 from db import Database, commit_with_retry
 from job_contract import progress_event
@@ -3832,7 +3833,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         cache_row = None
                         with contextlib.suppress(Exception):
                             cache_row = thread_db.preview_cache_get(photo["id"], max_size)
-                        if recipe and cache_row is None:
+                        if recipe and (cache_row is None or not _camera_cache_matches(cache_path, detail_photo, recipe)):
                             with contextlib.suppress(OSError):
                                 os.remove(cache_path)
                             if os.path.exists(cache_path):
