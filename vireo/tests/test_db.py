@@ -24504,6 +24504,119 @@ def test_set_active_mask_variant_missing_row_raises(tmp_path):
         db.set_active_mask_variant(1, "sam3-small")
 
 
+def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
+    tmp_path,
+):
+    """The bulk /api/pipeline/active-mask-variant route walks every
+    workspace photo and calls set_active_mask_variant. When reclassify
+    wipes every real detection between mask creation and activation,
+    the effective-primary LEFT JOIN yields NULL and the mask's stored
+    prompt matches no surviving detection. Without a mismatch check
+    for that NULL branch, the guard would treat the cached mask as
+    valid and reactivate an obsolete subject, repopulating mask_path
+    plus the mask-derived quality fields for a photo with no eligible
+    subject (Codex r4056687363).
+    """
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        subject_size=999, subject_tenengrad=1.0,
+        bg_tenengrad=0.2, crop_complete=0.9,
+    )
+    # An unrelated detection remains (e.g. reclassify swapped the box):
+    # the mask's prompt no longer matches any real detection, so the
+    # active-mask activation must refuse rather than silently reactivate
+    # a subject that is no longer eligible.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.3, 0.3, 0.2, 0.2, 0.9, 'animal')"
+    )
+    db.conn.commit()
+    with pytest.raises(ValueError, match="another subject"):
+        db.set_active_mask_variant(1, "sam2-large")
+    # The photos row must remain unactivated — no denormalised
+    # mask_path or subject_size from the obsolete mask.
+    row = db.conn.execute(
+        "SELECT mask_path, active_mask_variant, subject_size "
+        "FROM photos WHERE id=1"
+    ).fetchone()
+    assert row["mask_path"] is None
+    assert row["active_mask_variant"] is None
+    assert row["subject_size"] is None
+
+
+def test_set_active_mask_variant_allows_weak_detection_below_floor(
+    tmp_path,
+):
+    """Extract-masks legitimately activates masks for weak-rescued
+    detections that sit below the workspace's detector_confidence.
+    A detection matching the mask's prompt at any confidence keeps
+    the mask non-orphaned, so activation must succeed."""
+    import config as cfg
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        subject_size=42, subject_tenengrad=1.0,
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.1, 0.1, 0.5, 0.5, 0.18, 'animal')"
+    )
+    db.conn.commit()
+    original = cfg.load()
+    try:
+        cfg.save({**original, "detector_confidence": 0.5})
+        db.set_active_mask_variant(1, "sam2-large")
+        row = db.conn.execute(
+            "SELECT active_mask_variant, subject_size FROM photos WHERE id=1"
+        ).fetchone()
+        assert row["active_mask_variant"] == "sam2-large"
+        assert row["subject_size"] == 42
+    finally:
+        cfg.save(original)
+
+
+def test_set_active_mask_variant_allows_migration_without_detections(
+    tmp_path,
+):
+    """Photos with literally no non-full-image detections fall through
+    to activation — the mask was seeded without detection context
+    (pre-detection migration or a unit-test setup), so there is no
+    "obsolete subject" to guard against."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+    )
+    db.set_active_mask_variant(1, "sam2-large")
+    row = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=1"
+    ).fetchone()
+    assert row["active_mask_variant"] == "sam2-large"
+
+
 def test_delete_masks_for_variant_removes_files_and_rows(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))

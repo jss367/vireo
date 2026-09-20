@@ -12086,11 +12086,44 @@ class Database:
             raise ValueError(
                 f"No photo_masks row for photo {photo_id} variant {variant!r}"
             )
-        if row["primary_model"] is not None and (
-            row["detector_model"] != row["primary_model"]
-            or any(row["prompt_" + k] != row["primary_" + k] for k in "xywh")
-        ):
-            raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
+        if row["primary_model"] is not None:
+            # A primary detection sits above the workspace's current floor:
+            # it must match the mask exactly, otherwise the mask represents
+            # a different subject.
+            if (row["detector_model"] != row["primary_model"]
+                    or any(row["prompt_" + k] != row["primary_" + k] for k in "xywh")):
+                raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
+        else:
+            # LEFT JOIN found no primary above the floor. Reject when the
+            # mask's stored prompt also matches no real detection at all
+            # — reclassification wiped the backing detection, so the
+            # cached mask is orphaned and reactivating it would repopulate
+            # mask_path plus the mask-derived quality fields for a photo
+            # with no eligible subject (Codex r4056687363). The
+            # extract-masks pipeline legitimately activates masks for
+            # weak-rescued detections that live below detector_confidence
+            # but still exist as rows, so a matching detection at any
+            # confidence is enough to accept. Migration and unit-test
+            # setups that seed a mask without any detection at all also
+            # fall through, since there is no "obsolete subject" to
+            # protect against.
+            match = self.conn.execute(
+                "SELECT 1 FROM detections WHERE photo_id=? "
+                "AND detector_model=? "
+                "AND box_x=? AND box_y=? AND box_w=? AND box_h=? "
+                "AND detector_model!='full-image' LIMIT 1",
+                (photo_id, row["detector_model"],
+                 row["prompt_x"], row["prompt_y"],
+                 row["prompt_w"], row["prompt_h"]),
+            ).fetchone()
+            if match is None:
+                has_real_detection = self.conn.execute(
+                    "SELECT 1 FROM detections WHERE photo_id=? "
+                    "AND detector_model!='full-image' LIMIT 1",
+                    (photo_id,),
+                ).fetchone() is not None
+                if has_real_detection:
+                    raise ValueError("This mask belongs to another subject; run mask extraction for the primary subject")
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
