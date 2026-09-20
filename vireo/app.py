@@ -19475,11 +19475,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         def valid_aspect(value):
-            return (
-                type(value) in (int, float)
-                and math.isfinite(value)
-                and value > 0
-            )
+            if type(value) not in (int, float) or value <= 0:
+                return False
+            try:
+                return math.isfinite(value)
+            except OverflowError:
+                return False
 
         def valid_revision(value):
             return type(value) is int and 0 < value <= 9007199254740991

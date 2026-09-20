@@ -57,6 +57,7 @@ def test_editor_crop_ratio_ignores_late_older_writes(app_and_db):
     [], {}, {"enabled": "true"}, {"enabled": True, "aspect": True},
     {"enabled": True, "aspect": 0}, {"enabled": True, "aspect": -1},
     {"enabled": True, "aspect": "1.5"}, {"enabled": True, "aspect": float("inf")},
+    {"enabled": True, "aspect": 10 ** 309},
 ])
 def test_editor_crop_ratio_rejects_invalid_values(app_and_db, body):
     app, _ = app_and_db
