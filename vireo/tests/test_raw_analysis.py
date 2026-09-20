@@ -247,12 +247,16 @@ def test_session_falls_back_when_sam2_weights_unavailable(tmp_path, monkeypatch)
     def raise_weights_error(*args, **kwargs):
         raise RuntimeError("Failed to download SAM2 weights")
 
-    monkeypatch.setattr("masking.ensure_sam2_weights", raise_weights_error)
+    ensure = Mock(side_effect=raise_weights_error)
+    monkeypatch.setattr("masking.ensure_sam2_weights", ensure)
     generate = Mock(return_value=np.ones((100, 100), dtype=bool))
     monkeypatch.setattr("masking.generate_mask", generate)
     detection = {"box_x": 0.1, "box_y": 0.1, "box_w": 0.8, "box_h": 0.8}
     session = ra.RawAnalysisSession()
     assert session.prepare(str(path), detection) == (None, None)
+    assert session.prepare(str(path), detection) == (None, None)
+    assert session.prepare(str(tmp_path / "another.nef"), detection) == (None, None)
+    assert ensure.call_count == 1
     assert generate.call_count == 0
 
 
