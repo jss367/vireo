@@ -4261,8 +4261,9 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     assert 42 in processed
 
 
+@pytest.mark.parametrize("raw_subject_analysis", [False, True])
 def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, raw_subject_analysis,
 ):
     """classify_stage must pass every qualifying detection dict (with
     box_x/y/w/h keys) to _prepare_image, not the raw {photo_id: [dets]}
@@ -4330,7 +4331,8 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
 
     captured = []
 
-    def capturing_prepare_image(photo, folders, detection, vireo_dir=None):
+    def capturing_prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None):
+        assert (raw_analysis is not None) == raw_subject_analysis
         captured.append(detection)
         # Returning (None, ...) tells the caller this photo failed to load,
         # which short-circuits _flush_batch.  We only care about the
@@ -4368,6 +4370,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
         model_ids=[model_id],
         skip_extract_masks=True,
         skip_regroup=True,
+        raw_subject_analysis=raw_subject_analysis,
     )
 
     runner = FakeRunner()
@@ -10082,6 +10085,46 @@ def _run_extract_masks_for_test(
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
     return db, runner, generate_mask_calls, photo_ids
+
+
+def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, monkeypatch):
+    """Opting in and back out cannot silently reuse the opposite quality recipe."""
+    import masking
+    import numpy as np
+    import quality
+    import raw_analysis
+    from PIL import Image
+
+    real_quality = quality.compute_all_quality_features
+    db, _, calls, ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small",
+        [{"filename": "bird.jpg", "box": (0.1, 0.1, 0.8, 0.8), "model": "megadetector-v6"}],
+    )
+    monkeypatch.setattr(quality, "compute_all_quality_features", real_quality)
+    monkeypatch.setattr(masking, "render_proxy", lambda *a, **k: Image.new("RGB", (64, 64), (30, 30, 30)))
+    monkeypatch.setattr(masking, "generate_mask", lambda *a, **k: np.ones((64, 64), dtype=bool))
+    linear = np.random.default_rng(7).uniform(0.005, 0.02, (64, 64, 3)).astype(np.float32)
+    monkeypatch.setattr(raw_analysis, "decode_linear", lambda *a: linear)
+    collection_id = db.get_collections()[0]["id"]
+
+    def run(enabled):
+        run_pipeline_job(_make_job(), FakeRunner(), str(tmp_path / "test.db"), db._active_workspace_id,
+                         PipelineParams(collection_id=collection_id, skip_classify=True,
+                                        skip_regroup=True, raw_subject_analysis=enabled))
+        return db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
+
+    corrected = run(True)
+    assert corrected["quality_input_recipe"] == raw_analysis.RECIPE
+    report_row = db.conn.execute("SELECT report_json FROM subject_raw_analysis").fetchone()
+    report = json.loads(report_row[0])
+    assert report["exposure_ev"] == 2
+    assert corrected["subject_tenengrad"] == report["corrected_quality"]["subject_tenengrad"]
+    assert corrected["subject_y_median"] == report["original_quality"]["subject_y_median"]
+    normal = run(False)
+    assert normal["quality_input_recipe"] is None
+    assert normal["subject_tenengrad"] == 0
+    assert normal["subject_y_median"] == 30
+    db.close()
 
 
 def test_extract_masks_rolls_back_failed_photo_before_continuing(

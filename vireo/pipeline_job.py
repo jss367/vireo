@@ -486,7 +486,7 @@ def _source_offline_reason(
 def _preflight_mask_outcomes(
     thread_db, dropped_photos, sam2_variant, dinov2_variant,
     detector_confidence, contextual_weak_ids=None,
-    weak_detection_confidence=None,
+    weak_detection_confidence=None, raw_subject_analysis=False,
 ):
     """Split pre-flight-dropped photos into ``(already_masked, at_risk)``.
 
@@ -567,7 +567,7 @@ def _preflight_mask_outcomes(
             primary["box_w"], primary["box_h"],
         )
         state = thread_db.conn.execute(
-            "SELECT active_mask_variant, dino_embedding_variant "
+            "SELECT active_mask_variant, dino_embedding_variant, quality_input_recipe "
             "FROM photos WHERE id = ?",
             (photo_id,),
         ).fetchone()
@@ -576,6 +576,8 @@ def _preflight_mask_outcomes(
             and cached_prompt == live_prompt
             and os.path.isfile(existing["path"])
             and state is not None
+            and not raw_subject_analysis
+            and state["quality_input_recipe"] is None
             and state["active_mask_variant"] == sam2_variant
             and state["dino_embedding_variant"] == dinov2_variant
         ):
@@ -788,6 +790,8 @@ class PipelineParams:
     model_id: str | None = None
     model_ids: list | None = None
     reclassify: bool = False
+    # Experimental, per-run opt-in. Normal browsing and editing stay unchanged.
+    raw_subject_analysis: bool = False
     skip_extract_masks: bool = False
     skip_regroup: bool = False
     # Distinguishes the identify preset's species-only review from a
@@ -4313,6 +4317,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             except (OSError, ValueError):
                 portable_model_identity = None
 
+            if params.raw_subject_analysis and portable_model_identity is not None:
+                from raw_analysis import RECIPE
+
+                portable_model_identity = {
+                    **portable_model_identity, "raw_subject_analysis": RECIPE,
+                }
+
             # What this model actually compares photos against — the merged
             # species lists, Tree of Life, or a timm model's fixed head. The
             # classify step shows it so the row names the label space, not
@@ -5095,6 +5106,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
                 detector_confidence = user_cfg.get("detector_confidence", 0.2)
                 pipeline_cfg = user_cfg.get("pipeline", {})
+                raw_session = None
+                if params.raw_subject_analysis:
+                    from raw_analysis import RawAnalysisSession
+
+                    raw_session = RawAnalysisSession(
+                        max_size=pipeline_cfg.get("proxy_longest_edge") or 1536,
+                        sam2_variant=pipeline_cfg.get("sam2_variant") or "sam2-small",
+                        preserve_detail=True,
+                    )
+
+                def prepare_pipeline_image(photo, folders, detection):
+                    kwargs = {"raw_analysis": raw_session} if raw_session is not None else {}
+                    img, folder_path, image_path = _prepare_image(photo, folders, detection, **kwargs)
+                    if img is not None and raw_session is not None and detection is not None:
+                        report = img.info.get("_vireo_raw_analysis")
+                        if report is not None:
+                            thread_db.save_subject_raw_analysis(detection["id"], report)
+                    return img, folder_path, image_path
+
                 weak_rescue_enabled = pipeline_cfg.get(
                     "weak_detection_rescue_enabled", True,
                 )
@@ -5513,7 +5543,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             ),
                         )
                     )
-                    if not params.reclassify:
+                    if not params.reclassify and not params.raw_subject_analysis:
                         # Precompute the classifier runtime_fingerprint the
                         # runtime gate will accept for each distinct
                         # ``detections.runtime_fingerprint`` present in this
@@ -6082,7 +6112,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # raw_results so downstream grouping/storage sees
                                 # it — otherwise the cached detection would silently
                                 # drop out of the grouping pipeline.
-                                if not params.reclassify:
+                                if not params.reclassify and not params.raw_subject_analysis:
                                     expected_classifier_runtime = None
                                     portable_labels_full = loaded_models.get(
                                         "labels_fingerprint_full"
@@ -6322,7 +6352,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # (Codex #1468 P2).
                                 _det_prep_seconds = 0.0
                                 _prep_started = time.time()
-                                img, folder_path, image_path = _prepare_image(
+                                img, folder_path, image_path = prepare_pipeline_image(
                                     photo, folders,
                                     None if full_image_fallback else detection,
                                 )
@@ -6429,7 +6459,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     # folder-scope, or gives up.
                                     _prep_started = time.time()
                                     img, folder_path, image_path = (
-                                        _prepare_image(
+                                        prepare_pipeline_image(
                                             photo, folders,
                                             None if full_image_fallback
                                             else detection,
@@ -7000,6 +7030,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 sam2_variant = pipeline_cfg.get("sam2_variant")
                 dinov2_variant = pipeline_cfg.get("dinov2_variant")
                 proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge")
+                raw_session = None
+                if params.raw_subject_analysis:
+                    from raw_analysis import RawAnalysisSession
+
+                    raw_session = RawAnalysisSession(
+                        max_size=proxy_longest_edge or 1536,
+                        sam2_variant=sam2_variant or "sam2-small",
+                    )
 
                 masks_dir = os.path.join(os.path.dirname(db_path), "masks")
                 os.makedirs(masks_dir, exist_ok=True)
@@ -7150,6 +7188,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         _preflight_mask_outcomes(
                             thread_db, dropped, sam2_variant, dinov2_variant,
                             detector_confidence,
+                            raw_subject_analysis=params.raw_subject_analysis,
                             contextual_weak_ids=contextual_weak_ids,
                             weak_detection_confidence=(
                                 weak_detection_confidence
@@ -7262,6 +7301,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         primary = dets[0]  # already ordered by confidence DESC
                         photo_det_map[p["id"]] = {
                             "photo": p,
+                            "detection_id": primary["id"],
                             "det_box": {
                                 "x": primary["box_x"],
                                 "y": primary["box_y"],
@@ -7609,11 +7649,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     # update_photo_embeddings together.
                                     state = thread_db.conn.execute(
                                         "SELECT active_mask_variant, "
-                                        "dino_embedding_variant FROM photos "
+                                        "dino_embedding_variant, quality_input_recipe FROM photos "
                                         "WHERE id = ?",
                                         (photo_id,),
                                     ).fetchone()
                                     if (state is not None
+                                            and not params.raw_subject_analysis
+                                            and state["quality_input_recipe"] is None
                                             and state["active_mask_variant"]
                                             == sam2_variant
                                             and state["dino_embedding_variant"]
@@ -7710,6 +7752,27 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                             completeness = crop_completeness(mask)
                             features = compute_all_quality_features(proxy, mask)
+                            features["quality_input_recipe"] = None
+                            analysis_report = None
+                            if raw_session is not None:
+                                from raw_analysis import (
+                                    RECIPE,
+                                    analyze_subject,
+                                    resize_linear,
+                                    scoring_features,
+                                )
+
+                                linear = raw_session.load(image_path)
+                                if (linear is not None and abs(
+                                    linear.shape[1] / linear.shape[0] - proxy.width / proxy.height
+                                ) <= 0.02):
+                                    corrected, analysis_report = analyze_subject(
+                                        resize_linear(linear, proxy.size), mask,
+                                    )
+                                    corrected.close()
+                                    analysis_report.update(raw_session.source_metadata())
+                                    features = scoring_features(analysis_report)
+                                    features["quality_input_recipe"] = RECIPE
                             if _should_abort_without_pause(abort):
                                 break
 
@@ -7785,6 +7848,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if features:
                                 thread_db.update_photo_pipeline_features(
                                     photo_id, **features, _commit=False,
+                                )
+                            if analysis_report is not None:
+                                thread_db.save_subject_raw_analysis(
+                                    entry["detection_id"], analysis_report, _commit=False,
                                 )
                             thread_db.update_photo_embeddings(
                                 photo_id,

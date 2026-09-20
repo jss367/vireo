@@ -2431,6 +2431,30 @@ def test_pipeline_accepts_skip_classify(setup):
         assert resp.status_code == 200
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_pipeline_accepts_raw_subject_analysis(setup, enabled):
+    app, _ = setup
+    with patch("pipeline_job.run_pipeline_job", return_value={}) as run, app.test_client() as c:
+        response = c.post("/api/jobs/pipeline", json={
+            "collection_id": 1, "raw_subject_analysis": enabled,
+        })
+        assert response.status_code == 200
+        job = wait_for_job_via_client(c, response.get_json()["job_id"])
+        assert job["status"] == "completed"
+        assert run.call_args.args[4].raw_subject_analysis is enabled
+
+
+@pytest.mark.parametrize("endpoint", ["/api/jobs/pipeline", "/api/pipeline/plan"])
+def test_raw_subject_analysis_requires_boolean(setup, endpoint):
+    app, _ = setup
+    with app.test_client() as c:
+        response = c.post(endpoint, json={
+            "collection_id": 1, "raw_subject_analysis": "false",
+        })
+    assert response.status_code == 400
+    assert "raw_subject_analysis must be a boolean" in response.get_json()["error"]
+
+
 def test_pipeline_accepts_preview_max_size(setup):
     """Pipeline endpoint should accept preview_max_size parameter."""
     app, db_path = setup

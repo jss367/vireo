@@ -1055,7 +1055,8 @@ def test_classify_plan_will_run_when_new_model_added(tmp_path, monkeypatch):
     assert "BioCLIP" in classify["summary"]
 
 
-def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch):
+@pytest.mark.parametrize("raw_subject_analysis", [False, True])
+def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch, raw_subject_analysis):
     from labels_fingerprint import TOL_SENTINEL
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
@@ -1072,7 +1073,8 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch):
 
     plan = compute_plan(
         db,
-        _params(model_ids=["m1"], reclassify=True),
+        _params(model_ids=["m1"], reclassify=not raw_subject_analysis,
+                raw_subject_analysis=raw_subject_analysis),
         str(tmp_path / "test.db"),
     )
     classify = plan["stages"]["Classify"]
@@ -2730,6 +2732,22 @@ def test_regroup_plan_will_run_when_no_cache(tmp_path):
 
 
 # -------- /api/pipeline/plan endpoint --------
+
+def test_extract_plan_restores_normal_quality_only_in_selected_scope(tmp_path):
+    from pipeline_plan import PipelinePlanParams, _extract_plan
+
+    db, folder_id = _make_db(tmp_path)
+    photo_id, _ = _add_photo_with_detection(db, folder_id, "bird.jpg")
+    db.update_photo_pipeline_features(photo_id, quality_input_recipe="linear-raw-subject-v1")
+    params = PipelinePlanParams()
+    config = {"sam2_variant": "sam2-small"}
+    plan = _extract_plan(db, params, [photo_id], config)
+    assert plan["state"] == "will-run"
+    assert "without RAW exposure correction" in plan["summary"]
+    outside = _extract_plan(db, params, [], config)
+    assert "without RAW exposure correction" not in outside["summary"]
+    db.close()
+
 
 def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
     app, _ = app_and_db

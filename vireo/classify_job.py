@@ -1574,7 +1574,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
 _BATCH_SIZE = 16
 
 
-def _prepare_image(photo, folders, detection, vireo_dir=None):
+def _prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None):
     """Load and crop a photo to a specific detection's bounding box.
 
     Args:
@@ -1585,6 +1585,8 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
         vireo_dir: optional path to ~/.vireo/; when set, tries to load the
             pre-extracted working copy JPEG before falling back to the
             original file via load_image().
+        raw_analysis: optional stage-owned RawAnalysisSession for corrected
+            subject crops. Unsupported inputs use the ordinary loading path.
 
     Returns:
         (PIL.Image, folder_path, image_path) or (None, folder_path, image_path) on failure.
@@ -1595,8 +1597,11 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
     image_path = os.path.join(folder_path, photo["filename"])
 
     img = None
+    analysis_report = None
     input_source = "original"
-    if vireo_dir and load_working_image is not None:
+    if raw_analysis is not None:
+        img, analysis_report = raw_analysis.prepare(image_path, detection)
+    if img is None and vireo_dir and load_working_image is not None:
         img, input_source = load_working_image(
             photo, vireo_dir, max_size=None, folders=folders,
             return_source=True,
@@ -1608,7 +1613,7 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
         return None, folder_path, image_path
 
     # Crop to detection bounding box with padding
-    if detection:
+    if detection and not img.info.get("_vireo_subject_crop"):
         iw, ih = img.size
         pad_w = detection["box_w"] * 0.2
         pad_h = detection["box_h"] * 0.2
@@ -1629,6 +1634,8 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
     # source with the in-memory image so quota eviction cannot make a
     # working-copy-backed result look original-backed by clearing the row.
     img.info["_vireo_input_source"] = input_source
+    if analysis_report is not None:
+        img.info["_vireo_raw_analysis"] = analysis_report
     return img, folder_path, image_path
 
 

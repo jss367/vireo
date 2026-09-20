@@ -1213,6 +1213,13 @@ class Database:
                 PRIMARY KEY (photo_id, variant)
             );
 
+            CREATE TABLE IF NOT EXISTS subject_raw_analysis (
+                detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+                recipe TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS predictions (
                 id                   INTEGER PRIMARY KEY,
                 detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
@@ -2163,11 +2170,12 @@ class Database:
                 "ALTER TABLE photos "
                 "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
             )
-        # Migration: miss-classifier columns. PHOTO_COLS/get_collection_photos
+        # Migration: quality recipe and miss-classifier columns. PHOTO_COLS/get_collection_photos
         # and misses.py both reference these; without the fallback ALTER, any
         # DB created before the miss-classifier feature fails every photo-list
         # query with "no such column".
         for column, column_type in (
+            ("quality_input_recipe", "TEXT"),
             ("miss_no_subject", "INTEGER"),
             ("miss_clipped", "INTEGER"),
             ("miss_oof", "INTEGER"),
@@ -12395,6 +12403,17 @@ class Database:
         if _commit:
             commit_with_retry(self.conn)
 
+    def save_subject_raw_analysis(self, detection_id, report, _commit=True):
+        """Keep original and corrected measurements together for each detection."""
+        self.conn.execute(
+            "INSERT INTO subject_raw_analysis(detection_id, recipe, report_json, created_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(detection_id) DO UPDATE SET "
+            "recipe=excluded.recipe, report_json=excluded.report_json, created_at=excluded.created_at",
+            (detection_id, report["recipe"], json.dumps(report, allow_nan=False), int(time.time())),
+        )
+        if _commit:
+            commit_with_retry(self.conn)
+
     def update_photo_pipeline_features(
         self,
         photo_id,
@@ -12413,6 +12432,7 @@ class Database:
         eye_conf=_UNSET,
         eye_tenengrad=_UNSET,
         eye_kp_fingerprint=_UNSET,
+        quality_input_recipe=_UNSET,
         _commit=True,
     ):
         """Update pipeline feature columns for a photo.
@@ -12437,6 +12457,7 @@ class Database:
             "eye_conf": eye_conf,
             "eye_tenengrad": eye_tenengrad,
             "eye_kp_fingerprint": eye_kp_fingerprint,
+            "quality_input_recipe": quality_input_recipe,
         }
         # Filter to only provided values
         updates = {k: v for k, v in cols.items() if v is not _UNSET}
