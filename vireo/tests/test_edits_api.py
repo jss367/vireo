@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -18,6 +19,23 @@ def test_editor_crop_ratio_persists_in_config(app_and_db):
     response = client.put(endpoint, json={"enabled": False, "aspect": 1.5})
     assert response.get_json() == {"enabled": False, "aspect": None}
     assert cfg.load()["editor_crop_ratio"] == {"enabled": False, "aspect": None}
+
+
+@pytest.mark.parametrize("existing", [{}, {"pipeline": {"w_species": 0.4}}])
+def test_editor_crop_ratio_preserves_sparse_config(app_and_db, existing):
+    import config as cfg
+
+    app, _ = app_and_db
+    cfg.save(existing)
+    client = app.test_client()
+    for preference in (
+        {"enabled": True, "aspect": 1.5},
+        {"enabled": False, "aspect": None},
+    ):
+        response = client.put("/api/editor/crop-ratio", json=preference)
+        assert response.status_code == 200
+        with open(cfg.CONFIG_PATH) as config_file:
+            assert json.load(config_file) == {**existing, "editor_crop_ratio": preference}
 
 
 @pytest.mark.parametrize("body", [

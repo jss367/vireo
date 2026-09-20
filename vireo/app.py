@@ -19496,7 +19496,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("aspect must be a positive finite number or null", status=400)
         preference = {"enabled": body["enabled"], "aspect": aspect if body["enabled"] else None}
         with _settings_write_lock:
-            current = cfg.load()
+            current = _read_raw_config_file()
             current["editor_crop_ratio"] = preference
             cfg.save(current)
         return jsonify(preference)
