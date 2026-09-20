@@ -372,3 +372,25 @@ def test_reclassify_cancellation_clears_previous_subject(db, subject_photo, monk
     row = db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
     for column in ("mask_path", "eye_x", "eye_kp_fingerprint", "dino_subject_embedding", "quality_score"):
         assert row[column] is None
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_live_misses_preview_uses_primary_and_keeps_maximum_confidence(db, subject_photo, manual):
+    from misses import _attach_primary_detections
+
+    photo_id, ids, path = subject_photo
+    if manual:
+        select_primary(db, photo_id, ids[1])
+    else:
+        analyze_photo(db, photo_id, path)
+    rows = [{"id": photo_id}]
+    _attach_primary_detections(db, rows, .2)
+    assert rows[0]["detection_conf"] == .7
+    assert rows[0]["raw_detection_conf"] == .95
+    import json
+    assert json.loads(rows[0]["detection_box"])["x"] == .6
+    _attach_primary_detections(db, rows, .8)
+    assert rows[0]["detection_conf"] == .95
+    _attach_primary_detections(db, rows, .99)
+    assert rows[0]["detection_box"] is None
+    assert rows[0]["raw_detection_conf"] == .95

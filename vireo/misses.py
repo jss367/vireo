@@ -281,6 +281,8 @@ def _attach_primary_detections(db, photos, detector_confidence):
     if not photos:
         return
     photo_ids = [p["id"] for p in photos]
+    from subjects import primary_order_sql
+
     primary = {}
     raw_primary = {}
     CHUNK = 500
@@ -294,19 +296,19 @@ def _attach_primary_detections(db, photos, detector_confidence):
             f"WHERE photo_id IN ({placeholders}) "
             f"  AND (detector_model IS NULL OR detector_model != 'full-image') "
             f"  AND COALESCE(category, 'animal') = 'animal' "
-            f"ORDER BY photo_id, detector_confidence DESC",
+            f"ORDER BY photo_id, {primary_order_sql()}",
             chunk,
         ).fetchall()
         for d in det_rows:
-            raw_primary.setdefault(d["photo_id"], d)
+            raw_primary[d["photo_id"]] = max(
+                raw_primary.get(d["photo_id"], 0), d["detector_confidence"],
+            )
             if d["detector_confidence"] >= detector_confidence:
                 primary.setdefault(d["photo_id"], d)
     for p in photos:
         d = primary.get(p["id"])
         raw = raw_primary.get(p["id"])
-        p["raw_detection_conf"] = (
-            raw["detector_confidence"] if raw is not None else None
-        )
+        p["raw_detection_conf"] = raw
         if d is None:
             p["detection_box"] = None
             p["detection_conf"] = None
