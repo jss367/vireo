@@ -152,6 +152,8 @@ def test_presets_color_and_geometry_are_individual_steps(page, editor_photo):
     }""")
     page.locator('#presetSelect').select_option('1')
     page.locator('#applyPresetBtn').click()
+    page.get_by_role('dialog').get_by_role('button', name='Apply selected settings').click()
+    expect(page.locator('#exposureRange')).to_have_value('0.5')
     preset = page.evaluate('recipeForSave(editorState.recipe)')
     page.evaluate('rotateRecipe(90)')
     rotated = page.evaluate('recipeForSave(editorState.recipe)')

@@ -1,0 +1,30 @@
+.development-dialog {
+  margin: auto; inset: 0; overflow-y: auto; box-sizing: border-box;
+  color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-primary);
+  border-radius: 12px; padding: 24px; width: min(640px, calc(100vw - 48px));
+  max-height: 85vh; box-shadow: 0 16px 60px #0006;
+}
+.development-dialog::backdrop { background: #0007; }
+.development-dialog h2 { margin: 0 0 12px; font-size: 20px; }
+.development-dialog p { color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+.development-dialog fieldset { border: 1px solid var(--border-primary); border-radius: 6px; margin: 12px 0; padding: 12px; }
+.development-dialog legend { font-size: 13px; font-weight: 600; }
+.development-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.development-fields label { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.development-dialog select, .development-dialog input[type="number"] {
+  background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-primary);
+  border-radius: 4px; padding: 8px; max-width: 100%;
+}
+.development-dialog input[type="range"] { flex: 1; min-width: 80px; accent-color: var(--accent); }
+.development-dialog button {
+  background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-primary);
+  border-radius: 5px; padding: 8px 12px; cursor: pointer;
+}
+.development-dialog button.primary { background: var(--accent); color: var(--accent-text); }
+.development-dialog button:disabled { opacity: .5; cursor: default; }
+.development-actions, .development-control { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.development-actions { justify-content: flex-end; }
+.development-status { min-height: 20px; font-size: 13px; margin-top: 12px; }
+.development-status.error { color: var(--danger, #e56b6b); }
+.development-preview { display: flex; gap: 8px; overflow: auto; margin: 12px 0; }
+.development-preview img { width: 96px; height: 72px; object-fit: contain; background: var(--bg-secondary); border-radius: 4px; }

@@ -409,10 +409,13 @@ def test_new_color_controls_survive_presets_and_copy(live_server, page, color_ph
     expected = page.evaluate('recipeForSave(editorState.recipe).adjustments')
     page.locator('#presetNameInput').fill('Warm wildlife colors')
     page.locator('#savePresetBtn').click()
+    page.get_by_role('dialog').get_by_role('button', name='Save preset', exact=True).click()
     expect(page.locator('#presetSelect')).not_to_have_value('')
     page.locator('button[onclick="resetToneCurve()"]').click()
     page.locator('button[onclick="resetPointColor()"]').click()
     page.locator('#applyPresetBtn').click()
+    page.get_by_role('dialog').get_by_role('button', name='Apply selected settings').click()
+    page.wait_for_function("document.getElementById('toastContainer').textContent.includes('Applied preset')")
     assert page.evaluate('recipeForSave(editorState.recipe).adjustments') == expected
     # Clipboard settings use the canonical recipe, including both new sections.
     page.evaluate('copyEditSettings()')

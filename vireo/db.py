@@ -11523,11 +11523,12 @@ class Database:
                     out[row["photo_id"]] = recipe
         return out
 
-    def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True):
+    def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True, _commit=True):
         """Set or clear a non-destructive edit recipe for a photo.
 
         Returns the normalized recipe dict, or None when the provided recipe is
-        a no-op and the stored row was cleared.
+        a no-op and the stored row was cleared. Pass ``_commit=False`` to include
+        the write in a caller-owned batch transaction.
         """
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
@@ -11538,7 +11539,8 @@ class Database:
                 "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
                 (photo_id,),
             )
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
             return None
         self.conn.execute(
             """INSERT INTO photo_edit_recipes (photo_id, recipe_json, updated_at)
@@ -11548,7 +11550,8 @@ class Database:
                    updated_at = excluded.updated_at""",
             (photo_id, recipe_json),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         return copy_recipe(recipe_json)
 
     def clear_photo_edit_recipe(self, photo_id, verify_workspace=True):
@@ -11562,7 +11565,7 @@ class Database:
         self.conn.commit()
         return cur.rowcount > 0
 
-    # --- edit presets (global, adjustments-only looks) ----------------------
+    # --- edit presets (global reusable development settings) ----------------------
 
     EDIT_PRESET_NAME_MAX = 80
 
@@ -11572,7 +11575,7 @@ class Database:
         Presets are global (not workspace-scoped): they capture a look, and a
         look is the same look in every workspace.
         """
-        from image_edits import copy_recipe
+        from edit_batch import decode_preset
 
         rows = self.conn.execute(
             "SELECT id, name, recipe_json, updated_at FROM edit_presets"
@@ -11580,7 +11583,7 @@ class Database:
         out = []
         for row in rows:
             try:
-                recipe = copy_recipe(row["recipe_json"])
+                recipe, fields = decode_preset(row["recipe_json"])
             except Exception:
                 log.warning(
                     "Invalid stored edit preset %s (%r)",
@@ -11591,23 +11594,24 @@ class Database:
                 "id": row["id"],
                 "name": row["name"],
                 "recipe": recipe,
+                **({"fields": fields} if fields is not None else {}),
                 "updated_at": row["updated_at"],
             })
         out.sort(key=lambda p: p["name"].casefold())
         return out
 
-    def save_edit_preset(self, name, recipe):
+    def save_edit_preset(self, name, recipe, fields=None):
         """Create or overwrite (by trimmed name) a global edit preset.
 
-        Only the recipe's ``adjustments`` section is kept — geometry
-        (rotation/flip/straighten/crop) describes one photo, not a look.
+        Explicit fields retain just the selected settings, including neutral
+        values. Legacy callers keep adjustments-only preset semantics.
         Raises ValueError (or RecipeError, its subclass) for a blank or
-        overlong name, a malformed recipe, or one with no effective
-        adjustments. Returns the stored preset dict.
+        overlong name or malformed settings. Legacy calls also require an
+        effective adjustment; explicit fields may store neutral resets.
+        Returns the stored preset dict.
         """
         from image_edits import (
             RecipeError,
-            copy_recipe,
             normalize_recipe,
             recipe_to_json,
         )
@@ -11625,12 +11629,17 @@ class Database:
             recipe = normalize_recipe(recipe) or {}
         if not isinstance(recipe, dict):
             raise RecipeError("recipe must be an object")
-        normalized = normalize_recipe(
-            {"adjustments": recipe.get("adjustments") or {}}
-        )
-        if not (normalized or {}).get("adjustments"):
-            raise ValueError("preset must include at least one adjustment")
-        recipe_json = recipe_to_json(normalized)
+        from edit_batch import decode_preset, encode_preset
+
+        if fields is not None:
+            recipe_json = encode_preset(recipe, fields)
+        else:
+            normalized = normalize_recipe(
+                {"adjustments": recipe.get("adjustments") or {}}
+            )
+            if not (normalized or {}).get("adjustments"):
+                raise ValueError("preset must include at least one adjustment")
+            recipe_json = recipe_to_json(normalized)
 
         self.conn.execute(
             """INSERT INTO edit_presets (name, recipe_json, updated_at)
@@ -11646,10 +11655,12 @@ class Database:
             "WHERE name = ?",
             (name,),
         ).fetchone()
+        saved_recipe, saved_fields = decode_preset(row["recipe_json"])
         return {
             "id": row["id"],
             "name": row["name"],
-            "recipe": copy_recipe(row["recipe_json"]),
+            "recipe": saved_recipe,
+            **({"fields": saved_fields} if saved_fields is not None else {}),
             "updated_at": row["updated_at"],
         }
 

@@ -1,0 +1,328 @@
+"""Batch edits preserve per-photo choices and restore them through history."""
+
+import pytest
+from edit_batch import compose_recipe, decode_preset, encode_preset
+from image_edits import RecipeError
+
+
+def test_selective_white_balance_preserves_exposure_crop_and_other_white_balance():
+    original = {"crop": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.7},
+                "adjustments": {"exposure": 1.2, "white_balance": {"temperature": 20, "tint": -7}}}
+    result = compose_recipe(original, {"adjustments": {"white_balance": {"temperature": 0}}},
+                            ["adjustments.white_balance.temperature"], "merge")
+    assert result["crop"] == original["crop"]
+    assert result["adjustments"] == {"exposure": 1.2, "white_balance": {"tint": -7}}
+    assert original["adjustments"]["white_balance"]["temperature"] == 20
+
+
+def test_relative_offsets_clamp_and_support_negative_detail():
+    result = compose_recipe({"adjustments": {"exposure": 4.9, "sharpen": 20}},
+                            {"adjustments": {"exposure": 0.3, "sharpen": -30}},
+                            ["adjustments.exposure", "adjustments.sharpen"], "relative")
+    assert result["adjustments"] == {"exposure": 5}
+
+
+def test_radius_patch_uses_existing_sharpening():
+    result = compose_recipe({"adjustments": {"sharpen": 20}}, {"adjustments": {"sharpen_radius": 2}},
+                            ["adjustments.sharpen_radius"], "merge")
+    assert result["adjustments"] == {"sharpen": 20, "sharpen_radius": 2}
+
+
+@pytest.mark.parametrize("fields, mode, recipe", [
+    ([], "merge", {}), (["nope"], "merge", {}), ([{}], "merge", {}),
+    (None, "relative", {}), (["crop"], "relative", {}),
+    (["adjustments.exposure"], "relative", {"adjustments": {"exposure": True}}),
+    (["adjustments.exposure"], "relative", {"adjustments": {"exposure": float("nan")}}),
+    (["adjustments.sharpen_radius"], "merge", {"adjustments": {"sharpen_radius": 99}}),
+])
+def test_bad_operations_rejected(fields, mode, recipe):
+    with pytest.raises(RecipeError):
+        compose_recipe({}, recipe, fields, mode)
+
+
+def test_partial_preset_keeps_explicit_neutral_settings():
+    raw = encode_preset({"rotation": 90, "adjustments": {"exposure": 2}},
+                        ["rotation", "adjustments.white_balance.temperature"])
+    recipe, fields = decode_preset(raw)
+    assert recipe == {"version": 1, "rotation": 90}
+    target = compose_recipe({"adjustments": {"exposure": -1, "white_balance": {"temperature": 35}}},
+                            recipe, fields, "merge")
+    assert target == {"version": 1, "rotation": 90, "adjustments": {"exposure": -1}}
+
+
+def test_relative_api_preserves_individual_edits_and_undo_redo(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = [photo["id"] for photo in db.get_photos()]
+    originals = {}
+    for index, pid in enumerate(ids):
+        originals[pid] = db.set_photo_edit_recipe(pid, {
+            "rotation": 90 * index, "adjustments": {"exposure": index - 1, "contrast": 10 * index},
+        })
+    response = client.post('/api/photos/edit-recipe/apply', json={
+        "photo_ids": ids + [ids[0], 999999], "recipe": {"adjustments": {"exposure": .3}},
+        "fields": ["adjustments.exposure"], "mode": "relative",
+    })
+    assert response.status_code == 200
+    assert response.json["skipped"] == [999999]
+    assert response.json["count"] == len(ids)
+    for index, pid in enumerate(ids):
+        after = db.get_photo_edit_recipe(pid)
+        assert after["adjustments"]["exposure"] == pytest.approx(index - .7)
+        assert after.get("rotation") == (originals[pid] or {}).get("rotation")
+        assert after["adjustments"].get("contrast", 0) == 10 * index
+    applied = {pid: db.get_photo_edit_recipe(pid) for pid in ids}
+    assert client.post('/api/undo').status_code == 200
+    assert {pid: db.get_photo_edit_recipe(pid) for pid in ids} == originals
+    assert client.post('/api/redo').status_code == 200
+    assert {pid: db.get_photo_edit_recipe(pid) for pid in ids} == applied
+    assert len([h for h in db.get_edit_history() if h["action_type"] == "edit_recipe"]) == 1
+
+
+def test_partial_paste_can_reset_without_overwriting_other_settings(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = [photo["id"] for photo in db.get_photos()]
+    for pid in ids:
+        db.set_photo_edit_recipe(pid, {"rotation": 90, "adjustments": {"exposure": 1, "saturation": 10}})
+    response = client.post('/api/photos/edit-recipe/apply', json={
+        "photo_ids": ids, "recipe": {}, "fields": ["adjustments.exposure"],
+    })
+    assert response.status_code == 200
+    for pid in ids:
+        assert db.get_photo_edit_recipe(pid) == {"version": 1, "rotation": 90, "adjustments": {"saturation": 10}}
+
+
+def test_invalid_batch_leaves_every_photo_unchanged(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = [photo["id"] for photo in db.get_photos()]
+    response = client.post('/api/photos/edit-recipe/apply', json={
+        "photo_ids": ids, "recipe": {"adjustments": {"sharpen_radius": 99}},
+        "fields": ["adjustments.sharpen_radius"], "mode": "merge",
+    })
+    assert response.status_code == 400
+    assert all(db.get_photo_edit_recipe(pid) is None for pid in ids)
+
+
+def test_summary_reports_mixed_neutral_and_common_values(app_and_db):
+    app, db = app_and_db
+    ids = [photo["id"] for photo in db.get_photos()]
+    db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
+    response = app.test_client().post('/api/photos/edit-recipe/summary', json={"photo_ids": ids})
+    assert response.status_code == 200
+    assert response.json["values"]["adjustments.exposure"] is None
+    assert response.json["values"]["adjustments.sharpen_radius"] == 1
+    assert response.json["values"]["adjustments.white_balance.temperature"] == 0
+
+
+def test_rich_presets_roundtrip_and_compose_without_saving(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    fields = ["rotation", "adjustments.white_balance.temperature"]
+    response = client.post('/api/edit-presets', json={
+        "name": "Portrait orientation", "recipe": {"rotation": 90}, "fields": fields,
+    })
+    assert response.status_code == 200
+    assert client.get('/api/edit-presets').json["presets"] == [response.json["preset"]]
+    response = client.post(f'/api/photos/{pid}/edit-recipe/compose', json={
+        "current": {"adjustments": {"exposure": 1, "white_balance": {"temperature": 30, "tint": 7}}},
+        "recipe": response.json["preset"]["recipe"], "fields": fields,
+    })
+    assert response.status_code == 200
+    assert response.json["recipe"] == {
+        "version": 1, "rotation": 90, "adjustments": {"exposure": 1, "white_balance": {"tint": 7}},
+    }
+    assert db.get_photo_edit_recipe(pid) is None
+
+
+def test_radius_only_preset_preserves_destination_sharpen_strength():
+    raw = encode_preset({"adjustments": {"sharpen": 30, "sharpen_radius": 2}},
+                        ["adjustments.sharpen_radius"])
+    recipe, fields = decode_preset(raw)
+    result = compose_recipe({"adjustments": {"sharpen": 60}}, recipe, fields, "merge")
+    assert result["adjustments"] == {"sharpen": 60, "sharpen_radius": 2}
+
+
+def test_denoise_method_survives_selective_presets_and_can_reset():
+    source = {"adjustments": {"denoise_mode": "camera", "noise_reduction": 55}}
+    recipe, fields = decode_preset(encode_preset(source, ["adjustments.denoise_mode"]))
+    result = compose_recipe({"adjustments": {"noise_reduction": 70}}, recipe, fields, "merge")
+    assert result["adjustments"] == {"denoise_mode": "camera", "noise_reduction": 70}
+    reset = compose_recipe(result, {}, fields, "merge")
+    assert reset["adjustments"] == {"noise_reduction": 70}
+
+
+def test_summary_bulk_loads_visible_recipes_without_full_metadata(app_and_db):
+    app, db = app_and_db
+    folder_id = db.add_folder('/large-selection')
+    ids = [db.add_photo(folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
+                        file_size=1, file_mtime=1) for i in range(1601)]
+    db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
+    original_ws = db._active_workspace_id
+    other_ws = db.create_workspace('Other photos')
+    db.set_active_workspace(other_ws)
+    hidden_folder = db.add_folder('/hidden-selection')
+    hidden_id = db.add_photo(folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
+                             file_size=1, file_mtime=1)
+    db.set_photo_edit_recipe(hidden_id, {"adjustments": {"contrast": 90}})
+    db.set_active_workspace(original_ws)
+    from db import Database
+    from flask import g
+
+    queries = []
+
+    @app.before_request
+    def trace_summary_queries():
+        if "db" not in g:
+            g.db = Database(app.config["DB_PATH"], initialize_schema=False)
+        g.db.conn.set_trace_callback(queries.append)
+
+    response = app.test_client().post('/api/photos/edit-recipe/summary', json={
+        'photo_ids': ids + [ids[0], hidden_id, 999999],
+    })
+    assert response.status_code == 200
+    assert response.json['count'] == len(ids)
+    assert response.json['values']['adjustments.exposure'] is None
+    assert response.json['values']['adjustments.contrast'] == 0
+    membership_reads = [sql for sql in queries if 'workspace_folders' in sql]
+    recipe_reads = [sql for sql in queries if 'SELECT' in sql and 'photo_edit_recipes' in sql]
+    assert 1 <= len(membership_reads) <= 4
+    assert 1 <= len(recipe_reads) <= 3
+    assert not any('exif_data' in sql for sql in queries)
+
+
+def test_geometry_only_paste_preserves_cropped_pixels_for_all_orientations():
+    import itertools
+
+    import numpy as np
+    from image_edits import apply_recipe
+    from PIL import Image
+
+    pixels = np.arange(80 * 100, dtype=np.uint16).reshape(80, 100)
+    image = Image.fromarray(np.stack((pixels % 256, pixels // 256, pixels * 0), axis=-1).astype('uint8'))
+    orientations = [
+        {"rotation": rotation, "flip": {"horizontal": horizontal, "vertical": vertical}}
+        for rotation, horizontal, vertical in itertools.product((0, 90, 180, 270), (False, True), (False, True))
+    ]
+
+    def pixel_ids(recipe):
+        rendered = np.asarray(apply_recipe(image, recipe)).astype('uint16')
+        return sorted((rendered[..., 0] + 256 * rendered[..., 1]).ravel().tolist())
+
+    for old in orientations:
+        current = {**old, "crop": {"x": .1, "y": .2, "w": .3, "h": .4}}
+        expected = pixel_ids(current)
+        for new in orientations:
+            for fields in (["rotation"], ["flip"], ["rotation", "flip"]):
+                result = compose_recipe(current, new, fields, "merge", native_size=image.size)
+                assert pixel_ids(result) == expected, (old, new, fields)
+        assert current["crop"] == {"x": .1, "y": .2, "w": .3, "h": .4}
+
+
+def test_explicit_crop_is_not_transformed_with_geometry():
+    source = {"rotation": 90, "crop": {"x": .2, "y": .1, "w": .4, "h": .3}}
+    current = {"crop": {"x": .1, "y": .2, "w": .3, "h": .4}}
+    assert compose_recipe(current, source, ["rotation", "crop"], "merge")["crop"] == source["crop"]
+    assert "crop" not in compose_recipe(current, {"rotation": 90}, ["rotation", "crop"], "merge")
+    assert "crop" not in compose_recipe({}, source, ["rotation"], "merge")
+
+
+def test_geometry_crop_transform_accounts_for_straightening_and_aspect():
+    import numpy as np
+    from image_edits import apply_recipe
+    from PIL import Image, ImageDraw
+
+    image = Image.new('RGB', (600, 400))
+    ImageDraw.Draw(image).ellipse((170, 150, 190, 170), fill='white')
+    current = {"straighten": 20, "crop": {"x": .135, "y": .153, "w": .4, "h": .3}}
+
+    def marker_position(recipe):
+        rendered = np.asarray(apply_recipe(image, recipe))
+        ys, xs = np.nonzero(rendered[..., 0] > 240)
+        return xs.mean() / rendered.shape[1], ys.mean() / rendered.shape[0]
+
+    before = marker_position(current)
+    # Flipping a straightened image changes the crop's bounding box. The
+    # marker remains near its center when undoing/reapplying straightening.
+    assert abs(before[0] - .5) < .01 and abs(before[1] - .5) < .01
+    for rotation in (0, 90, 180, 270):
+        result = compose_recipe(current, {"rotation": rotation, "flip": {"horizontal": True}},
+                                ["rotation", "flip"], "merge", native_size=image.size)
+        after = marker_position(result)
+        assert abs(after[0] - .5) < .01 and abs(after[1] - .5) < .01
+
+
+def test_batch_slider_uses_chunked_reads_and_constant_commits(app_and_db):
+    app, db = app_and_db
+    folder_id = db.add_folder('/large-edit-selection')
+    ids = [db.add_photo(folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
+                        file_size=1, file_mtime=1) for i in range(1601)]
+    db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
+    original_ws = db._active_workspace_id
+    db.set_active_workspace(db.create_workspace('Hidden edits'))
+    hidden_folder = db.add_folder('/hidden-edit-selection')
+    hidden_id = db.add_photo(folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
+                             file_size=1, file_mtime=1)
+    db.set_active_workspace(original_ws)
+    from db import Database
+    from flask import g
+
+    queries = []
+
+    @app.before_request
+    def trace_batch_queries():
+        if "db" not in g:
+            g.db = Database(app.config["DB_PATH"], initialize_schema=False)
+        g.db.conn.set_trace_callback(queries.append)
+
+    client = app.test_client()
+    response = client.post('/api/photos/edit-recipe/apply', json={
+        'photo_ids': ids + [ids[0], hidden_id, 999999], 'recipe': {'adjustments': {'exposure': .3}},
+        'fields': ['adjustments.exposure'], 'mode': 'relative',
+    })
+    assert response.status_code == 200
+    assert response.json['count'] == len(ids)
+    assert response.json['skipped'] == [hidden_id, 999999]
+    assert 1 <= sum('workspace_folders' in sql for sql in queries) <= 4
+    assert 1 <= sum('SELECT' in sql and 'photo_edit_recipes' in sql for sql in queries) <= 3
+    assert 1 <= sum(sql == 'COMMIT' for sql in queries) <= 3
+    assert not any('exif_data' in sql for sql in queries)
+    assert db.get_photo_edit_recipe(ids[0])['adjustments']['exposure'] == 1.3
+    assert db.get_photo_edit_recipe(ids[-1])['adjustments']['exposure'] == .3
+    assert db.get_photo_edit_recipe(hidden_id) is None
+    pending = [row for row in db.get_pending_changes() if row['change_type'] == 'edit_recipe']
+    assert len(pending) == len(ids)
+    assert len([row for row in db.get_edit_history() if row['action_type'] == 'edit_recipe']) == 1
+    assert client.post('/api/undo').status_code == 200
+    assert db.get_photo_edit_recipe(ids[0])['adjustments']['exposure'] == 1
+    assert db.get_photo_edit_recipe(ids[-1]) is None
+    assert client.post('/api/redo').status_code == 200
+    assert db.get_photo_edit_recipe(ids[-1])['adjustments']['exposure'] == .3
+
+
+def test_batch_write_failure_rolls_back_recipes_sync_and_history(app_and_db, monkeypatch):
+    from db import Database
+
+    app, db = app_and_db
+    ids = [photo['id'] for photo in db.get_photos()]
+    original = Database.set_photo_edit_recipe
+    calls = []
+
+    def fail_second_write(self, photo_id, recipe, **kwargs):
+        calls.append(photo_id)
+        if len(calls) == 2:
+            raise RuntimeError('injected write failure')
+        return original(self, photo_id, recipe, **kwargs)
+
+    monkeypatch.setattr(Database, 'set_photo_edit_recipe', fail_second_write)
+    response = app.test_client().post('/api/photos/edit-recipe/apply', json={
+        'photo_ids': ids, 'recipe': {'adjustments': {'exposure': .3}},
+        'fields': ['adjustments.exposure'], 'mode': 'relative',
+    })
+    assert response.status_code == 500
+    assert len(calls) == 2
+    assert all(db.get_photo_edit_recipe(pid) is None for pid in ids)
+    assert not [row for row in db.get_pending_changes() if row['change_type'] == 'edit_recipe']
+    assert not [row for row in db.get_edit_history() if row['action_type'] == 'edit_recipe']

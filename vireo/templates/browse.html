@@ -2296,6 +2296,10 @@ body.sidebar-resizing {
     <!-- Multi-select Detail -->
     <div class="selection-panel hidden" id="selectionPanel">
       <div class="selection-heading" id="selectionCount">0 photos selected</div>
+      <div class="detail-section">
+        <button class="selection-action-btn" id="batchDevelopBtn" type="button" onclick="openBatchDevelopmentEditor()">Edit Selected Photos…</button>
+        <div class="selection-action-hint">Adjust the selection together or apply a saved preset.</div>
+      </div>
       <div class="detail-section" id="pasteEditSection" hidden>
         <div class="detail-section-title">Development Settings</div>
         <button class="selection-action-btn" id="pasteEditBtn" type="button" onclick="pasteEditSettingsToSelection()">Paste Development Settings</button>
@@ -2572,6 +2576,8 @@ body.sidebar-resizing {
 <script src="/static/vireo-work-locally.js"></script>
 <script src="/static/vireo-folder-browser.js"></script>
 <script src="/static/vireo-export-presets.js"></script>
+<link rel="stylesheet" href="/static/vireo-batch-edits.css">
+<script src="/static/vireo-batch-edits.js"></script>
 <script src="/static/vireo-thumbnail-queue.js"></script>
 <script src="/static/vireo-panorama.js"></script>
 <script>
@@ -9876,6 +9882,11 @@ async function copyDevelopmentSettingsFromPhoto(photoId) {
   }
 }
 
+async function openBatchDevelopmentEditor() {
+  try { await VireoBatchEdits.open(getActiveSelection().slice()); }
+  catch (error) { showToast(error.message || 'Could not open batch editor', 'error'); }
+}
+
 var _browseDevelopmentPasteInFlight = false;
 
 async function pasteEditSettingsToSelection() {
@@ -9894,36 +9905,8 @@ async function pasteEditSettingsToSelection() {
   _browseDevelopmentPasteInFlight = true;
   if (btn) btn.disabled = true;
   try {
-    var data = await safeFetch('/api/photos/edit-recipe/apply', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        recipe: copied.recipe,
-        photo_ids: ids,
-        description: copied.source ? ('Pasted development settings from ' + copied.source) : 'Pasted development settings',
-      }),
-    }, {toast: false});
-    var count = data.count || 0;
-    var skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
-    if (typeof window.vireoRefreshEditRecipeCache === 'function' && Array.isArray(data.applied)) {
-      // Prefer the server's per-id recipe map: with local adjustments each
-      // target now carries its own mask-snapshot ref, so reusing the copied
-      // recipe (or the first applied one) would cache wrong refs on all
-      // non-first ids until a full refetch.
-      var recipes = data.recipes && typeof data.recipes === 'object' ? data.recipes : null;
-      var updates = {};
-      data.applied.forEach(function(pid) {
-        var key = String(pid);
-        updates[key] = (recipes && recipes[key]) || data.recipe || copied.recipe;
-      });
-      window.vireoRefreshEditRecipeCache(updates);
-    }
-    var appliedMsg = 'Pasted development settings to ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');
-    if (skipped > 0) {
-      showToast(appliedMsg + '; skipped ' + skipped.toLocaleString() + '.', 'warning');
-    } else {
-      showToast(appliedMsg, 'success');
-    }
+    var data = await VireoBatchEdits.paste(ids.slice());
+    if (data) showToast(VireoBatchEdits.resultMessage(data), data.skipped.length ? 'warning' : 'success');
   } catch (e) {
     showToast(e.message || 'Could not paste development settings', 'error');
   } finally {

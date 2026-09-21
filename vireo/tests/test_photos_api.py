@@ -14507,3 +14507,53 @@ def test_point_color_api_rejects_black_and_white_samples(client_with_photo, lumi
     assert 'luminance' in preset.get_json()['error']
     assert db.get_photo_edit_recipe(photo_id) is None
     assert client.get('/api/edit-presets').get_json()['presets'] == []
+
+
+def test_partial_local_preset_rebinds_masks_and_keeps_target_global_edits(client_with_photo):
+    app, db, pid = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()["path"]
+    _register_active_mask(db, pid, folder)
+    mask = client.post(f"/api/photos/{pid}/local-mask/snapshot").json["mask"]
+    source = _local_recipe_payload(mask)["recipe"]
+    source["rotation"] = 90
+    response = client.post('/api/edit-presets', json={
+        "name": "Lift subject", "recipe": source, "fields": ["local"],
+    })
+    assert response.status_code == 200
+    preset = response.json["preset"]
+    assert "rotation" not in preset["recipe"]
+    assert preset["recipe"]["local"]["mask"]["ref"] != mask["ref"]
+    current = db.set_photo_edit_recipe(pid, {"rotation": 270, "adjustments": {"exposure": -1}})
+    preview = client.post(f'/api/photos/{pid}/edit-recipe/compose', json={
+        "current": current, "recipe": preset["recipe"], "fields": preset["fields"],
+    })
+    assert preview.status_code == 200
+    assert preview.json["recipe"]["local"]["mask"]["ref"] == mask["ref"]
+    assert db.get_photo_edit_recipe(pid) == current
+    response = client.post('/api/photos/edit-recipe/apply', json={
+        "photo_ids": [pid], "recipe": preset["recipe"], "fields": preset["fields"],
+    })
+    assert response.status_code == 200
+    result = db.get_photo_edit_recipe(pid)
+    assert result["rotation"] == 270
+    assert result["adjustments"] == {"exposure": -1}
+    assert result["local"]["mask"]["ref"] == mask["ref"]
+    assert result["local"]["regions"] == source["local"]["regions"]
+    assert client.post('/api/undo').status_code == 200
+    assert db.get_photo_edit_recipe(pid) == current
+
+
+def test_partial_global_paste_does_not_require_or_rebind_local_mask(client_with_photo):
+    app, db, pid = client_with_photo
+    client = app.test_client()
+    # This source snapshot does not exist on the destination. Selecting just
+    # exposure must neither skip the photo nor install that source mask.
+    recipe = _local_recipe_payload({"ref": "abcdef123456", "source_digest": "source"})["recipe"]
+    recipe["adjustments"] = {"exposure": 1}
+    response = client.post('/api/photos/edit-recipe/apply', json={
+        "photo_ids": [pid], "recipe": recipe, "fields": ["adjustments.exposure"],
+    })
+    assert response.status_code == 200
+    assert response.json["skipped"] == []
+    assert db.get_photo_edit_recipe(pid) == {"version": 1, "adjustments": {"exposure": 1}}

@@ -47,6 +47,7 @@ GET          /api/detection-cache/stats
 GET          /api/detections/<int:photo_id>
 GET          /api/duplicates/disk-cleanup-summary
 GET          /api/duplicates/last-scan
+GET          /api/edit-fields
 GET          /api/edit-history
 GET          /api/embedding-cache
 GET          /api/embedding-matrix
@@ -339,6 +340,7 @@ POST         /api/move-rules
 POST         /api/move-rules/preview
 POST         /api/photo-preferences
 POST         /api/photos/<int:photo_id>/color_label
+POST         /api/photos/<int:photo_id>/edit-recipe/compose
 POST         /api/photos/<int:photo_id>/flag
 POST         /api/photos/<int:photo_id>/keywords
 POST         /api/photos/<int:photo_id>/local-mask/snapshot
@@ -351,6 +353,7 @@ POST         /api/photos/best-batch
 POST         /api/photos/by-ids
 POST         /api/photos/companion-count
 POST         /api/photos/edit-recipe/apply
+POST         /api/photos/edit-recipe/summary
 POST         /api/photos/missing/check
 POST         /api/photos/missing/delete-sidecars
 POST         /api/photos/missing/remove

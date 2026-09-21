@@ -4699,7 +4699,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
         db.conn.commit()
 
-    def _queue_edit_recipe_sync(db, photo_id, recipe_json):
+    def _queue_edit_recipe_sync(db, photo_id, recipe_json, *, _commit=True):
         """Queue the current non-destructive edit recipe for XMP sync."""
         db.remove_pending_changes(
             photo_id, "edit_recipe", workspace_id=db._ws_id(), _commit=False,
@@ -4708,7 +4708,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo_id, "edit_recipe", recipe_json or "",
             workspace_id=db._ws_id(), _commit=False,
         )
-        db.conn.commit()
+        if _commit:
+            db.conn.commit()
 
     def _count_lines(path):
         if not path:
@@ -9219,11 +9220,65 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         return jsonify({"ok": True, "recipe": None})
 
+    @app.route("/api/edit-fields")
+    def api_edit_fields():
+        from edit_batch import FIELDS
+        return jsonify({"fields": FIELDS})
+
+    @app.route("/api/photos/edit-recipe/summary", methods=["POST"])
+    def api_photo_edit_recipe_summary():
+        from edit_batch import FIELDS, get_value
+
+        body = request.get_json(silent=True)
+        ids = body.get("photo_ids") if isinstance(body, dict) else None
+        if not isinstance(ids, list) or not ids or any(type(pid) is not int for pid in ids):
+            return json_error("photo_ids must be a non-empty list of integers")
+        db = _get_db()
+        visible_ids = db.filter_photo_ids_in_workspace(ids)
+        recipe_map = db.get_photo_edit_recipes(visible_ids)
+        recipes = [recipe_map.get(pid) for pid in visible_ids]
+        values = {}
+        for field in FIELDS:
+            if "min" not in field:
+                continue
+            amounts = {get_value(recipe, field["path"], field["default"]) for recipe in recipes}
+            values[field["path"]] = amounts.pop() if len(amounts) == 1 else None
+        return jsonify({"values": values, "count": len(recipes)})
+
+    @app.route("/api/photos/<int:photo_id>/edit-recipe/compose", methods=["POST"])
+    def api_compose_photo_edit_recipe(photo_id):
+        from edit_batch import compose_recipe
+        from image_edits import normalize_recipe
+
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return _photo_not_found_error(legacy_error="not found")
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        try:
+            current = normalize_recipe(body.get("current"))
+            fields = body.get("fields")
+            recipe = compose_recipe(
+                current, body.get("recipe"), fields, "merge", native_size=_recipe_source_dimensions(photo),
+            ) or {}
+            if "local" in fields and recipe.get("local"):
+                mask = _create_current_local_mask_snapshot(
+                    db, photo_id,
+                    vireo_dir=os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+                    native_size=_recipe_source_dimensions(photo),
+                )
+                recipe["local"]["mask"].update(mask)
+        except (ValueError, OSError) as e:
+            return json_error(str(e))
+        return jsonify({"recipe": recipe})
+
     @app.route("/api/photos/edit-recipe/apply", methods=["POST"])
     def api_apply_photo_edit_recipe_bulk():
         """Apply one edit recipe to many photos (copy/paste edit settings).
 
-        Replaces each target's recipe with the supplied one and records a
+        Replaces or merges selected settings and records a
         single undoable batch history entry. Photos missing from the active
         workspace are skipped (reported in ``skipped``) rather than failing
         the whole request.
@@ -9232,9 +9287,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return json_error("request body must be a JSON object")
+        from edit_batch import compose_recipe, validate_operation
+
         recipe = body.get("recipe")
-        if not isinstance(recipe, dict):
-            return json_error("recipe must be a JSON object")
+        fields = body.get("fields")
+        mode = body.get("mode", "merge" if fields is not None else "replace")
+        try:
+            fields = validate_operation(recipe, fields, mode)
+        except ValueError as e:
+            return json_error(str(e))
         raw_ids = body.get("photo_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             return json_error("photo_ids must be a non-empty list")
@@ -9247,12 +9308,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 seen.add(pid)
                 ids.append(pid)
 
-        from image_edits import RecipeError, recipe_to_json
+        from image_edits import RecipeError, normalize_recipe, recipe_to_json
 
         # Validate the incoming recipe once up front so a bad payload fails
         # cleanly before we touch any rows.
         try:
-            target_json = recipe_to_json(recipe) or ""
+            target_json = json.dumps(recipe) if mode == "relative" else (recipe_to_json(recipe) or "")
         except RecipeError as e:
             return json_error(str(e))
 
@@ -9261,21 +9322,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             description = "Pasted edit settings"
         description = description.strip()
 
-        has_local = bool(recipe.get("local"))
+        has_local = bool(recipe.get("local")) and (fields is None or "local" in fields)
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
+        visible_ids = db.filter_photo_ids_in_workspace(ids)
+        visible_set = set(visible_ids)
+        old_recipes = db.get_photo_edit_recipes(visible_ids)
+        # Slider edits need no photo metadata. Geometry and local masks use
+        # dimensions, loaded in chunks only for those operations.
+        needs_dimensions = has_local or bool(fields and {"rotation", "flip"}.intersection(fields))
+        photos = db.get_photos_by_ids(visible_ids) if needs_dimensions else {}
         items = []
         applied = []
         skipped = []
         local_errors = {}
         applied_recipes = {}
         for pid in ids:
-            photo = db.get_photo(pid, verify_workspace=True)
-            if not photo:
+            if pid not in visible_set:
                 skipped.append(pid)
                 continue
-            target_recipe = recipe
-            if has_local:
+            photo = photos.get(pid) or {}
+            old_recipe = old_recipes.get(pid)
+            target_recipe = compose_recipe(
+                old_recipe, recipe, fields, mode, native_size=_recipe_source_dimensions(photo),
+            ) or {}
+            if has_local and target_recipe.get("local"):
                 # Local adjustments reference a photo-specific mask, so each
                 # target gets its OWN snapshot (frozen from its active mask);
                 # the slider values copy, the mask does not. Photos without a
@@ -9295,16 +9366,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     skipped.append(pid)
                     local_errors[str(pid)] = str(e)
                     continue
-                target_recipe = copy.deepcopy(recipe)
                 target_local_mask = dict(
                     target_recipe["local"].get("mask") or {}
                 )
                 target_local_mask.update(target_mask)
                 target_recipe["local"]["mask"] = target_local_mask
-            old_recipe = db.get_photo_edit_recipe(pid)
             old_value = recipe_to_json(old_recipe) or ""
             try:
-                new_recipe = db.set_photo_edit_recipe(pid, target_recipe, verify_workspace=True)
+                new_recipe = normalize_recipe(target_recipe)
             except (RecipeError, ValueError):
                 skipped.append(pid)
                 continue
@@ -9312,17 +9381,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             applied.append(pid)
             applied_recipes[str(pid)] = new_recipe
             if old_value != new_value:
-                _queue_edit_recipe_sync(db, pid, new_value)
                 items.append({
                     "photo_id": pid,
                     "old_value": old_value,
                     "new_value": new_value,
                 })
 
-        if applied:
-            _invalidate_photo_render_cache(db, applied)
         if items:
-            db.record_edit("edit_recipe", description, target_json, items, is_batch=True)
+            # Commit recipes, sidecar intents, and the single undo record
+            # together. A failed write rolls back the whole adjustment.
+            with db.conn:
+                for item in items:
+                    pid = item["photo_id"]
+                    db.set_photo_edit_recipe(pid, applied_recipes[str(pid)], verify_workspace=False, _commit=False)
+                    _queue_edit_recipe_sync(db, pid, item["new_value"], _commit=False)
+                db.record_edit("edit_recipe", description, target_json, items, is_batch=True, _commit=False)
+            db._prune_edit_history()
+            _invalidate_photo_render_cache(db, [item["photo_id"] for item in items])
         # ``recipes`` maps each applied id to the recipe actually stored for
         # it — critical when ``has_local`` is true because each target has
         # its own mask snapshot ref, so callers cannot reuse the pasted
@@ -9344,8 +9419,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_edit_presets():
         """List or save (upsert by name) global edit presets.
 
-        Presets store an adjustments-only recipe — a reusable look. Geometry
-        is stripped on save; see db.save_edit_preset.
+        Explicit fields support partial looks, geometry, and local adjustments.
+        Calls without fields retain the legacy adjustments-only behavior.
         """
         db = _get_db()
         if request.method == "GET":
@@ -9357,7 +9432,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(recipe, dict):
             return json_error("recipe must be a JSON object")
         try:
-            preset = db.save_edit_preset(body.get("name"), recipe)
+            preset = db.save_edit_preset(body.get("name"), recipe, fields=body.get("fields"))
         except ValueError as e:  # includes RecipeError
             return json_error(str(e))
         return jsonify({"ok": True, "preset": preset})
