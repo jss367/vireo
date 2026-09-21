@@ -191,3 +191,64 @@ def test_summary_bulk_loads_visible_recipes_without_full_metadata(app_and_db):
     assert 1 <= len(membership_reads) <= 4
     assert 1 <= len(recipe_reads) <= 3
     assert not any('exif_data' in sql for sql in queries)
+
+
+def test_geometry_only_paste_preserves_cropped_pixels_for_all_orientations():
+    import itertools
+
+    import numpy as np
+    from image_edits import apply_recipe
+    from PIL import Image
+
+    pixels = np.arange(80 * 100, dtype=np.uint16).reshape(80, 100)
+    image = Image.fromarray(np.stack((pixels % 256, pixels // 256, pixels * 0), axis=-1).astype('uint8'))
+    orientations = [
+        {"rotation": rotation, "flip": {"horizontal": horizontal, "vertical": vertical}}
+        for rotation, horizontal, vertical in itertools.product((0, 90, 180, 270), (False, True), (False, True))
+    ]
+
+    def pixel_ids(recipe):
+        rendered = np.asarray(apply_recipe(image, recipe)).astype('uint16')
+        return sorted((rendered[..., 0] + 256 * rendered[..., 1]).ravel().tolist())
+
+    for old in orientations:
+        current = {**old, "crop": {"x": .1, "y": .2, "w": .3, "h": .4}}
+        expected = pixel_ids(current)
+        for new in orientations:
+            for fields in (["rotation"], ["flip"], ["rotation", "flip"]):
+                result = compose_recipe(current, new, fields, "merge", native_size=image.size)
+                assert pixel_ids(result) == expected, (old, new, fields)
+        assert current["crop"] == {"x": .1, "y": .2, "w": .3, "h": .4}
+
+
+def test_explicit_crop_is_not_transformed_with_geometry():
+    source = {"rotation": 90, "crop": {"x": .2, "y": .1, "w": .4, "h": .3}}
+    current = {"crop": {"x": .1, "y": .2, "w": .3, "h": .4}}
+    assert compose_recipe(current, source, ["rotation", "crop"], "merge")["crop"] == source["crop"]
+    assert "crop" not in compose_recipe(current, {"rotation": 90}, ["rotation", "crop"], "merge")
+    assert "crop" not in compose_recipe({}, source, ["rotation"], "merge")
+
+
+def test_geometry_crop_transform_accounts_for_straightening_and_aspect():
+    import numpy as np
+    from image_edits import apply_recipe
+    from PIL import Image, ImageDraw
+
+    image = Image.new('RGB', (600, 400))
+    ImageDraw.Draw(image).ellipse((170, 150, 190, 170), fill='white')
+    current = {"straighten": 20, "crop": {"x": .135, "y": .153, "w": .4, "h": .3}}
+
+    def marker_position(recipe):
+        rendered = np.asarray(apply_recipe(image, recipe))
+        ys, xs = np.nonzero(rendered[..., 0] > 240)
+        return xs.mean() / rendered.shape[1], ys.mean() / rendered.shape[0]
+
+    before = marker_position(current)
+    # Flipping a straightened image changes the crop's bounding box. The
+    # marker remains near its center when undoing/reapplying straightening.
+    assert abs(before[0] - .5) < .01 and abs(before[1] - .5) < .01
+    for rotation in (0, 90, 180, 270):
+        result = compose_recipe(current, {"rotation": rotation, "flip": {"horizontal": True}},
+                                ["rotation", "flip"], "merge", native_size=image.size)
+        after = marker_position(result)
+        assert abs(after[0] - .5) < .01 and abs(after[1] - .5) < .01

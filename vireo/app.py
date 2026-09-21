@@ -9257,7 +9257,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             current = normalize_recipe(body.get("current"))
             fields = body.get("fields")
-            recipe = compose_recipe(current, body.get("recipe"), fields, "merge") or {}
+            recipe = compose_recipe(
+                current, body.get("recipe"), fields, "merge", native_size=_recipe_source_dimensions(photo),
+            ) or {}
             if "local" in fields and recipe.get("local"):
                 mask = _create_current_local_mask_snapshot(
                     db, photo_id,
@@ -9331,7 +9333,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 skipped.append(pid)
                 continue
             old_recipe = db.get_photo_edit_recipe(pid)
-            target_recipe = compose_recipe(old_recipe, recipe, fields, mode) or {}
+            target_recipe = compose_recipe(
+                old_recipe, recipe, fields, mode, native_size=_recipe_source_dimensions(photo),
+            ) or {}
             if has_local and target_recipe.get("local"):
                 # Local adjustments reference a photo-specific mask, so each
                 # target gets its OWN snapshot (frozen from its active mask);

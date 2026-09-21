@@ -2,6 +2,7 @@
 
 import copy
 import json
+import math
 
 from image_edits import (
     _ADJUSTMENT_RANGES,
@@ -94,7 +95,60 @@ def validate_operation(recipe, fields=None, mode="replace"):
     return fields
 
 
-def compose_recipe(current, source, fields=None, mode="replace"):
+def _transform_retained_crop(current, result, native_size):
+    """Map an existing crop through the old and new post-rotation geometry."""
+    old_rotation = current.get("rotation", 0)
+    new_rotation = result.get("rotation", 0)
+    old_flip = current.get("flip") or {}
+    new_flip = result.get("flip") or {}
+    if old_rotation == new_rotation and old_flip == new_flip:
+        return
+    crop = current["crop"]
+    aspect = native_size[0] / native_size[1] if native_size and all(native_size) else None
+    old_aspect = 1 / aspect if aspect and old_rotation in (90, 270) else aspect
+    new_aspect = 1 / aspect if aspect and new_rotation in (90, 270) else aspect
+
+    def straighten(x, y, angle, ratio):
+        if not angle or not ratio:
+            return x, y
+        cos, sin = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+        dx, dy = (x - .5) * ratio, y - .5
+        return (dx * cos - dy * sin) / ratio + .5, dx * sin + dy * cos + .5
+
+    corners = []
+    delta = (new_rotation - old_rotation) % 360
+    for x in (crop["x"], crop["x"] + crop["w"]):
+        for y in (crop["y"], crop["y"] + crop["h"]):
+            px, py = straighten(x, y, -current.get("straighten", 0), old_aspect)
+            if old_flip.get("horizontal"):
+                px = 1 - px
+            if old_flip.get("vertical"):
+                py = 1 - py
+            if delta == 90:
+                px, py = 1 - py, px
+            elif delta == 180:
+                px, py = 1 - px, 1 - py
+            elif delta == 270:
+                px, py = py, 1 - px
+            if new_flip.get("horizontal"):
+                px = 1 - px
+            if new_flip.get("vertical"):
+                py = 1 - py
+            px, py = straighten(px, py, result.get("straighten", 0), new_aspect)
+            corners.append((px, py))
+    # Match the editor's bounding rectangle and clamp it to the image. Integer
+    # millionths keep rounding from producing x + w > 1 at image boundaries.
+    bounds = {}
+    for axis, size, index in (("x", "w", 0), ("y", "h", 1)):
+        lo = min(point[index] for point in corners)
+        hi = max(point[index] for point in corners)
+        extent = max(1, min(1_000_000, round((hi - lo) * 1_000_000)))
+        start = max(0, min(1_000_000 - extent, round(lo * 1_000_000)))
+        bounds[axis], bounds[size] = start / 1_000_000, extent / 1_000_000
+    result["crop"] = bounds
+
+
+def compose_recipe(current, source, fields=None, mode="replace", *, native_size=None):
     """Compose without rebinding masks; the caller owns target mask access."""
     fields = validate_operation(source, fields, mode)
     if fields is None:
@@ -114,6 +168,8 @@ def compose_recipe(current, source, fields=None, mode="replace"):
             value += get_value(current, path, field["default"])
             value = max(field["min"], min(field["max"], value))
         put_value(result, path, value)
+    if "crop" not in fields and (current or {}).get("crop") and {"rotation", "flip"}.intersection(fields):
+        _transform_retained_crop(current, result, native_size)
     return normalize_recipe(result)
 
 
