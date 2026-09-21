@@ -11523,11 +11523,12 @@ class Database:
                     out[row["photo_id"]] = recipe
         return out
 
-    def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True):
+    def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True, _commit=True):
         """Set or clear a non-destructive edit recipe for a photo.
 
         Returns the normalized recipe dict, or None when the provided recipe is
-        a no-op and the stored row was cleared.
+        a no-op and the stored row was cleared. Pass ``_commit=False`` to include
+        the write in a caller-owned batch transaction.
         """
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
@@ -11538,7 +11539,8 @@ class Database:
                 "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
                 (photo_id,),
             )
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
             return None
         self.conn.execute(
             """INSERT INTO photo_edit_recipes (photo_id, recipe_json, updated_at)
@@ -11548,7 +11550,8 @@ class Database:
                    updated_at = excluded.updated_at""",
             (photo_id, recipe_json),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         return copy_recipe(recipe_json)
 
     def clear_photo_edit_recipe(self, photo_id, verify_workspace=True):

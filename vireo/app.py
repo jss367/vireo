@@ -4698,7 +4698,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
         db.conn.commit()
 
-    def _queue_edit_recipe_sync(db, photo_id, recipe_json):
+    def _queue_edit_recipe_sync(db, photo_id, recipe_json, *, _commit=True):
         """Queue the current non-destructive edit recipe for XMP sync."""
         db.remove_pending_changes(
             photo_id, "edit_recipe", workspace_id=db._ws_id(), _commit=False,
@@ -4707,7 +4707,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo_id, "edit_recipe", recipe_json or "",
             workspace_id=db._ws_id(), _commit=False,
         )
-        db.conn.commit()
+        if _commit:
+            db.conn.commit()
 
     def _count_lines(path):
         if not path:
@@ -9305,7 +9306,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 seen.add(pid)
                 ids.append(pid)
 
-        from image_edits import RecipeError, recipe_to_json
+        from image_edits import RecipeError, normalize_recipe, recipe_to_json
 
         # Validate the incoming recipe once up front so a bad payload fails
         # cleanly before we touch any rows.
@@ -9322,17 +9323,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         has_local = bool(recipe.get("local")) and (fields is None or "local" in fields)
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
+        visible_ids = db.filter_photo_ids_in_workspace(ids)
+        visible_set = set(visible_ids)
+        old_recipes = db.get_photo_edit_recipes(visible_ids)
+        # Slider edits need no photo metadata. Geometry and local masks use
+        # dimensions, loaded in chunks only for those operations.
+        needs_dimensions = has_local or bool(fields and {"rotation", "flip"}.intersection(fields))
+        photos = db.get_photos_by_ids(visible_ids) if needs_dimensions else {}
         items = []
         applied = []
         skipped = []
         local_errors = {}
         applied_recipes = {}
         for pid in ids:
-            photo = db.get_photo(pid, verify_workspace=True)
-            if not photo:
+            if pid not in visible_set:
                 skipped.append(pid)
                 continue
-            old_recipe = db.get_photo_edit_recipe(pid)
+            photo = photos.get(pid) or {}
+            old_recipe = old_recipes.get(pid)
             target_recipe = compose_recipe(
                 old_recipe, recipe, fields, mode, native_size=_recipe_source_dimensions(photo),
             ) or {}
@@ -9363,7 +9371,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 target_recipe["local"]["mask"] = target_local_mask
             old_value = recipe_to_json(old_recipe) or ""
             try:
-                new_recipe = db.set_photo_edit_recipe(pid, target_recipe, verify_workspace=True)
+                new_recipe = normalize_recipe(target_recipe)
             except (RecipeError, ValueError):
                 skipped.append(pid)
                 continue
@@ -9371,17 +9379,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             applied.append(pid)
             applied_recipes[str(pid)] = new_recipe
             if old_value != new_value:
-                _queue_edit_recipe_sync(db, pid, new_value)
                 items.append({
                     "photo_id": pid,
                     "old_value": old_value,
                     "new_value": new_value,
                 })
 
-        if applied:
-            _invalidate_photo_render_cache(db, applied)
         if items:
-            db.record_edit("edit_recipe", description, target_json, items, is_batch=True)
+            # Commit recipes, sidecar intents, and the single undo record
+            # together. A failed write rolls back the whole adjustment.
+            with db.conn:
+                for item in items:
+                    pid = item["photo_id"]
+                    db.set_photo_edit_recipe(pid, applied_recipes[str(pid)], verify_workspace=False, _commit=False)
+                    _queue_edit_recipe_sync(db, pid, item["new_value"], _commit=False)
+                db.record_edit("edit_recipe", description, target_json, items, is_batch=True, _commit=False)
+            db._prune_edit_history()
+            _invalidate_photo_render_cache(db, [item["photo_id"] for item in items])
         # ``recipes`` maps each applied id to the recipe actually stored for
         # it — critical when ``has_local`` is true because each target has
         # its own mask snapshot ref, so callers cannot reuse the pasted

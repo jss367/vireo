@@ -252,3 +252,77 @@ def test_geometry_crop_transform_accounts_for_straightening_and_aspect():
                                 ["rotation", "flip"], "merge", native_size=image.size)
         after = marker_position(result)
         assert abs(after[0] - .5) < .01 and abs(after[1] - .5) < .01
+
+
+def test_batch_slider_uses_chunked_reads_and_constant_commits(app_and_db):
+    app, db = app_and_db
+    folder_id = db.add_folder('/large-edit-selection')
+    ids = [db.add_photo(folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
+                        file_size=1, file_mtime=1) for i in range(1601)]
+    db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
+    original_ws = db._active_workspace_id
+    db.set_active_workspace(db.create_workspace('Hidden edits'))
+    hidden_folder = db.add_folder('/hidden-edit-selection')
+    hidden_id = db.add_photo(folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
+                             file_size=1, file_mtime=1)
+    db.set_active_workspace(original_ws)
+    from db import Database
+    from flask import g
+
+    queries = []
+
+    @app.before_request
+    def trace_batch_queries():
+        if "db" not in g:
+            g.db = Database(app.config["DB_PATH"], initialize_schema=False)
+        g.db.conn.set_trace_callback(queries.append)
+
+    client = app.test_client()
+    response = client.post('/api/photos/edit-recipe/apply', json={
+        'photo_ids': ids + [ids[0], hidden_id, 999999], 'recipe': {'adjustments': {'exposure': .3}},
+        'fields': ['adjustments.exposure'], 'mode': 'relative',
+    })
+    assert response.status_code == 200
+    assert response.json['count'] == len(ids)
+    assert response.json['skipped'] == [hidden_id, 999999]
+    assert 1 <= sum('workspace_folders' in sql for sql in queries) <= 4
+    assert 1 <= sum('SELECT' in sql and 'photo_edit_recipes' in sql for sql in queries) <= 3
+    assert 1 <= sum(sql == 'COMMIT' for sql in queries) <= 3
+    assert not any('exif_data' in sql for sql in queries)
+    assert db.get_photo_edit_recipe(ids[0])['adjustments']['exposure'] == 1.3
+    assert db.get_photo_edit_recipe(ids[-1])['adjustments']['exposure'] == .3
+    assert db.get_photo_edit_recipe(hidden_id) is None
+    pending = [row for row in db.get_pending_changes() if row['change_type'] == 'edit_recipe']
+    assert len(pending) == len(ids)
+    assert len([row for row in db.get_edit_history() if row['action_type'] == 'edit_recipe']) == 1
+    assert client.post('/api/undo').status_code == 200
+    assert db.get_photo_edit_recipe(ids[0])['adjustments']['exposure'] == 1
+    assert db.get_photo_edit_recipe(ids[-1]) is None
+    assert client.post('/api/redo').status_code == 200
+    assert db.get_photo_edit_recipe(ids[-1])['adjustments']['exposure'] == .3
+
+
+def test_batch_write_failure_rolls_back_recipes_sync_and_history(app_and_db, monkeypatch):
+    from db import Database
+
+    app, db = app_and_db
+    ids = [photo['id'] for photo in db.get_photos()]
+    original = Database.set_photo_edit_recipe
+    calls = []
+
+    def fail_second_write(self, photo_id, recipe, **kwargs):
+        calls.append(photo_id)
+        if len(calls) == 2:
+            raise RuntimeError('injected write failure')
+        return original(self, photo_id, recipe, **kwargs)
+
+    monkeypatch.setattr(Database, 'set_photo_edit_recipe', fail_second_write)
+    response = app.test_client().post('/api/photos/edit-recipe/apply', json={
+        'photo_ids': ids, 'recipe': {'adjustments': {'exposure': .3}},
+        'fields': ['adjustments.exposure'], 'mode': 'relative',
+    })
+    assert response.status_code == 500
+    assert len(calls) == 2
+    assert all(db.get_photo_edit_recipe(pid) is None for pid in ids)
+    assert not [row for row in db.get_pending_changes() if row['change_type'] == 'edit_recipe']
+    assert not [row for row in db.get_edit_history() if row['action_type'] == 'edit_recipe']
