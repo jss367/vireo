@@ -173,3 +173,25 @@ def test_request_ids_are_validated_and_error_codes_are_stable(app_and_db):
     assert body["code"] == "browser_session_required"
     assert body["request_id"] != "invalid request id"
     assert response.headers["X-Request-ID"] == body["request_id"]
+
+
+def test_app_hooks_run_in_security_order(app_and_db):
+    """``web.app_hooks`` registers the app-wide hooks in one call. Flask runs
+    ``before_request`` hooks in registration order and stops at the first
+    response, so the browser guard and the v1 token check must precede the
+    workspace mutation reservation (a refused request takes no reservation),
+    and the request id must be stamped before any of them can answer."""
+    app, _ = app_and_db
+
+    def names(funcs):
+        return [f.__name__ for f in funcs]
+
+    assert names(app.before_request_funcs[None]) == [
+        "_start_timer",
+        "_protect_browser_surface",
+        "_enforce_api_v1_token",
+        "_reserve_workspace_mutation",
+    ]
+    assert names(app.after_request_funcs[None]) == ["_log_requests"]
+    assert names(app.teardown_request_funcs[None]) == ["_release_workspace_mutation"]
+    assert names(app.teardown_appcontext_funcs) == ["close_request_db"]

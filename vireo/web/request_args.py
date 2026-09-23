@@ -6,9 +6,10 @@ universal-filter ``rules`` tree, the ``visual`` clause, collection ids,
 selection ``photo_ids``). Parsing them in one place keeps every endpoint's
 400s and scoping identical as those groups move into their own blueprints.
 
-The ``request_*`` parsers read ``flask.request`` and raise ``ValueError`` for
-the caller to turn into a 400. Helpers that must answer with a response take
-the app's ``json_error`` as a keyword argument, the same convention as
+The ``request_*`` parsers (including the ``flag`` / ``location_status``
+filters) read ``flask.request`` and raise ``ValueError`` for the caller to
+turn into a 400. Helpers that must answer with a response take the app's
+``json_error`` as a keyword argument, the same convention as
 ``services.pipeline_launch.resolve_remote_archive_target``.
 """
 
@@ -43,6 +44,28 @@ def request_bool_arg(name):
     """Return whether query param ``name`` holds a truthy flag value."""
     raw = request.args.get(name, "")
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def request_flag_filter():
+    """Parse the optional ``flag`` query param (``none``/``flagged``/``rejected``)."""
+    flag = request.args.get("flag", None)
+    if flag in (None, ""):
+        return None
+    if flag not in ("none", "flagged", "rejected"):
+        raise ValueError("flag must be 'none', 'flagged', or 'rejected'")
+    return flag
+
+
+def request_location_status_filter():
+    """Parse the optional ``location_status`` query param (``exif``/``assigned``/``none``)."""
+    value = (request.args.get("location_status") or "").strip().lower()
+    if not value:
+        return None
+    if value not in {"exif", "assigned", "none"}:
+        raise ValueError(
+            "location_status must be 'exif', 'assigned', or 'none'"
+        )
+    return value
 
 
 def request_rules_arg():
