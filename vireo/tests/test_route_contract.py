@@ -55,24 +55,31 @@ def _is_route(node):
 
 
 def _collect_functions(module_label, tree):
-    """Yield ``(qualified_name, node)`` for every function definition.
+    """Yield ``(qualified_name, node, is_class_method)`` for every function.
 
     The qualified name is ``(module_label, ...enclosing_scope_names, own_name)``
     — the lexical path from the module root, with every enclosing ``def`` and
     ``class`` on the way in. A nested function stays a distinct node from a
     same-named function elsewhere, which is what a name-keyed graph loses.
+    ``is_class_method`` is true when the immediately enclosing scope is a
+    ``class``: a service method (``PhotoReviewService.set_flag``,
+    ``DecisionService.apply``) that another module can invoke via
+    ``ClassName(...).method(...)`` and that the module-level fallback alone
+    cannot see.
     """
-    def walk(node, scope):
+    def walk(node, scope, parent_is_class):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
                 qname = scope + (child.name,)
-                yield qname, child
-                yield from walk(child, qname)
+                yield qname, child, parent_is_class
+                # Inside the function body, further nested defs are nested,
+                # not class methods, even if this function itself is one.
+                yield from walk(child, qname, False)
             elif isinstance(child, ast.ClassDef):
-                yield from walk(child, scope + (child.name,))
+                yield from walk(child, scope + (child.name,), True)
             else:
-                yield from walk(child, scope)
-    yield from walk(tree, (module_label,))
+                yield from walk(child, scope, parent_is_class)
+    yield from walk(tree, (module_label,), False)
 
 
 def _called_names(node):
@@ -179,24 +186,33 @@ def _call_graph(sources):
       here, restricts the module-level fallback to the caller's own module
       — two blueprints each defining a module-level ``_decide`` do not
       merge. When the name is imported into this module, or the call is an
-      attribute call, any module-level function with that name is a
-      candidate.
+      attribute call, any module-level function or class method with that
+      name is a candidate: an attribute name may resolve to a service class
+      method (``PhotoReviewService(db).set_flag(...)``) as well as to a
+      module-level function.
     """
     call_map = {}
     routes = {}
     module_top = {}
     nested = {}
+    class_methods = {}
     module_imports = {}
 
     for label, text, may_register_routes in sources:
         tree = ast.parse(text)
         module_imports[label] = _imported_names(tree)
-        for qname, node in _collect_functions(label, tree):
+        for qname, node, is_class_method in _collect_functions(label, tree):
             call_map[qname] = _called_names(node)
             if len(qname) == 2:
                 module_top.setdefault(qname[-1], set()).add(qname)
             else:
                 nested.setdefault((qname[:-1], qname[-1]), set()).add(qname)
+                if is_class_method:
+                    # A class method on ``ClassName``: ``ClassName(db).method``
+                    # or ``ClassName.method`` from another module resolves
+                    # here, past the same-module and lexical fallbacks that
+                    # only see the caller's own scope.
+                    class_methods.setdefault(qname[-1], set()).add(qname)
             if may_register_routes and _is_route(node):
                 routes.setdefault(node.name, []).append(
                     (qname, f"{label}:{node.lineno}"),
@@ -226,8 +242,14 @@ def _call_graph(sources):
                 if q[0] == caller_module
             }
         # Attribute call, or a bare Name known to be imported here: match
-        # any module-level function with that name.
-        return module_top.get(name, set())
+        # any module-level function AND any class method with that name.
+        # The class-method union is what lets a route calling
+        # ``PhotoReviewService(db).set_flag(...)`` from a blueprint reach
+        # into the service's ``set_flag``; without it, a future decision
+        # route wrapped inside a service class would be invisible to the
+        # graph and could silently write ``prediction_review`` without
+        # being flagged as needing the lock.
+        return module_top.get(name, set()) | class_methods.get(name, set())
 
     return call_map, routes, resolve
 
@@ -520,6 +542,55 @@ def create_locked_blueprint(get_db, json_error):
         for p in problems
     ), problems
     assert not any(p.startswith("api_l ") for p in problems), problems
+
+
+def test_decision_route_analysis_follows_service_class_methods():
+    """``ClassName(...).method(...)`` reaches into that class's method.
+
+    A service class defined in ``vireo/services/`` (``PhotoReviewService``,
+    ``PhotoLabelService`` today) is instantiated and called from a blueprint
+    as ``ClassName(db).method(...)``. Class methods live under the class
+    scope, so bare-name lookups against ``module_top`` never see them: a
+    future decision route that runs its writes through such a service would
+    silently omit the lock without failing the structural test. Attribute-
+    call resolution now unions class methods with matching name, so the
+    reachability walk follows into the method and picks up its
+    ``prediction_review`` writes.
+    """
+    service_module = '''
+class DecisionService:
+    def __init__(self, db):
+        self.db = db
+
+    def apply(self, pred_id):
+        self.db.update_prediction_status(pred_id, "rejected")
+'''
+    blueprint = '''
+from services.decisions import DecisionService
+
+
+def create_bp(get_db, json_error):
+    bp = Blueprint("d", __name__)
+
+    @bp.post("/api/apply")
+    def api_apply():
+        return DecisionService(get_db()).apply(1)
+
+    return bp
+'''
+    call_map, routes, resolve = _call_graph([
+        ("services/decisions.py", service_module, False),
+        ("web/d.py", blueprint, True),
+    ])
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_apply ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
 
 
 def test_decision_route_analysis_follows_direct_imports_of_the_lock():
