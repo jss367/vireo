@@ -28,6 +28,35 @@ def test_api_v1_collections(app_and_db):
     assert resp.status_code == 200
 
 
+def test_api_v1_collection_photos(app_and_db):
+    import json
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.get_photos()[0]["id"]
+    cid = db.add_collection(
+        "Picked", json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    )
+    resp = client.get(f"/api/v1/collections/{cid}/photos", headers=_auth(app))
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [p["id"] for p in body["photos"]] == [photo_id]
+    # The v1 surface answers exactly as the internal route does.
+    assert body == client.get(f"/api/collections/{cid}/photos").get_json()
+
+
+def test_api_v1_collection_aliases_keep_their_endpoint_names(app_and_db):
+    """The collections routes live in a blueprint; the v1 aliases keep their
+    ``v1_<view>`` endpoint names and point at the blueprint's views."""
+    app, _ = app_and_db
+    views = app.view_functions
+    assert views["v1_api_collections"] is views["collections.api_collections"]
+    assert (
+        views["v1_api_collection_photos"]
+        is views["collections.api_collection_photos"]
+    )
+
+
 def test_api_v1_workspaces(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
