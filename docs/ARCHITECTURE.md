@@ -9,6 +9,8 @@ that information for interactive use.
 
 - HTTP blueprints validate requests and serialize responses. New route groups
   belong under `vireo/web`; do not add routes to the legacy application module.
+  `test_no_new_routes_in_app_py` enforces this with a route limit that only
+  goes down; lower it in the same PR that moves routes out of `vireo/app.py`.
 - Services own filesystem work, subprocesses, cache invalidation, and workflow
   coordination. A route should call a service rather than implement those
   operations itself.

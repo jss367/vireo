@@ -73,7 +73,7 @@ fails all three attempts; only one that passes on retry is tolerated.
 
 ## Architecture
 
-- `vireo/app.py` — Flask app with all routes. Created via `create_app(db_path, thumb_cache_dir)`.
+- `vireo/app.py` — Flask app factory and the legacy routes not yet moved to `vireo/web/`. Created via `create_app(db_path, thumb_cache_dir)`. Do not add routes here: `test_no_new_routes_in_app_py` caps the count, and PRs that move routes out lower the cap.
 - `vireo/db.py` — `Database` class. SQLite with workspace support. Auto-creates Default workspace and restores last-used workspace on init.
 - `vireo/duplicates.py` — Pure exact-duplicate resolver (winner/loser decision + metadata merge). Consumed by `db.apply_duplicate_resolution` and the scan job.
 - `vireo/import_dedup.py` — Metadata-first duplicate gate for imports (`CatalogIndex` + `DuplicateChecker`): match by (filename, size, EXIF capture time) with a content-hash fallback for missing/placeholder metadata; `verify_by_hash` restores hash-everything. Shared by `ingest()`, `/api/import/check-duplicates`, and the local-processing preflight so duplicate previews always agree with what ingest actually skips.

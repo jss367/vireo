@@ -123,6 +123,53 @@ def test_every_prediction_decision_route_locks():
         ), f"{name} is declared a decision route but never takes the lock"
 
 
+# Routes still registered with ``@app.<verb>`` in ``vireo/app.py``. This number
+# may only go down. New routes belong in a blueprint under ``vireo/web/`` (see
+# docs/ARCHITECTURE.md). When a PR moves routes out of app.py, lower this to
+# the new count in the same PR so the extraction cannot be undone.
+_LEGACY_APP_ROUTE_LIMIT = 281
+
+_ROUTE_VERBS = frozenset({"route", "get", "post", "put", "patch", "delete"})
+
+
+def _legacy_app_routes():
+    """``(function name, line)`` for every ``@app.<verb>`` rule in app.py."""
+    tree = ast.parse(APP_SOURCE.read_text(encoding="utf-8"))
+    return [
+        (node.name, dec.lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        for dec in node.decorator_list
+        if isinstance(dec, ast.Call)
+        and isinstance(dec.func, ast.Attribute)
+        and dec.func.attr in _ROUTE_VERBS
+        and isinstance(dec.func.value, ast.Name)
+        and dec.func.value.id == "app"
+    ]
+
+
+def test_no_new_routes_in_app_py():
+    """app.py may not gain routes. The limit only ratchets down.
+
+    docs/ARCHITECTURE.md has said "do not add routes to the legacy application
+    module" since July 2026, and app.py gained dozens of routes anyway. A rule
+    that lives only in prose does not hold, so this test enforces it.
+    """
+    count = len(_legacy_app_routes())
+    assert count <= _LEGACY_APP_ROUTE_LIMIT, (
+        f"vireo/app.py registers {count} routes; the limit is "
+        f"{_LEGACY_APP_ROUTE_LIMIT}. Put new routes in a blueprint under "
+        "vireo/web/ (see docs/ARCHITECTURE.md and the create_*_blueprint "
+        "factories there) instead of adding @app.route inside create_app."
+    )
+    assert count == _LEGACY_APP_ROUTE_LIMIT, (
+        f"vireo/app.py now registers {count} routes, below the limit of "
+        f"{_LEGACY_APP_ROUTE_LIMIT}. Lower _LEGACY_APP_ROUTE_LIMIT in "
+        f"vireo/tests/test_route_contract.py to {count} so the extraction "
+        "sticks."
+    )
+
+
 def _public_route_contract(app):
     rows = []
     for rule in app.url_map.iter_rules():
