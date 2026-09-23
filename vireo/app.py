@@ -22,7 +22,6 @@ import time
 import uuid
 import webbrowser
 from datetime import UTC, datetime
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import id_conflicts
@@ -60,6 +59,7 @@ from services.local_workspace import (
     stage_boundary_lock,
 )
 from services.pipeline_launch import PipelineChain
+from services.render_cache import RenderCache, queue_edit_recipe_sync
 from services.visual_scope import (
     VISUAL_COLLECTION_MSG,
     VisualScope,
@@ -2896,175 +2896,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         lambda: app._job_runner, _get_db, db_path, Database
     )
 
-    _invalid_preview_cache_paths = set()
-
-    # Canonical definitions live in preview_cache so the recycled-rowid
-    # purge (which runs in the scanner, outside this app factory) writes
-    # the same marker web.media's _serve_preview lazy-adoption branch consults.
-    def _ensure_preview_cache_invalidations_table(db):
-        from preview_cache import ensure_preview_cache_invalidations_table
-        ensure_preview_cache_invalidations_table(db)
-
-    def _mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
-        from preview_cache import mark_preview_cache_invalid
-        mark_preview_cache_invalid(db, photo_id, size, commit=commit)
-
-    def _clear_preview_cache_invalid(db, photo_id, size, *, commit=True):
-        _ensure_preview_cache_invalidations_table(db)
-        db.conn.execute(
-            "DELETE FROM preview_cache_invalidations WHERE photo_id=? AND size=?",
-            (photo_id, size),
-        )
-        if commit:
-            db.conn.commit()
-
-    def _invalidate_photo_render_cache(db, photo_ids):
-        """Drop cached rendered derivatives after an edit recipe changes."""
-        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        thumb_dir = app.config["THUMB_CACHE_DIR"]
-        preview_dir = os.path.join(vireo_dir, "previews")
-        originals_dir = os.path.join(vireo_dir, "originals")
-        external_edits_dir = os.path.join(vireo_dir, "external-edits")
-        for pid in photo_ids:
-            thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
-            clear_thumb_path = True
-            try:
-                if os.path.exists(thumb_cache):
-                    os.remove(thumb_cache)
-            except OSError:
-                clear_thumb_path = not os.path.exists(thumb_cache)
-                log.warning(
-                    "Failed to remove stale thumbnail cache %s", thumb_cache,
-                    exc_info=True,
-                )
-            for source in ("raw", "jpeg"):
-                variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
-                try:
-                    if os.path.exists(variant):
-                        os.remove(variant)
-                except OSError:
-                    log.warning(
-                        "Failed to remove stale paired-source thumbnail %s",
-                        variant,
-                        exc_info=True,
-                    )
-            # ``<pid>_regen.jpg`` / ``<pid>_raw_regen.jpg`` /
-            # ``<pid>_jpeg_regen.jpg`` are the sidecars ``serve_thumbnail``
-            # falls back to when the default couldn't be unlinked (a
-            # persistent lock). Without this pass, editing the recipe
-            # while the default stays locked leaves the sidecar carrying
-            # the pre-edit pixels; the freshness gate there compares
-            # against the unchanged source mtime and re-serves them.
-            for stem in (f"{pid}", f"{pid}_raw", f"{pid}_jpeg"):
-                sidecar = os.path.join(thumb_dir, f"{stem}_regen.jpg")
-                try:
-                    if os.path.exists(sidecar):
-                        os.remove(sidecar)
-                except OSError:
-                    log.warning(
-                        "Failed to remove stale regeneration sidecar %s",
-                        sidecar,
-                        exc_info=True,
-                    )
-            if clear_thumb_path:
-                db.conn.execute(
-                    "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
-                )
-            tracked_sizes = set()
-            removed_preview_rows = []
-            for row in db.conn.execute(
-                "SELECT size FROM preview_cache WHERE photo_id = ?",
-                (pid,),
-            ).fetchall():
-                size_value = row["size"]
-                tracked_sizes.add(str(size_value))
-                path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    if os.path.exists(path):
-                        _invalid_preview_cache_paths.add(path)
-                        _mark_preview_cache_invalid(
-                            db, pid, size_value, commit=False,
-                        )
-                    log.warning(
-                        "Failed to remove stale preview cache %s",
-                        path, exc_info=True,
-                    )
-                else:
-                    removed_preview_rows.append((pid, size_value))
-                    _clear_preview_cache_invalid(
-                        db, pid, size_value, commit=False,
-                    )
-            try:
-                for name in os.listdir(preview_dir):
-                    if not (name.startswith(f"{pid}_") and name.endswith(".jpg")):
-                        continue
-                    size_part = name[len(f"{pid}_"):-4]
-                    if size_part in tracked_sizes:
-                        continue
-                    path = os.path.join(preview_dir, name)
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        if os.path.exists(path):
-                            _invalid_preview_cache_paths.add(path)
-                            _mark_preview_cache_invalid(
-                                db, pid, size_part, commit=False,
-                            )
-                        log.warning(
-                            "Failed to remove stale preview cache %s",
-                            path, exc_info=True,
-                        )
-                    else:
-                        _clear_preview_cache_invalid(
-                            db, pid, size_part, commit=False,
-                        )
-            except FileNotFoundError:
-                pass
-            if removed_preview_rows:
-                db.conn.executemany(
-                    "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
-                    removed_preview_rows,
-                )
-            original_paths = [
-                os.path.join(originals_dir, f"{pid}.jpg"),
-                *Path(originals_dir).glob(f"{pid}_*.jpg"),
-            ]
-            for original_path in original_paths:
-                try:
-                    if os.path.exists(original_path):
-                        os.remove(original_path)
-                except OSError:
-                    log.warning(
-                        "Failed to remove stale original cache %s",
-                        original_path,
-                    )
-            external_cache = os.path.join(external_edits_dir, f"{pid}.jpg")
-            external_meta = os.path.join(external_edits_dir, f"{pid}.json")
-            for path in (external_cache, external_meta):
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    log.warning(
-                        "Failed to remove stale external edit cache %s",
-                        path, exc_info=True,
-                    )
-        db.conn.commit()
-
-    def _queue_edit_recipe_sync(db, photo_id, recipe_json, *, _commit=True):
-        """Queue the current non-destructive edit recipe for XMP sync."""
-        db.remove_pending_changes(
-            photo_id, "edit_recipe", workspace_id=db._ws_id(), _commit=False,
-        )
-        db.queue_change(
-            photo_id, "edit_recipe", recipe_json or "",
-            workspace_id=db._ws_id(), _commit=False,
-        )
-        if _commit:
-            db.conn.commit()
+    # Render/preview cache invalidation lives in services.render_cache;
+    # the aliases keep the blueprint wiring below unchanged.
+    render_cache = RenderCache(app.config)
+    _invalid_preview_cache_paths = render_cache.invalid_preview_cache_paths
+    _clear_preview_cache_invalid = render_cache.clear_preview_cache_invalid
+    _invalidate_photo_render_cache = render_cache.invalidate_photo_render_cache
+    _queue_edit_recipe_sync = queue_edit_recipe_sync
 
     @app.teardown_appcontext
     def _close_db(exc):
