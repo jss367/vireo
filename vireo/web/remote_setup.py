@@ -8,24 +8,35 @@ and validate the local archive root
 are loopback-only: the app already binds 127.0.0.1 via waitress, but the
 install-key route carries a NAS password, so defense in depth is cheap and
 the consistent rule is simplest.
+
+The configured remote targets the wizard produces are served here too:
+``/api/remote-targets`` lists them for the move/import pickers (with rsync/ssh
+availability and each local archive root's state), and
+``/api/remote-targets/test`` checks one saved or in-progress target. These
+two are not loopback-guarded; they never were.
 """
 
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import shutil
 import subprocess
 
 from flask import Blueprint, jsonify, request
 
+log = logging.getLogger(__name__)
 
-def create_remote_setup_blueprint(get_db, json_error):
+
+def create_remote_setup_blueprint(get_db, json_error, config):
     """Build the remote-setup blueprint.
 
-    Nothing is injected beyond the database accessor and the JSON error
-    helper: the loopback guard, the host/user/port validation and the ssh
-    binary lookup are used only by these routes, so they move here with them.
+    Beyond the database accessor and the JSON error helper, only ``config``
+    (``app.config``) is injected: the remote-targets list reads
+    ``REMOTE_TARGET_PROBE_BUDGET_SECS`` from it at request time. The loopback
+    guard, the host/user/port validation, the ssh binary lookup and the
+    archive-root probes are used only by these routes, so they live here.
     """
     blueprint = Blueprint("remote_setup", __name__)
 
@@ -258,5 +269,190 @@ def create_remote_setup_blueprint(get_db, json_error):
             # user proceed rather than block on a transient FS hiccup.
             inside = False
         return jsonify({"inside_mount": inside})
+
+    def _archive_root_state(target):
+        """``(present, volume_offline)`` for the target's local archive root.
+
+        ``present`` is None when no root is configured or when it cannot be
+        determined, else whether the directory exists. ``volume_offline`` is
+        True when the root sits on a mount-shaped volume that failed the
+        bounded reachability probe. The filesystem is only touched after
+        that probe passes: a plain ``os.path.isdir`` on a stale SMB/NFS
+        share can block a Flask worker indefinitely, and this runs on
+        every ``/api/remote-targets`` call (page loads and the Import
+        page's after-move refresh), so one dead root must not be able to
+        hang the endpoint. Ordinary local folders have no mount-shaped
+        prefix and skip the probe entirely.
+        """
+        import volume_reachability
+
+        root = (target.get("local_archive_root") or "").strip()
+        if not root:
+            return None, False
+        _, reachable = volume_reachability.get_shared().check(root)
+        if not reachable:
+            return None, True
+        return os.path.isdir(root), False
+
+    # Aggregate budget for probing every target's archive root in one
+    # /api/remote-targets call. Each individual probe is bounded (see
+    # volume_reachability), but with several roots on distinct dead
+    # volumes the bounded probes would add up serially past the Import
+    # page's 10s client abort, and the page would then report every SSH
+    # destination as unavailable. Probe concurrently and stop waiting at
+    # the budget; a root still unanswered by then is reported the same way
+    # volume_reachability reports "could not be inspected in time" —
+    # unreachable — rather than guessed.
+    config.setdefault("REMOTE_TARGET_PROBE_BUDGET_SECS", 6.0)
+
+    def _archive_root_states(targets):
+        """``[(present, volume_offline), ...]`` aligned with ``targets``,
+        probed concurrently under ``REMOTE_TARGET_PROBE_BUDGET_SECS``."""
+        from concurrent.futures import ThreadPoolExecutor, wait
+
+        indexed = [(i, t) for i, t in enumerate(targets)
+                   if (t.get("local_archive_root") or "").strip()]
+        states = [(None, False)] * len(targets)
+        if not indexed:
+            return states
+        budget = float(config.get("REMOTE_TARGET_PROBE_BUDGET_SECS", 6.0))
+        pool = ThreadPoolExecutor(
+            max_workers=min(len(indexed), 8),
+            thread_name_prefix="archive-root-probe")
+        futures = {pool.submit(_archive_root_state, t): i for i, t in indexed}
+        done, _ = wait(futures, timeout=budget)
+        # Don't block on stragglers: their probes are bounded and reaped by
+        # volume_reachability, so the worker threads exit on their own.
+        pool.shutdown(wait=False, cancel_futures=True)
+        for fut, i in futures.items():
+            if fut in done and fut.exception() is None:
+                states[i] = fut.result()
+            else:
+                if fut in done:
+                    log.warning("archive-root probe raised for %s",
+                                targets[i].get("local_archive_root"),
+                                exc_info=fut.exception())
+                else:
+                    log.warning(
+                        "archive-root probe for %s did not finish within "
+                        "%.1fs; reporting the volume as unreachable",
+                        targets[i].get("local_archive_root"), budget)
+                states[i] = (None, True)
+        return states
+
+    @blueprint.route("/api/remote-targets")
+    def api_remote_targets_list():
+        """List configured remote (SSH) move targets for the move-form picker,
+        plus whether a usable GNU rsync is available for the transfer."""
+        import config as cfg
+        import move as move_mod
+
+        effective_cfg = get_db().get_effective_config(cfg.load())
+        rsync_bin = move_mod.resolve_rsync_bin(
+            effective_cfg.get("rsync_bin", "") or "")
+        usable = bool(rsync_bin and move_mod.is_gnu_rsync(rsync_bin))
+        ssh_bin = move_mod.resolve_ssh_bin(
+            effective_cfg.get("ssh_bin", "") or "")
+        targets = cfg.get_remote_targets()
+        for t, (present, offline) in zip(
+                targets, _archive_root_states(targets), strict=True):
+            t["local_archive_root_present"] = present
+            t["local_archive_root_volume_offline"] = offline
+        return jsonify({
+            "targets": targets,
+            "rsync_available": usable,
+            "rsync_bin": rsync_bin if usable else None,
+            "ssh_available": bool(ssh_bin),
+            "ssh_bin": ssh_bin,
+            "remote_available": bool(usable and ssh_bin),
+        })
+
+    @blueprint.route("/api/remote-targets/test", methods=["POST"])
+    def api_remote_target_test():
+        """Test connectivity for a remote target (saved or in-progress edit):
+        SSH reachability, remote-path writability, GNU rsync availability,
+        whether the local mount path is currently present, and whether the
+        local archive root exists.
+
+        The archive-root check is the one that catches a typo'd
+        ``local_archive_root`` (issue #1377): the connection itself is fine,
+        so ``ok`` stays true, but a bare "Connection OK" would let the user
+        walk away from Settings believing the chained move is configured
+        and only find out on the Import page, where the hint can't name
+        the field that is wrong. ``archive_root_present`` is None when no
+        root is configured (nothing to check), so the UI can tell "not
+        set" from "set but missing"."""
+        import config as cfg
+        import move as move_mod
+
+        body = request.get_json(silent=True) or {}
+        target = cfg._coerce_remote_target(body)
+        if target is None:
+            return json_error("Host, user, and remote path are required.")
+
+        effective_cfg = get_db().get_effective_config(cfg.load())
+        rsync_bin = move_mod.resolve_rsync_bin(
+            effective_cfg.get("rsync_bin", "") or "")
+        # Apple openrsync resolves but can't drive SSH — treat as unusable.
+        if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
+            rsync_bin = ""
+        ssh_bin = move_mod.resolve_ssh_bin(
+            effective_cfg.get("ssh_bin", "") or "")
+        target["ssh_bin"] = ssh_bin
+        res = move_mod.test_remote_connection(target, rsync_bin)
+        import volume_reachability
+
+        mount = target.get("mount_path")
+        res["mount_path"] = mount
+        # Same bounded gate as the archive root: the mount is the NAS share
+        # itself, the most likely path to be stale, so probe before isdir.
+        res["mount_present"] = bool(
+            mount and volume_reachability.get_shared().check(mount)[1]
+            and os.path.isdir(mount))
+        # _coerce_remote_target blanks an invalid archive root (relative,
+        # or inside mount_path) rather than rejecting the target, and the
+        # save path does the same. Compare against what was actually
+        # submitted so a rejected root is reported as such instead of
+        # reading as "not configured" and getting a green result.
+        submitted_root = (body.get("local_archive_root") or "").strip()
+        archive_root = target.get("local_archive_root") or ""
+        archive_root_invalid = bool(submitted_root and not archive_root)
+        res["archive_root"] = (archive_root or submitted_root) or None
+        res["archive_root_invalid"] = archive_root_invalid
+        if archive_root_invalid:
+            present, volume_offline = False, False
+        else:
+            present, volume_offline = _archive_root_state(target)
+        res["archive_root_present"] = present
+        res["archive_root_volume_offline"] = volume_offline
+        res["rsync_bin"] = rsync_bin or None
+        res["ssh_bin"] = ssh_bin
+        if res.get("ok") and volume_offline:
+            res["message"] = (
+                f"Connection OK, but the volume holding the local archive "
+                f"root '{archive_root}' is not reachable right now, so "
+                f"whether the folder exists can't be checked. The Import "
+                f"page won't offer \"Then move to NAS\" for this target "
+                f"until it is.")
+        elif res.get("ok") and archive_root_invalid:
+            res["message"] = (
+                f"Connection OK, but the local archive root "
+                f"'{submitted_root}' is not valid: it must be an absolute "
+                f"path on this machine and must not be inside the mount "
+                f"path. Saving will clear it, and the Import page won't "
+                f"offer \"Then move to NAS\" for this target.")
+        elif res.get("ok") and res["archive_root_present"] is False:
+            res["message"] = (
+                f"Connection OK, but the local archive root '{archive_root}' "
+                f"does not exist on this machine \u2014 the Import page won't "
+                f"offer \"Then move to NAS\" for this target until it does. "
+                f"Check the path for a typo, or create the folder.")
+        if not ssh_bin:
+            res["ok"] = False
+            res["message"] = (
+                "OpenSSH Client was not found. Install the Windows optional "
+                "feature or configure ssh.exe under Settings → Paths."
+            )
+        return jsonify(res)
 
     return blueprint

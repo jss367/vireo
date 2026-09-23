@@ -41,7 +41,6 @@ from artifact_flight import (
 )
 from camera_denoise import cache_matches as _camera_cache_matches
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
-from classification_readiness import classification_readiness
 from db import (
     _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE,
     KEYWORD_TYPES,
@@ -58,8 +57,6 @@ from flask import (
     g,
     jsonify,
     make_response,
-    redirect,
-    render_template,
     request,
     send_from_directory,
 )
@@ -155,6 +152,7 @@ from web.card_cleanup import create_card_cleanup_blueprint
 from web.collections import create_collections_blueprint
 from web.dashboard import create_dashboard_blueprint
 from web.duplicates import create_duplicates_blueprint
+from web.editing import create_editing_blueprint
 from web.export import create_export_blueprint
 from web.imports import create_imports_blueprint
 from web.inat import InatTokenGeneration, create_inat_blueprint
@@ -177,7 +175,7 @@ from web.locations import create_locations_blueprint
 from web.misses import create_misses_blueprint
 from web.models import create_models_blueprint
 from web.moves import create_moves_blueprint
-from web.pages import pages_blueprint
+from web.pages import create_pages_blueprint
 from web.photo_labels import create_photo_labels_blueprint
 from web.photo_review import create_photo_review_blueprint
 from web.pipeline import create_pipeline_blueprint
@@ -194,6 +192,7 @@ from web.request_args import (
     request_visual_arg,
 )
 from web.settings import create_settings_blueprint
+from web.species import create_species_blueprint
 from web.storage import create_storage_blueprint
 from web.sync import create_sync_blueprint
 from web.system import create_system_blueprint
@@ -1394,32 +1393,6 @@ def _build_best_batch_response(db, seed_photo_id, rows):
         "alternate_ids": alternate_ids,
         "suggested_reject_ids": reject_ids,
     }, None
-
-
-def _file_manager_labels():
-    """Friendly OS file-manager wording for UI labels.
-
-    Keeps Linux/Windows users from seeing macOS-only "Finder" terminology in
-    menus and buttons. Keyed off the *server* platform because the reveal
-    action shells out server-side (``open`` / ``explorer`` / ``xdg-open``).
-    """
-    if sys.platform == "darwin":
-        return {
-            "name": "Finder",
-            "reveal": "Reveal in Finder",
-            "editor_placeholder": "/Applications/Adobe Lightroom Classic/Adobe Lightroom Classic.app",
-        }
-    if sys.platform.startswith("win"):
-        return {
-            "name": "File Explorer",
-            "reveal": "Show in File Explorer",
-            "editor_placeholder": r"C:\Program Files\Adobe\Adobe Lightroom Classic\lightroom.exe",
-        }
-    return {
-        "name": "file manager",
-        "reveal": "Reveal in File Manager",
-        "editor_placeholder": "/usr/bin/darktable",
-    }
 
 
 _FINDER_TRASH_TIMEOUT_SECS = 30
@@ -4133,59 +4106,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Page routes --
 
-    @app.route("/config-defaults.js")
-    def config_defaults_js():
-        """Expose backend defaults to browser code without template literals.
-
-        Templates are kept strictly Jinja-free (see
-        ``test_templates_jinja_free_except_includes``), so platform-aware
-        wording is injected here as ``window.*`` globals. This script is loaded
-        first in ``_navbar.html``, before any inline page script runs.
-        """
-        from move import rsync_install_guidance
-
-        labels = _file_manager_labels()
-        preview_max_size = _get_db().get_effective_config(cfg.load()).get("preview_max_size")
-        return Response(
-            "window.VIREO_CONFIG_DEFAULTS = "
-            + json.dumps(cfg.DEFAULTS, separators=(",", ":"))
-            + ";\nwindow.VIREO_FULL_PREVIEW_MAX_SIZE = "
-            + json.dumps(1920 if preview_max_size is None else preview_max_size)
-            + ";\nwindow.VIREO_PLATFORM = "
-            + json.dumps(sys.platform)
-            + ";\nwindow.VIREO_RSYNC_INSTALL = "
-            + json.dumps(rsync_install_guidance())
-            + ";\nwindow.VIREO_REVEAL_LABEL = "
-            + json.dumps(labels["reveal"])
-            + ";\nwindow.VIREO_FILE_MANAGER_NAME = "
-            + json.dumps(labels["name"])
-            + ";\nwindow.VIREO_EDITOR_PATH_PLACEHOLDER = "
-            + json.dumps(labels["editor_placeholder"])
-            + ";\n",
-            mimetype="application/javascript",
-            headers={"Cache-Control": "no-store"},
-        )
-
-    @app.route("/")
-    def index():
-        # Resume onboarding until the install can actually classify, OR the
-        # user explicitly finished/skipped setup. Redirecting on
-        # "model downloaded" alone stranded a user who bailed after the model
-        # download but before the labels step: setup_complete stays false yet
-        # the model is on disk, so they'd land back in the blocked pipeline.
-        if classification_readiness(_get_db())["ready"] or cfg.load().get("setup_complete"):
-            return redirect("/browse")
-        return redirect("/welcome")
-
-    @app.route("/welcome")
-    def welcome():
-        if request.args.get("force"):
-            return render_template("welcome.html")
-        if classification_readiness(_get_db())["ready"] or cfg.load().get("setup_complete"):
-            return redirect("/browse")
-        return render_template("welcome.html")
-
-    app.register_blueprint(pages_blueprint)
+    app.register_blueprint(create_pages_blueprint(_get_db))
 
     # -- API routes --
 
@@ -6269,11 +6190,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             response["visual"] = visual_info
         return jsonify(response)
 
-    @app.route("/api/species")
-    def api_species():
-        db = _get_db()
-        species = db.get_accepted_species()
-        return jsonify({"species": species})
 
     def _normalize_photo_id_list(raw_ids):
         """Validate and de-dupe a JSON ``photo_ids`` list, preserving order."""
@@ -6760,11 +6676,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         return jsonify({"ok": True, "recipe": None})
 
-    @app.route("/api/edit-fields")
-    def api_edit_fields():
-        from edit_batch import FIELDS
-        return jsonify({"fields": FIELDS})
-
     @app.route("/api/photos/edit-recipe/summary", methods=["POST"])
     def api_photo_edit_recipe_summary():
         from edit_batch import FIELDS, get_value
@@ -6954,35 +6865,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if local_errors:
             payload["local_errors"] = local_errors
         return jsonify(payload)
-
-    @app.route("/api/edit-presets", methods=["GET", "POST"])
-    def api_edit_presets():
-        """List or save (upsert by name) global edit presets.
-
-        Explicit fields support partial looks, geometry, and local adjustments.
-        Calls without fields retain the legacy adjustments-only behavior.
-        """
-        db = _get_db()
-        if request.method == "GET":
-            return jsonify({"presets": db.list_edit_presets()})
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return json_error("request body must be a JSON object")
-        recipe = body.get("recipe")
-        if not isinstance(recipe, dict):
-            return json_error("recipe must be a JSON object")
-        try:
-            preset = db.save_edit_preset(body.get("name"), recipe, fields=body.get("fields"))
-        except ValueError as e:  # includes RecipeError
-            return json_error(str(e))
-        return jsonify({"ok": True, "preset": preset})
-
-    @app.route("/api/edit-presets/<int:preset_id>", methods=["DELETE"])
-    def api_delete_edit_preset(preset_id):
-        db = _get_db()
-        if not db.delete_edit_preset(preset_id):
-            return json_error("preset not found", 404)
-        return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/edit-history")
     def api_photo_edit_history(photo_id):
@@ -12780,66 +12662,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify(payload(db, photo_id))
 
 
-    @app.route("/api/editor/crop-ratio", methods=["GET", "PUT"])
-    def api_editor_crop_ratio():
-        import math
-
-        import config as cfg
-
-        MAX_REVISION = 9007199254740991  # Number.MAX_SAFE_INTEGER
-
-        def valid_aspect(value):
-            if type(value) not in (int, float) or value <= 0:
-                return False
-            try:
-                return math.isfinite(value)
-            except OverflowError:
-                return False
-
-        def valid_revision(value):
-            return type(value) is int and 0 < value <= MAX_REVISION
-
-        def normalized_preference(stored):
-            result = {"enabled": False, "aspect": None}
-            if isinstance(stored, dict) and valid_revision(stored.get("revision")):
-                result["revision"] = stored["revision"]
-            if not isinstance(stored, dict) or stored.get("enabled") is not True:
-                return result
-            aspect = stored.get("aspect")
-            result.update(enabled=True, aspect=aspect if valid_aspect(aspect) else None)
-            return result
-
-        if request.method == "GET":
-            return jsonify(normalized_preference(cfg.load().get("editor_crop_ratio", {})))
-
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict) or type(body.get("enabled")) is not bool:
-            return json_error("enabled must be a boolean", status=400)
-        aspect = body.get("aspect")
-        if aspect is not None and not valid_aspect(aspect):
-            return json_error("aspect must be a positive finite number or null", status=400)
-        revision = body.get("revision")
-        if "revision" in body and not valid_revision(revision):
-            return json_error("revision must be a positive safe integer", status=400)
-        preference = {"enabled": body["enabled"], "aspect": aspect if body["enabled"] else None}
-        if revision is not None:
-            preference["revision"] = revision
-        with _settings_write_lock:
-            current = _read_raw_config_file()
-            stored = normalized_preference(current.get("editor_crop_ratio", {}))
-            stored_revision = stored.get("revision", 0)
-            # A stored revision at the safe-integer ceiling has no valid
-            # successor a browser can produce, so refusing a smaller
-            # revision would wedge the preference forever. Accept the
-            # rollover write and reset the counter to the incoming value.
-            at_ceiling = stored_revision >= MAX_REVISION
-            if (revision is not None
-                    and revision <= stored_revision
-                    and not at_ceiling):
-                return jsonify(stored)
-            current["editor_crop_ratio"] = preference
-            cfg.save(current)
-        return jsonify(preference)
 
     def _read_raw_config_file():
         """Return the parsed contents of ~/.vireo/config.json, or {}.
@@ -15609,194 +15431,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id})
 
-    def _archive_root_state(target):
-        """``(present, volume_offline)`` for the target's local archive root.
-
-        ``present`` is None when no root is configured or when it cannot be
-        determined, else whether the directory exists. ``volume_offline`` is
-        True when the root sits on a mount-shaped volume that failed the
-        bounded reachability probe. The filesystem is only touched after
-        that probe passes: a plain ``os.path.isdir`` on a stale SMB/NFS
-        share can block a Flask worker indefinitely, and this runs on
-        every ``/api/remote-targets`` call (page loads and the Import
-        page's after-move refresh), so one dead root must not be able to
-        hang the endpoint. Ordinary local folders have no mount-shaped
-        prefix and skip the probe entirely.
-        """
-        import volume_reachability
-
-        root = (target.get("local_archive_root") or "").strip()
-        if not root:
-            return None, False
-        _, reachable = volume_reachability.get_shared().check(root)
-        if not reachable:
-            return None, True
-        return os.path.isdir(root), False
-
-    def _archive_root_present(target):
-        return _archive_root_state(target)[0]
-
-    # Aggregate budget for probing every target's archive root in one
-    # /api/remote-targets call. Each individual probe is bounded (see
-    # volume_reachability), but with several roots on distinct dead
-    # volumes the bounded probes would add up serially past the Import
-    # page's 10s client abort, and the page would then report every SSH
-    # destination as unavailable. Probe concurrently and stop waiting at
-    # the budget; a root still unanswered by then is reported the same way
-    # volume_reachability reports "could not be inspected in time" —
-    # unreachable — rather than guessed.
-    app.config.setdefault("REMOTE_TARGET_PROBE_BUDGET_SECS", 6.0)
-
-    def _archive_root_states(targets):
-        """``[(present, volume_offline), ...]`` aligned with ``targets``,
-        probed concurrently under ``REMOTE_TARGET_PROBE_BUDGET_SECS``."""
-        from concurrent.futures import ThreadPoolExecutor, wait
-
-        indexed = [(i, t) for i, t in enumerate(targets)
-                   if (t.get("local_archive_root") or "").strip()]
-        states = [(None, False)] * len(targets)
-        if not indexed:
-            return states
-        budget = float(app.config.get("REMOTE_TARGET_PROBE_BUDGET_SECS", 6.0))
-        pool = ThreadPoolExecutor(
-            max_workers=min(len(indexed), 8),
-            thread_name_prefix="archive-root-probe")
-        futures = {pool.submit(_archive_root_state, t): i for i, t in indexed}
-        done, _ = wait(futures, timeout=budget)
-        # Don't block on stragglers: their probes are bounded and reaped by
-        # volume_reachability, so the worker threads exit on their own.
-        pool.shutdown(wait=False, cancel_futures=True)
-        for fut, i in futures.items():
-            if fut in done and fut.exception() is None:
-                states[i] = fut.result()
-            else:
-                if fut in done:
-                    log.warning("archive-root probe raised for %s",
-                                targets[i].get("local_archive_root"),
-                                exc_info=fut.exception())
-                else:
-                    log.warning(
-                        "archive-root probe for %s did not finish within "
-                        "%.1fs; reporting the volume as unreachable",
-                        targets[i].get("local_archive_root"), budget)
-                states[i] = (None, True)
-        return states
-
-    @app.route("/api/remote-targets")
-    def api_remote_targets_list():
-        """List configured remote (SSH) move targets for the move-form picker,
-        plus whether a usable GNU rsync is available for the transfer."""
-        import config as cfg
-        import move as move_mod
-
-        effective_cfg = _get_db().get_effective_config(cfg.load())
-        rsync_bin = move_mod.resolve_rsync_bin(
-            effective_cfg.get("rsync_bin", "") or "")
-        usable = bool(rsync_bin and move_mod.is_gnu_rsync(rsync_bin))
-        ssh_bin = move_mod.resolve_ssh_bin(
-            effective_cfg.get("ssh_bin", "") or "")
-        targets = cfg.get_remote_targets()
-        for t, (present, offline) in zip(
-                targets, _archive_root_states(targets), strict=True):
-            t["local_archive_root_present"] = present
-            t["local_archive_root_volume_offline"] = offline
-        return jsonify({
-            "targets": targets,
-            "rsync_available": usable,
-            "rsync_bin": rsync_bin if usable else None,
-            "ssh_available": bool(ssh_bin),
-            "ssh_bin": ssh_bin,
-            "remote_available": bool(usable and ssh_bin),
-        })
-
-    @app.route("/api/remote-targets/test", methods=["POST"])
-    def api_remote_target_test():
-        """Test connectivity for a remote target (saved or in-progress edit):
-        SSH reachability, remote-path writability, GNU rsync availability,
-        whether the local mount path is currently present, and whether the
-        local archive root exists.
-
-        The archive-root check is the one that catches a typo'd
-        ``local_archive_root`` (issue #1377): the connection itself is fine,
-        so ``ok`` stays true, but a bare "Connection OK" would let the user
-        walk away from Settings believing the chained move is configured
-        and only find out on the Import page, where the hint can't name
-        the field that is wrong. ``archive_root_present`` is None when no
-        root is configured (nothing to check), so the UI can tell "not
-        set" from "set but missing"."""
-        import config as cfg
-        import move as move_mod
-
-        body = request.get_json(silent=True) or {}
-        target = cfg._coerce_remote_target(body)
-        if target is None:
-            return json_error("Host, user, and remote path are required.")
-
-        effective_cfg = _get_db().get_effective_config(cfg.load())
-        rsync_bin = move_mod.resolve_rsync_bin(
-            effective_cfg.get("rsync_bin", "") or "")
-        # Apple openrsync resolves but can't drive SSH — treat as unusable.
-        if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
-            rsync_bin = ""
-        ssh_bin = move_mod.resolve_ssh_bin(
-            effective_cfg.get("ssh_bin", "") or "")
-        target["ssh_bin"] = ssh_bin
-        res = move_mod.test_remote_connection(target, rsync_bin)
-        import volume_reachability
-
-        mount = target.get("mount_path")
-        res["mount_path"] = mount
-        # Same bounded gate as the archive root: the mount is the NAS share
-        # itself, the most likely path to be stale, so probe before isdir.
-        res["mount_present"] = bool(
-            mount and volume_reachability.get_shared().check(mount)[1]
-            and os.path.isdir(mount))
-        # _coerce_remote_target blanks an invalid archive root (relative,
-        # or inside mount_path) rather than rejecting the target, and the
-        # save path does the same. Compare against what was actually
-        # submitted so a rejected root is reported as such instead of
-        # reading as "not configured" and getting a green result.
-        submitted_root = (body.get("local_archive_root") or "").strip()
-        archive_root = target.get("local_archive_root") or ""
-        archive_root_invalid = bool(submitted_root and not archive_root)
-        res["archive_root"] = (archive_root or submitted_root) or None
-        res["archive_root_invalid"] = archive_root_invalid
-        if archive_root_invalid:
-            present, volume_offline = False, False
-        else:
-            present, volume_offline = _archive_root_state(target)
-        res["archive_root_present"] = present
-        res["archive_root_volume_offline"] = volume_offline
-        res["rsync_bin"] = rsync_bin or None
-        res["ssh_bin"] = ssh_bin
-        if res.get("ok") and volume_offline:
-            res["message"] = (
-                f"Connection OK, but the volume holding the local archive "
-                f"root '{archive_root}' is not reachable right now, so "
-                f"whether the folder exists can't be checked. The Import "
-                f"page won't offer \"Then move to NAS\" for this target "
-                f"until it is.")
-        elif res.get("ok") and archive_root_invalid:
-            res["message"] = (
-                f"Connection OK, but the local archive root "
-                f"'{submitted_root}' is not valid: it must be an absolute "
-                f"path on this machine and must not be inside the mount "
-                f"path. Saving will clear it, and the Import page won't "
-                f"offer \"Then move to NAS\" for this target.")
-        elif res.get("ok") and res["archive_root_present"] is False:
-            res["message"] = (
-                f"Connection OK, but the local archive root '{archive_root}' "
-                f"does not exist on this machine \u2014 the Import page won't "
-                f"offer \"Then move to NAS\" for this target until it does. "
-                f"Check the path for a typo, or create the folder.")
-        if not ssh_bin:
-            res["ok"] = False
-            res["message"] = (
-                "OpenSSH Client was not found. Install the Windows optional "
-                "feature or configure ssh.exe under Settings → Paths."
-            )
-        return jsonify(res)
-
     @app.route("/api/jobs/sync", methods=["POST"])
     @background_job
     def api_job_sync(ctx):
@@ -15948,14 +15582,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
 
     # -- Image serving --
-
-    @app.route("/favicon.ico")
-    def favicon():
-        return send_from_directory(
-            os.path.join(os.path.dirname(__file__), "static"),
-            "favicon.png",
-            mimetype="image/png",
-        )
 
     @app.route("/thumbnails/<filename>")
     def serve_thumbnail(filename):
@@ -17994,59 +17620,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             response["encounters"] = cached.get("encounters", [])
             response["summary"] = cached.get("summary", {})
         return jsonify(response)
-
-    @app.route("/api/species/search")
-    def api_species_search():
-        """Search species names from active label sets for autocomplete."""
-        q = request.args.get("q", "").strip()
-        match_case = request_bool_arg("match_case")
-        whole_word = request_bool_arg("whole_word")
-        if len(q) < 2:
-            return jsonify([])
-
-        from labels import get_active_labels, normalized_label_set
-
-        matches = []
-        seen = set()
-        for label_set in get_active_labels():
-            labels_file = label_set.get("labels_file", "")
-            if not labels_file or not os.path.exists(labels_file):
-                continue
-            try:
-                # The normalized set, not the raw file: a prompt
-                # classification refuses to attribute must not be offered
-                # for hand-tagging either, and the qualified spellings are
-                # what predictions will be named.
-                for name in normalized_label_set(label_set):
-                    name_key = name.casefold()
-                    if (
-                        text_search_match(name, q, match_case, whole_word)
-                        and name_key not in seen
-                    ):
-                        seen.add(name_key)
-                        matches.append(name)
-                        if len(matches) >= 20:
-                            break
-            except Exception:
-                pass
-            if len(matches) >= 20:
-                break
-
-        # Also search existing species keywords in the database
-        db = _get_db()
-        kw_rows = db.conn.execute(
-            """SELECT name FROM keywords
-               WHERE is_species = 1
-                 AND vireo_keyword_text_match(name, ?, ?, ?)""",
-            (q, 1 if match_case else 0, 1 if whole_word else 0),
-        ).fetchall()
-        for row in kw_rows:
-            name_key = row["name"].casefold()
-            if name_key not in seen:
-                seen.add(name_key)
-                matches.append(row["name"])
-
-        return jsonify(matches[:20])
 
     def _mask_file_is_db_backed(filename, mask_path):
         """Whether a mask file on disk is actually this photo's.
@@ -20769,7 +20342,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             missing_originals_heavy_job_types=_MISSING_ORIGINALS_HEAVY_JOB_TYPES,
         )
     )
-    app.register_blueprint(create_remote_setup_blueprint(_get_db, json_error))
+    app.register_blueprint(
+        create_remote_setup_blueprint(_get_db, json_error, app.config)
+    )
+    app.register_blueprint(
+        create_editing_blueprint(
+            _get_db,
+            json_error,
+            settings_write_lock=_settings_write_lock,
+            read_raw_config_file=_read_raw_config_file,
+        )
+    )
+    app.register_blueprint(create_species_blueprint(_get_db))
     app.register_blueprint(
         create_system_blueprint(
             _get_db,

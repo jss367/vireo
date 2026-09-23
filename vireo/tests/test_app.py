@@ -5056,21 +5056,21 @@ def test_templates_jinja_free_except_includes():
 def test_file_manager_labels_per_platform(monkeypatch):
     """Reveal/placeholder wording is OS-appropriate so Linux/Windows users
     don't see macOS-only 'Finder' terminology."""
-    import app as app_module
+    import web.pages as pages_module
 
-    monkeypatch.setattr(app_module.sys, "platform", "linux")
-    linux = app_module._file_manager_labels()
+    monkeypatch.setattr(pages_module.sys, "platform", "linux")
+    linux = pages_module._file_manager_labels()
     assert linux["reveal"] == "Reveal in File Manager"
     assert linux["editor_placeholder"].startswith("/")
     assert "Applications" not in linux["editor_placeholder"]
 
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    mac = app_module._file_manager_labels()
+    monkeypatch.setattr(pages_module.sys, "platform", "darwin")
+    mac = pages_module._file_manager_labels()
     assert mac["reveal"] == "Reveal in Finder"
     assert mac["editor_placeholder"].endswith(".app")
 
-    monkeypatch.setattr(app_module.sys, "platform", "win32")
-    win = app_module._file_manager_labels()
+    monkeypatch.setattr(pages_module.sys, "platform", "win32")
+    win = pages_module._file_manager_labels()
     assert "Explorer" in win["reveal"]
     assert win["editor_placeholder"].endswith(".exe")
 
