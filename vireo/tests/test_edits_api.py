@@ -601,7 +601,7 @@ def test_sync_preview_revalidates_after_final_page_enrichment(
     app_and_db, tmp_path,
 ):
     """A queue write during slow final-page enrichment returns a conflict."""
-    import app as vireo_app
+    from web import sync as web_sync
 
     app, db = app_and_db
     photo_ids = [photo["id"] for photo in db.get_photos()[:2]]
@@ -612,7 +612,7 @@ def test_sync_preview_revalidates_after_final_page_enrichment(
     )
     db.conn.commit()
     db.queue_change(photo_ids[0], "rating", "3")
-    original_read = vireo_app.read_sync_preview_metadata
+    original_read = web_sync.read_sync_preview_metadata
     mutated = False
 
     def mutate_queue_during_read(path):
@@ -622,13 +622,13 @@ def test_sync_preview_revalidates_after_final_page_enrichment(
             db.queue_change(photo_ids[1], "rating", "4")
         return original_read(path)
 
-    vireo_app.read_sync_preview_metadata = mutate_queue_during_read
+    web_sync.read_sync_preview_metadata = mutate_queue_during_read
     try:
         response = app.test_client().get(
             "/api/sync/preview?limit=25&offset=0"
         )
     finally:
-        vireo_app.read_sync_preview_metadata = original_read
+        web_sync.read_sync_preview_metadata = original_read
 
     assert response.status_code == 409
     assert response.get_json()["code"] == "sync_preview_changed"
@@ -654,22 +654,22 @@ def test_sync_preview_reuses_snapshot_across_page_requests(app_and_db):
     assert first["revision"]
     revision = first["revision"]
 
-    import app as vireo_app
+    from web import sync as web_sync
 
     call_count = {"n": 0}
-    original_build = vireo_app._sync_preview_build_snapshot
+    original_build = web_sync._sync_preview_build_snapshot
 
     def counting_build(*args, **kwargs):
         call_count["n"] += 1
         return original_build(*args, **kwargs)
 
-    vireo_app._sync_preview_build_snapshot = counting_build
+    web_sync._sync_preview_build_snapshot = counting_build
     try:
         second = client.get(
             f"/api/sync/preview?limit=2&offset=2&revision={revision}"
         ).get_json()
     finally:
-        vireo_app._sync_preview_build_snapshot = original_build
+        web_sync._sync_preview_build_snapshot = original_build
 
     assert second["revision"] == revision
     assert len(second["photos"]) == 1
@@ -684,13 +684,13 @@ def test_sync_preview_cache_isolated_by_database(app_and_db, tmp_path):
     keyed only by ``(workspace_id, revision)`` can therefore return filenames
     and folders from another database in the same process.
     """
-    import app as vireo_app
     from db import Database
+    from web import sync as web_sync
 
     _app, first_db = app_and_db
     first_photo = first_db.get_photos()[0]
     first_db.queue_change(first_photo["id"], "rating", "3")
-    first_snapshot = vireo_app._sync_preview_get_snapshot(
+    first_snapshot = web_sync._sync_preview_get_snapshot(
         first_db, first_db._ws_id(), None,
     )
 
@@ -710,7 +710,7 @@ def test_sync_preview_cache_isolated_by_database(app_and_db, tmp_path):
             file_mtime=1.0,
         )
         second_db.queue_change(second_photo, "rating", "3")
-        second_snapshot = vireo_app._sync_preview_get_snapshot(
+        second_snapshot = web_sync._sync_preview_get_snapshot(
             second_db, second_ws, first_snapshot["revision"],
         )
     finally:
@@ -724,23 +724,23 @@ def test_sync_preview_cache_isolated_by_database(app_and_db, tmp_path):
 
 def test_sync_preview_cache_evicts_obsolete_workspace_revision(app_and_db):
     """A changed queue replaces, rather than accumulates, its old snapshot."""
-    import app as vireo_app
+    from web import sync as web_sync
 
     _app, db = app_and_db
     ws_id = db._ws_id()
     database_key = os.path.abspath(db._db_path)
     photos = db.get_photos()[:2]
     db.queue_change(photos[0]["id"], "rating", "3")
-    first_snapshot = vireo_app._sync_preview_get_snapshot(db, ws_id, None)
+    first_snapshot = web_sync._sync_preview_get_snapshot(db, ws_id, None)
 
     db.queue_change(photos[1]["id"], "rating", "4")
-    second_snapshot = vireo_app._sync_preview_get_snapshot(db, ws_id, None)
+    second_snapshot = web_sync._sync_preview_get_snapshot(db, ws_id, None)
 
     assert second_snapshot["revision"] != first_snapshot["revision"]
-    with vireo_app._SYNC_PREVIEW_SNAPSHOTS_LOCK:
+    with web_sync._SYNC_PREVIEW_SNAPSHOTS_LOCK:
         workspace_keys = [
             key
-            for key in vireo_app._SYNC_PREVIEW_SNAPSHOTS
+            for key in web_sync._SYNC_PREVIEW_SNAPSHOTS
             if key[:2] == (database_key, ws_id)
         ]
     assert workspace_keys == [
