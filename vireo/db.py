@@ -16264,7 +16264,7 @@ class Database:
             # If normalization would surface an opposite-type pending
             # change at the same (photo, workspace) with the same clean
             # value, cancel both — mirrors the add/remove cancellation
-            # _queue_keyword_add and _queue_keyword_remove enforce at
+            # queue_keyword_add and queue_keyword_remove enforce at
             # runtime. Without this, an unsynced
             # keyword_add('‘Apapane') alongside a
             # keyword_remove('Apapane') for the same photo would both
@@ -21438,7 +21438,7 @@ class Database:
                     # pending change exists. Queue one per removed species so a
                     # "replace" actually clears the stale tags downstream. A
                     # still-pending add for the same keyword cancels out
-                    # instead of stacking (mirrors _queue_keyword_remove).
+                    # instead of stacking (mirrors queue_keyword_remove).
                     new_species_lower = species.lower()
                     for old_name in old_species:
                         if old_name.lower() == new_species_lower:
@@ -24181,7 +24181,7 @@ class Database:
     def _flip_pending_keyword_change(self, pid, name, cancel_type, queue_type):
         """Reverse one side of the pending-sidecar queue for a keyword.
 
-        Symmetric with ``_queue_keyword_remove``: the original edit either
+        Symmetric with ``queue_keyword_remove``: the original edit either
         queued a change of ``cancel_type`` or, when a not-yet-synced change
         of ``queue_type`` was pending, cancelled that one instead. Reversing
         must restore whichever side the edit touched -- otherwise an

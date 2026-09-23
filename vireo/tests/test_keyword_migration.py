@@ -592,7 +592,7 @@ def test_migration_normalizes_orphan_pending_changes(tmp_path):
 def test_migration_cancels_opposite_pending_pair_after_normalization(tmp_path):
     """Opposite-type pending changes that share the same normalized value
     must cancel each other during the migration — same as the
-    _queue_keyword_add / _queue_keyword_remove cancel semantics at
+    queue_keyword_add / queue_keyword_remove cancel semantics at
     runtime. Without this, a stray-quote keyword_add(`‘Apapane`) plus a
     clean keyword_remove(`Apapane`) queued before the upgrade would both
     survive as add+remove(Apapane) after normalization, and sync_to_xmp

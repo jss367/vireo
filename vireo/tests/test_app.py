@@ -10397,7 +10397,7 @@ def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
     """Add → bulk remove → undo must leave a pending sidecar write.
 
     Bulk remove of a not-yet-synced pending add cancels the pending
-    `keyword_add` (via `_queue_keyword_remove`) instead of queuing a
+    `keyword_add` (via `queue_keyword_remove`) instead of queuing a
     `keyword_remove`. Undoing the recorded `keyword_remove` retags the
     photo but must also re-queue the `keyword_add` so the restored
     keyword is actually written back to the sidecar; otherwise the tag
