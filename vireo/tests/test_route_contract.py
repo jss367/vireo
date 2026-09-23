@@ -54,74 +54,155 @@ def _is_route(node):
     )
 
 
-def _called_names(node):
-    """Every name this function calls, directly or from a nested def/lambda.
+def _collect_functions(module_label, tree):
+    """Yield ``(qualified_name, node)`` for every function definition.
 
-    A bare name passed as an argument counts too: ``under_prediction_decision_lock
-    (db, _decide, ...)`` runs ``_decide``, and a blueprint may well define
-    ``_decide`` beside the route rather than inside it.
+    The qualified name is ``(module_label, ...enclosing_scope_names, own_name)``
+    — the lexical path from the module root, with every enclosing ``def`` and
+    ``class`` on the way in. A nested function stays a distinct node from a
+    same-named function elsewhere, which is what a name-keyed graph loses.
+    """
+    def walk(node, scope):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                qname = scope + (child.name,)
+                yield qname, child
+                yield from walk(child, qname)
+            elif isinstance(child, ast.ClassDef):
+                yield from walk(child, scope + (child.name,))
+            else:
+                yield from walk(child, scope)
+    yield from walk(tree, (module_label,))
+
+
+def _called_names(node):
+    """Every bare name this function's *own* body calls.
+
+    Nested ``def``/``async def``/class bodies are their own graph nodes, so
+    their calls belong to them — walking into them here would fold their
+    reachability into the enclosing function and re-create the merge-by-name
+    bug the qualified graph exists to avoid. Lambdas have no name and stay
+    walked in. A bare name passed as an argument counts as a call, because a
+    blueprint may define ``_decide`` beside the route and pass it to
+    ``under_prediction_decision_lock(db, _decide, ...)``.
     """
     names = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        func = child.func
-        if isinstance(func, ast.Name):
-            names.add(func.id)
-        elif isinstance(func, ast.Attribute):
-            names.add(func.attr)
-        for arg in (*child.args, *(kw.value for kw in child.keywords)):
-            if isinstance(arg, ast.Name):
-                names.add(arg.id)
+
+    def visit(current):
+        for child in ast.iter_child_nodes(current):
+            if isinstance(
+                child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+            ):
+                continue
+            if isinstance(child, ast.Call):
+                func = child.func
+                if isinstance(func, ast.Name):
+                    names.add(func.id)
+                elif isinstance(func, ast.Attribute):
+                    names.add(func.attr)
+                for arg in (*child.args, *(kw.value for kw in child.keywords)):
+                    if isinstance(arg, ast.Name):
+                        names.add(arg.id)
+            visit(child)
+
+    visit(node)
     return names
 
 
 def _call_graph(sources):
-    """Build ``(call_map, routes)`` from ``(label, text, may_register_routes)``.
+    """Build ``(call_map, routes, resolve)`` from module sources.
 
-    ``call_map`` maps a function name to every name it calls. It is keyed by
-    bare name across all modules, and same-named functions (a ``_work`` in two
-    routes, a helper in two blueprints) are unioned: an over-approximation, so
-    a route can only be flagged spuriously, never missed. ``routes`` maps each
-    route's view function name to the ``file:line`` places defining it.
+    Each function keeps its scope-qualified identity, so a helper named
+    ``_decide`` in one blueprint stays distinct from a ``_decide`` in another.
+    Merging by bare name would let an unlocked route calling the local
+    ``_decide`` appear to reach ``begin_prediction_decision`` through an
+    unrelated same-named function, so declaring the route would silence the
+    "declared but never reaches lock" check on an unlocked writer.
+
+    - ``call_map[qualified]`` — set of bare names ``qualified``'s own body
+      calls or receives as a Name argument. Attribute calls on ``self``/``db``
+      (mutators, or ``prediction_decisions.begin_prediction_decision``) land
+      in this set as bare names too, and the target intersection in
+      ``_reaches`` matches them there without needing a graph node.
+    - ``routes[view_function_name]`` — list of ``(qualified, "file:line")`` for
+      every place that route is defined. Keyed by bare name because
+      ``PREDICTION_DECISION_ROUTES`` names view functions, and the contract
+      test enforces that a decision route's name is unique across ``app.py``
+      and ``vireo/web/``.
+    - ``resolve(caller_qualified, bare_name)`` — set of qualified callees to
+      recurse into. Resolves each bare-name call against the caller's lexical
+      scope chain (a helper defined beside the route wins over a same-named
+      helper elsewhere), falling back to module-level functions across every
+      scanned module when nothing enclosing matches. Nested functions do not
+      leak across module or factory boundaries.
     """
     call_map = {}
     routes = {}
+    module_top = {}
+    nested = {}
+
     for label, text, may_register_routes in sources:
-        for node in ast.walk(ast.parse(text)):
-            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
-            call_map.setdefault(node.name, set()).update(_called_names(node))
+        tree = ast.parse(text)
+        for qname, node in _collect_functions(label, tree):
+            call_map[qname] = _called_names(node)
+            if len(qname) == 2:
+                module_top.setdefault(qname[-1], set()).add(qname)
+            else:
+                nested.setdefault((qname[:-1], qname[-1]), set()).add(qname)
             if may_register_routes and _is_route(node):
-                routes.setdefault(node.name, []).append(f"{label}:{node.lineno}")
-    return call_map, routes
+                routes.setdefault(node.name, []).append(
+                    (qname, f"{label}:{node.lineno}"),
+                )
+
+    def resolve(caller_qualified, bare_name):
+        # Innermost lexical scope outward: a caller's own inner helpers
+        # (``def _apply`` inside a route body, captured through
+        # ``under_prediction_decision_lock(db, _apply, ...)``) live at
+        # ``caller_qualified`` itself; siblings sit one step out.
+        for depth in range(len(caller_qualified), 0, -1):
+            found = nested.get((caller_qualified[:depth], bare_name))
+            if found:
+                return found
+        return module_top.get(bare_name, set())
+
+    return call_map, routes, resolve
 
 
-def _reaches(name, targets, call_map):
-    """Can ``name`` reach any of ``targets`` through analyzed functions?"""
-    seen = set()
-    stack = [name]
+def _reaches(start, targets, call_map, resolve):
+    """Can ``start`` (a qualified name) reach any bare name in ``targets``?"""
+    seen = {start}
+    stack = [start]
     while stack:
         current = stack.pop()
-        if current in seen:
-            continue
-        seen.add(current)
         callees = call_map.get(current, set())
         if callees & targets:
             return True
-        stack.extend(callee for callee in callees if callee in call_map)
+        for bare in callees:
+            for qualified in resolve(current, bare):
+                if qualified not in seen:
+                    seen.add(qualified)
+                    stack.append(qualified)
     return False
 
 
-def _decision_route_problems(call_map, routes, declared):
+def _decision_route_problems(call_map, routes, resolve, declared):
     """Every way the routes and ``declared`` disagree, as readable lines."""
+    def route_reaches(name, targets):
+        return any(
+            _reaches(qualified, targets, call_map, resolve)
+            for qualified, _ in routes.get(name, ())
+        )
+
     reaching = {
         name for name in routes
-        if _reaches(name, _PREDICTION_MUTATORS, call_map)
+        if route_reaches(name, _PREDICTION_MUTATORS)
     }
 
     def where(name):
-        return ", ".join(routes.get(name, ["no route with this name"]))
+        entries = routes.get(name)
+        if not entries:
+            return "no route with this name"
+        return ", ".join(location for _, location in entries)
 
     problems = [
         f"{name} ({where(name)}) writes prediction decisions but is not in "
@@ -144,7 +225,7 @@ def _decision_route_problems(call_map, routes, declared):
         f"{name} ({where(name)}) is declared a decision route but never "
         f"reaches {_DECISION_LOCK}"
         for name in sorted(declared & set(routes))
-        if not _reaches(name, {_DECISION_LOCK}, call_map)
+        if not route_reaches(name, {_DECISION_LOCK})
     ]
     return problems
 
@@ -175,11 +256,11 @@ def test_every_prediction_decision_route_locks():
          may_register_routes)
         for path, may_register_routes in _decision_sources()
     ]
-    call_map, routes = _call_graph(sources)
+    call_map, routes, resolve = _call_graph(sources)
 
     assert routes, "found no routes at all; the route scan is broken"
     problems = _decision_route_problems(
-        call_map, routes, set(PREDICTION_DECISION_ROUTES),
+        call_map, routes, resolve, set(PREDICTION_DECISION_ROUTES),
     )
     assert not problems, "\n".join(problems)
 
@@ -220,7 +301,7 @@ def create_review_blueprint(get_db, json_error):
     service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
         encoding="utf-8",
     )
-    call_map, routes = _call_graph([
+    call_map, routes, resolve = _call_graph([
         ("web/review.py", blueprint, True),
         ("services/prediction_decisions.py", service, False),
     ])
@@ -231,15 +312,78 @@ def create_review_blueprint(get_db, json_error):
     )
 
     assert _decision_route_problems(
-        call_map, routes, {"api_locked", "api_unlocked"},
+        call_map, routes, resolve, {"api_locked", "api_unlocked"},
     ) == [
         f"api_unlocked (web/review.py:{line}) is declared a decision route "
         "but never reaches begin_prediction_decision",
     ]
-    assert _decision_route_problems(call_map, routes, {"api_locked"}) == [
+    assert _decision_route_problems(
+        call_map, routes, resolve, {"api_locked"},
+    ) == [
         f"api_unlocked (web/review.py:{line}) writes prediction decisions but "
         "is not in PREDICTION_DECISION_ROUTES",
     ]
+
+
+def test_decision_route_analysis_distinguishes_same_named_helpers():
+    """A bare helper name in one blueprint must not resolve to another's.
+
+    A merged-by-name graph unions the callees of every function sharing a
+    bare name. Two blueprints each defining ``_decide`` — one that locks and
+    one that does not — then look the same to the reachability walk, so an
+    unlocked route calling its local ``_decide`` appears to reach the lock
+    through the unrelated helper and declaring it silences the "declared but
+    never reaches lock" check. Scope-qualified identities resolve each
+    bare-name call inside its own factory first, so the two ``_decide``
+    helpers stay distinct and the unlocked route is flagged.
+    """
+    unlocked = '''
+def create_unlocked_blueprint(get_db, json_error):
+    bp = Blueprint("u", __name__)
+
+    def _decide(db):
+        db.update_prediction_status(1, "rejected")
+
+    @bp.post("/api/u")
+    def api_u():
+        return _decide(get_db())
+
+    return bp
+'''
+    locked = '''
+from services import prediction_decisions
+
+def create_locked_blueprint(get_db, json_error):
+    bp = Blueprint("l", __name__)
+
+    def _decide(db):
+        db.update_prediction_status(2, "accepted")
+        return prediction_decisions.begin_prediction_decision(
+            db, json_error=json_error,
+        )
+
+    @bp.post("/api/l")
+    def api_l():
+        return _decide(get_db())
+
+    return bp
+'''
+    service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
+        encoding="utf-8",
+    )
+    call_map, routes, resolve = _call_graph([
+        ("web/unlocked.py", unlocked, True),
+        ("web/locked.py", locked, True),
+        ("services/prediction_decisions.py", service, False),
+    ])
+    problems = _decision_route_problems(
+        call_map, routes, resolve, {"api_u", "api_l"},
+    )
+    assert any(
+        p.startswith("api_u ") and "never reaches begin_prediction_decision" in p
+        for p in problems
+    ), problems
+    assert not any(p.startswith("api_l ") for p in problems), problems
 
 
 # Routes still registered with ``@app.<verb>`` in ``vireo/app.py``. This number
