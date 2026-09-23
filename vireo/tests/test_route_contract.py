@@ -54,6 +54,39 @@ def _is_route(node):
     )
 
 
+def _add_url_rule_view_names(tree):
+    """Bare Names passed as ``view_func`` to ``<anything>.add_url_rule(...)``.
+
+    Flask lets a route be registered without a decorator through
+    ``bp.add_url_rule(rule, endpoint, view_func)`` (positional) or
+    ``bp.add_url_rule(rule, view_func=view)`` (keyword); ``vireo/web/pages.py``
+    already uses the positional form. Route discovery keyed only on
+    ``@bp.<verb>`` decorators would miss a decision route registered this
+    way: its name would be absent from ``routes``, so neither its
+    ``prediction_review`` writes nor its missing lock would be checked, and
+    an unlocked writer registered by ``add_url_rule`` would pass silently.
+    Returning the referenced view names lets ``_call_graph`` add the
+    corresponding function to ``routes`` alongside decorator-based ones.
+    """
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "add_url_rule"):
+            continue
+        view = None
+        for kw in node.keywords:
+            if kw.arg == "view_func":
+                view = kw.value
+                break
+        if view is None and len(node.args) >= 3:
+            view = node.args[2]
+        if isinstance(view, ast.Name):
+            names.add(view.id)
+    return names
+
+
 def _collect_functions(module_label, tree):
     """Yield ``(qualified_name, node, is_class_method)`` for every function.
 
@@ -139,24 +172,57 @@ def _called_names(node):
 def _imported_names(tree):
     """Bare names a module's ``import`` statements bring into scope.
 
-    A bare Name call to one of these can resolve to a function defined in
-    another scanned module (``from services.prediction_decisions import
-    begin_prediction_decision`` makes ``begin_prediction_decision`` a bare
-    Name whose target lives elsewhere). Names not imported here have no
-    such cross-module target, and must resolve to something in the caller's
-    own module or its lexical scopes.
+    Returns ``{local_name: original_name_or_None}``. ``original_name`` is
+    the symbol's name inside its defining module — ``from services.review
+    import decide as apply_decision`` makes ``apply_decision`` a bare Name
+    here whose target function is defined as ``decide`` in
+    ``services.review``, so a bare-Name call to ``apply_decision()`` must
+    resolve against ``decide`` in ``module_top``, not against
+    ``apply_decision`` (which does not exist there). ``None`` marks a
+    binding that names a module rather than a function (``import a.b`` or
+    ``import a.b as c``): it cannot itself be called as a bare Name and
+    reaches functions only through attribute access.
+
+    Only imports at module scope count. A function-local ``from x import
+    _decide`` used to enter this map through ``ast.walk``, so an unlocked
+    route calling its own module-level ``_decide`` was then resolved
+    against every same-named ``_decide`` in the scanned tree; a locked one
+    in an unrelated module made the route look locked. Python's own scoping
+    binds a function-local import only inside that function, so the graph
+    must not extend it to the module either.
     """
-    imported = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if alias.name == "*":
-                    continue
-                imported.add(alias.asname or alias.name)
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                # ``import a.b`` binds ``a`` (or the ``as`` alias) in scope.
-                imported.add(alias.asname or alias.name.split(".")[0])
+    imported = {}
+
+    def visit(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child, ast.FunctionDef | ast.AsyncFunctionDef
+                | ast.ClassDef | ast.Lambda,
+            ):
+                # A ``def``/``class``/``lambda`` starts a new scope; imports
+                # inside its body are bound there, not in the module.
+                continue
+            if isinstance(child, ast.ImportFrom):
+                for alias in child.names:
+                    if alias.name == "*":
+                        continue
+                    imported[alias.asname or alias.name] = alias.name
+            elif isinstance(child, ast.Import):
+                for alias in child.names:
+                    # ``import a.b`` binds ``a`` (or the ``as`` alias) in
+                    # scope; ``import a.b as c`` binds ``c``. Either way the
+                    # bound name refers to a module, not a directly callable
+                    # function, so there is no ``module_top`` target for a
+                    # bare-Name call.
+                    local = alias.asname or alias.name.split(".")[0]
+                    imported[local] = None
+            else:
+                # ``if``, ``try``, ``with``, ``for`` at module scope: their
+                # bodies still run at module import time, so imports inside
+                # them bind at module scope.
+                visit(child)
+
+    visit(tree)
     return imported
 
 
@@ -279,6 +345,14 @@ def _call_graph(sources):
     for label, tree, may_register_routes in parsed:
         module_imports[label] = _imported_names(tree)
         module_alias[label] = _module_aliases(tree, dotted_to_label)
+        # Names registered as views by ``add_url_rule`` in this module. Any
+        # function whose name matches counts as a route here, alongside
+        # decorator-decorated ones. Confined to the same module because
+        # ``add_url_rule`` binds a specific ``view_func`` from the caller's
+        # scope; a same-named function elsewhere is unrelated.
+        add_url_views = (
+            _add_url_rule_view_names(tree) if may_register_routes else set()
+        )
         for qname, node, is_class_method in _collect_functions(label, tree):
             call_map[qname] = _called_names(node)
             if len(qname) == 2:
@@ -291,7 +365,9 @@ def _call_graph(sources):
                     # here, past the same-module and lexical fallbacks that
                     # only see the caller's own scope.
                     class_methods.setdefault(qname[-1], set()).add(qname)
-            if may_register_routes and _is_route(node):
+            if may_register_routes and (
+                _is_route(node) or node.name in add_url_views
+            ):
                 routes.setdefault(node.name, []).append(
                     (qname, f"{label}:{node.lineno}"),
                 )
@@ -309,7 +385,8 @@ def _call_graph(sources):
                 if found:
                     return found
         caller_module = caller_qualified[0]
-        if is_bare and name not in module_imports.get(caller_module, set()):
+        caller_imports = module_imports.get(caller_module, {})
+        if is_bare and name not in caller_imports:
             # A bare Name call whose name isn't imported here can only
             # resolve inside the caller's own module. Two modules each
             # defining a bare ``_decide`` at module level do not merge:
@@ -338,13 +415,27 @@ def _call_graph(sources):
                 }
         # Attribute call with an unknown or runtime receiver, or a bare Name
         # known to be imported here: match any module-level function AND any
-        # class method with that name. The class-method union is what lets a
-        # route calling ``PhotoReviewService(db).set_flag(...)`` from a
-        # blueprint reach into the service's ``set_flag``; without it, a
+        # class method with that name. For a bare Name that is an aliased
+        # import (``from services.review import decide as apply_decision``),
+        # look the target up under the imported symbol's *original* name —
+        # the scanned definition is ``decide``, so ``apply_decision`` would
+        # otherwise miss it and an unlocked route calling ``apply_decision``
+        # would appear to reach no writer. The class-method union is what
+        # lets a route calling ``PhotoReviewService(db).set_flag(...)`` from
+        # a blueprint reach into the service's ``set_flag``; without it, a
         # future decision route wrapped inside a service class would be
         # invisible to the graph and could silently write
         # ``prediction_review`` without being flagged as needing the lock.
-        return module_top.get(name, set()) | class_methods.get(name, set())
+        if is_bare:
+            target = caller_imports[name]
+            if target is None:
+                # ``import module`` binds a module, not a function: it has
+                # no bare-Name target of its own.
+                return set()
+            lookup = target
+        else:
+            lookup = name
+        return module_top.get(lookup, set()) | class_methods.get(lookup, set())
 
     return call_map, routes, resolve
 
@@ -684,6 +775,166 @@ def create_bp(get_db, json_error):
     )
     assert any(
         p.startswith("api_apply ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_follows_aliased_imports():
+    """``from x import decide as apply_decision`` still finds ``decide``.
+
+    When a blueprint imports a mutating helper under an alias, the local
+    name in the caller's module is the alias, but the scanned function is
+    defined under its original name in the source module. A bare-Name call
+    to the alias must resolve to the original definition; otherwise the
+    graph loses the edge and an unlocked route calling the alias never
+    reaches its writer, silencing this test.
+    """
+    writer_module = '''
+def decide(db):
+    db.update_prediction_status(1, "rejected")
+'''
+    blueprint = '''
+from services.writer import decide as apply_decision
+
+
+def create_bp(get_db, json_error):
+    bp = Blueprint("bp", __name__)
+
+    @bp.post("/api/a")
+    def api_a():
+        return apply_decision(get_db())
+
+    return bp
+'''
+    call_map, routes, resolve = _call_graph([
+        ("services/writer.py", writer_module, False),
+        ("web/aliased.py", blueprint, True),
+    ])
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_a ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_ignores_function_local_imports():
+    """A function-local ``import`` binds only inside that function's scope.
+
+    ``ast.walk`` used to gather every ``import`` node, including those inside
+    unrelated function bodies. A module-level fallback that treated a name
+    as imported here just because *some* function in this module imported
+    it lost the two-module distinguish rule: a bare ``_decide`` call from
+    an unlocked route would then union with a locked ``_decide`` in another
+    module through the module-level fallback, and declaring the route would
+    silence the "declared but never reaches lock" check.
+
+    Here ``web/unlocked.py`` has a function-local ``from services.locked
+    import _decide`` in an unrelated function, but the route calls its own
+    module-level ``_decide`` that does not lock. The graph must not merge
+    with the locked ``_decide`` in ``services/locked.py`` through that
+    nested import.
+    """
+    unlocked = '''
+def _decide(db):
+    db.update_prediction_status(1, "rejected")
+
+
+def _unrelated():
+    # A function-local import that must NOT mark ``_decide`` as imported
+    # at module scope.
+    from services.locked import _decide as _reserved  # noqa: F401
+
+
+def create_unlocked_blueprint(get_db, json_error):
+    bp = Blueprint("u", __name__)
+
+    @bp.post("/api/u")
+    def api_u():
+        return _decide(get_db())
+
+    return bp
+'''
+    locked = '''
+from services import prediction_decisions
+
+
+def _decide(db, json_error):
+    lock_err = prediction_decisions.begin_prediction_decision(
+        db, json_error=json_error,
+    )
+    if lock_err is not None:
+        return lock_err
+    db.update_prediction_status(2, "accepted")
+'''
+    service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
+        encoding="utf-8",
+    )
+    call_map, routes, resolve = _call_graph([
+        ("web/unlocked.py", unlocked, True),
+        ("services/locked.py", locked, False),
+        ("services/prediction_decisions.py", service, False),
+    ])
+    problems = _decision_route_problems(
+        call_map, routes, resolve, {"api_u"},
+    )
+    assert any(
+        p.startswith("api_u ") and "never reaches begin_prediction_decision" in p
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_recognizes_add_url_rule():
+    """``bp.add_url_rule(rule, endpoint, view_func)`` registers a route too.
+
+    Flask lets a blueprint attach a view function without a decorator; the
+    pages blueprint (``vireo/web/pages.py``) already uses this form for its
+    template routes. Route discovery keyed only on ``@bp.<verb>`` decorators
+    would then miss a prediction-decision view registered this way: its
+    name would be absent from ``routes``, so neither its
+    ``prediction_review`` writes nor its missing lock would be checked, and
+    an unlocked writer registered by ``add_url_rule`` would pass silently.
+    """
+    positional = '''
+def api_positional():
+    from db import get_db
+    return get_db().update_prediction_status(1, "rejected")
+
+
+def _install(bp):
+    bp.add_url_rule("/api/pos", "pos", api_positional)
+'''
+    keyword = '''
+def api_keyword():
+    from db import get_db
+    return get_db().update_prediction_status(2, "accepted")
+
+
+def _install(bp):
+    bp.add_url_rule("/api/kw", view_func=api_keyword)
+'''
+    call_map, routes, resolve = _call_graph([
+        ("web/positional.py", positional, True),
+        ("web/keyword.py", keyword, True),
+    ])
+    assert "api_positional" in routes, routes
+    assert "api_keyword" in routes, routes
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_positional ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
+    assert any(
+        p.startswith("api_keyword ")
         and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
         in p
         for p in problems
