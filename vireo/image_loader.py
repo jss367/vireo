@@ -514,6 +514,22 @@ def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
         else:
             with Image.open(str(path)) as opened:
                 img = ImageOps.exif_transpose(opened)
+                if img.mode.startswith("I;16") or (img.mode == "I" and ext == ".png"):
+                    import numpy as np
+
+                    values = np.asarray(img, dtype=np.float64)
+                    img = Image.fromarray(np.clip(np.rint(values / 257.0), 0, 255).astype("uint8"))
+                profile = opened.info.get("icc_profile")
+                if profile:
+                    from PIL import ImageCms
+
+                    try:
+                        img = ImageCms.profileToProfile(
+                            img, ImageCms.ImageCmsProfile(io.BytesIO(profile)),
+                            ImageCms.createProfile("sRGB"), outputMode="RGB",
+                        )
+                    except (OSError, ValueError, ImageCms.PyCMSError):
+                        log.warning("Could not convert color profile for %s", file_path)
                 img = img.convert("RGB")
 
         if img is None:

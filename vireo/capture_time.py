@@ -263,6 +263,17 @@ def _timestamp_from_exif_group(exif_group):
 
 
 def _refresh_photo_metadata(db, photo_id, primary_path):
+    from scanner import compute_file_hash
+
+    # This is an intentional source edit, so establish the new integrity
+    # baseline even if ExifTool cannot read back the complete metadata.
+    stat = os.stat(primary_path)
+    file_hash = compute_file_hash(primary_path) if stat.st_size else None
+    db.conn.execute(
+        "UPDATE photos SET file_hash=?, file_size=?, file_mtime=?, "
+        "hash_status=NULL, hash_checked_at=NULL WHERE id=?",
+        (file_hash, stat.st_size, stat.st_mtime, photo_id),
+    )
     metadata = extract_metadata([primary_path]).get(primary_path)
     if not metadata:
         return
@@ -392,6 +403,9 @@ def adjust_capture_time(
                 # metadata.py, which only accepts 1 for partial batch output.
                 raise RuntimeError((result.stderr or result.stdout or "ExifTool failed").strip())
             _refresh_photo_metadata(db, photo["id"], paths[0])
+            # A companion was edited too. Let the import index read its new
+            # identity rather than keeping the pre-correction JPEG hash.
+            db.conn.execute("DELETE FROM companion_identities WHERE photo_id=?", (photo["id"],))
             db.conn.commit()
             log.debug("ExifTool stdout: %s", result.stdout.strip())
             if result.stderr:

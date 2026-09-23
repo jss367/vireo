@@ -4246,7 +4246,7 @@ async function loadLabels() {
       }
       html += '</div>';
       html += '</label>';
-      html += '<button onclick="deleteLabelSet(\'' + escapeAttr(l.labels_file) + '\',\'' + escapeAttr(l.name) + '\')" ' +
+      html += '<button data-label-path="' + escapeAttr(l.labels_file) + '" data-label-name="' + escapeAttr(l.name) + '" onclick="deleteLabelSet(this.dataset.labelPath,this.dataset.labelName)" ' +
               'style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;white-space:nowrap;" ' +
               'title="Delete this label set">Delete</button>';
       html += '</div>';
@@ -4599,32 +4599,32 @@ async function loadModels() {
 
       html += '<span style="margin-left:auto;display:flex;gap:6px;">';
       if (state === 'incomplete' && m.source !== 'custom') {
-        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
       } else if (state === 'unverified' && hasMissingOptional && m.source !== 'custom') {
         // Missing optionals need download_model (Repair); retry-verification
         // alone would leave them absent. Offer both so the user can pick a
         // lighter re-check once they've handled the optional artifacts.
-        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
         html += '<button onclick="verifyAllModels()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Retry verification</button>';
       } else if (state === 'unverified' && m.source !== 'custom') {
         html += '<button onclick="verifyAllModels()" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Retry verification</button>';
       } else if (hasMissingOptional && m.source !== 'custom') {
-        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
       } else if (state === 'missing' && m.source !== 'custom') {
-        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }
       if (!isActive && (state === 'ok' || state === 'unverified')) {
-        html += '<button onclick="setActiveModel(\'' + m.id + '\')" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="setActiveModel(this.dataset.modelId)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
       }
-      if (state !== 'missing') {
-        html += '<button onclick="removeModel(\'' + m.id + '\')" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Remove</button>';
+      if (state !== 'missing' || m.source === 'custom') {
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="removeModel(this.dataset.modelId)" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Remove</button>';
       }
       html += '</span>';
       html += '</div>';
       // Progress bar (hidden until download starts)
-      html += '<div id="modelProgress-' + m.id + '" style="display:none;margin-top:6px;">';
-      html += '<div style="height:4px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;margin-bottom:4px;"><div id="modelProgressFill-' + m.id + '" style="height:100%;background:var(--accent);border-radius:2px;width:0%;transition:width 0.3s;"></div></div>';
-      html += '<div id="modelProgressText-' + m.id + '" style="font-size:11px;color:var(--text-dim);"></div>';
+      html += '<div id="modelProgress-' + escapeAttr(m.id) + '" style="display:none;margin-top:6px;">';
+      html += '<div style="height:4px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;margin-bottom:4px;"><div id="modelProgressFill-' + escapeAttr(m.id) + '" style="height:100%;background:var(--accent);border-radius:2px;width:0%;transition:width 0.3s;"></div></div>';
+      html += '<div id="modelProgressText-' + escapeAttr(m.id) + '" style="font-size:11px;color:var(--text-dim);"></div>';
       html += '</div>';
       html += '</div>';
     });
@@ -4952,7 +4952,7 @@ async function loadEmbeddingMatrix() {
         } else if (cell && cell.cached) {
           html += '<span style="color:var(--accent);">cached</span>';
         } else {
-          html += '<button onclick="precomputeEmbeddings(\'' + escapeAttr(m.id) + '\',\'' + escapeAttr(row.labels_file) + '\')" ' +
+          html += '<button data-model-id="' + escapeAttr(m.id) + '" data-label-path="' + escapeAttr(row.labels_file) + '" onclick="precomputeEmbeddings(this.dataset.modelId,this.dataset.labelPath)" ' +
             'style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">Compute</button>';
         }
         html += '</td>';

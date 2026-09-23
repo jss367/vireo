@@ -880,7 +880,9 @@ def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/gone", name="gone")
+    source_folder = tmp_path / "source"
+    source_folder.mkdir()
+    fid = db.add_folder(str(source_folder), name="source")
     pid = db.add_photo(
         folder_id=fid, filename="missing.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,

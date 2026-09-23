@@ -220,13 +220,55 @@ class CatalogIndex:
 
     @classmethod
     def from_db(cls, db):
+        # Older catalogs predate companion identity storage. Recover those
+        # identities once from available companions; offline files can be
+        # recovered on a later import without inventing a RAW-derived key.
+        missing = db.conn.execute(
+            "SELECT p.id, p.companion_path, f.path FROM photos p "
+            "JOIN folders f ON f.id=p.folder_id "
+            "LEFT JOIN companion_identities c ON c.photo_id=p.id AND c.filename=p.companion_path "
+            "WHERE p.companion_path IS NOT NULL AND c.photo_id IS NULL AND f.status IN ('ok', 'partial')"
+        ).fetchall()
+        available = []
+        for row in missing:
+            path = Path(row["path"]) / row["companion_path"]
+            try:
+                available.append((row, path, path.stat().st_size))
+            except OSError:
+                continue
+        captures = source_capture_timestamps([path for _, path, _ in available]) if available else {}
+        recovered = []
+        for row, path, size in available:
+            try:
+                capture = captures.get(path)
+                recovered.append((row["id"], row["companion_path"], size,
+                                  capture.isoformat() if capture else None,
+                                  compute_file_hash(str(path)) if size else None))
+            except OSError:
+                continue
+        if recovered:
+            db.conn.execute("SAVEPOINT recover_companion_identities")
+            try:
+                db.conn.executemany(
+                    "INSERT OR REPLACE INTO companion_identities "
+                    "(photo_id, filename, file_size, timestamp, file_hash) VALUES (?, ?, ?, ?, ?)",
+                    recovered,
+                )
+            except BaseException:
+                db.conn.execute("ROLLBACK TO recover_companion_identities")
+                raise
+            finally:
+                db.conn.execute("RELEASE recover_companion_identities")
         known_hashes = set()
         known_keys = set()
         hash_sizes = set()
         unkeyed_hash_sizes = set()
         sizes_complete = True
         rows = db.conn.execute(
-            "SELECT filename, file_size, timestamp, file_hash FROM photos"
+            "SELECT filename, file_size, timestamp, file_hash FROM photos "
+            "UNION ALL SELECT c.filename, c.file_size, c.timestamp, c.file_hash "
+            "FROM companion_identities c JOIN photos p ON p.id=c.photo_id "
+            "AND p.companion_path=c.filename"
         ).fetchall()
         for row in rows:
             key = stored_metadata_key(

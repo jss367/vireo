@@ -967,6 +967,14 @@ class Database:
                 kingdom     TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS companion_identities (
+                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+                filename TEXT NOT NULL,
+                file_size INTEGER,
+                timestamp TEXT,
+                file_hash TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS keywords (
                 id          INTEGER PRIMARY KEY,
                 name        TEXT,
@@ -5277,15 +5285,7 @@ class Database:
                 # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
                 # in a single IN(...) clause. Stage the ids in a
                 # connection-local temp table and join through that instead.
-                self.conn.execute(
-                    "CREATE TEMP TABLE IF NOT EXISTS missing_subtree_ids "
-                    "(id INTEGER PRIMARY KEY)"
-                )
-                self.conn.execute("DELETE FROM missing_subtree_ids")
-                self.conn.executemany(
-                    "INSERT OR IGNORE INTO missing_subtree_ids (id) VALUES (?)",
-                    [(i,) for i in subtree_ids],
-                )
+                self._stage_scope_ids("missing_subtree_ids", subtree_ids)
                 subtree_clause = (
                     " AND f.id IN (SELECT id FROM missing_subtree_ids)"
                 )
@@ -8267,7 +8267,7 @@ class Database:
                 result[row["id"]] = (row["folder_id"], row["filename"])
         return result
 
-    def get_photos_by_ids(self, photo_ids):
+    def get_photos_by_ids(self, photo_ids, *, include_exif=False):
         """Return photos for a list of IDs.
 
         Returns a dict mapping photo_id -> Row for efficient lookup. Large
@@ -8280,7 +8280,8 @@ class Database:
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
-                f"SELECT {self.PHOTO_COLS} FROM photos WHERE id IN ({placeholders})",
+                f"SELECT {self.PHOTO_COLS}{', exif_data' if include_exif else ''} "
+                f"FROM photos WHERE id IN ({placeholders})",
                 list(chunk),
             ).fetchall()
             for row in rows:
@@ -8811,6 +8812,26 @@ class Database:
                 linked.add(r["path"])
         return len(unique) - len(linked)
 
+    def _stage_scope_ids(self, table, ids):
+        """Stage a read scope without opening or committing a caller transaction."""
+        if table not in {"scope_ids", "missing_subtree_ids"}:
+            raise ValueError("Unknown scope table")
+        # An outermost SAVEPOINT releases its own transaction; a nested one
+        # preserves the caller's writes. A plain commit here would break
+        # atomic edits that happen to query a large selection.
+        self.conn.execute("SAVEPOINT stage_read_scope")
+        try:
+            self.conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY)")
+            self.conn.execute(f"DELETE FROM {table}")
+            self.conn.executemany(
+                f"INSERT OR IGNORE INTO {table} (id) VALUES (?)", ((i,) for i in ids),
+            )
+        except BaseException:
+            self.conn.execute("ROLLBACK TO stage_read_scope")
+            raise
+        finally:
+            self.conn.execute("RELEASE stage_read_scope")
+
     def _scope_clause(self, photo_ids, table_alias="p"):
         """Build a (clause, params) pair to scope a query to photo_ids.
 
@@ -8834,14 +8855,7 @@ class Database:
         if len(ids) <= _SQLITE_PARAM_CHUNK_SIZE:
             placeholders = ",".join("?" for _ in ids)
             return f" AND {table_alias}.id IN ({placeholders})", ids
-        self.conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS scope_ids (id INTEGER PRIMARY KEY)"
-        )
-        self.conn.execute("DELETE FROM scope_ids")
-        self.conn.executemany(
-            "INSERT OR IGNORE INTO scope_ids (id) VALUES (?)",
-            [(i,) for i in ids],
-        )
+        self._stage_scope_ids("scope_ids", ids)
         return f" AND {table_alias}.id IN (SELECT id FROM scope_ids)", []
 
     def count_real_detections_in_scope(self, photo_ids=None, min_conf=None):
@@ -8867,7 +8881,7 @@ class Database:
                 JOIN photos p ON p.id = d.photo_id
                 JOIN workspace_folders wf
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                WHERE d.detector_model != 'full-image'
+                WHERE d.detector_model != 'full-image' AND d.category = 'animal'
                   AND d.detector_confidence >= ?{scope_sql}""",
             (ws, min_conf, *scope_params),
         ).fetchone()
@@ -8945,8 +8959,8 @@ class Database:
                   ON cr.detection_id = d.id
                  AND cr.classifier_model = ?
                  AND cr.labels_fingerprint = ?
-                   AND cr.input_recipe IS NULL
-                WHERE d.detector_model != 'full-image'
+                   AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'
+                WHERE d.detector_model != 'full-image' AND d.category = 'animal'
                   AND d.detector_confidence >= ?
                   AND cr.detection_id IS NULL{scope_sql}""",
             (ws, classifier_model, labels_fingerprint, min_conf, *scope_params),
@@ -8990,7 +9004,7 @@ class Database:
                     ON cr.detection_id = d.id
                    AND cr.classifier_model = ?
                    AND cr.labels_fingerprint = ?
-                   AND cr.input_recipe IS NULL
+                   AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'
                  WHERE d.rn = 1
                    AND cr.detection_id IS NULL""",
             (ws, min_conf, *scope_params, classifier_model, labels_fingerprint),
@@ -9024,7 +9038,7 @@ class Database:
                 JOIN photos p ON p.id = d.photo_id
                 JOIN workspace_folders wf
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.detector_model != 'full-image'
+               WHERE d.detector_model != 'full-image' AND d.category = 'animal'
                  AND d.detector_confidence >= ?
                  AND EXISTS (
                     SELECT 1 FROM classifier_runs cr_stale
@@ -9177,7 +9191,7 @@ class Database:
                     ON cr.detection_id = f.detection_id
                    AND cr.classifier_model = ?
                    AND cr.labels_fingerprint = ?
-                   AND cr.input_recipe IS NULL
+                   AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'
                  WHERE f.detection_id IS NULL
                     OR cr.detection_id IS NULL""",
             (
@@ -21968,7 +21982,7 @@ class Database:
         rows = self.conn.execute(
             """SELECT cr.classifier_model, cr.labels_fingerprint
                FROM classifier_runs cr
-               WHERE cr.detection_id = ? AND cr.input_recipe IS NULL""" + runtime_clause,
+               WHERE cr.detection_id = ? AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'""" + runtime_clause,
             params,
         ).fetchall()
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
@@ -22021,7 +22035,7 @@ class Database:
         accepted, rejected = set(), set()
         for row in rows:
             key = (row["classifier_model"], row["labels_fingerprint"])
-            if row["input_recipe"] is None and (
+            if row["runtime_fingerprint"] != "incomplete" and row["input_recipe"] is None and (
                 row["runtime_fingerprint"] == runtime_fingerprint
                 or row["runtime_fingerprint"] == "legacy"
                 or row["has_individual_override"]
@@ -22204,7 +22218,7 @@ class Database:
             rt_predicate_sql = rt_predicate_sql_cr
 
         # RAW outputs cannot satisfy a normal-image run, even when reviewed.
-        rt_predicate_sql += " AND cr.input_recipe IS NULL"
+        rt_predicate_sql += " AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'"
 
         # For photos whose detector iteration completed, mirror the runtime's
         # in-memory target selection rather than querying every detection row
@@ -24179,10 +24193,14 @@ class Database:
 
     def _retag_for_edit(self, pid, keyword_id):
         """Re-add a keyword removed by an edit; returns the keyword name."""
+        name = self._keyword_name(keyword_id)
+        if name is None:
+            # Deleting a keyword deliberately retires it. Old history must
+            # not recreate it or strand the history cursor on a foreign key.
+            return None
         # Stamp the recreated association so durable authorship does not
         # disappear merely because untagging deleted the row.
         self.tag_photo(pid, keyword_id, source='manual')
-        name = self._keyword_name(keyword_id)
         if name:
             self._flip_pending_keyword_change(
                 pid, name, 'keyword_remove', 'keyword_add',

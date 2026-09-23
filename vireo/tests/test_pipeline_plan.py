@@ -980,8 +980,11 @@ def test_classify_plan_will_skip_when_disabled(tmp_path):
     assert plan["stages"]["Classify"]["state"] == "will-skip"
 
 
-def test_classify_plan_will_skip_when_no_models_selected(tmp_path):
+def test_classify_plan_will_skip_when_no_models_selected(tmp_path, monkeypatch):
+    import models
     from pipeline_plan import compute_plan
+
+    monkeypatch.setattr(models, "get_active_model", lambda: None)
     db, _ = _make_db(tmp_path)
     plan = compute_plan(db, _params(model_ids=[]), str(tmp_path / "test.db"))
     assert plan["stages"]["Classify"]["state"] == "will-skip"
@@ -1071,7 +1074,8 @@ def test_classify_plan_timm_intrinsic_uses_runtime_fingerprint(
     assert classify["detail"]["fingerprint_outdated"] is False
 
 
-def test_classify_plan_counts_primary_detections_only(tmp_path, monkeypatch):
+@pytest.mark.parametrize("model_ids", [["m1"], []])
+def test_classify_plan_counts_all_eligible_detections(tmp_path, monkeypatch, model_ids):
     from labels_fingerprint import TOL_SENTINEL
     from pipeline_plan import compute_plan
 
@@ -1100,15 +1104,16 @@ def test_classify_plan_counts_primary_detections_only(tmp_path, monkeypatch):
          "model_type": "bioclip", "downloaded": True,
          "weights_path": _tol_weights(tmp_path)},
     ])
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: models_mod.get_models()[0])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
     db.record_classifier_run(det_ids[0], "BioCLIP-2", TOL_SENTINEL, 1)
 
-    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    plan = compute_plan(db, _params(model_ids=model_ids), str(tmp_path / "test.db"))
     classify = plan["stages"]["Classify"]
-    assert classify["state"] == "done-prior"
-    assert classify["detail"]["eligible"] == 1
-    assert classify["detail"]["pending"] == 0
+    assert classify["state"] == "will-run"
+    assert classify["detail"]["eligible"] == 2
+    assert classify["detail"]["pending"] == 1
     assert classify["detail"]["stale"] == 0
 
 
@@ -2561,7 +2566,8 @@ def test_regroup_plan_species_review_skipped_when_selected_model_not_downloaded(
     assert plan["stages"]["Group"]["state"] == "will-skip"
 
 
-def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scoped", [False, True])
+def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path, monkeypatch, scoped):
     """The other headline bug: Group & Score had no signal at all and
     always said "Will run." When the cache exists and no upstream stage
     has work, the next press is a no-op — say so.
@@ -2605,11 +2611,11 @@ def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path
     plan = compute_plan(
         db,
         # Skip eye keypoints so it doesn't surface as upstream "will-run".
-        _params(model_ids=["m1"], skip_eye_keypoints=True),
+        _params(model_ids=["m1"], skip_eye_keypoints=True, photo_ids=[pid] if scoped else None),
         str(tmp_path / "test.db"),
     )
 
-    assert plan["stages"]["Group"]["state"] == "done-prior"
+    assert plan["stages"]["Group"]["state"] == ("will-run" if scoped else "done-prior")
 
 
 def test_regroup_plan_will_run_when_upstream_has_work(tmp_path):

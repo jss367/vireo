@@ -687,29 +687,26 @@ def ingest(
             path_sql_expr = "f.path"
             dest_path_sql_param = dest_path_sql
             dest_like_prefix_param = dest_like_prefix
+        folder_scope = ""
+        folder_params = ()
         if dest_path_sql_stripped:
-            folder_rows = db.conn.execute(
-                f"""SELECT p.file_hash, p.filename, p.file_size, p.timestamp,
-                          f.path AS folder_path
-                   FROM photos p
-                   JOIN folders f ON p.folder_id = f.id
-                   WHERE (p.file_hash IS NOT NULL OR p.timestamp IS NOT NULL)
-                     AND f.status IN ('ok', 'partial')
-                     AND (
-                       {path_sql_expr} = ?
-                       OR {path_sql_expr} LIKE ? ESCAPE '\\'
-                     )""",
-                (dest_path_sql_param, dest_like_prefix_param),
-            ).fetchall()
-        else:
-            folder_rows = db.conn.execute(
-                """SELECT p.file_hash, p.filename, p.file_size, p.timestamp,
-                          f.path AS folder_path
-                   FROM photos p
-                   JOIN folders f ON p.folder_id = f.id
-                   WHERE (p.file_hash IS NOT NULL OR p.timestamp IS NOT NULL)
-                     AND f.status IN ('ok', 'partial')"""
-            ).fetchall()
+            folder_scope = f"AND ({path_sql_expr} = ? OR {path_sql_expr} LIKE ? ESCAPE '\\')"
+            folder_params = (dest_path_sql_param, dest_like_prefix_param)
+        folder_rows = []
+        for identity, source in (
+            ("p", "photos p"),
+            ("c", "companion_identities c JOIN photos p ON p.id=c.photo_id AND p.companion_path=c.filename"),
+        ):
+            folder_rows.extend(db.conn.execute(
+                f"""SELECT {identity}.file_hash, {identity}.filename,
+                           {identity}.file_size, {identity}.timestamp,
+                           f.path AS folder_path
+                      FROM {source}
+                      JOIN folders f ON p.folder_id = f.id
+                     WHERE ({identity}.file_hash IS NOT NULL OR {identity}.timestamp IS NOT NULL)
+                       AND f.status IN ('ok', 'partial') {folder_scope}""",
+                folder_params,
+            ).fetchall())
         for r in folder_rows:
             folder_path = r["folder_path"]
             # Normalise both sides before the subtree check: a stored path

@@ -556,6 +556,14 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             f"SELECT {transfer_cols} FROM photos WHERE id = ?",
             (companion["id"],),
         ).fetchone()
+        # Pairing hides the JPEG row, not the JPEG's import identity. Keep
+        # it attached to the RAW so re-importing a card still skips both.
+        db.conn.execute(
+            "INSERT OR REPLACE INTO companion_identities "
+            "(photo_id, filename, file_size, timestamp, file_hash) "
+            "SELECT ?, filename, file_size, timestamp, file_hash FROM photos WHERE id=?",
+            (primary["id"], companion["id"]),
+        )
 
         updates = []
         params = []
@@ -3115,6 +3123,24 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             "Skipping other-app data bundle as scan root: %s", root_path,
         )
         return counts
+    from file_identity import catalog_folder_aliases, catalog_folder_path
+
+    original_root = os.path.abspath(root_path)
+    root_path = Path(catalog_folder_path(db, original_root))
+    if str(root_path) != original_root:
+        def rebase_scan_path(path):
+            path = os.path.abspath(path)
+            try:
+                if os.path.commonpath([original_root, path]) == original_root:
+                    return str(root_path / os.path.relpath(path, original_root))
+            except ValueError:
+                pass
+            return path
+
+        restrict_dirs = None if restrict_dirs is None else [rebase_scan_path(p) for p in restrict_dirs]
+        restrict_files = None if restrict_files is None else [rebase_scan_path(p) for p in restrict_files]
+        skip_paths = None if skip_paths is None else {rebase_scan_path(p) for p in skip_paths}
+        discovered_files = None if discovered_files is None else [Path(rebase_scan_path(p)) for p in discovered_files]
     # A frozen manifest may be any iterable, including a generator. Consume
     # it exactly once so the missing-root guard can distinguish an empty
     # manifest from promised work without exhausting the later work queue.
@@ -3418,6 +3444,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # Build folder cache: path -> folder_id
     folder_cache = {}
+    folder_aliases = catalog_folder_aliases(db)
 
     # When the scan is restricted to specific subfolders, those subfolders —
     # not the broad scan root — are the user-facing workspace roots. A
@@ -3477,7 +3504,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         )
 
         folder_id = db.add_folder(
-            path=folder_str,
+            path=catalog_folder_path(db, folder_str, aliases=folder_aliases),
             name=folder_path.name,
             parent_id=parent_id,
             workspace_root=is_ws_root,

@@ -9331,7 +9331,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Slider edits need no photo metadata. Geometry and local masks use
         # dimensions, loaded in chunks only for those operations.
         needs_dimensions = has_local or bool(fields and {"rotation", "flip"}.intersection(fields))
-        photos = db.get_photos_by_ids(visible_ids) if needs_dimensions else {}
+        photos = db.get_photos_by_ids(visible_ids, include_exif=True) if needs_dimensions else {}
         items = []
         applied = []
         skipped = []
@@ -9651,7 +9651,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
     def api_add_keyword(photo_id):
         db = _get_db()
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return _photo_not_found_error()
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         keyword_id = body.get("keyword_id")
         name = body.get("name", "")
         name = name.strip() if isinstance(name, str) else ""
@@ -9720,6 +9724,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
     def api_remove_keyword(photo_id, keyword_id):
         db = _get_db()
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return _photo_not_found_error()
         keywords = db.get_photo_keywords(photo_id)
         kw_name = ""
         kw_type = ""
@@ -9728,6 +9734,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 kw_name = k["name"]
                 kw_type = k["type"] or ""
                 break
+        else:
+            return jsonify({"ok": True})
         db.untag_photo(photo_id, keyword_id)
         _queue_keyword_remove(photo_id, kw_name)
         # A ``keyword_remove`` on a ``type='location'`` tag strips the flat
@@ -9997,7 +10005,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ambiguous.add(row["id"])
         return ambiguous
 
-    def _parse_selection_photo_ids(body):
+    def _parse_selection_photo_ids(body, *, limit=_MAX_SELECTION_PHOTOS):
         """Validate a selection payload's ``photo_ids``.
 
         Returns ``(photo_ids, None)`` or ``(None, error_response)``. Shared by
@@ -10020,11 +10028,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 seen.add(raw)
         if not photo_ids:
             return None, json_error("photo_ids required")
-        if len(photo_ids) > _MAX_SELECTION_PHOTOS:
+        if limit is not None and len(photo_ids) > limit:
             return None, json_error("too many photo_ids", 400)
 
+        visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
         for pid in photo_ids:
-            if not db._photo_in_workspace(pid):
+            if pid not in visible_ids:
                 return None, json_error(
                     f"Photo {pid} does not belong to the active workspace", 403
                 )
@@ -11642,7 +11651,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_batch_keyword():
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        photo_ids, error = _parse_selection_photo_ids(body, limit=None)
+        if error is not None:
+            return error
         keyword_id = body.get("keyword_id")
         name = body.get("name", "")
         name = name.strip() if isinstance(name, str) else ""
@@ -11694,15 +11707,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             already_tagged.update(row["photo_id"] for row in existing_rows)
         added_ids = [pid for pid in photo_ids if pid not in already_tagged]
 
-        for pid in added_ids:
-            # See api_add_keyword: an explicit user action stamps durable
-            # provenance so pruned edit history cannot orphan authorship.
-            db.tag_photo(pid, kid, source='manual')
-            _queue_keyword_add(pid, name)
-        items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
+        with db.conn:
+            for pid in added_ids:
+                db.tag_photo(pid, kid, source='manual', _commit=False)
+                _queue_keyword_add(pid, name, _commit=False)
+            items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
+            if items:
+                db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
+                               str(kid), items, is_batch=True, _commit=False)
         if items:
-            db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
-                           str(kid), items, is_batch=True)
+            db._prune_edit_history()
         return jsonify({"ok": True, "updated": len(added_ids)})
 
     @app.route("/api/batch/wildlife-excluded", methods=["POST"])
@@ -16105,6 +16119,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for fid in folder_ids:
                     if fid not in source_folder_ids:
                         return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
+                from db import _path_for_subtree_match
+
+                source_folders = db.get_workspace_folders(ws_id)
+                selected = set(folder_ids)
+                remaining_paths = [_path_for_subtree_match(f["path"]) for f in source_folders
+                                   if f["id"] not in selected and f["path"]]
+                if any(_path_for_subtree_match(f["path"]).startswith(parent + "/")
+                       for f in source_folders if f["id"] in selected and f["path"]
+                       for parent in remaining_paths):
+                    return json_error(
+                        "Cannot move a folder that is covered by another source workspace folder; "
+                        "move the covering folder or remove it first"
+                    )
                 try:
                     target_ws_id = db.create_workspace(new_ws_name)
                 except Exception as e:
@@ -17058,6 +17085,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if lock_err is not None:
             return lock_err
         try:
+            if _out_of_workspace_prediction_ids(db, [pred_id]):
+                db.conn.rollback()
+                return json_error("Prediction does not belong to the active workspace", 404)
             pred = db.conn.execute(
                 """SELECT pr.id, pr.species, d.photo_id,
                           COALESCE(pr_rev.status, 'pending') AS status
@@ -17117,6 +17147,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if lock_err is not None:
             return lock_err
         try:
+            if _out_of_workspace_prediction_ids(db, [pred_id]):
+                db.conn.rollback()
+                return json_error("Prediction does not belong to the active workspace", 404)
             current_status = _prediction_status(db, pred_id)
             if current_status is None:
                 db.conn.rollback()
@@ -18280,6 +18313,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if lock_err is not None:
             return lock_err
         try:
+            if _out_of_workspace_prediction_ids(db, [pred_id]):
+                db.conn.rollback()
+                return json_error("Prediction does not belong to the active workspace", 404)
             current_status = _prediction_status(db, pred_id)
             # Missing row falls through to ``accept_prediction`` returning None
             # — the endpoint's historical contract for unknown ids is a 200
@@ -18437,6 +18473,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if lock_err is not None:
             return lock_err
         try:
+            if _out_of_workspace_prediction_ids(db, [pred_id]):
+                db.conn.rollback()
+                return json_error("Prediction does not belong to the active workspace", 404)
             # Review state lives in prediction_review now; predictions.model
             # is renamed to classifier_model. Sibling-alternative rejection
             # goes through the workspace-scoped review table.
@@ -20711,6 +20750,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # this machine: absent secret keys keep their current on-disk
             # value; explicitly supplied ones write through.
             current_raw = _read_raw_config_file()
+            # Export deliberately omits install-local migration markers.
+            # Restore must not make already completed migrations run again.
+            payload["_migrations_applied"] = list(dict.fromkeys(
+                cfg._migrations_applied(current_raw) + cfg._migrations_applied(payload)
+            ))
             for secret_key in schema.secret_keys():
                 if schema.get_dotted(payload, secret_key, default=_MISSING) is not _MISSING:
                     continue
@@ -22686,11 +22730,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         photo_ids = body.get("photo_ids", [])
+        if not isinstance(photo_ids, list) or any(type(pid) is not int for pid in photo_ids):
+            return json_error("photo_ids must be a list of integers")
         if not photo_ids:
             return jsonify({"ok": True, "removed": 0})
 
-        result = db.delete_photos(photo_ids)
+        from audit import confirmed_orphan_ids
+
+        confirmed = confirmed_orphan_ids(db, photo_ids)
+        result = db.delete_photos(confirmed) if confirmed else {"deleted": 0}
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
         if result.get("deleted"):
             _invalidate_missing_originals_cache()
@@ -22705,7 +22756,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         try:
-            import_untracked(
+            imported = import_untracked(
                 db, paths,
                 vireo_dir=vireo_dir,
                 thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
@@ -22721,7 +22772,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # paths above. Without ExifTool the newly imported photos still lose
         # capture date, GPS, and camera info; the frontend renders any warning
         # as a toast so the user isn't told the import "succeeded" silently.
-        response = {"ok": True, "imported": len(paths)}
+        response = {"ok": True, "imported": imported}
         metadata_warning = _scan_metadata_warning()
         if metadata_warning:
             response["warning"] = metadata_warning
@@ -24767,15 +24818,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # across many photo_ids only when the user clicks "trash all losers"
         # for one library — still a small number of distinct hashes.
         hashes = {r["file_hash"] for r in rows_by_id.values() if r["file_hash"]}
-        anchored_hashes = set()
+        anchors_by_hash = {}
         for h in hashes:
-            anchor = db.conn.execute(
-                "SELECT 1 FROM photos "
-                "WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected') LIMIT 1",
+            anchors = db.conn.execute(
+                "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+                "WHERE p.file_hash = ? AND (p.flag IS NULL OR p.flag != 'rejected')",
                 (h,),
-            ).fetchone()
-            if anchor is not None:
-                anchored_hashes.add(h)
+            ).fetchall()
+            anchors_by_hash[h] = [os.path.join(a["path"], a["filename"]) for a in anchors]
 
         trash_candidates = []
         trashed_pids = []
@@ -24799,31 +24849,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if row["flag"] != "rejected":
                 skipped.append({"id": pid, "reason": "photo is not rejected"})
                 continue
-            if not row["file_hash"] or row["file_hash"] not in anchored_hashes:
+            if not row["file_hash"] or not anchors_by_hash.get(row["file_hash"]):
                 # No kept row shares this hash — refuse to trash. Treat as
                 # "not a duplicate loser" so the user can't accidentally use
                 # this endpoint to delete files for unrelated rejected rows.
                 skipped.append({"id": pid, "reason": "no duplicate winner exists"})
                 continue
             filepath = os.path.join(row["folder_path"] or "", row["filename"] or "")
-            if _path_on_network_volume(filepath, network_roots):
-                # Never stat a network path from this thread — delegate
-                # entirely to ``_trash_paths``, which routes network
-                # candidates through a time-bounded Finder subprocess. If
-                # the file is truly gone, Finder will report "missing" and
-                # the bounded mount-identity revalidation there decides
-                # whether to accept it as end-state or preserve the row.
-                trash_candidates.append((pid, filepath))
-                continue
-            file_existed = os.path.isfile(filepath)
-            if not file_existed:
-                # File was removed outside Vireo (e.g. user trashed in Finder).
-                # Drop the orphan DB row anyway so the summary count drops —
-                # without this, manually-cleaned losers would also "report
-                # forever". The "skipped" status still surfaces the no-op to
-                # the caller for accurate reporting.
-                skipped.append({"id": pid, "reason": "file already missing"})
-                trashed_pids.append(pid)
+            network = _path_on_network_volume(filepath, network_roots)
+            if not network:
+                from audit import confirmed_orphan_ids
+
+                if confirmed_orphan_ids(db, [pid]):
+                    skipped.append({"id": pid, "reason": "file already missing"})
+                    trashed_pids.append(pid)
+                    continue
+            from file_identity import distinct_existing_file
+
+            anchors = anchors_by_hash[row["file_hash"]]
+            # Reject aliases as well as unavailable winners: every retained
+            # row must continue to name a distinct, existing regular file.
+            if not all(distinct_existing_file(
+                filepath, anchor,
+                timeout=2.0 if network or _path_on_network_volume(anchor, network_roots) else None,
+            ) for anchor in anchors):
+                skipped.append({"id": pid, "reason": "no verified distinct duplicate winner exists"})
                 continue
             trash_candidates.append((pid, filepath))
 
@@ -27647,7 +27697,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             photos = []
             for pid in photo_ids:
-                p = thread_db.get_photo(pid)
+                p = thread_db.get_photo(pid, verify_workspace=True)
                 if p:
                     photos.append(p)
 
@@ -27663,7 +27713,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for i, photo in enumerate(photos):
                 if ctx.runner.is_cancelled(job["id"]):
                     break
-                folder_path = folders.get(photo["folder_id"], "")
+                folder_path = folders.get(photo["folder_id"])
+                if not folder_path:
+                    errors += 1
+                    continue
                 input_path = os.path.join(folder_path, photo["filename"])
 
                 # Determine output directory. The per-folder "developed/" default
@@ -29377,6 +29430,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         returned variant plus a default "active" option.
         """
         db = _get_db()
+        if db.get_photo(pid, verify_workspace=True) is None:
+            return _photo_not_found_error()
         masks = db.list_masks_for_photo(pid)
         row = db.conn.execute(
             "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
@@ -29419,6 +29474,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "", 404
         for _attempt in range(3):
             db = _get_db()
+            if db.get_photo(pid, verify_workspace=True) is None:
+                return "", 404
             mask = db.get_photo_mask(pid, variant)
             if mask is None or not mask.get("path"):
                 return "", 404
@@ -30494,12 +30551,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     try:
                         from PIL import Image as _PILImage
 
-                        with _PILImage.open(canonical) as selected_image:
-                            candidate_dims = _image_size_after_exif_orientation(
-                                selected_image,
-                            )
-                        if all(candidate_dims):
-                            selected_dims = candidate_dims
+                        if selected_ext not in RAW_EXTENSIONS:
+                            with _PILImage.open(canonical) as selected_image:
+                                candidate_dims = _image_size_after_exif_orientation(
+                                    selected_image,
+                                )
+                            if all(candidate_dims):
+                                selected_dims = candidate_dims
                     except Exception:
                         # Some RAW formats cannot be opened by Pillow. Their
                         # stored native dimensions remain the best available

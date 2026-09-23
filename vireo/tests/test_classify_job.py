@@ -3666,7 +3666,8 @@ def test_record_batch_classifier_runs_skips_zero_count(tmp_path):
 
     keys_ok = db.get_classifier_run_keys(det_ok)
     keys_failed = db.get_classifier_run_keys(det_failed)
-    assert keys_ok == {("bioclip-2", "abc123")}, "successful detection should be cached"
+    assert keys_ok == set(), "output is not reusable until predictions are persisted"
+    assert db.conn.execute("SELECT runtime_fingerprint FROM classifier_runs WHERE detection_id=?", (det_ok,)).fetchone()[0] == "incomplete"
     assert keys_failed == set(), "failed detection must NOT be cached"
 
 
@@ -3757,10 +3758,10 @@ def test_publish_classifier_runs_promotes_after_predictions_persist(tmp_path):
         "SELECT runtime_fingerprint FROM classifier_runs "
         "WHERE detection_id = ?", (det_id,),
     ).fetchone()
-    assert run["runtime_fingerprint"] == "legacy", (
+    assert run["runtime_fingerprint"] == "incomplete", (
         "record_batch must NOT attempt to publish before predictions "
         "are persisted — that call silently no-ops and leaves the run "
-        "stranded on 'legacy' runtime"
+        "stranded on 'incomplete' runtime"
     )
 
     # Publishing without the persisted prediction rows still no-ops.
@@ -3773,7 +3774,7 @@ def test_publish_classifier_runs_promotes_after_predictions_persist(tmp_path):
         "SELECT runtime_fingerprint FROM classifier_runs "
         "WHERE detection_id = ?", (det_id,),
     ).fetchone()
-    assert run["runtime_fingerprint"] == "legacy"
+    assert run["runtime_fingerprint"] == "incomplete"
 
     # Simulate _store_grouped_predictions persisting the prediction row,
     # then re-run the publish pass — the classifier_runs row now gets
@@ -4522,6 +4523,17 @@ def test_store_grouped_predictions_burst_group():
     assert result["predictions_stored"] == 2
     assert result["burst_groups"] >= 1
     assert mock_db.add_prediction.call_count == 2
+
+
+    first_groups = {call.kwargs["group_id"] for call in mock_db.add_prediction.call_args_list}
+    assert None not in first_groups
+    mock_db.reset_mock()
+    _store_grouped_predictions(
+        raw_results=raw_results, job_id="classify-test", model_name="Other model",
+        grouping_window=10, similarity_threshold=0.85, tax=None, db=mock_db,
+    )
+    second_groups = {call.kwargs["group_id"] for call in mock_db.add_prediction.call_args_list}
+    assert first_groups.isdisjoint(second_groups)
 
 
 def test_store_grouped_predictions_folds_species_before_group_consensus():

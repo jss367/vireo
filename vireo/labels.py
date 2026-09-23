@@ -621,6 +621,13 @@ def delete_labels(labels_file):
     Args:
         labels_file: path to the .txt labels file
     """
+    if not isinstance(labels_file, str) or not labels_file.endswith(".txt"):
+        raise ValueError("Choose a label set from the labels directory")
+    root = os.path.realpath(LABELS_DIR)
+    candidates = [labels_file, labels_file.rsplit(".", 1)[0] + ".json"]
+    for candidate in candidates:
+        if os.path.dirname(os.path.realpath(candidate)) != root:
+            raise ValueError("Label files must be inside the labels directory")
     # Remove .txt and corresponding .json
     if os.path.exists(labels_file):
         os.remove(labels_file)

@@ -132,9 +132,11 @@ def _resolve_models(model_ids):
     written into classifier_runs. Unknown ids are dropped — the plan reflects
     what the classify job would actually run, and the job ignores them.
     """
+    from models import get_active_model, get_models
+
     if not model_ids:
-        return []
-    from models import get_models
+        active = get_active_model()
+        model_ids = [active["id"]] if active else []
 
     by_id = {m["id"]: m for m in get_models()}
     out = []
@@ -330,7 +332,7 @@ def _classify_plan(
             max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
         )
 
-    det_counts = db.count_primary_detections_in_scope(
+    det_counts = db.count_real_detections_in_scope(
         photo_ids, min_conf=detector_confidence,
     )
     weak_det_counts = db.count_primary_detections_in_scope(
@@ -391,7 +393,7 @@ def _classify_plan(
             if info.get("blocked"):
                 continue
             fp = info["fingerprint"]
-            stale_total += db.count_primary_classify_stale(
+            stale_total += db.count_classify_stale(
                 classifier_model=m["name"],
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
@@ -518,7 +520,7 @@ def _classify_plan(
         if params.reclassify or params.raw_subject_analysis:
             pending = classifiable_units
         else:
-            pending = db.count_primary_classify_pending_pairs(
+            pending = db.count_classify_pending_pairs(
                 classifier_model=m["name"],
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
@@ -1128,6 +1130,12 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
                 "upstream_will_run": False,
                 "import_no_new": True,
             },
+        }
+    if params.collection_id is not None or params.photo_ids is not None or params.exclude_photo_ids:
+        return {
+            "state": "will-run",
+            "summary": "Will re-group selected photos and replace the latest review",
+            "detail": {"cache_exists": cache_exists, "scoped": True},
         }
     if upstream_will_run:
         return {

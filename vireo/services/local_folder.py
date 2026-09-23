@@ -650,8 +650,8 @@ def stage_folder(
                 raise LocalWorkspaceError(
                     f"Could not create the local destination {local_root}: {exc}"
                 ) from exc
-            db.conn.execute("BEGIN IMMEDIATE")
             try:
+                db.conn.execute("BEGIN IMMEDIATE")
                 db.conn.execute(
                     "INSERT INTO local_folders (root_folder_id, state, created_at) VALUES (?, 'staging', ?)",
                     (root_folder_id, time.time()),

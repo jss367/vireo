@@ -1831,6 +1831,13 @@ def create_pipeline_blueprint(
 
         # Remove burst from encounter
         detached = bursts.pop(burst_idx)
+        inherited_species = burst_species_list(enc, detached)
+        detached_override = detached.get("species_override") or {}
+        detached_confirmed = (
+            bool(detached_override.get("confirmed"))
+            if isinstance(detached_override.get("species_list"), list) or detached_override.get("confirmed")
+            else bool(enc.get("species_confirmed") and inherited_species)
+        )
         detached_ids = detached["photo_ids"]
         photos_by_id = {p["id"]: p for p in results.get("photos", [])}
 
@@ -1873,11 +1880,9 @@ def create_pipeline_blueprint(
         )
         # Also refresh the detached burst's own predictions
         detached["species_predictions"] = new_enc_predictions
-        detached_override = detached.get("species_override") or {}
-        detached_confirmed = bool(detached_override.get("confirmed"))
         # The burst's own list (confirmed, mixed-but-edited, or empty); a
         # candidate override contributes nothing.
-        detached_list = burst_species_list({}, detached)
+        detached_list = inherited_species
         new_enc = {
             "species": new_enc_species,
             "confirmed_species": detached_list[0] if detached_list else None,
@@ -2446,6 +2451,9 @@ def create_pipeline_blueprint(
         preds = db.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
                       pr.category, pr.match_score,
+                      pr.scientific_name, pr.taxonomy_kingdom, pr.taxonomy_phylum,
+                      pr.taxonomy_class, pr.taxonomy_order, pr.taxonomy_family,
+                      pr.taxonomy_genus,
                       COALESCE(pr_rev.status, 'pending') AS status,
                       pr_rev.individual AS individual,
                       pr_rev.group_id AS group_id,

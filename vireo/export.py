@@ -868,6 +868,8 @@ def _save_export_image(img, output, format_info, quality):
     if pil_format == "JPEG" and img.mode not in ("RGB", "L"):
         save_img = img.convert("RGB")
     save_kwargs = {}
+    if img.info.get("icc_profile"):
+        save_kwargs["icc_profile"] = img.info["icc_profile"]
     if format_info["quality"]:
         save_kwargs["quality"] = quality
     elif pil_format == "TIFF":

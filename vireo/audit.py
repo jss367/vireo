@@ -108,22 +108,11 @@ def check_orphans(db):
     Returns:
         list of {photo_id, filename, folder_path}
     """
-    photos = db.get_photos(per_page=999999)
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
-    orphans = []
-
-    for photo in photos:
-        folder_path = folders.get(photo["folder_id"], "")
-        file_path = os.path.join(folder_path, photo["filename"])
-
-        if not os.path.exists(file_path):
-            orphans.append(
-                {
-                    "photo_id": photo["id"],
-                    "filename": photo["filename"],
-                    "folder_path": folder_path,
-                }
-            )
+    orphans = [
+        {"photo_id": photo["id"], "filename": photo["filename"],
+         "folder_path": photo["folder_path"]}
+        for photo in db.get_missing_photos()
+    ]
 
     log.info("Orphan check: %d orphaned entries found", len(orphans))
     return orphans
@@ -629,16 +618,36 @@ def import_untracked(db, paths, vireo_dir=None, thumb_cache_dir=None):
             to the scanner so invalidation targets the real cache even
             when ``--thumb-dir`` points outside ``vireo_dir/thumbnails``.
     """
+    from file_identity import catalog_folder_path
     from new_images import invalidate_new_images_after_scan
     from scanner import scan
 
     # Group by parent directory
-    dirs = set(os.path.dirname(p) for p in paths)
-    for d in dirs:
+    dirs = {}
+    for path in paths:
+        path = os.path.abspath(path)
+        dirs.setdefault(os.path.dirname(path), set()).add(path)
+
+    def selected_catalog_files(directory, files):
+        folder_path = catalog_folder_path(db, directory)
+        names = {os.path.basename(p) for p in files}
+        rows = db.conn.execute(
+            "SELECT p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE f.path=? "
+            "UNION SELECT p.companion_path FROM photos p JOIN folders f ON f.id=p.folder_id "
+            "WHERE f.path=? AND p.companion_path IS NOT NULL",
+            (folder_path, folder_path),
+        ).fetchall()
+        return names.intersection(os.path.basename(row[0]) for row in rows)
+
+    imported = 0
+    for d, files in dirs.items():
+        before = selected_catalog_files(d, files)
         try:
-            scan(d, db, incremental=True,
+            scan(d, db, incremental=True, recursive=False,
+                 restrict_dirs=[d], restrict_files=files,
                  vireo_dir=vireo_dir,
                  thumb_cache_dir=thumb_cache_dir)
+            imported += len(selected_catalog_files(d, files) - before)
         finally:
             # scanner.scan commits photo rows incrementally, so even a
             # mid-scan failure can leave DB state that invalidates cached
@@ -650,3 +659,30 @@ def import_untracked(db, paths, vireo_dir=None, thumb_cache_dir=None):
                 log.exception(
                     "Failed to invalidate new-images cache for %s", d
                 )
+    return imported
+
+
+def confirmed_orphan_ids(db, photo_ids):
+    """Recheck selected, workspace-owned originals; offline is not missing."""
+    import stat
+
+    confirmed = []
+    for pid in db.filter_photo_ids_in_workspace(photo_ids):
+        row = db.conn.execute(
+            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+            (pid,),
+        ).fetchone()
+        if not row:
+            continue
+        try:
+            with os.scandir(row["path"]):
+                pass
+            try:
+                mode = os.stat(os.path.join(row["path"], row["filename"])).st_mode
+                if stat.S_ISREG(mode):
+                    continue
+            except FileNotFoundError:
+                confirmed.append(pid)
+        except OSError:
+            continue
+    return confirmed

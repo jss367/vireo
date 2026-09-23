@@ -4873,6 +4873,7 @@ async function loadUntilPhotoRendered(photoId, shouldContinue, options) {
 }
 
 function clearActiveSelectionAndDetail() {
+  anchorRestoreEpoch++;
   selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
@@ -9287,13 +9288,14 @@ async function selectAllMatchingPhotos() {
   selectedPhotoId = null;
   selectedIndex = -1;
   var requestSeq = ++selectAllRequestSeq;
+  var selectionEpoch = anchorRestoreEpoch;
   var windowIsCurrent = observeBrowseWindow();
   var request = buildBrowseIdsRequest();
 
   showToast('Selecting all matching photos...', 'info');
   try {
     var data = await safeFetch(request.url, request.options, { toast: false });
-    if (requestSeq !== selectAllRequestSeq || !windowIsCurrent()) return;
+    if (requestSeq !== selectAllRequestSeq || selectionEpoch !== anchorRestoreEpoch || !windowIsCurrent()) return;
     selectedPhotos.clear();
     (data.photo_ids || data.ids || []).forEach(function(id) { selectedPhotos.add(id); });
     renderGrid();
@@ -11590,8 +11592,8 @@ function _refreshBatchInspectorIfActive() {
   }
 }
 
-async function batchSetRating(rating) {
-  var ids = getActiveSelection();
+async function batchSetRating(rating, photoIds) {
+  var ids = photoIds ? photoIds.slice() : getActiveSelection();
   try {
     await safeFetch('/api/batch/rating', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -11810,8 +11812,8 @@ function _clearRepresentativeStateAfterKeywordRemoval(photoIds, keywordName) {
   }
 }
 
-async function batchSetFlag(flag) {
-  var ids = getActiveSelection();
+async function batchSetFlag(flag, photoIds) {
+  var ids = photoIds ? photoIds.slice() : getActiveSelection();
   try {
     await safeFetch('/api/batch/flag', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -11834,8 +11836,8 @@ async function batchSetFlag(flag) {
   showUndoToast();
 }
 
-async function batchSetColorLabel(color) {
-  var ids = getActiveSelection();
+async function batchSetColorLabel(color, photoIds) {
+  var ids = photoIds ? photoIds.slice() : getActiveSelection();
   if (!ids.length) return;
   _noteColorLabelEdits(ids);
   try {
@@ -14684,7 +14686,7 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
       label: n === 0 ? '\u2606' : String(n),
       title: n === 0 ? 'No rating' : 'Rate ' + n,
       onClick: function() {
-        photoIds.forEach(function(id) { setRatingFor(id, n); });
+        batchSetRating(n, photoIds);
       },
     };
   };
@@ -14697,7 +14699,7 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
       color: c,
       colorBaseTitle: title,
       onClick: function() {
-        photoIds.forEach(function(id) { setColorLabelFor(id, c); });
+        batchSetColorLabel(c, photoIds);
       },
     };
   };
@@ -14705,7 +14707,7 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
     return {
       label: icon, title: title,
       onClick: function() {
-        photoIds.forEach(function(id) { setFlagFor(id, f); });
+        batchSetFlag(f, photoIds);
       },
     };
   };
