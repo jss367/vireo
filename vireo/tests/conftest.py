@@ -160,11 +160,17 @@ def app_and_db(tmp_path, monkeypatch):
     """Create a test app with sample data."""
     from db import Database
     monkeypatch.setenv("HOME", str(tmp_path))
+    import classifier
     import config as cfg
     import models
     from app import create_app
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    # Like the model paths below, this is resolved before HOME is patched.
+    # Storage totals must not see another xdist worker's embedding writes.
+    monkeypatch.setattr(
+        classifier, "CACHE_DIR", str(tmp_path / "embedding_cache"),
+    )
     # `models.DEFAULT_MODELS_DIR` and `models.CONFIG_PATH` are resolved
     # at import time from the real `~`. Redirect them so tests don't see
     # the developer's locally-downloaded weights and don't write to the

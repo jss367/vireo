@@ -90,11 +90,14 @@ relative_files = true
 core = "ctrace"
 
 [tool.coverage.report]
-# test-main.yml measures ``tests/`` and ``scripts/`` so the impact map has a
-# context for every test, but the coverage percentage stays what it always
-# was: ``vireo/**`` (which includes ``vireo/tests``). Patterns are anchored
-# at the path start, so ``tests/*`` does not touch ``vireo/tests``.
-omit = ["tests/*", "scripts/*"]
+# The percentage covers production code only. test-main.yml also measures
+# ``tests/`` and ``scripts/`` so the impact map has a context for every test,
+# and ``vireo/tests`` is measured because it sits under ``--cov=vireo``. All
+# three are omitted here: test bodies execute almost completely whenever the
+# suite runs, so counting them inflated the total from about 76% to 88%.
+# Patterns are anchored at the path start, so ``tests/*`` does not touch
+# ``vireo/tests``, which needs its own entry.
+omit = ["tests/*", "scripts/*", "vireo/tests/*"]
 
 [tool.ruff]
 target-version = "py314"
