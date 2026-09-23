@@ -1013,7 +1013,7 @@ def test_scan_dir_file_count_stops_walking_after_truncation(tmp_path, monkeypatc
     worker-stalling behavior the cap is meant to avoid: it can open ~dir_limit
     extra directories after the decision to truncate is already made.
     """
-    import app as app_module
+    import web.moves as moves_module
 
     # 30 subdirectories under one root. With dir_limit=10, the inner for-loop
     # appends children to the stack one at a time. After the 9th append the
@@ -1031,9 +1031,9 @@ def test_scan_dir_file_count_stops_walking_after_truncation(tmp_path, monkeypatc
         scanned.append(str(path))
         return real_scandir(path)
 
-    monkeypatch.setattr(app_module.os, "scandir", counting_scandir)
+    monkeypatch.setattr(moves_module.os, "scandir", counting_scandir)
 
-    file_count, truncated = app_module._scan_dir_file_count(
+    file_count, truncated = moves_module._scan_dir_file_count(
         str(root), file_limit=None, dir_limit=10)
 
     assert truncated is True
@@ -1084,7 +1084,7 @@ def test_move_folder_preflight_exact_mode_is_capped_not_unbounded(
     not server-side work). Exact mode passes a generous but finite cap so the
     worst case is seconds, and the response surfaces truncated=True if the
     cap was hit — the UI already renders that as 'at least N'."""
-    import app as app_module
+    import web.moves as moves_module
 
     app, db = app_and_db
     dst = tmp_path / "dest"
@@ -1102,7 +1102,7 @@ def test_move_folder_preflight_exact_mode_is_capped_not_unbounded(
         # Pretend the cap was hit so the truncated flag can be checked too.
         return file_limit or 0, True
 
-    monkeypatch.setattr(app_module, "_scan_dir_file_count", fake_scan)
+    monkeypatch.setattr(moves_module, "_scan_dir_file_count", fake_scan)
 
     client = app.test_client()
     resp = client.post("/api/move-folder/preflight", json={
