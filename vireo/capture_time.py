@@ -406,9 +406,10 @@ def adjust_capture_time(
                 db, photo["id"], paths[0],
                 refresh_file_identity=paths[0] == catalog_paths[0],
             )
-            # A companion was edited too. Let the import index read its new
-            # identity rather than keeping the pre-correction JPEG hash.
-            db.conn.execute("DELETE FROM companion_identities WHERE photo_id=?", (photo["id"],))
+            # Invalidate only a companion that was actually edited. An offline
+            # companion still needs its saved identity for import deduplication.
+            if any(path in paths for path in catalog_paths[1:]):
+                db.conn.execute("DELETE FROM companion_identities WHERE photo_id=?", (photo["id"],))
             db.conn.commit()
             log.debug("ExifTool stdout: %s", result.stdout.strip())
             if result.stderr:
