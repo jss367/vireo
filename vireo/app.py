@@ -21,7 +21,6 @@ import sys
 import time
 import uuid
 import webbrowser
-from datetime import UTC, datetime
 
 import id_conflicts
 import places
@@ -59,6 +58,7 @@ from preview_cache import (
 )
 from proc import no_window_kwargs
 from schema import ensure_schema
+from services import prediction_ambiguity, startup_tasks
 from services.local_folder import (
     local_root_for_folder,
     local_root_under_folder,
@@ -1816,55 +1816,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # CORE_PHILOSOPHY.md.
     init_db.repair_mixed_species_prediction_groups()
 
-    # Parsing taxonomy.json is expensive for a full iNaturalist download.
-    # Cache the startup instance so overlapping one-time migrations and the
-    # immediate background species pass do not each parse it independently.
-    _taxonomy_not_loaded = object()
-    _startup_taxonomy = _taxonomy_not_loaded
-
-    def _load_startup_taxonomy():
-        nonlocal _startup_taxonomy
-        # Do not cache a miss: a concurrent first-run taxonomy download can
-        # make the file available before the background retry starts.
-        if (
-            _startup_taxonomy is _taxonomy_not_loaded
-            or _startup_taxonomy is None
-        ):
-            from taxonomy import load_local_taxonomy
-
-            _startup_taxonomy = load_local_taxonomy()
-        return _startup_taxonomy
-
-    def _sync_mark_species_only(db, log_label):
-        """Load taxonomy and run mark_species_keywords synchronously.
-
-        Returns True when the pass ran (marking either updated rows or
-        found nothing to update), False when taxonomy is missing or the
-        pass raised. Callers use the return value to gate follow-up work
-        that depends on hierarchy leaves being correctly typed as
-        taxonomy/is_species.
-        """
-        tax = _load_startup_taxonomy()
-        if tax is None:
-            log.debug(
-                "[%s] taxonomy not loaded; deferring species marking",
-                log_label,
-            )
-            return False
-        try:
-            updated = db.mark_species_keywords(tax)
-            if updated:
-                log.info(
-                    "[%s] Marked %d keywords as species from taxonomy",
-                    log_label, updated,
-                )
-            return True
-        except Exception:
-            log.debug(
-                "[%s] mark_species_keywords failed",
-                log_label, exc_info=True,
-            )
-            return False
+    # Startup/maintenance passes; the per-app instance caches the startup
+    # taxonomy parse so overlapping one-time migrations and the immediate
+    # background species pass do not each parse taxonomy.json.
+    startup = startup_tasks.StartupTasks(app, db_path, init_db)
+    _sync_mark_species_only = startup.sync_mark_species_only
 
     # Remove same-photo, same-taxon duplicate associations left by the old
     # hierarchy-import + top-level-confirmation interaction. Idempotent and
@@ -1981,74 +1937,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # on photos; species marking no longer materializes a Wildlife keyword.
     import threading
 
-    def _retire_wildlife_genre():
-        """Run the catalog-wide XMP migration outside startup readiness.
-
-        Large upgraded catalogs can require tens of thousands of sidecar
-        reads here. Keeping that work on create_app's calling thread prevents
-        the HTTP listener from binding and makes the desktop launcher report
-        a false startup failure when its readiness deadline expires.
-        """
-        retirement_db = None
-        started_at = time.time()
-        try:
-            retirement_db = Database(db_path)
-            retired = retirement_db.retire_builtin_wildlife_genre()
-            if retired:
-                log.info(
-                    "Retired the built-in Wildlife genre from %d photo(s)",
-                    retired,
-                )
-            log.info(
-                "Wildlife genre retirement finished in %.2fs",
-                time.time() - started_at,
-            )
-            return retired
-        except Exception:
-            log.exception("Wildlife genre retirement failed")
-            return 0
-        finally:
-            if retirement_db is not None:
-                retirement_db.close()
+    _retire_wildlife_genre = startup.retire_wildlife_genre
 
     # Tests and one-shot tools can invoke the pass deterministically without
     # enabling production timers. Production schedules it only after every
     # route has been registered, immediately before create_app returns.
     app._retire_wildlife_genre = _retire_wildlife_genre
 
-    def _mark_species_and_repair(db, log_label):
-        """Load taxonomy, mark species keywords, and repair duplicates."""
-        tax = _load_startup_taxonomy()
-        if tax is None:
-            log.debug("[%s] taxonomy not loaded; deferring species marking", log_label)
-            return
-        try:
-            updated = db.mark_species_keywords(tax)
-            if updated:
-                log.info("[%s] Marked %d keywords as species from taxonomy",
-                         log_label, updated)
-            repaired = db.repair_duplicate_photo_species()
-            if repaired:
-                log.info(
-                    "[%s] Removed %d duplicate root species associations",
-                    log_label, repaired,
-                )
-        except Exception:
-            log.debug(
-                "[%s] species marking/repair failed", log_label, exc_info=True,
-            )
-
-    def _mark_species():
-        bg_db = None
-        try:
-            bg_db = Database(db_path)
-        except Exception:
-            log.debug("Could not open background db for species marking", exc_info=True)
-            return
-        try:
-            _mark_species_and_repair(bg_db, "background")
-        finally:
-            bg_db.close()
+    _mark_species = startup.mark_species
 
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         threading.Thread(target=_mark_species, daemon=True).start()
@@ -2099,21 +1995,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
-    def _cleanup_app_resources(job_timeout=10.0):
-        try:
-            jobs_stopped = app._job_runner.shutdown(timeout=job_timeout)
-        except Exception:
-            jobs_stopped = False
-            log.exception("Failed to shut down background jobs cleanly")
-        try:
-            app._log_broadcaster.uninstall()
-        except Exception:
-            log.exception("Failed to uninstall log broadcaster during cleanup")
-        try:
-            init_db.close()
-        except Exception:
-            log.exception("Failed to close database during cleanup")
-        return jobs_stopped
+    _cleanup_app_resources = startup.cleanup_app_resources
 
     app._cleanup_app_resources = _cleanup_app_resources
 
@@ -2141,89 +2023,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # CPU for photos the user has not requested.
 
     # ----- thumb_path self-healing backfill -----
-    # The dashboard's coverage card counts thumbnails by ``thumb_path IS NOT
-    # NULL``, but for a long stretch the column was never populated by
-    # production code, so libraries with 40k JPEGs cached on disk reported
-    # "0 thumbnails" forever. This pass aligns the column with disk reality
-    # for legacy rows, and clears it for photos whose cached file has since
-    # been deleted (drift correction).
-    #
-    # Same shape as the working-copy backfill above: ephemeral JobRunner
-    # job (so it shows in the bottom panel), never written to job_history,
-    # skipped entirely when a fast count check finds nothing to do.
-    def _kickoff_thumb_path_backfill():
-        from thumbnails import (
-            backfill_thumb_paths,
-            thumb_path_backfill_candidate_count,
-        )
-
-        tpdb = None
-        try:
-            tpdb = Database(db_path)
-            candidate_count = thumb_path_backfill_candidate_count(
-                tpdb, app.config["THUMB_CACHE_DIR"],
-            )
-        except Exception:
-            log.exception("thumb_path backfill: candidate check failed")
-            return
-        finally:
-            if tpdb is not None:
-                tpdb.close()
-        if candidate_count == 0:
-            log.debug("thumb_path backfill: no candidates, skipping")
-            return
-
-        runner = app._job_runner
-        cache_dir = app.config["THUMB_CACHE_DIR"]
-
-        def work(job):
-            thread_db = Database(db_path)
-            try:
-                active_ws = init_db._active_workspace_id
-                if active_ws is not None:
-                    thread_db.set_active_workspace(active_ws)
-
-                def progress_cb(current, total):
-                    job["progress"]["current"] = current
-                    job["progress"]["total"] = total
-                    runner.push_event(
-                        job["id"],
-                        "progress",
-                        {
-                            "current": current,
-                            "total": total,
-                            "phase": f"{current:,} / {total:,} photos reconciled",
-                        },
-                    )
-
-                def status_cb(message, **_phase):
-                    runner.push_event(job["id"], "progress", {
-                        "phase": message,
-                        "current": job["progress"].get("current", 0),
-                        "total": job["progress"].get("total", 0),
-                    })
-
-                def cancel_check():
-                    return runner.is_cancelled(job["id"])
-
-                return backfill_thumb_paths(
-                    thread_db, cache_dir,
-                    progress_callback=progress_cb,
-                    status_callback=status_cb,
-                    cancel_check=cancel_check,
-                )
-            finally:
-                thread_db.close()
-
-        try:
-            runner.start(
-                "thumb_path_backfill", work,
-                ephemeral=True,
-                config={"trigger": "startup"},
-            )
-        except Exception:
-            log.exception("Failed to start thumb_path backfill job")
-
+    # Aligns photos.thumb_path with the thumbnails on disk (see
+    # StartupTasks.kickoff_thumb_path_backfill). Same shape as the
+    # working-copy backfill: ephemeral JobRunner job, skipped entirely when a
+    # fast count check finds nothing to do.
+    _kickoff_thumb_path_backfill = startup.kickoff_thumb_path_backfill
     app._kickoff_thumb_path_backfill = _kickoff_thumb_path_backfill
 
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
@@ -2287,8 +2091,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         "card-cleanup-verify",
     }
 
-    def _utc_iso_now():
-        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    _utc_iso_now = startup_tasks.utc_iso_now
 
     def _parse_missing_originals_folder_id(db):
         folder_id = request.args.get("folder_id")
@@ -3031,191 +2834,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({"ok": True})
 
-    def _effective_category_resolver(db, photo_ids):
-        """Build ``(photo_id, species) -> category`` against *current* keywords.
-
-        ``predictions.category`` is a snapshot of how the prediction compared
-        to the photo's keywords at classification time, and nothing rewrites
-        it when keywords change afterwards (the only writers are the classify
-        path and duplicate merge). So a photo that gained a Robin keyword
-        after a pending Sparrow prediction was stored as ``new`` still reads
-        ``new`` — and Browse would offer a bare Accept that tags a species
-        conflicting with what the photo already says. ``CORE_PHILOSOPHY.md``
-        forbids exactly that: the button must mean what the user reads it as.
-
-        Returns ``match``/``new``/``refinement``/``broader``/``conflict`` from
-        ``compare_prediction_to_keywords`` — Compare's vocabulary, because
-        this is Compare's computation, shared rather than reimplemented (see
-        ``api_predictions_compare``). Callers treat
-        ``refinement``/``broader``/``conflict`` as ambiguous, the same set
-        Browse's ``predictionIsAmbiguous`` refuses to offer a bare Accept for.
-
-        Two details are load-bearing and are the reason this goes through the
-        same helpers Compare uses rather than a raw keyword query:
-
-        * ``get_species_keywords_for_photos`` canonicalizes a hierarchy alias
-          through its linked taxon's root, and ``resolve_species_display_name``
-          does the same for the prediction label. Comparing raw
-          ``keywords.name`` text would make a photo tagged with the leaf
-          ``Desert Verdin`` read as *conflicting* with a ``Verdin``
-          prediction whenever the taxonomy file is unavailable — inventing an
-          ambiguity and sending a settled photo to Review.
-        * the comparison runs on the species the accept path would actually
-          apply (the burst consensus), not the row's own label.
-
-        Returns None when no comparison is possible (compare or the photo set
-        unavailable) so callers can fall back to the stored snapshot.
-        """
-        photo_ids = [pid for pid in dict.fromkeys(photo_ids) if pid is not None]
-        if not photo_ids:
-            return None
-        try:
-            from compare import compare_prediction_to_keywords
-        except Exception:
-            return None
-        # Cached by mtime inside load_local_taxonomy, so this is a lookup on
-        # the hot path rather than a re-parse per request. None degrades
-        # compare_prediction_to_keywords to exact-text matching, which is
-        # still current-state truth — better than a stale column either way,
-        # and a missing or corrupt taxonomy file must never hard-fail the
-        # endpoint.
-        try:
-            from taxonomy import load_local_taxonomy
-            taxonomy = load_local_taxonomy()
-        except Exception:
-            taxonomy = None
-        from species_identity import SpeciesResolver
-        resolver = SpeciesResolver(db=db)
-        species_by_photo = db.get_species_keywords_for_photos(photo_ids, include_identities=True)
-        resolved = {}
-        cache = {}
-
-        def comparison_name(species, identity=None):
-            identity = identity or resolver.display(species)
-            if identity.scientific_name:
-                return identity.scientific_name
-            if species not in resolved:
-                resolved[species] = db.resolve_species_display_name(identity.display_name)
-            return resolved[species]
-
-        keyword_names = {}
-        for photo_id, entries in species_by_photo.items():
-            names = []
-            for entry in entries:
-                source = {"taxon_id": int(entry["key"][6:])} if entry["key"].startswith("taxon:") else None
-                identity = resolver.resolve(entry["name"], source=source) if source else resolver.display(entry["name"])
-                names.append(comparison_name(entry["name"], identity))
-            keyword_names[photo_id] = names
-
-        def _category(photo_id, species, identity=None):
-            if not species or photo_id is None:
-                return None
-            identity = identity or resolver.display(species)
-            key = (photo_id, identity.key)
-            if key not in cache:
-                if any(entry["key"] == identity.key for entry in species_by_photo.get(photo_id, [])):
-                    cache[key] = "match"
-                else:
-                    comparison = compare_prediction_to_keywords(
-                        comparison_name(species, identity),
-                        keyword_names.get(photo_id, []),
-                        taxonomy,
-                    )
-                    cache[key] = (
-                        comparison.get("category")
-                        if isinstance(comparison, dict) else None
-                    )
-            return cache[key]
-
-        return _category
-
-    _EFFECTIVE_AMBIGUOUS_CATEGORIES = frozenset(
-        {"refinement", "broader", "conflict"}
-    )
-    # Stored-snapshot categories that mean the same thing, used only when no
-    # fresh comparison is available.
-    _STORED_AMBIGUOUS_CATEGORIES = frozenset({"disagreement", "refinement"})
-
-    def _prediction_is_ambiguous(effective_category, stored_category):
-        """Would a bare Accept here be dishonest?
-
-        The fresh comparison wins outright when there is one. ORing it with
-        the stored snapshot would make ambiguity a one-way ratchet: a photo
-        whose conflicting keyword has since been removed would keep being
-        routed to Review forever, naming a conflict that no longer exists —
-        the same staleness bug in the other direction. The snapshot is the
-        fallback for when no fresh comparison could be made at all.
-        """
-        if effective_category is not None:
-            return effective_category in _EFFECTIVE_AMBIGUOUS_CATEGORIES
-        return stored_category in _STORED_AMBIGUOUS_CATEGORIES
-
-    def _ambiguous_prediction_ids(db, rows):
-        """Which of ``rows`` a bare Accept must not act on.
-
-        The one definition of "ambiguous" for the pair of endpoints that
-        need it: the selection panel, which splits its payload into
-        ``acceptable_prediction_ids`` and ``ambiguous_prediction_ids``, and
-        ``batch-accept``, which re-derives the same verdict before writing.
-        Two conditions, both of which mean a bare Accept would decide
-        something the user has not been shown:
-
-        * an ``alternative`` sibling on the row's ``(detection, model)`` —
-          the classifier offered a runner-up, so accepting picks a winner on
-          the user's behalf;
-        * a disagreement/refinement against the photo's species keywords,
-          judged by ``_prediction_is_ambiguous`` on the *current* keywords
-          (see ``_effective_category_resolver`` for why the stored
-          ``category`` column cannot be trusted for this).
-
-        ``batch-accept`` recomputes rather than trusting the payload because
-        the panel's split is a snapshot: a keyword added from Review, a
-        second Browse tab, or an XMP sync between render and click makes a
-        row ambiguous while it is still ``pending``, so the decided-status
-        precondition alone cannot catch it. The panel's own refresh handles
-        mutations inside one document; only the server sees the rest. This
-        lives here — not once per endpoint — for the reason rounds 7 and 8
-        established for the status precondition and the accept scope: a rule
-        with two implementations is a rule that drifts.
-
-        ``rows`` are prediction rows carrying ``id``, ``photo_id``,
-        ``detection_id``, ``model``, ``category``, ``species``, ``group_id``
-        and ``individual``. Returns the ambiguous subset of their ids.
-        """
-        rows = list(rows)
-        if not rows:
-            return set()
-        photo_ids = list(dict.fromkeys(
-            row["photo_id"] for row in rows if row["photo_id"] is not None
-        ))
-        # Keyed by (detection, model) exactly as /api/predictions nests
-        # alternatives, so "has alternatives" means the same thing in Browse,
-        # in this check, and in Review.
-        alt_keys = {
-            (row["detection_id"], row["model"])
-            for row in db.get_predictions(
-                photo_ids=photo_ids, status="alternative",
-            )
-        }
-        effective_category_of = _effective_category_resolver(db, photo_ids)
-        from species_identity import SpeciesResolver
-        resolver = SpeciesResolver(db=db)
-        ambiguous = set()
-        for row in rows:
-            # Compared on the species the accept path would actually apply
-            # (the burst consensus), not the row's own label.
-            identity = resolver.consensus(row)
-            species = identity.display_name
-            effective_category = (
-                effective_category_of(row["photo_id"], species, identity)
-                if effective_category_of is not None and species else None
-            )
-            if (
-                (row["detection_id"], row["model"]) in alt_keys
-                or _prediction_is_ambiguous(effective_category, row["category"])
-            ):
-                ambiguous.add(row["id"])
-        return ambiguous
+    # The ambiguity rule lives in services.prediction_ambiguity; these names
+    # stay bound for the predictions and browse blueprint wiring below.
+    _effective_category_resolver = prediction_ambiguity.effective_category_resolver
+    _prediction_is_ambiguous = prediction_ambiguity.prediction_is_ambiguous
+    _ambiguous_prediction_ids = prediction_ambiguity.ambiguous_prediction_ids
 
 
     def _summarize_details(details):
@@ -3736,107 +3359,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return work
 
 
-    def _metadata_repair_count(db, workspace_id, root_paths=None):
-        # Don't filter by ``folders.status``: that column is only refreshed
-        # by ``check_folder_health`` (10-minute loop or the manual
-        # "check missing folders" flow), so a workspace whose drive was
-        # unplugged and is now reconnected still reads as ``status='missing'``
-        # until then. The readiness endpoint fires as soon as the Import
-        # page opens; if we filtered by ``status``, users would see 0
-        # repairable photos and the repair route would 409 with "no
-        # photos need metadata repair" even though ``os.path.isdir`` would
-        # let the repair job scan them.
-        #
-        # ``root_paths`` scopes the count to real-time reachable roots
-        # (based on ``os.path.isdir``). When a workspace mixes an offline
-        # drive with photos missing EXIF and a separate reachable drive
-        # with no repairable rows, an unscoped count combined with a
-        # non-empty ``reachable_roots`` list would enable the Repair
-        # button and start a job that finishes without ever touching the
-        # offline photos — Codex's "repeating repair job" pathology. The
-        # scoped count reflects only what the repair pass would actually
-        # process. ``None`` preserves the unscoped legacy shape for any
-        # future caller that wants a workspace-wide figure.
-        params = [workspace_id]
-        where_extra = ""
-        if root_paths is not None:
-            if not root_paths:
-                return 0
-            normalized_roots = [
-                r.replace("\\", "/").rstrip("/") for r in root_paths if r
-            ]
-            if not normalized_roots:
-                return 0
-            clauses = []
-            for norm in normalized_roots:
-                prefix = norm + "/"
-                # Match ``f.path`` normalized to forward slashes either
-                # exactly against the root or as a boundary-preserving
-                # prefix. ``substr(...)=prefix`` avoids the wildcard
-                # collision LIKE would introduce (e.g. a folder called
-                # ``photos_backup`` incorrectly matching a reachable
-                # ``photos`` root because ``_`` matches any character
-                # in LIKE without ESCAPE).
-                clauses.append(
-                    "(REPLACE(f.path, '\\', '/') = ? "
-                    "OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)"
-                )
-                params.extend([norm, len(prefix), prefix])
-            where_extra = " AND (" + " OR ".join(clauses) + ")"
-        rows = db.conn.execute(
-            "SELECT DISTINCT p.id, p.filename, "
-            "f.id AS folder_id, f.path AS folder_path "
-            "FROM photos p "
-            "JOIN folders f ON f.id = p.folder_id "
-            "JOIN workspace_folders wf ON wf.folder_id = f.id "
-            "WHERE wf.workspace_id = ? "
-            "AND p.exif_data IS NULL"
-            + where_extra
-            + " ORDER BY f.path, p.filename",
-            params,
-        ).fetchall()
-
-        # A database row is only repairable when its original still exists.
-        # The incremental repair scan discovers files from disk, so counting
-        # a deleted/moved original here would leave the Repair button enabled
-        # forever for a job that can never visit that row. Enumerate each
-        # candidate folder once instead of statting every photo individually;
-        # this keeps readiness responsive for large degraded imports.
-        from image_loader import is_excluded_scan_path
-
-        folder_files = {}
-        repairable = 0
-        for row in rows:
-            folder_id = row["folder_id"]
-            folder_path = row["folder_path"]
-            if folder_id not in folder_files:
-                if is_excluded_scan_path(folder_path):
-                    folder_files[folder_id] = None
-                else:
-                    try:
-                        with os.scandir(folder_path) as entries:
-                            folder_files[folder_id] = {
-                                entry.name for entry in entries if entry.is_file()
-                            }
-                    except OSError:
-                        # The folder disappeared or became unreadable after
-                        # root reachability was checked. Treat its rows as
-                        # unavailable rather than offering a no-op repair.
-                        folder_files[folder_id] = None
-
-            names = folder_files[folder_id]
-            if names is None:
-                continue
-            filename = row["filename"]
-            if filename in names:
-                repairable += 1
-                continue
-            # Preserve the filesystem's own case and Unicode matching rules
-            # for a catalog name that did not compare byte-for-byte with the
-            # directory entry (notably default APFS and NTFS volumes).
-            if os.path.isfile(os.path.join(folder_path, filename)):
-                repairable += 1
-        return repairable
+    _metadata_repair_count = startup_tasks.metadata_repair_count
 
 
     # -- Export presets --
