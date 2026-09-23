@@ -1074,7 +1074,7 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
 
 def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
-                  import_no_new=False):
+                  import_no_new=False, scoped_photo_ids=None):
     if params.skip_regroup:
         # The identify preset sets ``skip_regroup=True`` but flags
         # ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py)
@@ -1132,6 +1132,24 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
             },
         }
     if params.collection_id is not None or params.photo_ids is not None or params.exclude_photo_ids:
+        # A scope selector is present. If ``compute_plan`` already resolved
+        # that scope to zero photos (a valid collection or selected folder
+        # with no photos, or exclusions that removed every candidate), the
+        # job's ``regroup_stage`` reaches ``if not photos``, reports
+        # "No photos to group", and does NOT call ``save_results`` —
+        # leaving the latest review unchanged. Reporting "Will re-group
+        # ... replace the latest review" here would lie about what the
+        # next press does; surface a will-skip instead.
+        if scoped_photo_ids is not None and not scoped_photo_ids:
+            return {
+                "state": "will-skip",
+                "summary": "Will skip — no photos in scope",
+                "detail": {
+                    "cache_exists": cache_exists,
+                    "scoped": True,
+                    "empty_scope": True,
+                },
+            }
         return {
             "state": "will-run",
             "summary": "Will re-group selected photos and replace the latest review",
@@ -1527,6 +1545,7 @@ def compute_plan(db, params, db_path):
     regroup = _regroup_plan(
         db, params, db_path, ws_id, upstream_will_run, effective_cfg,
         import_no_new=import_no_new,
+        scoped_photo_ids=photo_ids,
     )
 
     stages = {

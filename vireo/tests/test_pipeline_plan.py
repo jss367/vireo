@@ -2828,6 +2828,72 @@ def test_regroup_plan_will_run_when_no_cache(tmp_path):
     assert "no cached" in plan["stages"]["Group"]["summary"].lower()
 
 
+def test_regroup_plan_will_skip_when_photo_ids_scope_is_empty(tmp_path):
+    """A folder-scoped run whose subtree contains no photos resolves to
+    an empty ``photo_ids`` list. The job's ``regroup_stage`` then reaches
+    ``if not photos``, reports "No photos to group", and does NOT call
+    ``save_results`` — the latest review is preserved. Promising
+    "Will re-group ... replace the latest review" lies about the next
+    press; the plan must surface will-skip instead.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(photo_ids=[]),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "no photos" in group["summary"].lower(), group
+    assert group["detail"].get("empty_scope") is True, group
+
+
+def test_regroup_plan_will_skip_when_collection_resolves_to_no_photos(tmp_path):
+    """A valid collection whose rules match zero workspace photos is the
+    same shape of empty resolved scope as an empty folder selection. The
+    plan must not promise "Will re-group ... replace the latest review"
+    when ``regroup_stage`` would preserve the latest review instead.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _add_photo_with_detection(db, folder_id, "a.jpg")
+    # ``photo_ids`` with an empty list resolves to zero photos — same
+    # empty-scope shape a valid-but-empty collection produces.
+    empty_collection_id = db.add_collection(
+        "empty", '[{"field":"photo_ids","value":[]}]',
+    )
+    plan = compute_plan(
+        db,
+        _params(collection_id=empty_collection_id),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "no photos" in group["summary"].lower(), group
+    assert group["detail"].get("empty_scope") is True, group
+
+
+def test_regroup_plan_will_skip_when_exclusions_remove_every_photo(tmp_path):
+    """When ``exclude_photo_ids`` covers every workspace photo, the
+    resolved regroup scope is empty. Reporting "Will re-group ... replace
+    the latest review" would lie — ``regroup_stage`` short-circuits on
+    the empty scope and preserves the latest review.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    plan = compute_plan(
+        db,
+        _params(exclude_photo_ids=[pid]),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "no photos" in group["summary"].lower(), group
+    assert group["detail"].get("empty_scope") is True, group
+
+
 # -------- /api/pipeline/plan endpoint --------
 
 def test_extract_plan_restores_normal_quality_only_in_selected_scope(tmp_path):
