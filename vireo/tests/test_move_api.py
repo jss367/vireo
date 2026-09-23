@@ -456,14 +456,14 @@ def test_move_folder_job_caps_the_stored_date_folder_list(
     app_and_db, tmp_path,
 ):
     """A many-date move stores a preview of the folders plus the real totals."""
-    import app as app_module
+    from services import folder_moves
     from wait import wait_for_job_via_client
 
     app, db = app_and_db
     src = tmp_path / "many-dates-source"
     src.mkdir()
     fid = db.add_folder(str(src), name="many-dates-source")
-    days = range(1, app_module.MOVE_DATE_DEST_PREVIEW_LIMIT + 3)
+    days = range(1, folder_moves.MOVE_DATE_DEST_PREVIEW_LIMIT + 3)
     for day in days:
         filename = f"day-{day:02d}.jpg"
         (src / filename).write_bytes(b"photo")
@@ -486,7 +486,7 @@ def test_move_folder_job_caps_the_stored_date_folder_list(
     assert job["status"] == "completed", job
     config = job["config"]
     assert len(config["date_destinations"]) == \
-        app_module.MOVE_DATE_DEST_PREVIEW_LIMIT
+        folder_moves.MOVE_DATE_DEST_PREVIEW_LIMIT
     assert config["date_destination_count"] == len(days)
     assert config["date_photo_count"] == len(days)
     assert config["resolved_destination"] == str(archive)
