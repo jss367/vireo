@@ -25,7 +25,7 @@ def test_selection_and_review_state(node):
 
 
 @pytest.mark.parametrize("route", ["/browse", "/pipeline", "/pipeline/review", "/settings"])
-def test_rendered_page_scripts_parse(app_and_db, node, route):
+def test_rendered_page_scripts_parse(app_and_db, node, route, tmp_path):
     app, _ = app_and_db
     response = app.test_client().get(route)
     assert response.status_code == 200
@@ -50,8 +50,21 @@ def test_rendered_page_scripts_parse(app_and_db, node, route):
     parser = Scripts()
     parser.feed(response.get_data(as_text=True))
     assert parser.scripts
-    for script in parser.scripts:
+    for index, script in enumerate(parser.scripts):
         if not script.strip():
             continue
-        result = subprocess.run([node, "--check"], input=script, text=True, capture_output=True)
+        # Check a UTF-8 file instead of piping the script to ``node --check``
+        # over stdin. On Windows the stdin form never exits: Python writes and
+        # closes the pipe, then blocks forever waiting for node's stdout, until
+        # pytest-timeout kills the xdist worker. ``text=True`` stdin would also
+        # encode with the locale codec (cp1252 on Windows), which cannot
+        # represent the arrows, check marks and emoji these pages contain. The
+        # timeout keeps any future hang a test failure, not a worker crash.
+        script_path = tmp_path / f"script-{index}.js"
+        script_path.write_text(script, encoding="utf-8")
+        result = subprocess.run(
+            [node, "--check", str(script_path)],
+            stdin=subprocess.DEVNULL, capture_output=True,
+            encoding="utf-8", errors="replace", timeout=60,
+        )
         assert result.returncode == 0, result.stderr

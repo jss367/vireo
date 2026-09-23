@@ -1,5 +1,6 @@
 import dataclasses
 import json
+from pathlib import Path
 
 import pytest
 from classify_job import ClassifyParams, run_classify_job
@@ -1409,7 +1410,11 @@ def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
         )
 
     assert seen_paths, "subject analysis loop did not run"
-    assert seen_paths[0] == str(vireo_dir / wc_rel), (
+    # Compare as paths, not strings: the DB stores ``working_copy_path``
+    # POSIX-style and product code joins it with ``os.path.join``, which on
+    # Windows yields a valid mixed-separator path (``...\vireo\working/bird.jpg``)
+    # that a string compare against ``str(vireo_dir / wc_rel)`` would reject.
+    assert Path(seen_paths[0]) == vireo_dir / wc_rel, (
         "subject analysis must resolve through the working-copy JPEG "
         "when the source folder is offline"
     )
