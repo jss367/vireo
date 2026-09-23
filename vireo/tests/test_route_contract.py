@@ -76,17 +76,30 @@ def _collect_functions(module_label, tree):
 
 
 def _called_names(node):
-    """Every bare name this function's *own* body calls.
+    """``(bare_names, attr_names)`` this function's *own* body invokes.
 
     Nested ``def``/``async def``/class bodies are their own graph nodes, so
     their calls belong to them — walking into them here would fold their
     reachability into the enclosing function and re-create the merge-by-name
     bug the qualified graph exists to avoid. Lambdas have no name and stay
-    walked in. A bare name passed as an argument counts as a call, because a
-    blueprint may define ``_decide`` beside the route and pass it to
-    ``under_prediction_decision_lock(db, _decide, ...)``.
+    walked in.
+
+    ``bare_names`` are the names invoked as bare ``Name`` nodes: a call
+    ``_decide()`` and a bare Name argument (``_decide`` passed to
+    ``under_prediction_decision_lock(db, _decide, ...)``). Python resolves a
+    bare Name to a lexically enclosing scope, the caller's own module, or
+    the caller's imports — never to a same-named module-level function in
+    an unrelated module.
+
+    ``attr_names`` are the names invoked as attribute access
+    (``db.method(...)``, ``prediction_decisions.begin_prediction_decision(...)``).
+    An attribute name can refer to a function anywhere: the receiver may be
+    an imported module or a database instance whose method matches a
+    mutator name, so the reachability walk matches ``.attr`` against every
+    module-level function with that name.
     """
-    names = set()
+    bare_names = set()
+    attr_names = set()
 
     def visit(current):
         for child in ast.iter_child_nodes(current):
@@ -97,16 +110,40 @@ def _called_names(node):
             if isinstance(child, ast.Call):
                 func = child.func
                 if isinstance(func, ast.Name):
-                    names.add(func.id)
+                    bare_names.add(func.id)
                 elif isinstance(func, ast.Attribute):
-                    names.add(func.attr)
+                    attr_names.add(func.attr)
                 for arg in (*child.args, *(kw.value for kw in child.keywords)):
                     if isinstance(arg, ast.Name):
-                        names.add(arg.id)
+                        bare_names.add(arg.id)
             visit(child)
 
     visit(node)
-    return names
+    return bare_names, attr_names
+
+
+def _imported_names(tree):
+    """Bare names a module's ``import`` statements bring into scope.
+
+    A bare Name call to one of these can resolve to a function defined in
+    another scanned module (``from services.prediction_decisions import
+    begin_prediction_decision`` makes ``begin_prediction_decision`` a bare
+    Name whose target lives elsewhere). Names not imported here have no
+    such cross-module target, and must resolve to something in the caller's
+    own module or its lexical scopes.
+    """
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                imported.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                # ``import a.b`` binds ``a`` (or the ``as`` alias) in scope.
+                imported.add(alias.asname or alias.name.split(".")[0])
+    return imported
 
 
 def _call_graph(sources):
@@ -119,30 +156,41 @@ def _call_graph(sources):
     unrelated same-named function, so declaring the route would silence the
     "declared but never reaches lock" check on an unlocked writer.
 
-    - ``call_map[qualified]`` — set of bare names ``qualified``'s own body
-      calls or receives as a Name argument. Attribute calls on ``self``/``db``
-      (mutators, or ``prediction_decisions.begin_prediction_decision``) land
-      in this set as bare names too, and the target intersection in
-      ``_reaches`` matches them there without needing a graph node.
+    - ``call_map[qualified]`` — ``(bare, attr)`` sets of names ``qualified``'s
+      own body invokes. ``bare`` is bare ``Name`` calls (and Name arguments
+      passed as helpers) — these follow Python's own scoping and resolve
+      inside the caller's module, its lexical scopes, or its imports.
+      ``attr`` is ``.attr`` calls (``db.method(...)``,
+      ``prediction_decisions.begin_prediction_decision(...)``) — these match
+      any module-level function with that name, because the receiver may be
+      an imported module or a database instance defined elsewhere. The
+      target intersection in ``_reaches`` matches both sets against
+      ``_PREDICTION_MUTATORS`` and ``_DECISION_LOCK`` without needing a
+      graph node for the mutator or the lock.
     - ``routes[view_function_name]`` — list of ``(qualified, "file:line")`` for
       every place that route is defined. Keyed by bare name because
       ``PREDICTION_DECISION_ROUTES`` names view functions, and the contract
       test enforces that a decision route's name is unique across ``app.py``
       and ``vireo/web/``.
-    - ``resolve(caller_qualified, bare_name)`` — set of qualified callees to
-      recurse into. Resolves each bare-name call against the caller's lexical
-      scope chain (a helper defined beside the route wins over a same-named
-      helper elsewhere), falling back to module-level functions across every
-      scanned module when nothing enclosing matches. Nested functions do not
-      leak across module or factory boundaries.
+    - ``resolve(caller_qualified, name, is_bare)`` — set of qualified callees
+      to recurse into. For a bare-Name call, walks the caller's lexical
+      scope chain outward (a helper defined beside the route wins over a
+      same-named helper elsewhere) and then, if the name is not imported
+      here, restricts the module-level fallback to the caller's own module
+      — two blueprints each defining a module-level ``_decide`` do not
+      merge. When the name is imported into this module, or the call is an
+      attribute call, any module-level function with that name is a
+      candidate.
     """
     call_map = {}
     routes = {}
     module_top = {}
     nested = {}
+    module_imports = {}
 
     for label, text, may_register_routes in sources:
         tree = ast.parse(text)
+        module_imports[label] = _imported_names(tree)
         for qname, node in _collect_functions(label, tree):
             call_map[qname] = _called_names(node)
             if len(qname) == 2:
@@ -154,16 +202,32 @@ def _call_graph(sources):
                     (qname, f"{label}:{node.lineno}"),
                 )
 
-    def resolve(caller_qualified, bare_name):
-        # Innermost lexical scope outward: a caller's own inner helpers
-        # (``def _apply`` inside a route body, captured through
+    def resolve(caller_qualified, name, is_bare):
+        # Bare-Name call: walk lexical scopes outward. A caller's own inner
+        # helpers (``def _apply`` inside a route body, captured through
         # ``under_prediction_decision_lock(db, _apply, ...)``) live at
-        # ``caller_qualified`` itself; siblings sit one step out.
-        for depth in range(len(caller_qualified), 0, -1):
-            found = nested.get((caller_qualified[:depth], bare_name))
-            if found:
-                return found
-        return module_top.get(bare_name, set())
+        # ``caller_qualified`` itself; siblings sit one step out. Attribute
+        # calls skip this step: ``obj.attr`` never resolves against local
+        # ``def``s in the caller's frame.
+        if is_bare:
+            for depth in range(len(caller_qualified), 0, -1):
+                found = nested.get((caller_qualified[:depth], name))
+                if found:
+                    return found
+        caller_module = caller_qualified[0]
+        if is_bare and name not in module_imports.get(caller_module, set()):
+            # A bare Name call whose name isn't imported here can only
+            # resolve inside the caller's own module. Two modules each
+            # defining a bare ``_decide`` at module level do not merge:
+            # an unlocked route calling its own ``_decide`` cannot reach a
+            # locked ``_decide`` in a different blueprint through the graph.
+            return {
+                q for q in module_top.get(name, set())
+                if q[0] == caller_module
+            }
+        # Attribute call, or a bare Name known to be imported here: match
+        # any module-level function with that name.
+        return module_top.get(name, set())
 
     return call_map, routes, resolve
 
@@ -174,11 +238,16 @@ def _reaches(start, targets, call_map, resolve):
     stack = [start]
     while stack:
         current = stack.pop()
-        callees = call_map.get(current, set())
-        if callees & targets:
+        bare, attrs = call_map.get(current, (set(), set()))
+        if bare & targets or attrs & targets:
             return True
-        for bare in callees:
-            for qualified in resolve(current, bare):
+        for name in bare:
+            for qualified in resolve(current, name, True):
+                if qualified not in seen:
+                    seen.add(qualified)
+                    stack.append(qualified)
+        for name in attrs:
+            for qualified in resolve(current, name, False):
                 if qualified not in seen:
                     seen.add(qualified)
                     stack.append(qualified)
@@ -384,6 +453,112 @@ def create_locked_blueprint(get_db, json_error):
         for p in problems
     ), problems
     assert not any(p.startswith("api_l ") for p in problems), problems
+
+
+def test_decision_route_analysis_distinguishes_module_level_helpers():
+    """Same bare-name distinguish rule, but at module scope.
+
+    The nested-scope case above only exercises helpers defined inside a
+    factory. The module-level fallback used to union every ``_decide``
+    defined anywhere in the scanned tree, so an unlocked route in
+    ``web/unlocked.py`` calling a module-level ``_decide`` would appear to
+    reach ``begin_prediction_decision`` through an unrelated module-level
+    ``_decide`` in ``web/locked.py``. Python's own scoping resolves a bare
+    Name inside the caller's module (or its imports), never against a
+    same-named function in an unrelated module, so the graph must not
+    either.
+    """
+    unlocked = '''
+def _decide(db):
+    db.update_prediction_status(1, "rejected")
+
+
+def create_unlocked_blueprint(get_db, json_error):
+    bp = Blueprint("u", __name__)
+
+    @bp.post("/api/u")
+    def api_u():
+        return _decide(get_db())
+
+    return bp
+'''
+    locked = '''
+from services import prediction_decisions
+
+
+def _decide(db, json_error):
+    lock_err = prediction_decisions.begin_prediction_decision(
+        db, json_error=json_error,
+    )
+    if lock_err is not None:
+        return lock_err
+    db.update_prediction_status(2, "accepted")
+
+
+def create_locked_blueprint(get_db, json_error):
+    bp = Blueprint("l", __name__)
+
+    @bp.post("/api/l")
+    def api_l():
+        return _decide(get_db(), json_error)
+
+    return bp
+'''
+    service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
+        encoding="utf-8",
+    )
+    call_map, routes, resolve = _call_graph([
+        ("web/unlocked.py", unlocked, True),
+        ("web/locked.py", locked, True),
+        ("services/prediction_decisions.py", service, False),
+    ])
+    problems = _decision_route_problems(
+        call_map, routes, resolve, {"api_u", "api_l"},
+    )
+    assert any(
+        p.startswith("api_u ") and "never reaches begin_prediction_decision" in p
+        for p in problems
+    ), problems
+    assert not any(p.startswith("api_l ") for p in problems), problems
+
+
+def test_decision_route_analysis_follows_direct_imports_of_the_lock():
+    """A bare Name call to an imported helper still crosses module boundaries.
+
+    ``vireo/services/prediction_decisions.py`` documents that a caller may
+    ``from services.prediction_decisions import begin_prediction_decision``
+    and then invoke the lock as a bare ``begin_prediction_decision(...)``.
+    The graph must follow that call even though the target lives in a
+    different module, or a locked route reached this way would be flagged
+    as unlocked.
+    """
+    caller = '''
+from services.prediction_decisions import begin_prediction_decision
+
+
+def create_locked_blueprint(get_db, json_error):
+    bp = Blueprint("l", __name__)
+
+    @bp.post("/api/l")
+    def api_l():
+        db = get_db()
+        lock_err = begin_prediction_decision(db, json_error=json_error)
+        if lock_err is not None:
+            return lock_err
+        db.update_prediction_status(1, "accepted")
+
+    return bp
+'''
+    service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
+        encoding="utf-8",
+    )
+    call_map, routes, resolve = _call_graph([
+        ("web/direct.py", caller, True),
+        ("services/prediction_decisions.py", service, False),
+    ])
+    assert not _decision_route_problems(
+        call_map, routes, resolve, {"api_l"},
+    )
 
 
 # Routes still registered with ``@app.<verb>`` in ``vireo/app.py``. This number
