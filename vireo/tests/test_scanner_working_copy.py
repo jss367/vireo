@@ -1032,7 +1032,7 @@ def test_startup_does_not_generate_working_copies(tmp_path, monkeypatch):
     real_start = threading.Thread.start
 
     def start_thread(thread):
-        if getattr(thread._target, "__name__", "") != "_folder_health_loop":
+        if getattr(thread._target, "__name__", "") != "folder_health_loop":
             real_start(thread)
 
     monkeypatch.delenv("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS", raising=False)

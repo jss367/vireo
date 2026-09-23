@@ -257,7 +257,7 @@ def create_photos_blueprint(
         "mode": "vireo"|"disk"|"disk_permanent"}``.
 
         A ready ``/api/photos/missing`` cache is served for up to
-        ``_MISSING_ORIGINALS_STALE_SECONDS`` (30 min) without a filesystem
+        ``services.missing_originals.STALE_SECONDS`` (30 min) without a filesystem
         recheck, so a photo whose original came back between the last
         scan and the user clicking Remove would otherwise be deleted
         from Vireo by trusting the cache. This endpoint pre-checks each
