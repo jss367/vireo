@@ -44,7 +44,8 @@ def test_remove_orphans_retains_existing_photo(app_and_db, tmp_path):
     assert db.get_photo(pid) is not None
 
 
-def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("network", [False, True])
+def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkeypatch, network):
     import app as app_module
     from move import move_photos
     from scanner import scan
@@ -74,7 +75,7 @@ def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkey
         requested.extend(paths)
         return len(paths), set(paths), []
     monkeypatch.setattr(app_module, "_trash_paths", record_trash)
-    monkeypatch.setattr(app_module, "_network_volume_roots", lambda: [])
+    monkeypatch.setattr(app_module, "_network_volume_roots", lambda: [str(dst)] if network else [])
     response = app.test_client().post("/api/duplicates/delete-loser-files", json={"photo_ids": [loser]})
     assert response.status_code == 200, response.json
     assert requested == []

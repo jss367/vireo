@@ -24869,9 +24869,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             anchors = anchors_by_hash[row["file_hash"]]
             # Reject aliases as well as unavailable winners: every retained
             # row must continue to name a distinct, existing regular file.
+            # Missing network sources still need Finder's bounded check and
+            # mounted-volume revalidation before their catalog rows can go.
             if not all(distinct_existing_file(
                 filepath, anchor,
                 timeout=2.0 if network or _path_on_network_volume(anchor, network_roots) else None,
+                allow_missing_source=network,
             ) for anchor in anchors):
                 skipped.append({"id": pid, "reason": "no verified distinct duplicate winner exists"})
                 continue

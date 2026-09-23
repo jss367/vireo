@@ -547,6 +547,7 @@ def test_delete_loser_files_reports_already_missing_network_losers_as_skipped(
 
     app, db = app_and_db
     _w, l, _wp, loser_path = _seed_pair_with_real_files(db, tmp_path, "NETMISS")
+    os.remove(loser_path)
 
     # Advertise the loser's folder as a network mount so the endpoint
     # routes it through _trash_paths without stat'ing it first.
