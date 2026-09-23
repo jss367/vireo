@@ -1495,7 +1495,7 @@ def test_api_photos_geo_caps_payload_and_preserves_focused_photo(
     app_and_db, monkeypatch
 ):
     """The map payload has a hard ceiling without breaking deep links."""
-    import app as app_module
+    import web.photos as photos_module
 
     app, db = app_and_db
     photos = db.get_photos(sort="name")
@@ -1505,7 +1505,7 @@ def test_api_photos_geo_caps_payload_and_preserves_focused_photo(
             (37.0 + index, -122.0 - index, photo["id"]),
         )
     db.conn.commit()
-    monkeypatch.setattr(app_module, "MAP_RENDER_PHOTO_LIMIT", 2)
+    monkeypatch.setattr(photos_module, "MAP_RENDER_PHOTO_LIMIT", 2)
 
     focus_id = photos[-1]["id"]
     response = app.test_client().get(f"/api/photos/geo?photo_id={focus_id}")
