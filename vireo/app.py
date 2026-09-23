@@ -16,7 +16,6 @@ import os
 import posixpath
 import re
 import secrets
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -58,6 +57,7 @@ from preview_cache import (
 )
 from proc import no_window_kwargs
 from schema import ensure_schema
+from services import prediction_decisions
 from services.local_folder import (
     local_root_for_folder,
     local_root_under_folder,
@@ -6303,7 +6303,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from services.grouping_history import GroupingHistoryConflict
 
         try:
-            early = _under_prediction_decision_lock(db, _apply)
+            early = prediction_decisions.under_prediction_decision_lock(
+                db, _apply, json_error=json_error,
+            )
         except GroupingHistoryConflict as exc:
             return json_error(str(exc), 409)
         if early is not None:
@@ -6365,7 +6367,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from services.grouping_history import GroupingHistoryConflict
 
         try:
-            early = _under_prediction_decision_lock(db, _apply)
+            early = prediction_decisions.under_prediction_decision_lock(
+                db, _apply, json_error=json_error,
+            )
         except GroupingHistoryConflict as exc:
             return json_error(str(exc), 409)
         if early is not None:
@@ -7373,8 +7377,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
-        return _under_prediction_decision_lock(
+        return prediction_decisions.under_prediction_decision_lock(
             db, lambda: _highlights_confirm_under_lock(db, photo_ids),
+            json_error=json_error,
         )
 
     def _highlights_confirm_under_lock(db, photo_ids):
@@ -7537,8 +7542,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # here, before ``_highlight_top_predictions`` — the read that picks
         # *which* row gets rejected is exactly the read that must not race a
         # concurrent decision on that row.
-        return _under_prediction_decision_lock(
+        return prediction_decisions.under_prediction_decision_lock(
             db, lambda: _highlights_relabel_under_lock(db, photo_ids, species),
+            json_error=json_error,
         )
 
     def _highlights_relabel_under_lock(db, photo_ids, species):
@@ -8459,11 +8465,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         it says.
         """
         db = _get_db()
-        lock_err = _begin_prediction_decision(db)
+        lock_err = prediction_decisions.begin_prediction_decision(
+            db, json_error=json_error,
+        )
         if lock_err is not None:
             return lock_err
         try:
-            if _out_of_workspace_prediction_ids(db, [pred_id]):
+            if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.conn.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             pred = db.conn.execute(
@@ -8521,11 +8529,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         lost even though undo cannot restore it.
         """
         db = _get_db()
-        lock_err = _begin_prediction_decision(db)
+        lock_err = prediction_decisions.begin_prediction_decision(
+            db, json_error=json_error,
+        )
         if lock_err is not None:
             return lock_err
         try:
-            if _out_of_workspace_prediction_ids(db, [pred_id]):
+            if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.conn.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             current_status = _prediction_status(db, pred_id)
@@ -8617,11 +8627,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         "At the moment of the write" is literal, not approximate: the checks
         and the writes run inside one ``BEGIN IMMEDIATE`` transaction
-        (``_begin_prediction_decision``), so no other connection can decide
-        these rows in between. Two overlapping requests are serialized by
-        SQLite's writer lock — the second reads what the first committed and
-        skips accordingly, rather than acting on state it read before the
-        first one wrote.
+        (``prediction_decisions.begin_prediction_decision``), so no other
+        connection can decide these rows in between. Two overlapping requests
+        are serialized by SQLite's writer lock — the second reads what the
+        first committed and skips accordingly, rather than acting on state it
+        read before the first one wrote.
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
@@ -8674,8 +8684,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Everything from here to the commit is one transaction, taken with
         # the writer lock held from the first read (see
-        # ``_begin_prediction_decision``). The preconditions below are
-        # only worth what their atomicity with the write is worth: read them
+        # ``prediction_decisions.begin_prediction_decision``). The
+        # preconditions below are only worth what their atomicity with the
+        # write is worth: read them
         # outside the transaction and a second overlapping request can pass the
         # same checks against the same pre-write state.
         #
@@ -8683,10 +8694,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # the payload's shape and workspace ownership, which is not the state
         # these preconditions race against, and it can walk a 1,000-photo
         # selection. The lock is held for the decision, not for parsing. The
-        # in-lock ``_out_of_workspace_prediction_ids`` filter re-checks the
-        # workspace half so a folder detach that lands in the window between
-        # parse and lock cannot tag a now-foreign photo.
-        lock_err = _begin_prediction_decision(db)
+        # in-lock ``prediction_decisions.out_of_workspace_prediction_ids``
+        # filter re-checks the workspace half so a folder detach that lands in
+        # the window between parse and lock cannot tag a now-foreign photo.
+        lock_err = prediction_decisions.begin_prediction_decision(
+            db, json_error=json_error,
+        )
         if lock_err is not None:
             return lock_err
         try:
@@ -8774,7 +8787,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # rest of the batch is still exactly what the user asked for, and
         # failing the whole call would strand honest accepts on one row that
         # moved.
-        out_of_workspace_ids = _out_of_workspace_prediction_ids(db, pred_ids)
+        out_of_workspace_ids = (
+            prediction_decisions.out_of_workspace_prediction_ids(db, pred_ids)
+        )
         pred_ids = [pid for pid in pred_ids if pid not in out_of_workspace_ids]
 
         # The button in Browse names one species and the endpoint should
@@ -9092,10 +9107,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         Single-row decision endpoints (accept, reject, mark-reviewed,
         replace-keywords, accept-subject) use this inside
-        ``_begin_prediction_decision`` to enforce the same "still actionable"
-        precondition the batch endpoints already enforce via
-        ``_decided_prediction_ids``. Same reason the batch helper exists: the
-        rule for which statuses are terminal lives in one place, so the
+        ``prediction_decisions.begin_prediction_decision`` to enforce the same
+        "still actionable" precondition the batch endpoints already enforce
+        via ``_decided_prediction_ids``. Same reason the batch helper exists:
+        the rule for which statuses are terminal lives in one place, so the
         single-row and batch flavors cannot drift on what "already decided"
         means, and neither flavor can be tightened on one side and forgotten
         on the other.
@@ -9280,84 +9295,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     stale.add(row["photo_id"])
         return stale
 
-    # Every route that records a prediction decision, and therefore every
-    # route that must take the writer lock below.
-    #
-    # Serialization is only worth what the *least* careful writer does: a lock
-    # one side takes and the other does not is not a lock. That is exactly how
-    # the last gap arose — the batch endpoints held it, Review's single-row
-    # routes did not — and fixing only the routes a review names repeats the
-    # mistake one level up. So this list is checked against the set derived
-    # from ``create_app``'s own call graph by
-    # ``test_route_contract.py::test_every_prediction_decision_route_locks``,
-    # which also asserts each name here reaches ``_begin_prediction_decision``.
-    # A new route that touches ``prediction_review`` fails that test until it
-    # is listed and locked.
-    #
-    # The five below the single-row group were the remainder of the sweep:
-    # burst group apply writes accepted/rejected for whole photos, highlight
-    # confirm accepts through ``accept_prediction``, highlight relabel rejects
-    # each photo's top prediction, and undo/redo replay recorded statuses back
-    # out of edit history.
-    _PREDICTION_DECISION_ROUTES = (
-        "api_batch_accept_predictions",
-        "api_batch_reject_predictions",
-        "api_accept_prediction",
-        "api_accept_subject_species",
-        "api_reject_prediction",
-        "api_mark_prediction_reviewed",
-        "api_replace_species_keywords_with_prediction",
-        "api_prediction_group_apply",
-        "api_highlights_confirm",
-        "api_highlights_relabel",
-        "api_undo",
-        "api_redo",
-    )
-
-    def _out_of_workspace_prediction_ids(db, pred_ids):
-        """Which of ``pred_ids`` sit on a photo no longer in this workspace.
-
-        The fourth precondition alongside decided / superseded / ambiguous, and
-        the same shape: ``_parse_prediction_ids`` verified workspace ownership
-        before the lock, but a folder detach is itself a write. In WAL mode
-        another connection can acquire the writer lock, delete the row from
-        ``workspace_folders``, and commit — all in the window between
-        ``_parse_prediction_ids`` finishing and ``BEGIN IMMEDIATE`` on this
-        request succeeding. Skipping the row here catches that race so a batch
-        cannot tag a now-foreign photo or write workspace-scoped
-        ``prediction_review`` state for it. Reported as
-        ``skipped_out_of_workspace`` so a caller can tell "detached mid-flight"
-        from any of the other skip reasons — the user's next step is a panel
-        refresh, and folding it into a different count would misname the
-        problem the way ``CORE_PHILOSOPHY.md`` rules out.
-
-        Chunked for the same reason every other id query here is (see
-        ``_SQL_PARAM_CHUNK``).
-        """
-        if not pred_ids:
-            return set()
-        ws = db._ws_id()
-        # Rows whose ``workspace_folders`` join misses are out of scope. The
-        # LEFT JOIN keeps a row for every prediction id regardless of folder
-        # membership; the WHERE clause selects the misses.
-        found = set()
-        for chunk in _chunked(pred_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            found.update(
-                row["id"] for row in db.conn.execute(
-                    f"""SELECT pr.id FROM predictions pr
-                        JOIN detections d ON d.id = pr.detection_id
-                        JOIN photos ph ON ph.id = d.photo_id
-                        LEFT JOIN workspace_folders wf
-                          ON wf.folder_id = ph.folder_id
-                         AND wf.workspace_id = ?
-                        WHERE pr.id IN ({placeholders})
-                          AND wf.workspace_id IS NULL""",
-                    (ws, *chunk),
-                )
-            )
-        return found
-
     def _species_drifted_prediction_ids(db, rows, expected_species):
         """Which of ``rows`` no longer resolve to the species Browse rendered.
 
@@ -9400,77 +9337,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if current.key != expected_key and keyword_match_key(current.display_name) != keyword_match_key(expected_species):
                 drifted.add(row["id"])
         return drifted
-
-    def _begin_prediction_decision(db):
-        """Hold SQLite's write lock across a decision's checks *and* its writes.
-
-        Every route in ``_PREDICTION_DECISION_ROUTES`` is check-then-write: it
-        reads a row's status (and, for the batch pair, its ambiguity and label
-        set), then writes the rows that pass. Read and write have to be one
-        indivisible step, or the preconditions only *narrow* the race they
-        claim to close — two overlapping requests (a double-clicked Accept, or
-        Browse's batch accept and Review's single reject fired before either
-        page reloads) can both finish their reads while the row is still
-        pending and then both write. Waitress serves these routes on 16
-        threads, and ``_get_db`` hands each request its own connection, so
-        "overlapping" is a real interleaving and not a thought experiment.
-
-        The completeness of that route list is the guarantee, not an
-        implementation detail: a decision route that skips this lock puts
-        every other route's atomicity back to "narrowed, not closed".
-
-        ``BEGIN IMMEDIATE`` takes the database's single writer lock up front,
-        before the first read. That is what makes the whole sequence atomic:
-        SQLite's WAL mode allows one writer at a time, so a second decision
-        request blocks here until the first commits and then re-reads the state
-        the first one left. The alternative — a conditional
-        ``UPDATE ... WHERE status = 'pending'`` — would only guard the status
-        column, leaving ambiguity (a function of the photo's keywords) and the
-        keyword/history writes outside the guarantee, and would need a second
-        code path for the sibling and group writes that hang off the same
-        decision. Python's ``sqlite3`` would otherwise open its implicit
-        transaction at the *first write*, which is exactly too late.
-
-        Returns ``None`` on success, or an error response when the lock cannot
-        be taken within the connection's ``busy_timeout``. Reporting that
-        plainly beats a silent non-atomic fallback: the caller can retry, and
-        nothing has been written.
-        """
-        if db.conn.in_transaction:
-            # A previous statement in this request may have opened sqlite3's
-            # implicit transaction; BEGIN cannot nest.
-            db.conn.commit()
-        try:
-            db.conn.execute("BEGIN IMMEDIATE")
-        except sqlite3.OperationalError:
-            return json_error(
-                "another prediction decision is in progress; nothing was "
-                "changed — try again",
-                503,
-            )
-        return None
-
-    def _under_prediction_decision_lock(db, work):
-        """Run ``work()`` as one serialized prediction decision.
-
-        The wrapper form of ``_begin_prediction_decision`` for routes whose
-        body has several exits. ``work`` commits when it writes; the
-        ``finally`` covers the paths that do not — an early ``404``/``409``
-        precondition failure, or an exception unwinding — because leaving
-        ``BEGIN IMMEDIATE`` open would hold the database's single writer lock
-        for the rest of this connection's life and stall every later decision
-        served on it. The single-row endpoints take the same lock inline with
-        explicit rollbacks at each exit; both shapes are equivalent, and the
-        route-contract test checks the lock, not the shape.
-        """
-        lock_err = _begin_prediction_decision(db)
-        if lock_err is not None:
-            return lock_err
-        try:
-            return work()
-        finally:
-            if db.conn.in_transaction:
-                db.conn.rollback()
 
     def _parse_prediction_ids(db, body):
         """Validate a batch payload's ``prediction_ids``.
@@ -9557,7 +9423,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if err is not None:
             return err
 
-        lock_err = _begin_prediction_decision(db)
+        lock_err = prediction_decisions.begin_prediction_decision(
+            db, json_error=json_error,
+        )
         if lock_err is not None:
             return lock_err
         try:
@@ -9598,7 +9466,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # closes, and both endpoints filter identically for the same reason
         # they share ``_decided_prediction_ids``: a rule with two
         # implementations drifts.
-        out_of_workspace_ids = _out_of_workspace_prediction_ids(db, pred_ids)
+        out_of_workspace_ids = (
+            prediction_decisions.out_of_workspace_prediction_ids(db, pred_ids)
+        )
         pred_ids = [pid for pid in pred_ids if pid not in out_of_workspace_ids]
 
         ws = db._ws_id()
@@ -9675,23 +9545,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Accept a single prediction as one atomic decision.
 
         Serialized with every other prediction-decision route through
-        ``_begin_prediction_decision`` — batch-accept, batch-reject, single
-        reject, replace-keywords, accept-subject, mark-reviewed. Without the
-        lock, a double-clicked Accept, or an Accept fired while a batch-reject
-        for the same row is in flight, can both pass their status precondition
-        against the same pre-write state and both commit. The reject wins the
-        write; the accept's keyword stays on the photo; keyword state and
-        review state then contradict each other and undo restores a state that
-        never existed. Holding SQLite's writer lock across the read *and* the
-        write makes the check-then-write indivisible, exactly as the batch
-        endpoints already do.
+        ``prediction_decisions.begin_prediction_decision`` — batch-accept,
+        batch-reject, single reject, replace-keywords, accept-subject,
+        mark-reviewed. Without the lock, a double-clicked Accept, or an Accept
+        fired while a batch-reject for the same row is in flight, can both
+        pass their status precondition against the same pre-write state and
+        both commit. The reject wins the write; the accept's keyword stays on
+        the photo; keyword state and review state then contradict each other
+        and undo restores a state that never existed. Holding SQLite's writer
+        lock across the read *and* the write makes the check-then-write
+        indivisible, exactly as the batch endpoints already do.
         """
         db = _get_db()
-        lock_err = _begin_prediction_decision(db)
+        lock_err = prediction_decisions.begin_prediction_decision(
+            db, json_error=json_error,
+        )
         if lock_err is not None:
             return lock_err
         try:
-            if _out_of_workspace_prediction_ids(db, [pred_id]):
+            if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.conn.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             current_status = _prediction_status(db, pred_id)
@@ -9768,7 +9640,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rather than overwrite that decision.
         """
         db = _get_db()
-        lock_err = _begin_prediction_decision(db)
+        lock_err = prediction_decisions.begin_prediction_decision(
+            db, json_error=json_error,
+        )
         if lock_err is not None:
             return lock_err
         try:
@@ -9836,22 +9710,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Reject a single prediction as one atomic decision.
 
         Serialized with every other prediction-decision route through
-        ``_begin_prediction_decision`` — see ``api_accept_prediction`` for the
-        full argument. Codex's fresh evidence beyond the batch-atomicity fix:
-        a Browse batch accept overlapping a Review-side single reject on the
-        same row would let the reject read while the batch held the writer
-        lock and then overwrite the newly accepted status *after* the batch
-        committed, leaving the species keyword attached to a row now marked
-        rejected. Same failure mode as the inverse (single accept vs batch
-        reject). The single-row routes now take the same lock and honour the
-        same terminal-status precondition as their batch siblings.
+        ``prediction_decisions.begin_prediction_decision`` — see
+        ``api_accept_prediction`` for the full argument. Codex's fresh
+        evidence beyond the batch-atomicity fix: a Browse batch accept
+        overlapping a Review-side single reject on the same row would let the
+        reject read while the batch held the writer lock and then overwrite
+        the newly accepted status *after* the batch committed, leaving the
+        species keyword attached to a row now marked rejected. Same failure
+        mode as the inverse (single accept vs batch reject). The single-row
+        routes now take the same lock and honour the same terminal-status
+        precondition as their batch siblings.
         """
         db = _get_db()
-        lock_err = _begin_prediction_decision(db)
+        lock_err = prediction_decisions.begin_prediction_decision(
+            db, json_error=json_error,
+        )
         if lock_err is not None:
             return lock_err
         try:
-            if _out_of_workspace_prediction_ids(db, [pred_id]):
+            if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.conn.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             # Review state lives in prediction_review now; predictions.model
@@ -10035,9 +9912,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for pid in actionable_rejects:
                     db.update_photo_flag(pid, "rejected", _commit=False)
             except ValueError as e:
-                # ``_under_prediction_decision_lock``'s finally will roll back
-                # the still-open transaction; returning here just short-circuits
-                # the rest of the writes.
+                # ``prediction_decisions.under_prediction_decision_lock``'s
+                # finally will roll back the still-open transaction; returning
+                # here just short-circuits the rest of the writes.
                 return json_error(str(e), 403)
 
             # Record flag history for all picks + rejects
@@ -10087,7 +9964,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # tell "nothing was stale" from an older server that never checked.
             return jsonify({"ok": True, "already_decided": len(stale_photos)})
 
-        return _under_prediction_decision_lock(db, _apply_group_decisions)
+        return prediction_decisions.under_prediction_decision_lock(
+            db, _apply_group_decisions, json_error=json_error,
+        )
 
     # -- Detection API routes --
 
@@ -11236,8 +11115,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         db = _get_db()
         with acquire_workspace_regroup(db._ws_id()):
-            return _under_prediction_decision_lock(
+            return prediction_decisions.under_prediction_decision_lock(
                 db, lambda: _confirm_encounter_species(db),
+                json_error=json_error,
             )
 
     def _confirm_encounter_species(db):

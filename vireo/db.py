@@ -20368,8 +20368,9 @@ class Database:
         detections join and upsert each review row.
 
         ``_commit=False`` lets a caller that already holds the prediction
-        decision lock (``app.py``'s ``_under_prediction_decision_lock``) fold
-        these writes into that transaction.
+        decision lock (``services.prediction_decisions``'
+        ``under_prediction_decision_lock``) fold these writes into that
+        transaction.
 
         Deliberately unconditional. The stale-overwrite this method used to
         enable — a group apply flipping an ``accepted`` row to ``rejected``

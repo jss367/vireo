@@ -20993,32 +20993,29 @@ def test_batch_reject_resolves_alternative_rows(app_and_db):
     assert app is not None
 
 
-def _patch_begin_prediction_decision(app, view_name, replacement):
-    """Swap the endpoint's captured ``_begin_prediction_decision`` closure.
+def _patch_begin_prediction_decision(monkeypatch, app, view_name, replacement):
+    """Swap ``begin_prediction_decision`` for ``replacement(db)`` for one test.
 
-    The helpers in ``create_app`` are captured as free variables of every
-    view function that uses them, so a module-level patch never reaches the
-    live handler. This walks the view's closure cells and rebinds the one
-    holding ``_begin_prediction_decision`` to ``replacement`` — matching how
-    the endpoint would call it. Returns True when the swap landed, so tests
-    can assert on rewire rather than on the hook silently missing.
+    The lock lives in ``services.prediction_decisions`` and every route looks
+    it up there at call time, so patching the module attribute reaches the
+    live handler (and ``under_prediction_decision_lock``). ``replacement``
+    takes the request's ``Database`` and returns what the real function
+    would: ``None`` to proceed, or an error response. Returns True when
+    ``view_name``'s own code calls the lock, so tests assert on the rewire
+    rather than on the hook silently missing.
     """
+    from services import prediction_decisions
+
+    monkeypatch.setattr(
+        prediction_decisions,
+        "begin_prediction_decision",
+        lambda db, *, json_error: replacement(db),
+    )
     view = app.view_functions[view_name]
-    for cell in view.__closure__ or ():
-        try:
-            candidate = cell.cell_contents
-        except ValueError:
-            continue
-        if (
-            callable(candidate)
-            and getattr(candidate, "__name__", "") == "_begin_prediction_decision"
-        ):
-            cell.cell_contents = replacement
-            return True
-    return False
+    return "begin_prediction_decision" in view.__code__.co_names
 
 
-def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db):
+def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db, monkeypatch):
     """A folder detach in the parse→lock window must not tag a foreign photo.
 
     ``_parse_prediction_ids`` verifies workspace ownership before
@@ -21030,7 +21027,7 @@ def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db):
     longer owns.
 
     Exercised deterministically by rebinding
-    ``_begin_prediction_decision`` in the endpoint's closure: right before
+    ``begin_prediction_decision`` in its service module: right before
     the endpoint takes the lock, the hook detaches the photo's folder on a
     competing connection so the in-lock check must catch it.
     """
@@ -21070,7 +21067,7 @@ def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db):
         return None
 
     assert _patch_begin_prediction_decision(
-        app, "api_batch_accept_predictions", _detach_before_lock,
+        monkeypatch, app, "api_batch_accept_predictions", _detach_before_lock,
     )
 
     resp = client.post(
@@ -21102,13 +21099,13 @@ def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db):
     assert db.get_edit_history(limit=5) == []
 
 
-def test_batch_reject_skips_rows_whose_photo_left_the_workspace(app_and_db):
+def test_batch_reject_skips_rows_whose_photo_left_the_workspace(app_and_db, monkeypatch):
     """Reject shares the workspace re-check with accept — same helper.
 
     A stale reject writes no keyword, but a workspace-scoped
     ``prediction_review`` row for a now-foreign photo is the same class of
     leak the accept side closes. Both endpoints filter through
-    ``_out_of_workspace_prediction_ids`` for the reason they share
+    ``out_of_workspace_prediction_ids`` for the reason they share
     ``_decided_prediction_ids``: a rule with two implementations drifts.
     """
     import sqlite3
@@ -21143,7 +21140,7 @@ def test_batch_reject_skips_rows_whose_photo_left_the_workspace(app_and_db):
         return None
 
     assert _patch_begin_prediction_decision(
-        app, "api_batch_reject_predictions", _detach_before_lock,
+        monkeypatch, app, "api_batch_reject_predictions", _detach_before_lock,
     )
 
     resp = client.post(
@@ -21167,7 +21164,7 @@ def test_batch_reject_skips_rows_whose_photo_left_the_workspace(app_and_db):
     assert db.get_edit_history(limit=5) == []
 
 
-def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db):
+def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch):
     """A grouping change after render must not tag with the wrong species.
 
     The panel groups by species and labels the button "Accept on N
@@ -21179,7 +21176,7 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db):
     consensus does not match.
 
     The mid-flight change is delivered by hooking
-    ``_begin_prediction_decision``: right before the lock, the hook clears
+    ``begin_prediction_decision``: right before the lock, the hook clears
     the row's ``individual`` votes so ``_prediction_consensus_species``
     falls back to the raw label "Sparrow" — different from the "Robin"
     label the caller passed as ``expected_species``.
@@ -21236,7 +21233,7 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db):
         return None
 
     assert _patch_begin_prediction_decision(
-        app, "api_batch_accept_predictions", _clear_group_before_lock,
+        monkeypatch, app, "api_batch_accept_predictions", _clear_group_before_lock,
     )
 
     resp = client.post(
@@ -24606,7 +24603,7 @@ def test_single_reject_serializes_with_concurrent_batch_accept(
     batch holds the writer lock, then overwrite the newly accepted status
     *after* the batch commits — leaving the species keyword attached to a
     row now marked ``rejected``. The fix wraps ``api_reject_prediction`` in
-    ``_begin_prediction_decision`` so its check-and-write is one indivisible
+    ``begin_prediction_decision`` so its check-and-write is one indivisible
     step against the batch's.
 
     Same in-process, deterministic exercise as
