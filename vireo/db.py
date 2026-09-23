@@ -8881,7 +8881,7 @@ class Database:
                 JOIN photos p ON p.id = d.photo_id
                 JOIN workspace_folders wf
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                WHERE d.detector_model != 'full-image' AND d.category = 'animal'
+                WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
                   AND d.detector_confidence >= ?{scope_sql}""",
             (ws, min_conf, *scope_params),
         ).fetchone()
@@ -8917,7 +8917,7 @@ class Database:
                       JOIN workspace_folders wf
                         ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
-                       AND d.category = 'animal'
+                       AND COALESCE(d.category, 'animal') = 'animal'
                        AND d.detector_confidence >= ?{scope_sql}
                 )
                 SELECT COUNT(*) AS primary_dets,
@@ -8960,7 +8960,7 @@ class Database:
                  AND cr.classifier_model = ?
                  AND cr.labels_fingerprint = ?
                    AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'
-                WHERE d.detector_model != 'full-image' AND d.category = 'animal'
+                WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
                   AND d.detector_confidence >= ?
                   AND cr.detection_id IS NULL{scope_sql}""",
             (ws, classifier_model, labels_fingerprint, min_conf, *scope_params),
@@ -8995,7 +8995,7 @@ class Database:
                       JOIN workspace_folders wf
                         ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
-                       AND d.category = 'animal'
+                       AND COALESCE(d.category, 'animal') = 'animal'
                        AND d.detector_confidence >= ?{scope_sql}
                 )
                 SELECT COUNT(*) AS pending
@@ -9038,7 +9038,7 @@ class Database:
                 JOIN photos p ON p.id = d.photo_id
                 JOIN workspace_folders wf
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.detector_model != 'full-image' AND d.category = 'animal'
+               WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
                  AND d.detector_confidence >= ?
                  AND EXISTS (
                     SELECT 1 FROM classifier_runs cr_stale
@@ -9081,7 +9081,7 @@ class Database:
                       JOIN workspace_folders wf
                         ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
-                       AND d.category = 'animal'
+                       AND COALESCE(d.category, 'animal') = 'animal'
                        AND d.detector_confidence >= ?{scope_sql}
                 )
                 SELECT COUNT(*) AS n

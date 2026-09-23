@@ -4093,3 +4093,22 @@ def test_normal_plan_counts_raw_recipe_as_pending(tmp_path, monkeypatch, fallbac
     stage = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))["stages"]["Classify"]
     assert stage["detail"]["pending"] == 0
     db.close()
+
+
+@pytest.mark.parametrize("category, expected", [(None, 1), ("animal", 1), ("person", 0)])
+def test_plan_counts_use_runtime_category_defaults(tmp_path, category, expected):
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "legacy.jpg")
+    db.conn.execute("UPDATE detections SET category=? WHERE id=?", (category, did))
+    db.conn.commit()
+    for count in (db.count_real_detections_in_scope, db.count_primary_detections_in_scope):
+        assert count([pid], min_conf=0.2) == {"photos_with_dets": expected, "total_dets": expected}
+    for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
+        assert pending("Model", "current", [pid], min_conf=0.2) == expected
+    db.record_classifier_run(did, "Model", "old", prediction_count=1)
+    for stale in (db.count_classify_stale, db.count_primary_classify_stale):
+        assert stale("Model", "current", [pid], min_conf=0.2) == expected
+    db.record_classifier_run(did, "Model", "current", prediction_count=1)
+    for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
+        assert pending("Model", "current", [pid], min_conf=0.2) == 0
+    db.close()
