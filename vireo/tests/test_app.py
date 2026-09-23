@@ -1008,6 +1008,26 @@ def test_api_storage_breaks_down_backups_renders_and_nested_cache_files(
     )
 
 
+def test_api_storage_ignores_embedding_writes_outside_fixture(
+    request, monkeypatch, tmp_path_factory,
+):
+    import classifier
+
+    # Model another worker writing to the cache that was resolved at import
+    # time, before app_and_db redirects HOME to its isolated directory.
+    shared_cache = tmp_path_factory.mktemp("shared-embeddings")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(shared_cache))
+    app, _ = request.getfixturevalue("app_and_db")
+    client = app.test_client()
+    before = client.get("/api/storage").get_json()
+
+    (shared_cache / "labels.npy").write_bytes(b"x" * 6272)
+    after = client.get("/api/storage").get_json()
+
+    assert after["embeddings"]["size"] == before["embeddings"]["size"]
+    assert after["total"] == before["total"]
+
+
 def test_api_storage_custom_thumb_dir_ignores_unrelated_siblings(
     app_and_db, tmp_path,
 ):
