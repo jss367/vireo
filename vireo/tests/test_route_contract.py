@@ -108,6 +108,33 @@ def _iter_class_defs(module_label, tree):
     yield from walk(tree, (module_label,))
 
 
+def _class_base_refs(class_node):
+    """Bases named on a ``class Foo(...)`` header, in inheritance order.
+
+    Yields one reference per base the resolver can chase later:
+
+    - ``("name", "Base")`` — bare Name in the header. Resolves through
+      the class's own module's imports (an imported class symbol) or a
+      class defined at module scope in the same file.
+    - ``("attr", "mod", "Base")`` — ``mod.Base`` in the header. Pins
+      ``Base`` to the module ``mod`` names, again via the class's own
+      module's imports.
+
+    Anything else (a call, a subscription like ``Generic[T]``, a chained
+    attribute) is skipped: the graph can only follow bases it can name to
+    a scanned class identity, and unioning across every same-named class
+    for an unresolvable base is exactly the merge the exact-class lookup
+    exists to prevent.
+    """
+    for base in class_node.bases:
+        if isinstance(base, ast.Name):
+            yield ("name", base.id)
+        elif isinstance(base, ast.Attribute) and isinstance(
+            base.value, ast.Name,
+        ):
+            yield ("attr", base.value.id, base.attr)
+
+
 def _collect_functions(module_label, tree):
     """Yield ``(qualified_name, node, class_qname_or_None)`` for every function.
 
@@ -170,9 +197,21 @@ def _called_names(node):
       class by its identity (imported class symbol, or a class defined in
       this module) and dispatches to that specific class's method — not the
       union of every same-named method across every scanned class.
+    - ``"module_class"`` — the receiver was a module-qualified class
+      construction (``writer.WriterService(db).apply``,
+      ``services.decisions.DecisionService(db).apply``). ``receiver_id``
+      is the ``(module_alias, class_name)`` pair; the resolver looks the
+      alias up in the caller's imports to pin the class to its defining
+      module, then dispatches to that specific class's method. Without
+      this the module-qualified construction falls into the ``None``
+      union and a route calling an unlocked ``writer.WriterService.apply``
+      would silently reach the lock through an unrelated same-named
+      method on another class.
     - ``None`` — receiver is a chained expression or a call whose target
-      isn't a bare Name (``obj.a.b.c()``, ``func()()``). ``receiver_id`` is
-      ``None``. The resolver falls back to the same-named union for these.
+      isn't a bare Name or a simple ``mod.Class`` (``obj.a.b.c()``,
+      ``func()()``, ``pkg.sub.mod.Class(...)``). ``receiver_id`` is
+      ``None``. The resolver falls back to the same-named union for
+      these.
     """
     bare_names = set()
     attr_calls = []
@@ -201,6 +240,25 @@ def _called_names(node):
                         # own method rather than the union of every
                         # same-named method across every scanned class.
                         attr_calls.append((func.attr, "class", value.func.id))
+                    elif (
+                        isinstance(value, ast.Call)
+                        and isinstance(value.func, ast.Attribute)
+                        and isinstance(value.func.value, ast.Name)
+                    ):
+                        # ``mod.ClassName(...).method(...)`` — a module-
+                        # qualified construction. Both the receiver
+                        # module alias and the class name are scanned
+                        # identities: the resolver pins the class through
+                        # the caller's import of ``mod`` and dispatches
+                        # to that class's own method rather than the
+                        # union across every same-named method.
+                        attr_calls.append(
+                            (
+                                func.attr,
+                                "module_class",
+                                (value.func.value.id, value.func.attr),
+                            ),
+                        )
                     else:
                         attr_calls.append((func.attr, None, None))
                 for arg in (*child.args, *(kw.value for kw in child.keywords)):
@@ -425,6 +483,13 @@ def _call_graph(sources):
     # module scope in that file. Lets a receiver Name that names a locally
     # defined class dispatch to that class's own method table.
     module_classes = {}
+    # ``class_bases[(module_label, class_name)]`` — bases named on the
+    # class header, as ``_class_base_refs`` returns them. Used to walk up
+    # a class's inheritance chain when the exact-class method table has
+    # no entry: an inherited mutator would otherwise disappear from
+    # reachability, letting an undeclared and unlocked decision route on
+    # a subclass pass the contract test.
+    class_bases = {}
     # ``scoped_imports[label]`` — ``{scope: {local: (label, original)}}``
     # for that module's imports at every lexical scope. Serves all three
     # things earlier module-wide maps did (bare-Name imports, receiver-
@@ -448,6 +513,15 @@ def _call_graph(sources):
             for class_qname, _ in _iter_class_defs(label, tree)
             if len(class_qname) == 2
         }
+        for class_qname, class_node in _iter_class_defs(label, tree):
+            # Only module-level classes participate in class dispatch:
+            # nested classes have no cross-module identity the resolver
+            # can name.
+            if len(class_qname) != 2:
+                continue
+            class_bases[(class_qname[0], class_qname[-1])] = list(
+                _class_base_refs(class_node),
+            )
         # Names registered as views by ``add_url_rule`` in this module. Any
         # function whose name matches counts as a route here, alongside
         # decorator-decorated ones. Confined to the same module because
@@ -522,17 +596,119 @@ def _call_graph(sources):
             return caller_module, receiver_name
         return None
 
+    def _module_class_identity_for(caller_qualified, mod_alias, class_name):
+        """A ``mod.Class`` pair from an attribute construction.
+
+        Returns ``(class_module, class_name)`` when ``mod_alias`` is
+        bound to a scanned module (through the caller's imports at any
+        lexical scope) and that module defines a class named
+        ``class_name`` at module scope. Otherwise ``None`` — the walk
+        falls back to the same-named-method union like any other
+        unknown-receiver call.
+        """
+        binding = _lookup_binding(caller_qualified, mod_alias)
+        if binding is None:
+            return None
+        module_label, original = binding
+        if (
+            module_label is not None
+            and original is None
+            and class_name in module_classes.get(module_label, set())
+        ):
+            return module_label, class_name
+        return None
+
+    def _resolve_base(class_module, base_ref):
+        """A base class ref from ``_class_base_refs`` to a class identity.
+
+        Bases are resolved in the *defining* class's module, not the
+        caller's: ``class Sub(Base):`` in ``services/writer.py`` looks
+        ``Base`` up through ``services/writer.py``'s own imports and
+        top-level classes, the same way Python does.
+        """
+        if base_ref[0] == "name":
+            _, base_name = base_ref
+            scope_map = scoped_imports.get(class_module, {})
+            binding = scope_map.get((), {}).get(base_name)
+            if binding is not None:
+                sym_module, original = binding
+                if (
+                    sym_module is not None
+                    and original is not None
+                    and original in module_classes.get(sym_module, set())
+                ):
+                    return sym_module, original
+            if base_name in module_classes.get(class_module, set()):
+                return class_module, base_name
+            return None
+        _, mod_alias, base_name = base_ref
+        scope_map = scoped_imports.get(class_module, {})
+        binding = scope_map.get((), {}).get(mod_alias)
+        if binding is None:
+            return None
+        module_label, original = binding
+        if (
+            module_label is not None
+            and original is None
+            and base_name in module_classes.get(module_label, set())
+        ):
+            return module_label, base_name
+        return None
+
+    def _class_method_lookup(class_module, class_name, method_name):
+        """Method table for ``class_module::class_name.method_name``.
+
+        Walks up ``class_bases`` to include inherited methods when the
+        exact class does not define ``method_name``. A method defined on
+        both the subclass and a base is not shadowed — the graph is a
+        reachability set, not a runtime dispatch, and the subclass's own
+        method may still delegate to the base's via ``super()``. Cycle-
+        protected in case a synthetic test defines a base loop.
+        """
+        seen = set()
+        stack = [(class_module, class_name)]
+        found = set()
+        while stack:
+            key = stack.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            found |= class_methods_by_class.get(
+                (key[0], key[1], method_name), set(),
+            )
+            for base_ref in class_bases.get(key, ()):
+                base = _resolve_base(key[0], base_ref)
+                if base is not None:
+                    stack.append(base)
+        return found
+
     def resolve(
-        caller_qualified, name, is_bare, receiver=None, class_receiver=None,
+        caller_qualified,
+        name,
+        is_bare,
+        receiver=None,
+        class_receiver=None,
+        module_class_receiver=None,
     ):
         caller_module = caller_qualified[0]
+        # ``mod.ClassName(...).method(...)``: pin the class through
+        # ``mod``'s import binding, then dispatch to that specific class's
+        # method (including inherited ones).
+        if module_class_receiver is not None:
+            mod_alias, class_name = module_class_receiver
+            cls = _module_class_identity_for(
+                caller_qualified, mod_alias, class_name,
+            )
+            if cls is not None:
+                return _class_method_lookup(cls[0], cls[1], name)
+            # Alias isn't a scanned module or the class isn't defined
+            # there. Over-approximate rather than lose a decision route.
+            return class_methods.get(name, set())
         # ``ClassName(...).method(...)``: dispatch to that class's own method.
         if class_receiver is not None:
             cls = _class_identity_for(caller_qualified, class_receiver)
             if cls is not None:
-                return class_methods_by_class.get(
-                    (cls[0], cls[1], name), set(),
-                )
+                return _class_method_lookup(cls[0], cls[1], name)
             # Class isn't a scanned identity — over-approximate rather than
             # miss a decision route. Union across every same-named method.
             return class_methods.get(name, set())
@@ -591,9 +767,7 @@ def _call_graph(sources):
             # construction form.
             cls = _class_identity_for(caller_qualified, receiver)
             if cls is not None:
-                return class_methods_by_class.get(
-                    (cls[0], cls[1], name), set(),
-                )
+                return _class_method_lookup(cls[0], cls[1], name)
             binding = _lookup_binding(caller_qualified, receiver)
             if binding is not None:
                 receiver_label, receiver_original = binding
@@ -648,9 +822,14 @@ def _reaches(start, targets, call_map, resolve):
             class_receiver = (
                 receiver_id if receiver_kind == "class" else None
             )
+            module_class_receiver = (
+                receiver_id if receiver_kind == "module_class" else None
+            )
             for qualified in resolve(
                 current, name, False,
-                receiver=receiver, class_receiver=class_receiver,
+                receiver=receiver,
+                class_receiver=class_receiver,
+                module_class_receiver=module_class_receiver,
             ):
                 if qualified not in seen:
                     seen.add(qualified)
@@ -1472,6 +1651,142 @@ def create_writer_blueprint(get_db, json_error):
     # problem.
     assert not any(
         p.startswith("api_locked_attr ")
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_pins_module_qualified_constructors():
+    """``mod.ClassName(...).method(...)`` still dispatches to that class.
+
+    Two service modules each define a class exposing an ``apply`` method:
+    ``services/writer.py::WriterService.apply`` mutates ``prediction_review``
+    without locking; ``services/locked.py::LockedService.apply`` reaches
+    ``begin_prediction_decision``. A blueprint imports ``writer`` and calls
+    ``writer.WriterService(get_db()).apply(1)`` — unambiguously unlocked. A
+    resolver that only recognized class identity when the constructor is a
+    bare Name lets that call fall into the unknown-receiver union, which
+    reaches the lock through the unrelated ``LockedService.apply``; declaring
+    the route then silences the "declared but never reaches lock" check even
+    though its actual path never locks. Pinning the class through the
+    receiver module's import restores the signal.
+    """
+    writer = '''
+class WriterService:
+    def __init__(self, db):
+        self.db = db
+
+    def apply(self, pred_id):
+        self.db.update_prediction_status(pred_id, "rejected")
+'''
+    locked_service = '''
+from services import prediction_decisions
+
+
+class LockedService:
+    @staticmethod
+    def apply(db, json_error):
+        return prediction_decisions.under_prediction_decision_lock(
+            db, lambda: db.update_prediction_status(2, "accepted"),
+            json_error=json_error,
+        )
+'''
+    blueprint = '''
+from services import writer
+
+
+def create_writer_blueprint(get_db, json_error):
+    bp = Blueprint("w", __name__)
+
+    @bp.post("/api/w")
+    def api_w():
+        return writer.WriterService(get_db()).apply(1)
+
+    return bp
+'''
+    service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
+        encoding="utf-8",
+    )
+    call_map, routes, resolve = _call_graph([
+        ("web/writer_route.py", blueprint, True),
+        ("services/writer.py", writer, False),
+        ("services/locked.py", locked_service, False),
+        ("services/prediction_decisions.py", service, False),
+    ])
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
+    problems = _decision_route_problems(
+        call_map, routes, resolve, {"api_w"},
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "never reaches begin_prediction_decision" in p
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_follows_inherited_methods():
+    """A method inherited from a base class stays reachable through a subclass.
+
+    ``services/base.py::BaseService.apply`` mutates ``prediction_review``.
+    ``services/writer.py::WriterService`` inherits from ``BaseService`` and
+    defines no ``apply`` of its own. A blueprint calls
+    ``WriterService(db).apply(1)``. An exact-class lookup that returned an
+    empty set for ``WriterService.apply`` — because no such method is
+    defined directly on ``WriterService`` — would drop the inherited mutator
+    from the call graph, so the undeclared and unlocked route would pass
+    the contract test silently. Walking up ``class_bases`` keeps the
+    inherited writer visible.
+
+    Also covers the ``mod.Base`` header form: the subclass's base is
+    resolved through the subclass module's own import of ``base``.
+    """
+    base = '''
+class BaseService:
+    def __init__(self, db):
+        self.db = db
+
+    def apply(self, pred_id):
+        self.db.update_prediction_status(pred_id, "rejected")
+'''
+    writer = '''
+from services import base
+
+
+class WriterService(base.BaseService):
+    pass
+'''
+    blueprint = '''
+from services.writer import WriterService
+
+
+def create_writer_blueprint(get_db, json_error):
+    bp = Blueprint("w", __name__)
+
+    @bp.post("/api/w")
+    def api_w():
+        return WriterService(get_db()).apply(1)
+
+    return bp
+'''
+    call_map, routes, resolve = _call_graph([
+        ("services/base.py", base, False),
+        ("services/writer.py", writer, False),
+        ("web/writer_route.py", blueprint, True),
+    ])
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
         for p in problems
     ), problems
 
