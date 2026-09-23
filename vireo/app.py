@@ -1122,7 +1122,6 @@ def _migrate_legacy_preview_cache(app):
     to unsized {id}.jpg, so those are left in place for Clear Cache to
     remove later. Sized files are still adopted in that case.
     """
-    import re
 
     import config as cfg
 
