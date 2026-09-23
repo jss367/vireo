@@ -1,10 +1,17 @@
-"""Models, darktable, taxonomy info and species-label endpoints."""
+"""Models, darktable, taxonomy info, species-label and classifier endpoints.
+
+Also the classifier's model-side readiness (``/api/classify/readiness``,
+``/api/classify/config``), the MegaDetector download/delete, and the label
+embedding cache (``/api/embedding-cache`` list/clear, ``/api/embedding-matrix``)
+— the per-model text embeddings that belong to a downloaded classifier.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
 import re
+import sys
 import uuid
 
 from classification_readiness import classification_readiness
@@ -68,12 +75,15 @@ def create_models_blueprint(
     *,
     read_raw_config_file,
     settings_write_lock,
+    count_keywords,
 ):
     """Build the models blueprint.
 
     ``read_raw_config_file`` / ``settings_write_lock`` are the settings
     file's raw reader and write lock; the darktable download records the
-    installed binary through them.
+    installed binary through them. ``count_keywords`` is the startup
+    database's ``count_keywords`` (``init_db`` in ``create_app``), which
+    ``/api/classify/config`` reports as the taxonomy species count.
     """
     blueprint = Blueprint("models", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
@@ -857,5 +867,352 @@ def create_models_blueprint(
             dinov2_mod._variant_loaded = None
 
         return jsonify({"deleted": removed, "count": len(removed), "model_id": model_id})
+
+    @blueprint.route("/api/classify/readiness")
+    def api_classify_readiness():
+        """Check what's ready for classification and what will need work."""
+        from classifier import _embedding_is_cached, _resolve_model_dir
+        from labels import get_active_labels, get_saved_labels, load_label_set, load_merged_labels
+        from models import get_active_model, get_models
+
+        model_id = request.args.get("model_id", "")
+        labels_file = request.args.get("labels_file", "")
+        labels_files = request.args.getlist("labels_files")
+
+        # Resolve model
+        models = get_models()
+        model = None
+        if model_id:
+            model = next((m for m in models if m["id"] == model_id), None)
+        if not model:
+            model = get_active_model()
+
+        model_ready = bool(model and model.get("downloaded"))
+        model_name = model["name"] if model else "None"
+        model_size = model.get("size_mb", 0) if model else 0
+        model_source = model.get("source", "") if model else ""
+        model_type = model.get("model_type", "bioclip") if model else "bioclip"
+        needs_download = not model_ready and (
+            model_source.startswith("hf-hub:") or model_source == "timm"
+        )
+
+        from metadata import exiftool_status as get_exiftool_status
+        from metadata import find_homebrew
+
+        exiftool_probe = get_exiftool_status()
+        exiftool_status = {
+            "installed": exiftool_probe["available"],
+            "version": exiftool_probe["version"],
+            "bundled": bool(
+                getattr(sys, "_MEIPASS", None) and exiftool_probe["available"]
+            ),
+            "brew_available": find_homebrew() is not None,
+        }
+
+        # timm models have a fixed class set — no labels needed
+        if model_type == "timm":
+            return jsonify(
+                {
+                    "model_name": model_name,
+                    "model_ready": model_ready,
+                    "model_size_mb": model_size,
+                    "needs_download": needs_download,
+                    "labels_name": "Built-in (10K iNat21 species)",
+                    "labels_count": 10000,
+                    "use_tol": False,
+                    "embeddings_cached": True,  # no embeddings to compute
+                    "exiftool": exiftool_status,
+                }
+            )
+
+        # Resolve labels (BioCLIP path)
+        use_tol = False
+        label_count = 0
+        label_name = ""
+        labels = []
+        labels_selected = False
+
+        if labels_file:
+            # Single file override from query param (classify page picker)
+            if os.path.exists(labels_file):
+                saved_meta = next(
+                    (ls for ls in get_saved_labels()
+                     if ls.get("labels_file") == labels_file), None,
+                )
+                labels = load_label_set(labels_file, saved_meta)
+                label_count = len(labels)
+                labels_selected = True
+                if saved_meta:
+                    label_name = saved_meta.get("name", labels_file)
+        elif labels_files:
+            # Multiple files override from query param
+            active_sets = []
+            saved = get_saved_labels()
+            saved_by_file = {s["labels_file"]: s for s in saved}
+            for p in labels_files:
+                meta = saved_by_file.get(p, {"labels_file": p})
+                active_sets.append(meta)
+            labels = load_merged_labels(active_sets)
+            label_count = len(labels)
+            # Same rule as classify_job._any_present: an open tab can send
+            # a path deleted since it rendered, and that is a fallback, not
+            # a refusal — readiness must not promise a block the job will
+            # not perform.
+            labels_selected = any(
+                os.path.exists(ls.get("labels_file", "")) for ls in active_sets
+            )
+            names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
+            label_name = ", ".join(names)
+        else:
+            db = get_db()
+            ws_labels = db.get_workspace_active_labels()
+            if ws_labels is not None:
+                saved_by_file = {s["labels_file"]: s for s in get_saved_labels()}
+                active_sets = [saved_by_file.get(p, {"labels_file": p}) for p in ws_labels if os.path.exists(p)]
+            else:
+                active_sets = get_active_labels()
+            if active_sets:
+                labels = load_merged_labels(active_sets)
+                label_count = len(labels)
+                labels_selected = True
+                names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
+                label_name = ", ".join(names)
+            else:
+                from models import supports_tree_of_life, tree_of_life_ready
+                model_str_check = model.get("model_str", "") if model else ""
+                model_dir_check = model.get("weights_path") if model else None
+                if tree_of_life_ready(model_str_check, model_dir_check):
+                    use_tol = True
+                    label_name = "Tree of Life (all species)"
+                elif supports_tree_of_life(model_str_check):
+                    # ToL-capable model whose artifacts aren't installed
+                    # yet (e.g. bioclip-2.5 before its HF upload lands).
+                    # Tell the user what's missing rather than falsely
+                    # advertising ToL-ready and crashing at classify time.
+                    label_name = (
+                        "Tree of Life files not installed — click Repair "
+                        "in Settings → Models, or download a species list"
+                    )
+                else:
+                    label_name = "No labels — download a species list in Settings"
+
+        # A selection that classifies nothing is not "no labels":
+        # classify_job raises and the planner marks it blocked, so the
+        # preflight panel has to say so too rather than rendering nothing.
+        # ``labels_selected`` separates that from the genuine no-selection
+        # case, which still falls back to Tree of Life.
+        labels_skipped = len(getattr(labels, "dropped_ambiguous", ()))
+        labels_blocked = bool(labels_selected and not labels and not use_tol)
+
+        # Check embedding cache
+        embeddings_cached = False
+        if model and not use_tol and labels:
+            model_dir = _resolve_model_dir(
+                model.get("model_str", ""), model.get("weights_path")
+            )
+            embeddings_cached = _embedding_is_cached(
+                labels, model.get("model_str", ""), model_dir
+            )
+
+        return jsonify(
+            {
+                "model_name": model_name,
+                "model_ready": model_ready,
+                "model_size_mb": model_size,
+                "needs_download": needs_download,
+                "labels_name": label_name,
+                "labels_count": label_count,
+                "labels_blocked": labels_blocked,
+                "labels_skipped": labels_skipped,
+                "use_tol": use_tol,
+                "embeddings_cached": embeddings_cached,
+                "exiftool": exiftool_status,
+            }
+        )
+
+    @blueprint.route("/api/classify/config")
+    def api_classify_config():
+        """Return classifier configuration from model registry."""
+        import config as cfg
+        from models import get_active_model, get_taxonomy_info
+
+        active = get_active_model()
+        tax = get_taxonomy_info()
+        user_cfg = get_db().get_effective_config(cfg.load())
+        return jsonify(
+            {
+                "model_name": active["name"] if active else "No model",
+                "model_str": active["model_str"] if active else "",
+                "weights_path": active["weights_path"] if active else "",
+                "weights_available": active["downloaded"] if active else False,
+                "taxonomy_available": tax["available"],
+                "taxonomy_species_count": count_keywords(),
+                "default_threshold": user_cfg["classification_threshold"],
+                "default_grouping_window": user_cfg["grouping_window_seconds"],
+                "default_similarity_threshold": user_cfg.get(
+                    "similarity_threshold", 0.85
+                ),
+            }
+        )
+
+    @blueprint.route("/api/embedding-cache")
+    def api_embedding_cache():
+        """Return info about cached label embeddings."""
+        from classifier import CACHE_DIR
+
+        if not os.path.isdir(CACHE_DIR):
+            return jsonify({"entries": [], "total_size": 0})
+        from embedding_cache import CHECKPOINT_SUFFIX
+
+        entries = []
+        total_size = 0
+        for f in sorted(os.listdir(CACHE_DIR)):
+            if f.endswith(CHECKPOINT_SUFFIX):
+                # Partial progress from a paused or interrupted
+                # computation, not a usable embedding set.
+                continue
+            if f.endswith(".npy") or f.endswith(".pt"):
+                fp = os.path.join(CACHE_DIR, f)
+                size = os.path.getsize(fp)
+                total_size += size
+                entries.append({"file": f, "size": size})
+        # Reusable individual labels live below their encoder identity.
+        # Aggregate them instead of shipping thousands of filenames to Settings.
+        label_size = 0
+        label_count = 0
+        for root, _dirs, files in os.walk(os.path.join(CACHE_DIR, "labels")):
+            for name in files:
+                if name.endswith(".npy") and not name.endswith(CHECKPOINT_SUFFIX):
+                    try:
+                        label_size += os.path.getsize(os.path.join(root, name))
+                        label_count += 1
+                    except FileNotFoundError:
+                        pass  # a concurrent cache clear won
+        if label_count:
+            entries.append({"file": "Reusable species labels", "size": label_size, "label_count": label_count})
+            total_size += label_size
+        return jsonify({"entries": entries, "total_size": total_size})
+
+    @blueprint.route("/api/embedding-matrix")
+    def api_embedding_matrix():
+        """Return which model+labels combinations have cached embeddings."""
+        from classifier import _embedding_is_cached, _resolve_model_dir
+        from labels import get_saved_labels, normalized_label_set
+        from models import get_models
+
+        # Only BioCLIP-style models use per-label text embeddings. timm models
+        # have a fixed class head and never need embedding precomputation, so
+        # excluding them here prevents the Settings UI from offering a
+        # "Compute" button that would fail with a missing-file error.
+        models = [
+            m for m in get_models()
+            if m["downloaded"] and m.get("model_type", "bioclip") != "timm"
+        ]
+        label_sets = get_saved_labels()
+
+        matrix = []
+        for ls in label_sets:
+            labels_file = ls.get("labels_file", "")
+            if not labels_file or not os.path.exists(labels_file):
+                continue
+            # Cached on the files' stamps: both Settings and Storage load
+            # this matrix, and it needs every saved set's full list to ask
+            # whether its embeddings are cached.
+            labels = normalized_label_set(ls)
+            row = {
+                "labels_name": ls.get("name", ""),
+                "labels_file": labels_file,
+                "species_count": len(labels),
+                # No prompt survived, so there is nothing to embed: the row
+                # stays visible (the set is on disk and the user is looking
+                # for it) but says why instead of offering a Compute button
+                # whose job can only fail.
+                "unusable": not labels,
+                "skipped": len(getattr(labels, "dropped_ambiguous", ())),
+                "models": {},
+            }
+            for m in models:
+                model_dir = _resolve_model_dir(m["model_str"], m.get("weights_path"))
+                row["models"][m["id"]] = {
+                    "cached": _embedding_is_cached(
+                        labels, m["model_str"], model_dir
+                    ),
+                    "model_name": m["name"],
+                }
+            matrix.append(row)
+
+        return jsonify(
+            {
+                "models": [{"id": m["id"], "name": m["name"]} for m in models],
+                "matrix": matrix,
+            }
+        )
+
+    @blueprint.route("/api/embedding-cache", methods=["DELETE"])
+    def api_embedding_cache_clear():
+        """Clear all cached label embeddings."""
+        import shutil
+
+        from classifier import CACHE_DIR
+
+        if os.path.isdir(CACHE_DIR):
+            shutil.rmtree(CACHE_DIR)
+            log.info("Embedding cache cleared")
+        return jsonify({"ok": True})
+
+    @blueprint.route("/api/megadetector/download", methods=["POST"])
+    @background_job
+    def api_megadetector_download(ctx):
+        """Download MegaDetector ONNX model as a background job."""
+
+        def work(job):
+            from detector import MEGADETECTOR_ONNX_DIR, MEGADETECTOR_ONNX_PATH
+            from huggingface_hub import hf_hub_download
+            from models import ONNX_REPO
+
+            os.makedirs(MEGADETECTOR_ONNX_DIR, exist_ok=True)
+
+            ctx.runner.push_event(job["id"], "progress", {
+                "phase": "Downloading MegaDetector ONNX model...",
+                "current": 0, "total": 1,
+            })
+
+            import shutil
+
+            cached_path = hf_hub_download(
+                repo_id=ONNX_REPO,
+                filename="model.onnx",
+                subfolder="megadetector-v6",
+            )
+
+            dest = MEGADETECTOR_ONNX_PATH
+            if cached_path != dest:
+                shutil.copy2(cached_path, dest)
+
+            if not os.path.isfile(dest):
+                raise RuntimeError("Download completed but ONNX file not found")
+
+            size_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
+            return {"status": "downloaded", "size": f"{size_mb} MB", "path": dest}
+
+        return ctx.start("download-megadetector", work)
+
+    @blueprint.route("/api/megadetector/delete", methods=["POST"])
+    def api_megadetector_delete():
+        """Delete MegaDetector ONNX model from disk."""
+        import shutil
+
+        import detector
+        from detector import MEGADETECTOR_ONNX_DIR
+
+        removed = []
+        if os.path.isdir(MEGADETECTOR_ONNX_DIR):
+            shutil.rmtree(MEGADETECTOR_ONNX_DIR)
+            removed.append(MEGADETECTOR_ONNX_DIR)
+
+        # Clear the cached singleton so it reloads next time
+        detector._session = None
+
+        return jsonify({"deleted": removed, "count": len(removed)})
 
     return blueprint
