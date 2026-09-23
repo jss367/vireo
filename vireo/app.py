@@ -144,6 +144,7 @@ from volume_reachability import (
 from web.audit import create_audit_blueprint
 from web.background_jobs import make_background_job
 from web.card_cleanup import create_card_cleanup_blueprint
+from web.duplicates import create_duplicates_blueprint
 from web.export import create_export_blueprint
 from web.imports import create_imports_blueprint
 from web.inat import InatTokenGeneration, create_inat_blueprint
@@ -153,6 +154,7 @@ from web.local_folder import LOCAL_FOLDER_JOB_TYPES, create_local_folder_bluepri
 from web.local_workspace import LOCAL_WORKSPACE_JOB_TYPES, create_local_workspace_blueprint
 from web.misses import create_misses_blueprint
 from web.models import create_models_blueprint
+from web.moves import create_moves_blueprint
 from web.pages import pages_blueprint
 from web.photo_labels import create_photo_labels_blueprint
 from web.photo_review import create_photo_review_blueprint
@@ -1094,60 +1096,6 @@ def _chunked(seq, size=_SQL_PARAM_CHUNK):
     """Yield ``seq`` in successive lists of at most ``size`` items."""
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
-
-
-def _scan_dir_file_count(root_path, file_limit=None, dir_limit=None):
-    """Count files (non-directory entries) under ``root_path`` with a lazy
-    ``os.scandir`` walk. ``os.scandir`` yields entries one at a time, so with
-    ``file_limit``/``dir_limit`` set we bail the moment either cap is reached
-    rather than waiting for the OS to enumerate a directory with millions of
-    entries. Pass ``None`` for both to count the whole tree exactly.
-
-    Returns ``(file_count, truncated)`` where ``truncated`` is True iff a cap
-    stopped the walk early.
-    """
-    file_count = 0
-    dirs_seen = 0
-    truncated = False
-    stack = [root_path]
-    # `not truncated` in the outer condition stops the walk the moment the
-    # inner loop trips a cap. Without it, we'd keep popping queued sibling
-    # directories until `dirs_seen` mechanically caught up to `dir_limit` —
-    # which on a flat fanout means opening every already-queued child, the
-    # exact worker-stalling case the cap is supposed to prevent.
-    while stack and not truncated:
-        if file_limit is not None and file_count >= file_limit:
-            truncated = True
-            break
-        if dir_limit is not None and dirs_seen >= dir_limit:
-            truncated = True
-            break
-        current = stack.pop()
-        dirs_seen += 1
-        try:
-            scanner = os.scandir(current)
-        except OSError:
-            continue
-        with scanner:
-            for entry in scanner:
-                # Check the caps inside the inner loop so a single directory
-                # with a huge number of children cannot blow past either limit
-                # before we bail out.
-                if file_limit is not None and file_count >= file_limit:
-                    truncated = True
-                    break
-                if dir_limit is not None and dirs_seen + len(stack) >= dir_limit:
-                    truncated = True
-                    break
-                try:
-                    is_dir = entry.is_dir(follow_symlinks=False)
-                except OSError:
-                    is_dir = False
-                if is_dir:
-                    stack.append(entry.path)
-                else:
-                    file_count += 1
-    return file_count, truncated
 
 
 def _filename_sequence_key(filename):
@@ -17661,54 +17609,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 500)
         return jsonify({"name": os.path.basename(path), "path": path})
 
-    # -- Move rules API --
-
-    @app.route("/api/move-rules", methods=["GET"])
-    def api_list_move_rules():
-        db = _get_db()
-        rules = db.list_move_rules()
-        return jsonify([dict(r) for r in rules])
-
-    @app.route("/api/move-rules", methods=["POST"])
-    def api_create_move_rule():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        name = body.get("name", "").strip()
-        destination = body.get("destination", "").strip()
-        criteria = body.get("criteria", {})
-        if not name or not destination:
-            return json_error("name and destination required")
-        rule_id = db.create_move_rule(name, destination, criteria)
-        return jsonify({"ok": True, "id": rule_id})
-
-    @app.route("/api/move-rules/<int:rule_id>", methods=["PUT"])
-    def api_update_move_rule(rule_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        kwargs = {}
-        if "name" in body:
-            kwargs["name"] = body["name"]
-        if "destination" in body:
-            kwargs["destination"] = body["destination"]
-        if "criteria" in body:
-            kwargs["criteria"] = body["criteria"]
-        db.update_move_rule(rule_id, **kwargs)
-        return jsonify({"ok": True})
-
-    @app.route("/api/move-rules/<int:rule_id>", methods=["DELETE"])
-    def api_delete_move_rule(rule_id):
-        db = _get_db()
-        db.delete_move_rule(rule_id)
-        return jsonify({"ok": True})
-
-    @app.route("/api/move-rules/preview", methods=["POST"])
-    def api_move_rule_preview():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        criteria = body.get("criteria", {})
-        photo_ids = db.query_move_rule_matches(criteria)
-        return jsonify({"count": len(photo_ids), "photo_ids": photo_ids})
-
     # -- Scan status (kept, non-job) --
 
     # -- Model & Taxonomy API routes --
@@ -18685,41 +18585,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             extra={"photo_count": repair_count, "roots": existing},
         )
 
-    @app.route("/api/duplicates/apply", methods=["POST"])
-    def api_duplicates_apply():
-        """Apply resolver decisions for the given list of file hashes.
-
-        Body: {"hashes": ["<hash>", ...]}. For each hash we look up every
-        non-rejected photo sharing it and hand that set to
-        apply_duplicate_resolution, which picks a winner via the pure
-        resolver and flags the losers as rejected. Returns the total number
-        of photos rejected across all hashes.
-        """
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return json_error("hashes required")
-        hashes = body.get("hashes")
-        if not isinstance(hashes, list) or not hashes:
-            return json_error("hashes required")
-
-        for h in hashes:
-            if not isinstance(h, str) or not h:
-                return json_error("hashes must be a list of non-empty strings")
-
-        db = _get_db()
-        total_rejected = 0
-        for h in hashes:
-            rows = db.conn.execute(
-                "SELECT id FROM photos "
-                "WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected')",
-                (h,),
-            ).fetchall()
-            if len(rows) < 2:
-                continue
-            result = db.apply_duplicate_resolution([r["id"] for r in rows])
-            total_rejected += result.get("rejected", 0)
-        return jsonify({"rejected_count": total_rejected})
-
     @app.route("/api/folders/reveal", methods=["POST"])
     def api_folders_reveal():
         """Reveal a batch of folder paths in the OS file manager.
@@ -18811,331 +18676,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "revealed": revealed,
             "skipped": skipped,
             "failed": failed,
-        })
-
-    @app.route("/api/duplicates/bulk-resolve", methods=["POST"])
-    def api_duplicates_bulk_resolve():
-        """Force-resolve a batch of duplicate groups by keeping the photo
-        whose folder matches ``keep_folder``.
-
-        Body: ``{"file_hashes": [str, ...], "keep_folder": str}``. For each
-        hash, the photo in ``keep_folder`` becomes the kept winner; every
-        other non-rejected photo sharing the hash becomes rejected, with
-        rating/keywords merged onto the winner.
-
-        Returns ``{"ok": True, "resolved_count": int, "resolved":
-        [{"file_hash", "winner_id", "loser_ids"}], "skipped":
-        [{"file_hash", "reason"}]}``. ``loser_ids`` is surfaced so the UI
-        can chain into ``/api/duplicates/delete-loser-files`` when the
-        user opted in to immediate trash.
-        """
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return json_error("file_hashes and keep_folder required")
-        file_hashes = body.get("file_hashes")
-        keep_folder = body.get("keep_folder")
-        if not isinstance(file_hashes, list) or not file_hashes:
-            return json_error("file_hashes required")
-        if not isinstance(keep_folder, str) or not keep_folder:
-            return json_error("keep_folder required")
-        for h in file_hashes:
-            if not isinstance(h, str) or not h:
-                return json_error("file_hashes must be a list of non-empty strings")
-
-        db = _get_db()
-        result = db.bulk_resolve_by_folder(file_hashes, keep_folder)
-        return jsonify({
-            "ok": True,
-            "resolved_count": len(result["resolved"]),
-            "resolved": result["resolved"],
-            "skipped": result["skipped"],
-        })
-
-    @app.route("/api/duplicates/delete-loser-files", methods=["POST"])
-    def api_duplicates_delete_loser_files():
-        """Move duplicate loser files to OS Trash and remove their DB rows.
-
-        Body: {"photo_ids": [int, ...]}. For each id we require:
-          - the row's flag is 'rejected' (already auto-resolved or
-            user-applied), AND
-          - at least one OTHER photo with the same ``file_hash`` is NOT
-            rejected (the kept "winner" anchor that makes this row a
-            duplicate-loser rather than an unrelated rejection).
-
-        Validating both conditions prevents this endpoint from being misused
-        to trash files for arbitrary rejected photos (e.g. a photo the user
-        manually rejected for non-duplicate reasons).
-
-        After a successful trash we also delete the loser's photo row (and
-        its cached thumbnail / preview / working-copy files). Without that,
-        ``/api/duplicates/disk-cleanup-summary`` would keep reporting the
-        same count forever — the summary predicate can't cheaply tell that
-        the on-disk file has been removed (stat'ing every loser path on a
-        slow network volume would make the banner poll expensive). Deleting
-        the row makes the count correct without a stat. The keywords/rating
-        were merged onto the winner during ``apply_duplicate_resolution``,
-        so nothing of value is lost. If the user later restores the file
-        from Trash and re-scans, the auto-resolve hook re-creates the row
-        and the cycle is idempotent.
-
-        Returns ``{trashed: N, skipped: [{id, reason}, ...],
-        failed: [{id, path, error}, ...]}``.
-        """
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return json_error("photo_ids required")
-        photo_ids = body.get("photo_ids")
-        if not isinstance(photo_ids, list) or not photo_ids:
-            return json_error("photo_ids required")
-        for pid in photo_ids:
-            # ``bool`` is a subclass of ``int`` in Python, so a bare
-            # ``isinstance(pid, int)`` would accept ``True``/``False`` as
-            # valid ids — and ``True`` would then be treated as photo id 1.
-            # Reject booleans explicitly so ``{"photo_ids": [true]}`` can't
-            # trick the endpoint into trashing whichever rejected row
-            # happens to have id 1.
-            if isinstance(pid, bool) or not isinstance(pid, int):
-                return json_error("photo_ids must be a list of integers")
-
-        db = _get_db()
-        # Chunk the lookup SELECT — bulk cleanup actions may hand us thousands
-        # of ids at once, and SQLite builds with the legacy 999-parameter cap
-        # would otherwise fail before any cleanup runs.
-        rows_by_id = {}
-        for chunk in _chunked(photo_ids):
-            placeholders = ",".join("?" * len(chunk))
-            chunk_rows = db.conn.execute(
-                f"""SELECT p.id, p.flag, p.file_hash, p.filename,
-                           f.path AS folder_path
-                    FROM photos p
-                    LEFT JOIN folders f ON f.id = p.folder_id
-                    WHERE p.id IN ({placeholders})""",
-                chunk,
-            ).fetchall()
-            for r in chunk_rows:
-                rows_by_id[r["id"]] = r
-
-        # One query per distinct hash to find kept-row anchors. Cheap because
-        # the hash column is indexed and a typical bulk action shares hashes
-        # across many photo_ids only when the user clicks "trash all losers"
-        # for one library — still a small number of distinct hashes.
-        hashes = {r["file_hash"] for r in rows_by_id.values() if r["file_hash"]}
-        anchors_by_hash = {}
-        for h in hashes:
-            anchors = db.conn.execute(
-                "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
-                "WHERE p.file_hash = ? AND (p.flag IS NULL OR p.flag != 'rejected')",
-                (h,),
-            ).fetchall()
-            anchors_by_hash[h] = [os.path.join(a["path"], a["filename"]) for a in anchors]
-
-        trash_candidates = []
-        trashed_pids = []
-        skipped = []
-        failed = []
-        # Classify paths via the bounded kernel mount table BEFORE any
-        # per-path stat. Calling ``os.path.isfile`` on an unhealthy SMB path
-        # can block indefinitely inside this endpoint, meaning the new
-        # network routing inside ``_trash_paths`` would never even be
-        # reached; a stat failure would also be misread as "already
-        # missing" and drop the DB row for a photo that reappears on
-        # remount. Local paths keep the existing preflight — a fast, safe
-        # stat on the local FS — so the "file already missing" reporting
-        # contract for manually-cleaned local losers is preserved.
-        network_roots = _network_volume_roots()
-        for pid in photo_ids:
-            row = rows_by_id.get(pid)
-            if row is None:
-                skipped.append({"id": pid, "reason": "photo not found"})
-                continue
-            if row["flag"] != "rejected":
-                skipped.append({"id": pid, "reason": "photo is not rejected"})
-                continue
-            if not row["file_hash"] or not anchors_by_hash.get(row["file_hash"]):
-                # No kept row shares this hash — refuse to trash. Treat as
-                # "not a duplicate loser" so the user can't accidentally use
-                # this endpoint to delete files for unrelated rejected rows.
-                skipped.append({"id": pid, "reason": "no duplicate winner exists"})
-                continue
-            filepath = os.path.join(row["folder_path"] or "", row["filename"] or "")
-            network = _path_on_network_volume(filepath, network_roots)
-            if not network:
-                from audit import confirmed_orphan_ids
-
-                if confirmed_orphan_ids(db, [pid]):
-                    skipped.append({"id": pid, "reason": "file already missing"})
-                    trashed_pids.append(pid)
-                    continue
-            from file_identity import distinct_existing_file
-
-            anchors = anchors_by_hash[row["file_hash"]]
-            # Reject aliases as well as unavailable winners: every retained
-            # row must continue to name a distinct, existing regular file.
-            # Missing network sources still need Finder's bounded check and
-            # mounted-volume revalidation before their catalog rows can go.
-            if not all(distinct_existing_file(
-                filepath, anchor,
-                timeout=2.0 if network or _path_on_network_volume(anchor, network_roots) else None,
-                allow_missing_source=network,
-            ) for anchor in anchors):
-                skipped.append({"id": pid, "reason": "no verified distinct duplicate winner exists"})
-                continue
-            trash_candidates.append((pid, filepath))
-
-        # Track paths whose end state already held (local preflight found
-        # them absent, or Finder reported them missing on a still-mounted
-        # network volume). Without this the network path would silently
-        # succeed with ``trashed: 0`` and empty ``skipped``/``failed``,
-        # leaving the UI stuck on "Moving to Trash..." — the local branch
-        # already surfaces "file already missing" and the network branch
-        # must match so cleanup is a terminal state either way.
-        already_missing_paths = set()
-        # Pass through our mount-table snapshot — including an explicit
-        # ``None`` when our own query failed — so ``_trash_paths`` does
-        # not re-query and overwrite our fail-closed classification. If
-        # its second query happened to succeed after the share detached,
-        # a custom-mount path we already flagged network (via the
-        # ``/Volumes`` fallback in ``_path_on_network_volume``) would be
-        # silently reclassified as local, reintroducing the unbounded-I/O
-        # hang this routing exists to prevent.
-        trashed, successful_paths, trash_failures = _trash_paths(
-            [filepath for _pid, filepath in trash_candidates],
-            already_missing_out=already_missing_paths,
-            network_roots=network_roots,
-        )
-        failure_by_path = {
-            failure["path"]: failure for failure in trash_failures
-        }
-        for pid, filepath in trash_candidates:
-            if filepath in successful_paths:
-                if filepath in already_missing_paths:
-                    skipped.append({
-                        "id": pid, "reason": "file already missing",
-                    })
-                trashed_pids.append(pid)
-                continue
-            failure = failure_by_path.get(filepath) or {}
-            failed.append({
-                "id": pid,
-                "path": filepath,
-                "error": failure.get("error", "Trash operation failed"),
-            })
-
-        # Drop DB rows + cached derivatives for every photo whose file is now
-        # gone. Chunked so ``delete_photos``' five internal IN-clause queries
-        # can't trip the SQLite parameter cap on large bulk actions; without
-        # chunking, a 1000+ id request would raise OperationalError on legacy
-        # builds AFTER files were already trashed, leaving the DB inconsistent.
-        if trashed_pids:
-            try:
-                all_files = []
-                deleted_rows = 0
-                for chunk in _chunked(trashed_pids):
-                    result = db.delete_photos(chunk)
-                    all_files.extend(result.get("files", []))
-                    deleted_rows += result.get("deleted", 0)
-                _cleanup_cached_files_for_deleted_photos(all_files)
-                if deleted_rows:
-                    _invalidate_missing_originals_cache()
-            except Exception:
-                # Files are already in Trash; if the row delete fails we
-                # surface a 500 so the caller knows reconciliation is
-                # incomplete. Without raising, the summary count would stay
-                # inflated and the caller would have no signal that the
-                # cleanup is half-done.
-                log.exception(
-                    "DB row delete failed after trashing %d files", len(trashed_pids),
-                )
-                return jsonify({
-                    "ok": False,
-                    "error": "trashed files but failed to clean up DB rows",
-                    "trashed": trashed,
-                    "skipped": skipped,
-                    "failed": failed,
-                }), 500
-
-        return jsonify({
-            "ok": True,
-            "trashed": trashed,
-            "skipped": skipped,
-            "failed": failed,
-        })
-
-    @app.route("/api/duplicates/last-scan", methods=["GET"])
-    def api_duplicates_last_scan():
-        """Return the most recent completed duplicate-scan's result.
-
-        The /duplicates page only holds proposals in JS memory, so
-        navigating away and back used to require a full rescan. This
-        lets the page restore prior results from ``job_history`` instead.
-
-        Library-wide on purpose: duplicate detection itself ignores
-        workspace scope (photos are global), so the result of any
-        completed scan is valid for any active workspace — even though
-        the row carries the triggering workspace's id.
-
-        Response: ``{found: false}`` or
-        ``{found: true, job_id, started_at, finished_at, result}``.
-        """
-        db = _get_db()
-        row = db.conn.execute(
-            """SELECT id, started_at, finished_at, result
-                 FROM job_history
-                WHERE type = 'duplicate-scan'
-                  AND status = 'completed'
-                  AND result IS NOT NULL
-                ORDER BY finished_at DESC
-                LIMIT 1"""
-        ).fetchone()
-        if row is None:
-            return jsonify({"found": False})
-        try:
-            result = json.loads(row["result"])
-        except (json.JSONDecodeError, TypeError):
-            return jsonify({"found": False})
-        attach_nested_edit_recipes(db, result)
-        return jsonify({
-            "found": True,
-            "job_id": row["id"],
-            "started_at": row["started_at"],
-            "finished_at": row["finished_at"],
-            "result": result,
-        })
-
-    @app.route("/api/duplicates/disk-cleanup-summary", methods=["GET"])
-    def api_duplicates_disk_cleanup_summary():
-        """Return counts of duplicate-loser files that may still be on disk.
-
-        Body: ``{count: int, total_size: int, file_hashes: [str, ...]}``.
-
-        Powers the navbar banner that surfaces the volume of cleanup
-        available — without it, auto-resolved duplicates from scan are
-        invisible to the user.
-
-        ``count`` is the number of rejected photo rows whose hash is also
-        held by a non-rejected row (i.e. duplicate losers, not unrelated
-        rejections). ``total_size`` is the sum of their stored ``file_size``
-        — a best-effort estimate; we do NOT stat each path here because
-        slow network volumes (e.g. SMB) would make this endpoint expensive
-        on every banner poll. The bulk-trash endpoint validates each file
-        exists before trashing.
-        """
-        db = _get_db()
-        row = db.conn.execute(
-            """
-            SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS total_bytes
-            FROM photos p
-            WHERE p.flag = 'rejected'
-              AND p.file_hash IS NOT NULL
-              AND EXISTS (
-                  SELECT 1 FROM photos q
-                  WHERE q.file_hash = p.file_hash AND (q.flag IS NULL OR q.flag != 'rejected')
-              )
-            """
-        ).fetchone()
-        return jsonify({
-            "count": row["n"],
-            "total_size": row["total_bytes"],
         })
 
     @app.route("/api/jobs/previews", methods=["POST"])
@@ -20328,201 +19868,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             date_destinations=date_destinations,
         )
         return jsonify({"job_id": job_id})
-
-    @app.route("/api/move-folder/preflight", methods=["POST"])
-    def api_move_folder_preflight():
-        """Report the resolved destination for a folder move and whether it
-        already exists, so the UI can offer a merge/resume confirmation
-        instead of silently failing on an existing destination. Handles both
-        local-path and remote-target (SSH) destinations.
-
-        ``mode`` controls how much work the endpoint does (local paths only;
-        a remote target returns its SSH-probed result and ignores ``mode``):
-
-        * ``"quick"`` (default) — caps the destination file count at 1000 so
-          the live, keystroke-debounced status line stays instant even when
-          the destination holds millions of files.
-        * ``"exact"`` — walks the destination with a much larger cap
-          (100k files / 50k dirs) than ``quick`` so the true count is
-          reported for any realistic photo library, while still bounding
-          the Flask worker thread on pathological NAS targets (millions
-          of unrelated files). The UI fires this in the background to
-          replace the capped "at least 1000" line once the fast check
-          reported a truncation, and still renders "at least N" if the
-          exact walk itself truncated.
-        * ``"preview"`` — keeps the destination count on the capped fast
-          path (same as ``quick``) and adds a ``preview_merge`` block
-          reporting how many source files would actually copy vs. be
-          skipped as already present. The deliberate merge-confirm click
-          fires this; the source-tree walk for ``preview_merge`` is
-          acceptable there, but a second uncapped destination walk is not
-          — the dialog displays the preview's copy/skip counts, not the
-          raw destination count, so capping the destination here keeps the
-          Flask worker free even when the resume target is a NAS folder
-          with millions of unrelated files.
-        """
-        import move as move_mod
-        from move import preview_merge, resolve_folder_dest
-
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return json_error("JSON body must be an object")
-        folder_id = body.get("folder_id")
-        destination = body.get("destination", "")
-        destination_name_raw = body.get("destination_name", "")
-        folder_template_raw = body.get("folder_template", "")
-        mode = body.get("mode", "quick")
-        if mode not in ("quick", "exact", "preview"):
-            mode = "quick"
-        remote_target_id = (body.get("remote_target_id") or "").strip()
-        subpath = body.get("subpath", "")
-
-        if not folder_id:
-            return json_error("folder_id required")
-        if not isinstance(folder_template_raw, str):
-            return json_error("folder_template must be a string")
-        folder_template = folder_template_raw.strip()
-        if folder_template and destination_name_raw:
-            return json_error(
-                "destination_name cannot be combined with folder_template"
-            )
-        try:
-            destination_name = move_mod.normalize_destination_name(
-                destination_name_raw)
-        except ValueError as exc:
-            return json_error(str(exc))
-
-        folder = _get_db().conn.execute(
-            "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
-        if not folder:
-            return json_error("Folder not found", status=404)
-
-        # Remote target: resolve the NAS-side dest and probe it over SSH.
-        if remote_target_id:
-            if folder_template:
-                return json_error(
-                    "Organizing one folder into capture-date folders is only "
-                    "available for local or mounted-drive destinations."
-                )
-            import posixpath
-
-            import config as cfg
-            target = cfg.get_remote_target(remote_target_id)
-            if not target:
-                return json_error("Remote target not found", status=404)
-            effective_cfg = _get_db().get_effective_config(cfg.load())
-            ssh_bin = move_mod.resolve_ssh_bin(
-                effective_cfg.get("ssh_bin", "") or "")
-            if not ssh_bin:
-                return json_error(
-                    "OpenSSH Client was not found. Install it or configure ssh.exe in Settings."
-                )
-            target = dict(target)
-            target["ssh_bin"] = ssh_bin
-            try:
-                spec = move_mod.build_remote_move_spec(target, subpath, "", ssh_bin)
-            except ValueError as exc:
-                return json_error(str(exc))
-            # The NAS path is POSIX, so the preview/probe path must join with
-            # '/' even when this server runs on Windows — resolve_folder_dest
-            # uses os.path.join and would produce ``/volume1/Photo\trip``,
-            # which the SSH ``test -d`` probe would then look up at a
-            # different remote path than the actual transfer (move_folder
-            # uses posixpath.join), so an existing destination would be
-            # reported as new and the first non-merge move would fail.
-            landing_name = destination_name or folder["name"] \
-                or os.path.basename(folder["path"].rstrip("/\\"))
-            resolved = posixpath.join(spec["ssh_dest_base"], landing_name)
-            exists, fcount, truncated, reachable, err = \
-                move_mod.remote_preflight(target, resolved)
-            return jsonify({
-                "resolved_dest": move_mod.rsync_dest_spec(target, resolved),
-                "exists": exists,
-                "file_count": fcount,
-                "file_count_truncated": truncated,
-                "remote": True,
-                "reachable": reachable,
-                "error": err,
-                "mount_path_set": bool(target.get("mount_path")),
-            })
-
-        if not isinstance(destination, str):
-            return json_error("destination must be a string")
-        if not destination:
-            return json_error("destination required")
-        if not os.path.isabs(destination):
-            return json_error("destination must be an absolute path")
-
-        if folder_template:
-            from ingest import folder_template_samples
-            try:
-                plan, capture_dts = \
-                    move_mod.plan_folder_date_moves_with_capture_dates(
-                        _get_db(), folder_id, destination, folder_template,
-                    )
-            except ValueError as exc:
-                return json_error(str(exc))
-            destinations = [
-                {
-                    "path": item["destination"],
-                    "relative_path": item["relative_path"],
-                    "photo_count": item["photo_count"],
-                    "exists": os.path.isdir(item["destination"]),
-                }
-                for item in plan
-            ]
-            return jsonify({
-                "resolved_dest": destination,
-                "date_organized": True,
-                "folder_template": folder_template,
-                "destinations": destinations,
-                "destination_count": len(destinations),
-                "photo_count": sum(item["photo_count"] for item in plan),
-                "exists": any(item["exists"] for item in destinations),
-                "file_count": 0,
-                "file_count_truncated": False,
-                # Example folder names for the format dropdown, rendered from
-                # the very capture dates that produced ``destinations`` above.
-                # Same scan, same code path — so the label a user reads as
-                # "my folder will be called this" cannot disagree with the
-                # folder list it sits beside.
-                "template_samples": folder_template_samples(capture_dts),
-            })
-
-        resolved = resolve_folder_dest(
-            folder["path"], folder["name"], destination, destination_name)
-        exists = os.path.isdir(resolved)
-        file_count = 0
-        file_count_truncated = False
-        if exists:
-            if mode == "exact":
-                # Generous cap, not uncapped: requestExactDestCount fires from
-                # the keystroke-driven path, and an unbounded walk on a NAS
-                # target with millions of files would pin a Flask worker for
-                # minutes (the UI seq guard only discards stale replies, not
-                # server-side work). 100k/50k is large enough that any
-                # realistic photo library reports its true count, and small
-                # enough that the worst case is seconds, not minutes.
-                file_count, file_count_truncated = _scan_dir_file_count(
-                    resolved, file_limit=100000, dir_limit=50000)
-            else:
-                # Both "quick" and "preview" cap the destination scan. The
-                # merge dialog uses preview_merge's copy/skip counts, not
-                # this number, so walking the destination uncapped here
-                # would block a Flask worker for no UI benefit.
-                file_count, file_count_truncated = _scan_dir_file_count(
-                    resolved, file_limit=1000, dir_limit=2000)
-
-        result = {
-            "resolved_dest": resolved,
-            "exists": exists,
-            "file_count": file_count,
-            "file_count_truncated": file_count_truncated,
-        }
-        if mode == "preview" and exists:
-            result["preview"] = preview_merge(folder["path"], resolved)
-        return jsonify(result)
 
     def _archive_root_state(target):
         """``(present, volume_offline)`` for the target's local archive root.
@@ -26051,6 +25396,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _get_db, lambda: app._job_runner, json_error,
         lambda paths: _trash_paths(paths), _move_folder_guard_error,
     ))
+    app.register_blueprint(create_moves_blueprint(_get_db, json_error))
+    app.register_blueprint(
+        create_duplicates_blueprint(
+            _get_db,
+            json_error,
+            chunked=_chunked,
+            # Late-bound through the module globals, like the move-cleanup
+            # blueprint's trash hook above, so a patched ``app._trash_paths``
+            # or ``app._network_volume_roots`` still reaches these routes.
+            trash_paths=lambda *args, **kwargs: _trash_paths(*args, **kwargs),
+            network_volume_roots=lambda: _network_volume_roots(),
+            path_on_network_volume=_path_on_network_volume,
+            cleanup_cached_files_for_deleted_photos=(
+                _cleanup_cached_files_for_deleted_photos
+            ),
+            invalidate_missing_originals=_invalidate_missing_originals_cache,
+        )
+    )
     app.register_blueprint(
         create_card_cleanup_blueprint(
             _get_db, json_error, lambda: app._job_runner, db_path, app.config,
