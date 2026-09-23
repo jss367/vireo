@@ -89,12 +89,14 @@ from web.audit import create_audit_blueprint
 from web.background_jobs import make_background_job
 from web.browse import create_browse_blueprint
 from web.caches import create_caches_blueprint
+from web.capture_time import create_capture_time_blueprint
 from web.card_cleanup import create_card_cleanup_blueprint
 from web.collections import create_collections_blueprint
 from web.dashboard import create_dashboard_blueprint
 from web.duplicates import create_duplicates_blueprint
 from web.editing import create_editing_blueprint
 from web.export import create_export_blueprint
+from web.folders import create_folders_blueprint
 from web.imports import create_imports_blueprint
 from web.inat import InatTokenGeneration, create_inat_blueprint
 from web.job_launchers import create_job_launchers_blueprint
@@ -2045,51 +2047,6 @@ def _trash_paths(filepaths, progress_callback=None, already_missing_out=None,
     return moved, successful, failures
 
 
-def _inventory_pair(label_set, label_set_path, fingerprint, is_tol,
-                    is_intrinsic, db_pair, total):
-    """Build one (model × label-set) row for the classification inventory."""
-    classified = db_pair.get("classified_dets", 0)
-    pending = max(0, total - classified) if not is_intrinsic else max(
-        0, total - classified
-    )
-    if classified == 0:
-        status = "never_run"
-    elif pending == 0:
-        status = "complete"
-    else:
-        status = "partial"
-    denom = classified + pending
-    coverage = round(100.0 * classified / denom, 1) if denom > 0 else 0.0
-    return {
-        "label_set": label_set,
-        "label_set_path": label_set_path,
-        "fingerprint": fingerprint,
-        "is_tol": is_tol,
-        "is_intrinsic": is_intrinsic,
-        "status": status,
-        "classified_dets": classified,
-        "pending_dets": pending,
-        "coverage_pct": coverage,
-        "photos_covered": db_pair.get("photos_covered", 0),
-        "last_run": db_pair.get("last_run"),
-        "median_top1_conf": db_pair.get("median_top1_conf"),
-        "median_sample_size": db_pair.get("median_sample_size", 0),
-    }
-
-
-def _inventory_subtotal(pairs):
-    """Sum classified/pending across a model's pairs into a subtotal dict."""
-    classified = sum(p["classified_dets"] for p in pairs)
-    pending = sum(p["pending_dets"] for p in pairs)
-    denom = classified + pending
-    coverage = round(100.0 * classified / denom, 1) if denom > 0 else 0.0
-    return {
-        "classified_dets": classified,
-        "pending_dets": pending,
-        "coverage_pct": coverage,
-    }
-
-
 # The canonical implementation lives in ``new_images.py`` so non-Flask
 # modules (e.g. ``pipeline_job.py``) can import it without pulling in the
 # app module. Kept aliased here under the original private name for
@@ -3752,43 +3709,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         return value
 
-    @app.route("/api/folders")
-    def api_folders():
-        db = _get_db()
-        # Browse pins its destructive Remove action to the workspace the
-        # tree was rendered against. Fetching the tree and the active
-        # workspace ID in two independent requests would let a cross-tab
-        # workspace switch pair A's rows with B's id, so opt-in callers
-        # get both from a single read snapshot instead of following up
-        # with /api/workspaces/active (Codex review r3799038685). The
-        # legacy array response is preserved for every other caller.
-        include_workspace = request.args.get("with_workspace") in ("1", "true")
-        if include_workspace:
-            db.conn.execute("BEGIN")
-            try:
-                folders = [dict(f) for f in db.get_folder_tree()]
-                active_workspace_id = db._ws_id()
-            finally:
-                db.conn.rollback()
-            return jsonify(
-                {"folders": folders, "active_workspace_id": active_workspace_id}
-            )
-        folders = db.get_folder_tree()
-        return jsonify([dict(f) for f in folders])
 
-    @app.route("/api/folders/missing")
-    def api_folders_missing():
-        db = _get_db()
-        # Keep the rows and their monotonic observation marker on one read
-        # snapshot so clients can compare this response with /api/browse/init
-        # independent of network delivery order.
-        db.conn.execute("BEGIN")
-        missing = db.get_missing_folders()
-        health_version = db.get_folder_health_version()
-        response = jsonify([dict(f) for f in missing])
-        response.headers["X-Vireo-Folder-Health-Version"] = str(health_version)
-        db.conn.rollback()
-        return response
 
     _MISSING_ORIGINALS_STALE_SECONDS = 30 * 60
     _MISSING_ORIGINALS_BACKOFF_SECONDS = 30 * 60
@@ -4278,283 +4199,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             payload["status"] = "pending"
         return payload
 
-    @app.route("/api/folders/check-health", methods=["POST"])
-    def api_folders_check_health():
-        db = _get_db()
-        # ``check_folder_health()`` scans every folder in the DB and returns a
-        # global change count, but the client needs to know whether the
-        # ACTIVE workspace's missing set changed. Snapshot the workspace-
-        # scoped missing IDs before and after so the client's null-baseline
-        # fallback in loadMissingFolders() (fired when the modal opens before
-        # any poll seeds the snapshot) can distinguish a cross-workspace
-        # flip — which must NOT reset the active Browse — from a real
-        # active-workspace transition that still needs to notify Browse
-        # (Codex review r3686191131).
-        ws_missing_before = {f["id"] for f in db.get_missing_folders()}
-        changed = db.check_folder_health()
-        # A folder flipping ok→missing turns every one of its photos into a
-        # ghost, and missing→ok resurrects them. Either transition would
-        # otherwise be masked by a ready /api/photos/missing cache until the
-        # next full scan.
-        if changed:
-            _invalidate_missing_originals_cache()
-        db.conn.execute("BEGIN")
-        missing = db.get_missing_folders()
-        ws_missing_after = {f["id"] for f in missing}
-        health_version = db.get_folder_health_version()
-        response = jsonify({
-            "changed": changed,
-            "workspace_changed": ws_missing_before != ws_missing_after,
-            "missing": [dict(f) for f in missing],
-            "folder_health_version": health_version,
-        })
-        db.conn.rollback()
-        return response
-
-    @app.route("/api/folders/<int:folder_id>", methods=["GET"])
-    def api_folder_get(folder_id):
-        """Return a single folder's id, name, and path.
-
-        Powers the folder-tree context menu's "Copy Path" action. A lean
-        response on purpose: callers that want the richer tree data already
-        have /api/folders for that. Scoped to the active workspace so
-        absolute paths from folders hidden in this workspace don't leak.
-        """
-        db = _get_db()
-        folder = db.get_folder(folder_id)
-        if not folder:
-            return json_error("folder not found", 404)
-        linked = db.conn.execute(
-            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-            (db._active_workspace_id, folder_id),
-        ).fetchone()
-        if not linked:
-            return json_error("folder not found", 404)
-        return jsonify({
-            "id": folder["id"],
-            "name": folder["name"],
-            "path": folder["path"],
-        })
-
-    @app.route("/api/folders/<int:folder_id>/workspaces", methods=["GET"])
-    def api_folder_workspaces(folder_id):
-        """List workspaces in which a Browse-visible folder appears."""
-        db = _get_db()
-        folder = db.get_folder(folder_id)
-        if not folder:
-            return json_error("folder not found", 404)
-
-        # Match the folder-detail endpoint's active-workspace boundary while
-        # also recognizing read-only inheritance from a recursive root. This
-        # prevents callers from using hidden folder IDs to enumerate workspace
-        # names without mutating the membership table during a GET.
-        folder_workspaces = db.get_folder_workspaces(folder_id)
-        if not any(
-            workspace["id"] == db._active_workspace_id
-            for workspace in folder_workspaces
-        ):
-            return json_error("folder not found", 404)
-
-        workspaces = []
-        for workspace in folder_workspaces:
-            workspaces.append({
-                "id": workspace["id"],
-                "name": workspace["name"],
-                "is_active": workspace["id"] == db._active_workspace_id,
-                "is_root": bool(workspace["is_root"]),
-            })
-        return jsonify({
-            "folder": {
-                "id": folder["id"],
-                "name": folder["name"],
-                "path": folder["path"],
-            },
-            "workspaces": workspaces,
-        })
-
-    @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
-    def api_folder_relocate(folder_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        new_path = body.get("path", "")
-        if not new_path:
-            return json_error("path is required")
-        if not os.path.isdir(new_path):
-            return json_error("path does not exist or is not a directory")
-
-        # Relocating a folder that a local workspace has rebased would leave
-        # local_workspace_folders and the manifest pointing at a path this
-        # route just moved out from under them, so a later sync/discard could
-        # not restore the catalog to the source layout. The guard and the
-        # subsequent write must both run under stage_boundary_lock so a stage
-        # claim cannot commit between them.
-        with stage_boundary_lock():
-            local_root_id = local_root_for_folder(db, folder_id)
-            if local_root_id is not None:
-                return json_error(
-                    "Cannot relocate this folder while it has a shared local copy. "
-                    "Sync or discard the local copy from any linked workspace first.",
-                    409,
-                )
-            # Staging a descendant rebases its folders.path under local-folders/,
-            # so a folders.path subtree scan (as db.relocate_folder does) no
-            # longer sees it — while local_folder_mappings.source_path still
-            # points at the pre-relocation location. Without this check the
-            # relocate would rewrite the ancestor while the manifest keeps
-            # pointing at the old descendant path, so a later sync/discard
-            # could not restore or publish to the new location.
-            descendant_root_id = local_root_under_folder(db, folder_id)
-            if descendant_root_id is not None:
-                return json_error(
-                    "Cannot relocate this folder while a subfolder has a shared local copy. "
-                    "Sync or discard the local copy from any linked workspace first.",
-                    409,
-                )
-            staged, owner_ws = folder_has_local_workspace(db, folder_id)
-            if staged:
-                return json_error(
-                    f"Cannot relocate this folder — workspace {owner_ws} has it staged locally. "
-                    "Switch to that workspace and sync or discard the local copy first.",
-                    409,
-                )
-
-            # Capture the old path before the DB rewrite so we can rebase the
-            # corresponding darktable output subdir on disk. Developed outputs
-            # are nested under developed_folder_key(folder_path), so a path
-            # change invalidates the old key and would silently regress export
-            # to RAW until the user re-developed.
-            old_row = db.conn.execute(
-                "SELECT path, status FROM folders WHERE id = ?", (folder_id,)
-            ).fetchone()
-            old_path = old_row["path"] if old_row else ""
-
-            try:
-                cascaded = db.relocate_folder(folder_id, new_path)
-            except ValueError as e:
-                if old_row and old_row["status"] == "missing":
-                    current_row = db.conn.execute(
-                        "SELECT status FROM folders WHERE id = ?", (folder_id,)
-                    ).fetchone()
-                    if current_row and current_row["status"] == "ok":
-                        _invalidate_missing_originals_cache()
-                return json_error(str(e), 409)
-
-        # Relocation rewrites folders.path (and can merge/delete rows via the
-        # missing→existing branch). A ready /api/photos/missing cache would
-        # otherwise keep offering the pre-relocation ghost rows for removal
-        # even though the originals just came back online at the new path.
-        _invalidate_missing_originals_cache()
-
-        import config as cfg
-        from export import relocate_developed_dir
-        effective_cfg = db.get_effective_config(cfg.load())
-        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
-        if developed_dir and old_path:
-            relocate_developed_dir(developed_dir, old_path, new_path)
-            for child in cascaded:
-                relocate_developed_dir(
-                    developed_dir, child["old_path"], child["new_path"]
-                )
-        return jsonify({
-            "status": "ok",
-            "cascaded": cascaded,
-        })
-
-    @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
-    def api_folder_delete(folder_id):
-        db = _get_db()
-        # Deleting a folder that a local workspace has rebased removes the
-        # folders row that local_workspace_folders and the manifest depend on,
-        # so a later sync/discard would be unable to restore the catalog. The
-        # guard and delete run under stage_boundary_lock so a stage claim
-        # cannot commit between them; the local_workspace_folders FK to
-        # folders(id) ON DELETE CASCADE is the final safety net.
-        with stage_boundary_lock():
-            local_root_id = local_root_for_folder(db, folder_id)
-            if local_root_id is not None:
-                return json_error(
-                    "Cannot delete this folder while it has a shared local copy. "
-                    "Sync or discard the local copy from any linked workspace first.",
-                    409,
-                )
-            descendant_root_id = local_root_under_folder(db, folder_id)
-            if descendant_root_id is not None:
-                return json_error(
-                    "Cannot delete this folder while a subfolder has a shared local copy. "
-                    "Sync or discard the local copy from any linked workspace first.",
-                    409,
-                )
-            staged, owner_ws = folder_has_local_workspace(db, folder_id)
-            if staged:
-                return json_error(
-                    f"Cannot delete this folder — workspace {owner_ws} has it staged locally. "
-                    "Switch to that workspace and sync or discard the local copy first.",
-                    409,
-                )
-            result = db.delete_folder(folder_id)
-        # Clean up cached files alongside the cascaded photo rows so preview
-        # files don't get orphaned on disk (untracked by preview_cache).
-        _cleanup_cached_files_for_deleted_photos(result.get("files", []))
-        # The cascaded row deletion here is the same shape as any other
-        # photo-removal path: without invalidation, a ready
-        # /api/photos/missing cache could keep listing ghosts from the
-        # now-deleted folder (offered up for removal a second time in
-        # the modal) until the next scan runs.
-        _invalidate_missing_originals_cache()
-        # Don't leak the internal file list to the API response — keep the
-        # shape callers expect.
-        return jsonify({"deleted_photos": result["deleted_photos"]})
 
 
-    @app.route("/api/capture-time/preview", methods=["POST"])
-    def api_capture_time_preview():
-        """Preview a capture-time correction for selected photos."""
-        from capture_time import build_capture_time_preview
 
-        db = _get_db()
-        body = request.get_json(silent=True)
-        if body is None:
-            body = {}
-        elif not isinstance(body, dict):
-            return json_error("request body must be a JSON object", 400)
-        raw_ids = body.get("photo_ids", [])
-        if not isinstance(raw_ids, list):
-            return json_error("photo_ids must be a list", 400)
-        if not raw_ids:
-            return json_error("photo_ids required", 400)
-        if len(raw_ids) > 50000:
-            return json_error("too many photo_ids", 400)
 
-        photo_ids = []
-        seen = set()
-        for raw in raw_ids:
-            if isinstance(raw, bool) or not isinstance(raw, int):
-                return json_error("photo_ids must be integers", 400)
-            if raw in seen:
-                continue
-            seen.add(raw)
-            photo_ids.append(raw)
 
-        photos = []
-        for pid in photo_ids[:20]:
-            photo = db.get_photo(pid, verify_workspace=True)
-            if photo:
-                photos.append(photo)
-        if not photos:
-            return json_error("no photos found", 404)
 
-        try:
-            preview = build_capture_time_preview(
-                photos,
-                mode=body.get("mode", "preserve_instant"),
-                target_offset=body.get("target_offset"),
-                shift_minutes=body.get("shift_minutes"),
-                limit=5,
-            )
-        except ValueError as exc:
-            return json_error(str(exc), 400)
-        preview["count"] = len(photo_ids)
-        return jsonify(preview)
 
 
     def _normalize_photo_id_list(raw_ids):
@@ -6413,250 +6063,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Statistics --
 
-    @app.route("/api/workspace/classification-inventory")
-    def api_workspace_classification_inventory():
-        """Per-(model × label-set) classification coverage for the active workspace.
-
-        Builds a cross-product of downloaded or previously used classifier
-        models × label sets on disk, merges in counts from `classifier_runs`, identifies
-        stale rows (predictions whose fingerprint no longer matches any
-        label file) and legacy rows (predictions from a model not in the
-        current registry), and returns a structured payload for the
-        dashboard inventory panel. See
-        ``docs/plans/2026-05-06-classification-inventory-design.md``.
-        """
-        import config as cfg
-        from labels import get_saved_labels, load_label_set, load_merged_labels
-        from labels_fingerprint import TOL_SENTINEL, compute_fingerprint
-        from models import get_models
-
-        db = _get_db()
-        ws_id = db._active_workspace_id
-        if not ws_id:
-            return json_error("No active workspace", status=400)
-        ws = db.get_workspace(ws_id)
-        min_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
-        )
-
-        db_inv = db.get_classification_inventory(ws_id, min_conf=min_conf)
-        total_dets = db_inv["total_real_detections"]
-        db_pairs = {
-            (p["classifier_model"], p["labels_fingerprint"]): p
-            for p in db_inv["pairs"]
-        }
-
-        # Available label sets: read each saved .txt and recompute fingerprint
-        # so the inventory's identity matches what the classify job would use.
-        label_sets = []
-        unusable_label_sets = []
-        seen_paths = set()
-        for ls in get_saved_labels():
-            path = ls.get("labels_file", "")
-            if not path or not os.path.exists(path) or path in seen_paths:
-                continue
-            seen_paths.add(path)
-            try:
-                species = load_label_set(path, ls)
-            except OSError:
-                continue
-            name = ls.get("name") or os.path.splitext(os.path.basename(path))[0]
-            if not species:
-                # ``compute_fingerprint([])`` is the ToL sentinel, so an
-                # empty set would claim Tree of Life's row: its counts
-                # would be double-billed under the set's own name, and a
-                # non-ToL model would show an impossible regional pair.
-                # It classifies nothing — name it as unusable instead.
-                unusable_label_sets.append({
-                    "name": name,
-                    "filename": os.path.basename(path),
-                    "skipped": len(getattr(species, "dropped_ambiguous", ())),
-                })
-                continue
-            label_sets.append({
-                "name": name,
-                "path": path,
-                "filename": os.path.basename(path),
-                "fingerprint": compute_fingerprint(species),
-            })
-
-        # Dedupe by fingerprint: duplicate-content files (rename/copy) share a
-        # fingerprint and the same db_pair stats. Emitting both rows would
-        # double-count subtotals and inflate pending coverage. Keep the
-        # alphabetically-first name as the canonical representative.
-        deduped_by_fp = {}
-        for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
-            deduped_by_fp.setdefault(ls["fingerprint"], ls)
-        label_sets = list(deduped_by_fp.values())
-
-        # Keep the full registry for identifying legacy and stale results.
-        # Custom models without an explicit model_type default to bioclip
-        # (same as classify/pipeline).
-        from models import supports_tree_of_life
-        all_models = [
-            m for m in get_models()
-            if m.get("model_type", "bioclip") in ("bioclip", "timm")
-        ]
-
-        models_out = []
-        seen_keys = set()  # (model_name, fingerprint) we've placed in models_out
-        used_model_names = {model_name for model_name, _fp in db_pairs}
-
-        for m in all_models:
-            model_name = m.get("name") or m.get("id")
-            # Uninstalled models with no history in this workspace are not
-            # pending work and should not inflate inventory coverage totals.
-            if not m.get("downloaded") and model_name not in used_model_names:
-                continue
-            # Capability question — does this model TYPE ship ToL text
-            # embeddings? Ask supports_tree_of_life(model_str), not the raw
-            # `files` manifest: bioclip-2.5's ToL artifacts are declared
-            # under `optional_files` so a straight `"tol_embeddings.npy" in
-            # m.get("files", [])` would drop ToL coverage from this
-            # inventory entirely — no current-pair emit and no stale-row
-            # for prior ToL runs, because TOL_SENTINEL is always in
-            # current_fps for the model.
-            supports_tol = supports_tree_of_life(m.get("model_str", ""))
-            is_closed_set = m.get("model_type") == "timm"
-
-            pairs = []
-            if is_closed_set:
-                key = (model_name, TOL_SENTINEL)
-                pairs.append(_inventory_pair(
-                    label_set="(intrinsic)", label_set_path=None,
-                    fingerprint=TOL_SENTINEL, is_tol=False, is_intrinsic=True,
-                    db_pair=db_pairs.get(key, {}), total=total_dets,
-                ))
-                seen_keys.add(key)
-            else:
-                for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
-                    key = (model_name, ls["fingerprint"])
-                    pairs.append(_inventory_pair(
-                        label_set=ls["name"], label_set_path=ls["filename"],
-                        fingerprint=ls["fingerprint"], is_tol=False,
-                        is_intrinsic=False,
-                        db_pair=db_pairs.get(key, {}), total=total_dets,
-                    ))
-                    seen_keys.add(key)
-                if supports_tol:
-                    key = (model_name, TOL_SENTINEL)
-                    pairs.append(_inventory_pair(
-                        label_set="Tree of Life", label_set_path=None,
-                        fingerprint=TOL_SENTINEL, is_tol=True,
-                        is_intrinsic=False,
-                        db_pair=db_pairs.get(key, {}), total=total_dets,
-                    ))
-                    seen_keys.add(key)
-
-            models_out.append({
-                "id": m.get("id"),
-                "name": model_name,
-                "supports_tol": supports_tol,
-                "downloaded": bool(m.get("downloaded")),
-                "legacy": False,
-                "subtotal": _inventory_subtotal(pairs),
-                "pairs": pairs,
-            })
-
-        # Legacy: a (model, fp) in the DB whose model isn't in the current
-        # registry. Group those rows under one entry per legacy model name.
-        registry_names = {m.get("name") or m.get("id") for m in all_models}
-        legacy_groups = {}
-        for (model_name, fp), p in db_pairs.items():
-            if model_name in registry_names:
-                continue
-            legacy_groups.setdefault(model_name, []).append((fp, p))
-        for model_name, fp_pairs in sorted(legacy_groups.items()):
-            pairs = []
-            for fp, p in sorted(fp_pairs, key=lambda x: x[0]):
-                pairs.append(_inventory_pair(
-                    label_set=("Tree of Life" if fp == TOL_SENTINEL
-                               else "fp:" + fp[:8]),
-                    label_set_path=None, fingerprint=fp,
-                    is_tol=(fp == TOL_SENTINEL), is_intrinsic=False,
-                    db_pair=p, total=total_dets,
-                ))
-                seen_keys.add((model_name, fp))
-            models_out.append({
-                "id": None,
-                "name": model_name,
-                "supports_tol": False,
-                "downloaded": False,
-                "legacy": True,
-                "subtotal": _inventory_subtotal(pairs),
-                "pairs": pairs,
-            })
-
-        # Stale: a (current model, fingerprint) in the DB whose fingerprint
-        # is not currently on disk and isn't TOL. Single-file fingerprints
-        # come from the label_sets above; merged-set fingerprints come from
-        # the labels_fingerprints sidecar (one row per distinct merge the
-        # classify job has ever produced). A merged row is current if all
-        # its sources still exist and re-merging them reproduces the same
-        # fingerprint; otherwise the contents drifted and it's stale.
-        current_fps = {ls["fingerprint"] for ls in label_sets} | {TOL_SENTINEL}
-        for row in db.get_labels_fingerprints():
-            sources = row.get("sources") or []
-            if len(sources) <= 1:
-                continue  # single-file already covered by label_sets
-            if not all(os.path.exists(s) for s in sources):
-                continue
-            try:
-                merged = load_merged_labels([{"labels_file": source} for source in sources])
-            except OSError:
-                continue
-            if compute_fingerprint(merged) == row["fingerprint"]:
-                current_fps.add(row["fingerprint"])
-        stale = []
-        for (model_name, fp), p in db_pairs.items():
-            if model_name not in registry_names:
-                continue  # legacy, already grouped
-            if fp in current_fps:
-                continue
-            # The stale UI labels this column "Predictions", so report rows
-            # from `predictions` (one per species) rather than distinct
-            # detection IDs from `classifier_runs`. A top-k run with k species
-            # per detection would otherwise undercount stale work.
-            stale.append({
-                "model": model_name,
-                "fingerprint": fp,
-                "stale_count": p.get("predictions_count", 0),
-                "last_run": p.get("last_run"),
-            })
-
-        # Grand total: classified across all rows (including stale/legacy);
-        # pending across the current cross-product only (forward-looking work).
-        grand_classified_all = sum(
-            p.get("classified_dets", 0) for p in db_inv["pairs"]
-        )
-        grand_pending = sum(
-            pp["pending_dets"] for m in models_out
-            for pp in m["pairs"] if not m["legacy"]
-        )
-        denom = grand_classified_all + grand_pending
-        grand_coverage = (
-            round(100.0 * grand_classified_all / denom, 1) if denom > 0 else 0.0
-        )
-
-        return jsonify({
-            "workspace_id": ws_id,
-            "workspace_name": ws["name"] if ws else None,
-            "min_conf": min_conf,
-            "total_real_detections": total_dets,
-            "total_photos": db.count_photos(),
-            "models": models_out,
-            "stale": stale,
-            # Saved sets that produce no usable prompt at all, so they have
-            # no inventory row of their own. Named rather than dropped in
-            # silence (CORE_PHILOSOPHY: no black boxes).
-            "unusable_label_sets": unusable_label_sets,
-            "grand_total": {
-                "classified_dets": grand_classified_all,
-                "pending_dets": grand_pending,
-                "coverage_pct": grand_coverage,
-                "total_predictions_rows": db_inv["total_predictions_rows"],
-            },
-        })
 
     # -- Highlights --
 
@@ -10387,54 +9793,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return work
 
-    @app.route("/api/folders/<int:folder_id>/rescan", methods=["POST"])
-    @background_job
-    def api_folder_rescan(ctx, folder_id):
-        """Queue a scan job scoped to the given folder's path.
-
-        Body (optional): {"incremental": bool}
-        Returns: {"job_id": "scan-..."} on success; 404 if the folder id
-        is unknown or not linked to the active workspace.
-        """
-        body = request.get_json(silent=True) or {}
-        incremental = bool(body.get("incremental", False))
-        db = _get_db()
-        folder = db.get_folder(folder_id)
-        if not folder:
-            return json_error("folder not found", 404)
-        # Folders are global but scans emit workspace-scoped data (predictions,
-        # pending_changes). Reject rescans of folders the active workspace has
-        # no claim on — otherwise a stale UI or crafted request could pollute
-        # this workspace with scan output from an unrelated folder, and
-        # add_folder's auto-link would silently attach it.
-        linked = db.conn.execute(
-            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-            (ctx.workspace_id, folder_id),
-        ).fetchone()
-        if not linked:
-            return json_error("folder not found", 404)
-        root = folder["path"]
-        from image_loader import is_excluded_scan_path
-        # See api_job_scan for why this must run before os.path.isdir.
-        if is_excluded_scan_path(root):
-            return json_error(
-                f"folder is inside a macOS app-managed library and cannot "
-                f"be scanned: {root}"
-            )
-        if not os.path.isdir(root):
-            return json_error(f"folder path no longer exists: {root}")
-
-        work = _build_scan_work(root, incremental, ctx.workspace_id)
-
-        return ctx.start(
-            "scan", work,
-            config={
-                "root": root,
-                "incremental": incremental,
-                "folder_id": folder_id,
-            },
-            pausable=True,
-        )
 
     def _metadata_repair_count(db, workspace_id, root_paths=None):
         # Don't filter by ``folders.status``: that column is only refreshed
@@ -10538,98 +9896,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 repairable += 1
         return repairable
 
-    @app.route("/api/folders/reveal", methods=["POST"])
-    def api_folders_reveal():
-        """Reveal a batch of folder paths in the OS file manager.
-
-        Body: ``{"paths": [str, ...]}``. Backs the bulk-decide UI's
-        "Reveal in Finder" button, which opens every folder in a bucket
-        with a single click.
-
-        Each path must exist as a row in the ``folders`` table — refusing
-        arbitrary filesystem paths is the security boundary, otherwise
-        a malicious caller could probe paths via the side-channel of
-        whether the OS file manager opened. Unknown paths are returned
-        in ``skipped`` rather than 404'd so a single bad path doesn't
-        kill a bucket-wide batch.
-
-        Returns ``{"ok": True, "revealed": [str], "skipped":
-        [{"path", "reason"}], "failed": [{"path", "reason"}]}``.
-        """
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return json_error("paths required")
-        paths = body.get("paths")
-        if not isinstance(paths, list) or not paths:
-            return json_error("paths required")
-        for p in paths:
-            if not isinstance(p, str) or not p:
-                return json_error("paths must be a list of non-empty strings")
-
-        db = _get_db()
-        # Validate every path against the ``folders`` table — refusing
-        # arbitrary filesystem paths is the security boundary, otherwise
-        # a caller could probe disk via the OS-window-opens side channel.
-        # Don't gate on workspace_folders: duplicate scans are
-        # library-wide (file_hash is global), so a bucket can legitimately
-        # surface folders linked only to another workspace, and Vireo is
-        # a single-user app where workspaces are organizational rather
-        # than access-bound.
-        # Normalize both sides so legacy/relocated rows stored with a
-        # trailing separator still match bucket-UI paths derived from
-        # ``os.path.dirname(...)`` — same trap bulk_resolve_by_folder
-        # patched.
-        norm_paths = [os.path.normpath(p) for p in paths]
-        all_rows = db.conn.execute("SELECT path FROM folders").fetchall()
-        known_norm = {os.path.normpath(r["path"]) for r in all_rows}
-
-        revealed = []
-        skipped = []
-        failed = []
-        for path, norm in zip(paths, norm_paths, strict=True):
-            if norm not in known_norm:
-                skipped.append({"path": path, "reason": "not a known folder"})
-                continue
-            try:
-                if sys.platform == "darwin":
-                    proc = subprocess.run(["open", "-R", "--", path],
-                                          timeout=5, check=False,
-                                          **no_window_kwargs())
-                elif sys.platform.startswith("win"):
-                    # Folder reveal opens the folder itself (no /select,)
-                    # so the user sees its contents.
-                    proc = subprocess.run(["explorer", path],
-                                          timeout=5, check=False,
-                                          **no_window_kwargs())
-                else:
-                    # xdg-open doesn't honor `--`; abspath guarantees a
-                    # leading slash so a crafted leading-dash path can't
-                    # be parsed as a flag.
-                    proc = subprocess.run(
-                        ["xdg-open", os.path.abspath(path)],
-                        timeout=5, check=False,
-                        **no_window_kwargs(),
-                    )
-                # check=False returns a CompletedProcess for every exit
-                # code; classify non-zero as failed so the UI doesn't
-                # report success when nothing actually opened (e.g.
-                # unmounted volume, stale path).
-                if proc.returncode != 0:
-                    failed.append({
-                        "path": path,
-                        "reason": f"reveal command exited {proc.returncode}",
-                    })
-                else:
-                    revealed.append(path)
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-                failed.append({"path": path, "reason": str(exc)})
-
-        return jsonify({
-            "ok": True,
-            "revealed": revealed,
-            "skipped": skipped,
-            "failed": failed,
-        })
 
     # -- Export presets --
 
@@ -12081,6 +11347,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             missing_originals_heavy_job_types=_MISSING_ORIGINALS_HEAVY_JOB_TYPES,
         )
     )
+    app.register_blueprint(
+        create_folders_blueprint(
+            _get_db,
+            json_error,
+            lambda: app._job_runner,
+            db_path,
+            build_scan_work=_build_scan_work,
+            cleanup_cached_files_for_deleted_photos=(
+                _cleanup_cached_files_for_deleted_photos
+            ),
+            invalidate_missing_originals=_invalidate_missing_originals_cache,
+        )
+    )
+    app.register_blueprint(create_capture_time_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_remote_setup_blueprint(_get_db, json_error, app.config)
     )
