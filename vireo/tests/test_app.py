@@ -18397,7 +18397,7 @@ def _seed_bird_taxonomy(db):
 
 
 def test_build_explorer_payload_rollup(db):
-    from app import _build_explorer_payload
+    from web.life_list import _build_explorer_payload
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
@@ -18427,7 +18427,7 @@ def test_build_explorer_payload_rollup(db):
 
 
 def test_build_explorer_payload_not_ready(db):
-    from app import _build_explorer_payload
+    from web.life_list import _build_explorer_payload
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     payload = _build_explorer_payload(db)
@@ -18436,7 +18436,7 @@ def test_build_explorer_payload_not_ready(db):
 
 
 def test_build_explorer_payload_rejects_non_class_root(db):
-    from app import _build_explorer_payload
+    from web.life_list import _build_explorer_payload
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
@@ -18455,7 +18455,7 @@ def test_build_explorer_payload_rejects_non_class_root(db):
 
 
 def test_build_explorer_payload_multi_found_species_rollup(db):
-    from app import _build_explorer_payload
+    from web.life_list import _build_explorer_payload
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
@@ -18496,7 +18496,7 @@ def test_build_explorer_payload_multi_found_species_rollup(db):
 
 
 def test_build_explorer_species_leaf(db):
-    from app import _build_explorer_species
+    from web.life_list import _build_explorer_species
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
@@ -18547,7 +18547,7 @@ def test_api_explorer_not_ready(app_and_db):
 
 
 def test_build_explorer_rank_families(db):
-    from app import _build_explorer_rank
+    from web.life_list import _build_explorer_rank
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
@@ -18572,13 +18572,13 @@ def test_build_explorer_rank_families(db):
     # found-first ordering
     assert out['items'][0]['found'] is True
     # counts equal the payload summary chip
-    from app import _build_explorer_payload
+    from web.life_list import _build_explorer_payload
     assert out['found'] == _build_explorer_payload(db)['summary']['family']['found']
     assert out['total'] == _build_explorer_payload(db)['summary']['family']['total']
 
 
 def test_build_explorer_rank_species_has_photo(db):
-    from app import _build_explorer_rank
+    from web.life_list import _build_explorer_rank
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
@@ -18636,7 +18636,7 @@ def _seed_mammal_taxon(db):
 
 
 def test_explorer_uncounted_identifications_are_class_aware_and_reasoned(db):
-    from app import _build_explorer_payload
+    from web.life_list import _build_explorer_payload
 
     ids = _seed_bird_taxonomy(db)
     mammalia_id = _seed_mammal_taxon(db)
@@ -18708,7 +18708,7 @@ def test_build_explorer_payload_always_includes_default_aves_class(db):
     # stay in the selector so the user has an in-page way back to it. Recomputing
     # `classes` only from *found* taxa would otherwise drop Birds when the user's
     # only tagged species are outside Aves.
-    from app import _build_explorer_payload
+    from web.life_list import _build_explorer_payload
     ids = _seed_bird_taxonomy(db)
     mammalia_id = _seed_mammal_taxon(db)
     ws = db.ensure_default_workspace()
