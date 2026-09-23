@@ -6,6 +6,7 @@ of photo dicts keyed by ``id`` and batches its lookups so a page of results
 costs a handful of queries, not one per photo. Only
 ``attach_species_representatives`` and ``attach_nested_edit_recipes`` also
 accept the ``photo_id`` shape used by cached pipeline results.
+``prepare_browse_photo_dicts`` combines them into the Browse grid payload.
 """
 
 import hashlib
@@ -180,3 +181,79 @@ def attach_nested_edit_recipes(db, payload):
         photo["render_key"] = render_key_for_recipe(recipe)
     attach_species_representatives(db, [photo for photo, _pid in refs])
     return payload
+
+
+def prepare_browse_photo_dicts(db, photos, stack_items=None):
+    """Normalize photo rows and attach optional Browse stack summaries."""
+    photo_dicts = [dict(photo) for photo in photos]
+    stacks_by_cover = {
+        item["cover_id"]: item for item in (stack_items or [])
+    }
+    # Under a prediction-confidence sort the stacked query reports the
+    # score that positioned each item — read off the stack's *leading*
+    # member, which is usually not the quality-ranked cover. Keep it so
+    # the badge names the number that decided the card's place instead of
+    # the cover's own (Codex P2 on PR #1670). Absent for every other sort
+    # and for unstacked reads, where the card's own score is the one that
+    # positioned it.
+    stack_lead_confidence = {}
+    for photo in photo_dicts:
+        if "_stack_lead_prediction_confidence" in photo:
+            stack_lead_confidence[photo.get("id")] = photo[
+                "_stack_lead_prediction_confidence"
+            ]
+        projected = (
+            stack_items is not None
+            or "_browse_stack_kind" in photo
+        )
+        kind = photo.pop("_browse_stack_kind", None)
+        raw_count = photo.pop("_browse_stack_count", None)
+        raw_ids = photo.pop("_browse_stack_member_ids", None)
+        # Strip every SQL-only stack helper before the response is
+        # serialized. Their names and values are implementation details;
+        # Browse consumes only the stable summary below.
+        for key in list(photo):
+            if key.startswith("_"):
+                photo.pop(key, None)
+        item = stacks_by_cover.get(photo.get("id"))
+        if item is not None:
+            kind = item.get("kind")
+            member_ids = list(item.get("member_ids") or [])
+        else:
+            member_ids = []
+            if raw_ids:
+                member_ids = [
+                    int(value) for value in str(raw_ids).split(",") if value
+                ]
+        count = len(member_ids) if member_ids else int(raw_count or 1)
+        if projected:
+            photo["browse_stack"] = (
+                {
+                    "kind": kind,
+                    "count": count,
+                    "photo_ids": member_ids,
+                }
+                if kind and count >= 2
+                else None
+            )
+    attach_location_statuses(db, photo_dicts)
+    attach_species(db, photo_dicts)
+    attach_species_representatives(db, photo_dicts)
+    attach_detections(db, photo_dicts)
+    attach_prediction_confidence(db, photo_dicts)
+    for photo in photo_dicts:
+        if photo.get("id") not in stack_lead_confidence:
+            continue
+        photo["prediction_confidence"] = stack_lead_confidence[photo["id"]]
+        # Say, per card, that this number came off the stack's leading
+        # frame rather than the cover in the thumbnail — the client must
+        # not infer it from the sort dropdown. A healthy visual clause
+        # keeps results similarity-ranked no matter what the dropdown
+        # says, and that path builds its stacks in Python with only the
+        # cover's own score, so a select-derived label would explain the
+        # relevance order with a number that did not produce it (Codex
+        # P2 on PR #1670).
+        if (photo.get("browse_stack") or {}).get("count", 0) >= 2:
+            photo["prediction_confidence_is_stack_lead"] = True
+    attach_edit_recipes(db, photo_dicts)
+    return photo_dicts

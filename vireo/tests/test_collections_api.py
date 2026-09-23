@@ -814,7 +814,7 @@ def test_list_collections_flags_visual(app_and_db):
 
 def test_create_collection_rejects_non_string_visual_strength(app_and_db):
     """A JSON array for ``visual.strength`` is unhashable, so
-    ``strength in _VISUAL_STRENGTH_THRESHOLDS`` raises TypeError; without
+    ``strength in VISUAL_STRENGTH_THRESHOLDS`` raises TypeError; without
     an explicit type check that TypeError escapes the 400 handler as a 500
     (CodeRabbit review r3620473547 outside-diff note)."""
     app, db = app_and_db
@@ -977,7 +977,7 @@ def test_browse_init_visual_collection_scope_returns_empty_first_paint(app_and_d
     """``/api/browse/init?collection_id=<visual>`` cannot resolve the
     visual clause — ``db.get_photos(collection_id=...)`` /
     ``count_filtered_photos`` expand only ``collections.rules``, the same
-    rules-only path guarded elsewhere by ``_reject_visual_collection``.
+    rules-only path guarded elsewhere by ``reject_visual_collection``.
     For a visual-only collection (rules ``[]``) that would silently widen
     the first paint to the entire workspace instead of the saved visual
     result set; the client's ``filterByCollection()`` reloads through

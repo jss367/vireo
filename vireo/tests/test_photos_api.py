@@ -12931,7 +12931,7 @@ def test_api_photos_query_validation(app_and_db, monkeypatch):
     # Force an active visual model so the active-model injection walker
     # actually runs — that's the code path that must survive malformed
     # group rules without raising TypeError. Without a monkeypatch,
-    # ``_inject_active_visual_model`` returns rules verbatim and the
+    # ``inject_active_visual_model`` returns rules verbatim and the
     # malformed-group asserts below wouldn't exercise the walker at all.
     import models as models_mod
     monkeypatch.setattr(
@@ -13921,7 +13921,7 @@ def test_api_photos_geo_surfaces_visual_status(app_and_db, monkeypatch):
 def test_api_photos_geo_visual_scoped_to_plottable(app_and_db, monkeypatch):
     """Map visual search must not silently return zero when the only
     embedded photos are non-plottable. Without scoping the candidate set
-    to plottable ids, ``_resolve_visual`` would return ``status: ok``
+    to plottable ids, ``VisualScope.resolve`` would return ``status: ok``
     with non-plottable ids and ``get_geolocated_photos`` would then
     intersect them away — leaving the user with a "visual match" chip
     and zero markers, no fallback / no-index warning.
@@ -13931,7 +13931,7 @@ def test_api_photos_geo_visual_scoped_to_plottable(app_and_db, monkeypatch):
     photos = {p["filename"]: p["id"] for p in db.get_photos()}
     # Only bird3 is plottable — and only bird1 and bird2 (both
     # non-plottable in this test) carry embeddings. Without the
-    # plottable-scoped candidate set, _resolve_visual would happily
+    # plottable-scoped candidate set, VisualScope.resolve would happily
     # return bird1/bird2 as ``ok`` matches and get_geolocated_photos
     # would then intersect them away.
     db.conn.execute(
