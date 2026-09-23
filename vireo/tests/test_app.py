@@ -4896,6 +4896,43 @@ def test_shutdown_endpoint(app_and_db):
         mock_timer.start.assert_called_once()
 
 
+def test_shutdown_endpoints_take_no_workspace_mutation_reservation(
+    app_and_db, monkeypatch,
+):
+    """Shutdown is a control request: ``_reserve_workspace_mutation`` exempts
+    both shutdown endpoints by their blueprint-qualified names
+    (``system.api_shutdown`` / ``system.api_v1_shutdown``), so quitting is
+    never blocked behind a running transfer. If those names drift from the
+    registered endpoints, shutdown silently takes a reservation again."""
+    from unittest.mock import MagicMock, patch
+
+    app, _ = app_and_db
+    assert "system.api_shutdown" in app.view_functions
+    assert "system.api_v1_shutdown" in app.view_functions
+    calls = []
+    original = app._job_runner.workspace_mutation
+
+    def spy(workspace_id, *, exclusive=False):
+        calls.append((workspace_id, exclusive))
+        return original(workspace_id, exclusive=exclusive)
+
+    monkeypatch.setattr(app._job_runner, "workspace_mutation", spy)
+    client = app.test_client()
+    with patch("threading.Timer", return_value=MagicMock()):
+        resp = client.post("/api/shutdown", headers={"X-Vireo-Shutdown": "1"})
+        assert resp.status_code == 200
+        resp = client.post(
+            "/api/v1/shutdown",
+            headers={"X-Vireo-Token": app.config["API_TOKEN"]},
+        )
+        assert resp.status_code == 200
+    assert calls == []
+
+    # Sanity check: the spy does see reservations for a non-exempt mutation.
+    client.post("/api/recent-destinations", json={"path": "relative"})
+    assert calls
+
+
 def test_pipeline_page_init_api(app_and_db):
     """GET /api/pipeline/page-init returns pipeline initialization data."""
     app, _ = app_and_db

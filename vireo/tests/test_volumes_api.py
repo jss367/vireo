@@ -22,8 +22,8 @@ def test_volumes_macos_scans_volumes_dir(app_and_db):
 
     with app.test_client() as c, \
          patch("platform.system", return_value="Darwin"), \
-         patch("vireo.app.os.path.isdir", side_effect=_isdir), \
-         patch("vireo.app.os.listdir", return_value=["SD_CARD", "Backup"]):
+         patch("web.system.os.path.isdir", side_effect=_isdir), \
+         patch("web.system.os.listdir", return_value=["SD_CARD", "Backup"]):
         resp = c.get("/api/volumes")
         assert resp.status_code == 200
         paths = {v["path"] for v in resp.get_json()}
@@ -42,8 +42,8 @@ def test_volumes_linux_scans_media_mounts(app_and_db):
 
     with app.test_client() as c, \
          patch("platform.system", return_value="Linux"), \
-         patch("vireo.app.os.path.isdir", side_effect=_isdir), \
-         patch("vireo.app.os.listdir", side_effect=_listdir):
+         patch("web.system.os.path.isdir", side_effect=_isdir), \
+         patch("web.system.os.listdir", side_effect=_listdir):
         resp = c.get("/api/volumes")
         assert resp.status_code == 200
         paths = {v["path"] for v in resp.get_json()}
@@ -77,7 +77,7 @@ def test_volumes_windows_enumerates_drive_letters(app_and_db):
     with app.test_client() as c, \
          patch("platform.system", return_value="Windows"), \
          patch("ctypes.windll", windll, create=True), \
-         patch("vireo.app.os.path.isdir", side_effect=_isdir):
+         patch("web.system.os.path.isdir", side_effect=_isdir):
         resp = c.get("/api/volumes")
         assert resp.status_code == 200
         volumes = resp.get_json()
@@ -139,7 +139,7 @@ def test_volumes_windows_serializes_set_error_mode(app_and_db):
 
     with patch("platform.system", return_value="Windows"), \
          patch("ctypes.windll", windll, create=True), \
-         patch("vireo.app.os.path.isdir", side_effect=_isdir):
+         patch("web.system.os.path.isdir", side_effect=_isdir):
         t1 = threading.Thread(target=_hit)
         t2 = threading.Thread(target=_hit)
         t1.start()
@@ -199,7 +199,7 @@ def test_volumes_windows_skips_not_ready_drives(app_and_db):
     with app.test_client() as c, \
          patch("platform.system", return_value="Windows"), \
          patch("ctypes.windll", windll, create=True), \
-         patch("vireo.app.os.path.isdir", side_effect=_isdir):
+         patch("web.system.os.path.isdir", side_effect=_isdir):
         resp = c.get("/api/volumes")
         assert resp.status_code == 200
         paths = {v["path"] for v in resp.get_json()}

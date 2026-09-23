@@ -18,8 +18,8 @@ def test_reveal_macos(app_and_db):
     pid = db.get_photos()[0]["id"]
     expected_path = _expected_full_path(db, pid)
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "darwin"), \
+         patch("web.system.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
         assert resp.status_code == 200
@@ -40,9 +40,9 @@ def test_reveal_linux_opens_parent(app_and_db):
     # opening its parent — the sample DB uses synthetic paths, so pretend
     # the file is on disk so subprocess still gets called.
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "linux"), \
-         patch("vireo.app.os.path.isfile", return_value=True), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "linux"), \
+         patch("web.system.os.path.isfile", return_value=True), \
+         patch("web.system.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
         assert resp.status_code == 200
@@ -62,9 +62,9 @@ def test_reveal_linux_missing_photo_reports_error(app_and_db):
     app, db = app_and_db
     pid = db.get_photos()[0]["id"]
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "linux"), \
-         patch("vireo.app.os.path.isfile", return_value=False), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "linux"), \
+         patch("web.system.os.path.isfile", return_value=False), \
+         patch("web.system.subprocess.run") as run:
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
         assert resp.status_code == 200
         body = resp.get_json()
@@ -87,9 +87,9 @@ def test_reveal_windows_ignores_nonzero_exit(app_and_db):
     # launching Explorer; the sample DB uses synthetic paths, so pretend
     # the file is on disk so subprocess still gets called.
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "win32"), \
-         patch("vireo.app.os.path.isfile", return_value=True), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "win32"), \
+         patch("web.system.os.path.isfile", return_value=True), \
+         patch("web.system.subprocess.run") as run:
         run.return_value = MagicMock(returncode=1, stdout="", stderr="")
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
         assert resp.status_code == 200
@@ -100,9 +100,9 @@ def test_reveal_windows_select(app_and_db):
     app, db = app_and_db
     pid = db.get_photos()[0]["id"]
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "win32"), \
-         patch("vireo.app.os.path.isfile", return_value=True), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "win32"), \
+         patch("web.system.os.path.isfile", return_value=True), \
+         patch("web.system.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
         assert resp.status_code == 200
@@ -120,9 +120,9 @@ def test_reveal_windows_missing_photo_reports_error(app_and_db):
     app, db = app_and_db
     pid = db.get_photos()[0]["id"]
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "win32"), \
-         patch("vireo.app.os.path.isfile", return_value=False), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "win32"), \
+         patch("web.system.os.path.isfile", return_value=False), \
+         patch("web.system.subprocess.run") as run:
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
         assert resp.status_code == 200
         body = resp.get_json()
@@ -144,8 +144,8 @@ def test_reveal_shell_failure_reports_reason(app_and_db):
     app, db = app_and_db
     pid = db.get_photos()[0]["id"]
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "darwin"), \
+         patch("web.system.subprocess.run") as run:
         run.side_effect = FileNotFoundError("no 'open'")
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
         assert resp.status_code == 200
@@ -158,8 +158,8 @@ def test_reveal_nonzero_exit_reports_reason(app_and_db):
     app, db = app_and_db
     pid = db.get_photos()[0]["id"]
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "darwin"), \
+         patch("web.system.subprocess.run") as run:
         run.return_value = MagicMock(
             returncode=1,
             stdout="",
@@ -186,8 +186,8 @@ def test_reveal_folder_macos(app_and_db):
     app, db = app_and_db
     folder = db.get_folder_tree()[0]
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "darwin"), \
+         patch("web.system.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/files/reveal", json={"folder_id": folder["id"]})
         assert resp.status_code == 200
@@ -205,8 +205,8 @@ def test_reveal_folder_linux_opens_folder(app_and_db):
     app, db = app_and_db
     folder = db.get_folder_tree()[0]
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "linux"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "linux"), \
+         patch("web.system.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/files/reveal", json={"folder_id": folder["id"]})
         assert resp.status_code == 200
@@ -231,9 +231,9 @@ def test_reveal_folder_windows_opens_folder(app_and_db):
     def fake_isdir(p):
         return True if p == folder["path"] else real_isdir(p)
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "win32"), \
-         patch("vireo.app.os.path.isdir", side_effect=fake_isdir), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "win32"), \
+         patch("web.system.os.path.isdir", side_effect=fake_isdir), \
+         patch("web.system.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/files/reveal", json={"folder_id": folder["id"]})
         assert resp.status_code == 200
@@ -255,9 +255,9 @@ def test_reveal_folder_windows_missing_reports_error(app_and_db):
     def fake_isdir(p):
         return False if p == folder["path"] else real_isdir(p)
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "win32"), \
-         patch("vireo.app.os.path.isdir", side_effect=fake_isdir), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.system.sys.platform", "win32"), \
+         patch("web.system.os.path.isdir", side_effect=fake_isdir), \
+         patch("web.system.subprocess.run") as run:
         resp = c.post("/api/files/reveal", json={"folder_id": folder["id"]})
         assert resp.status_code == 200
         body = resp.get_json()
