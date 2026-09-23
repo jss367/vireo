@@ -132,9 +132,11 @@ def _resolve_models(model_ids):
     written into classifier_runs. Unknown ids are dropped — the plan reflects
     what the classify job would actually run, and the job ignores them.
     """
+    from models import get_active_model, get_models
+
     if not model_ids:
-        return []
-    from models import get_models
+        active = get_active_model()
+        model_ids = [active["id"]] if active else []
 
     by_id = {m["id"]: m for m in get_models()}
     out = []
@@ -330,7 +332,7 @@ def _classify_plan(
             max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
         )
 
-    det_counts = db.count_primary_detections_in_scope(
+    det_counts = db.count_real_detections_in_scope(
         photo_ids, min_conf=detector_confidence,
     )
     weak_det_counts = db.count_primary_detections_in_scope(
@@ -391,7 +393,7 @@ def _classify_plan(
             if info.get("blocked"):
                 continue
             fp = info["fingerprint"]
-            stale_total += db.count_primary_classify_stale(
+            stale_total += db.count_classify_stale(
                 classifier_model=m["name"],
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
@@ -518,7 +520,7 @@ def _classify_plan(
         if params.reclassify or params.raw_subject_analysis:
             pending = classifiable_units
         else:
-            pending = db.count_primary_classify_pending_pairs(
+            pending = db.count_classify_pending_pairs(
                 classifier_model=m["name"],
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
@@ -1072,7 +1074,17 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
 
 def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
-                  import_no_new=False):
+                  import_no_new=False, photo_ids=None):
+    # The job leaves the latest review untouched when the resolved selection
+    # is empty, including when exclusions removed every selected photo.
+    # Imports can collect destination photos absent from the preview scope;
+    # their no-work case is handled separately by import_no_new below.
+    if photo_ids is not None and not photo_ids and params.source_paths is None:
+        return {
+            "state": "will-skip",
+            "summary": "Will skip — no photos in scope to group",
+            "detail": {"photo_count": 0},
+        }
     if params.skip_regroup:
         # The identify preset sets ``skip_regroup=True`` but flags
         # ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py)
@@ -1128,6 +1140,12 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
                 "upstream_will_run": False,
                 "import_no_new": True,
             },
+        }
+    if params.collection_id is not None or params.photo_ids is not None or params.exclude_photo_ids:
+        return {
+            "state": "will-run",
+            "summary": "Will re-group selected photos and replace the latest review",
+            "detail": {"cache_exists": cache_exists, "scoped": True},
         }
     if upstream_will_run:
         return {
@@ -1518,7 +1536,7 @@ def compute_plan(db, params, db_path):
     )
     regroup = _regroup_plan(
         db, params, db_path, ws_id, upstream_will_run, effective_cfg,
-        import_no_new=import_no_new,
+        import_no_new=import_no_new, photo_ids=photo_ids,
     )
 
     stages = {

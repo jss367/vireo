@@ -262,22 +262,30 @@ def _timestamp_from_exif_group(exif_group):
         return None
 
 
-def _refresh_photo_metadata(db, photo_id, primary_path):
-    metadata = extract_metadata([primary_path]).get(primary_path)
+def _refresh_photo_metadata(db, photo_id, metadata_path, *, refresh_file_identity=True):
+    from scanner import compute_file_hash
+
+    # This is an intentional source edit, so establish the new integrity
+    # baseline even if ExifTool cannot read back the complete metadata.
+    if refresh_file_identity:
+        stat = os.stat(metadata_path)
+        file_hash = compute_file_hash(metadata_path) if stat.st_size else None
+        db.conn.execute(
+            "UPDATE photos SET file_hash=?, file_size=?, file_mtime=?, "
+            "hash_status=NULL, hash_checked_at=NULL WHERE id=?",
+            (file_hash, stat.st_size, stat.st_mtime, photo_id),
+        )
+    metadata = extract_metadata([metadata_path]).get(metadata_path)
     if not metadata:
         return
     exif = metadata.get("EXIF", {})
     timestamp = _timestamp_from_exif_group(exif)
-    file_mtime = os.path.getmtime(primary_path) if os.path.exists(primary_path) else None
 
     updates = ["exif_data=?"]
     params = [json.dumps(metadata)]
     if timestamp is not None:
         updates.append("timestamp=?")
         params.append(timestamp)
-    if file_mtime is not None:
-        updates.append("file_mtime=?")
-        params.append(file_mtime)
     params.append(photo_id)
     update_clause = ", ".join(updates)
     db.conn.execute("UPDATE photos SET " + update_clause + " WHERE id=?", params)
@@ -323,7 +331,8 @@ def adjust_capture_time(
     for index, photo in enumerate(photos, start=1):
         if cancel_check and cancel_check():
             break
-        paths = [p for p in _photo_paths(db, photo) if os.path.exists(p)]
+        catalog_paths = _photo_paths(db, photo)
+        paths = [p for p in catalog_paths if os.path.exists(p)]
         if not paths:
             failed += 1
             failures.append({"photo_id": photo["id"], "error": "source file not found"})
@@ -391,7 +400,16 @@ def adjust_capture_time(
                 # don't copy the read path's (0, 1) tolerance from
                 # metadata.py, which only accepts 1 for partial batch output.
                 raise RuntimeError((result.stderr or result.stdout or "ExifTool failed").strip())
-            _refresh_photo_metadata(db, photo["id"], paths[0])
+            # The primary may be offline while its companion is available.
+            # Companion EXIF can refresh capture metadata, never RAW identity.
+            _refresh_photo_metadata(
+                db, photo["id"], paths[0],
+                refresh_file_identity=paths[0] == catalog_paths[0],
+            )
+            # Invalidate only a companion that was actually edited. An offline
+            # companion still needs its saved identity for import deduplication.
+            if any(path in paths for path in catalog_paths[1:]):
+                db.conn.execute("DELETE FROM companion_identities WHERE photo_id=?", (photo["id"],))
             db.conn.commit()
             log.debug("ExifTool stdout: %s", result.stdout.strip())
             if result.stderr:

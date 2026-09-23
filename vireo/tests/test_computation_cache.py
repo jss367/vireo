@@ -2057,3 +2057,22 @@ def test_complete_enrichment_beats_partial_enrichment_same_identity(tmp_path):
             "Robin", "Sparrow",
         ]
         destination.close()
+
+
+def test_tree_of_life_models_share_sentinel_without_label_collision(tmp_path):
+    db, _, _ = _database_with_photo(tmp_path / "destination.db", "bird.jpg")
+    artifacts = []
+    for model, fingerprint in [("model-a", "a" * 64), ("model-b", "b" * 64)]:
+        artifact = classification_artifact()
+        artifact["classifier_model"] = model
+        artifact["labels"] = {"short_fingerprint": "tol", "fingerprint": fingerprint}
+        artifact["runtime_fingerprint"] = runtime_fingerprint({"model": model, "labels": fingerprint})
+        artifacts.append(artifact)
+    result = materialize_artifacts(
+        db, [detection_artifact(), *artifacts], known_runtimes={RUNTIME},
+        known_classifier_runtimes={a["runtime_fingerprint"] for a in artifacts},
+    )
+    assert result["label_collisions"] == 0
+    assert result["classifier_runs_applied"] == 2
+    assert {r[0] for r in db.conn.execute("SELECT classifier_model FROM classifier_runs")} == {"model-a", "model-b"}
+    db.close()

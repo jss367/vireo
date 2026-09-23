@@ -6,7 +6,7 @@ DELETE       /api/folders/<int:folder_id>
 DELETE       /api/import/orphaned-staging
 DELETE       /api/keywords/<int:keyword_id>
 DELETE       /api/labels
-DELETE       /api/models/<model_id>
+DELETE       /api/models/<path:model_id>
 DELETE       /api/move-rules/<int:rule_id>
 DELETE       /api/photo-preferences
 DELETE       /api/photos/<int:photo_id>/edit-recipe

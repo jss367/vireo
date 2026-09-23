@@ -1734,7 +1734,11 @@ function fetchFolderPreview() {
       body: JSON.stringify({ collection_id: parseInt(collId) }),
       signal: _previewAbort.signal,
     })
-      .then(function(r) { return r.json(); })
+      .then(async function(r) {
+        var data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || 'Could not load collection preview');
+        return data;
+      })
       .then(function(data) {
         _previewData = data;
         _previewSelected = {};
@@ -3510,20 +3514,27 @@ async function loadLabels(options) {
   } catch(e) {}
 }
 
+var readinessRequestSequence = 0;
 async function updateReadiness() {
   var panel = document.getElementById('readinessPanel');
-  var modelId = (document.querySelector('.model-checkbox:checked') || {}).value || '';
+  var requestSequence = ++readinessRequestSequence;
+  var modelIds = Array.from(document.querySelectorAll('.model-checkbox:checked')).map(function(cb) { return cb.value; });
+  if (!modelIds.length) modelIds = [''];
   var labelsFiles = [];
   document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
     labelsFiles.push(cb.value);
   });
 
   try {
-    var params = [];
-    if (modelId) params.push('model_id=' + encodeURIComponent(modelId));
-    labelsFiles.forEach(function(f) { params.push('labels_files=' + encodeURIComponent(f)); });
-    var r = await safeFetch('/api/classify/readiness' + (params.length ? '?' + params.join('&') : ''), {}, { toast: false });
-
+    var readiness = await Promise.all(modelIds.map(function(modelId) {
+      var params = [];
+      if (modelId) params.push('model_id=' + encodeURIComponent(modelId));
+      labelsFiles.forEach(function(f) { params.push('labels_files=' + encodeURIComponent(f)); });
+      return safeFetch('/api/classify/readiness' + (params.length ? '?' + params.join('&') : ''), {}, {toast: false});
+    }));
+    if (requestSequence !== readinessRequestSequence) return;
+    var sections = [];
+    readiness.forEach(function(r) {
     var items = [];
 
     // Model status
@@ -3562,7 +3573,7 @@ async function updateReadiness() {
     // Embeddings status
     if (!r.use_tol) {
       if (r.embeddings_cached) {
-        items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Embeddings: precomputed — classification will start immediately');
+        items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Embeddings: precomputed for this model');
       } else if (r.labels_count > 0) {
         items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> Embeddings: not cached — will compute for ' + r.labels_count.toLocaleString() + ' labels on first run (~1-3 min)');
       }
@@ -3579,10 +3590,14 @@ async function updateReadiness() {
       items.push(exifMsg);
     }
 
-    panel.innerHTML = items.join('<br>');
-    panel.style.display = items.length > 0 ? '' : 'none';
+    sections.push(items.join('<br>'));
+    });
+    panel.innerHTML = sections.join('<hr>');
+    panel.style.display = sections.length ? '' : 'none';
   } catch(e) {
-    panel.style.display = 'none';
+    if (requestSequence !== readinessRequestSequence) return;
+    panel.textContent = 'Could not check model readiness: ' + (e.message || e);
+    panel.style.display = '';
   }
 }
 

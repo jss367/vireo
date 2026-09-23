@@ -8205,6 +8205,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     _update_stages(runner, job["id"], stages)
                     return
 
+                eye_exclude_ids = set(params.exclude_photo_ids or ())
                 collection_photo_ids = (
                     _resolve_collection_photo_ids(thread_db, collection_id)
                     if collection_id is not None else None
@@ -8288,13 +8289,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # exclusion set so the actual keypoint runners
                     # don't reopen the dead source (CodeRabbit
                     # r3664548813).
-                    existing_exclude = (
-                        set(params.exclude_photo_ids)
-                        if params.exclude_photo_ids else set()
-                    )
-                    params.exclude_photo_ids = (
-                        existing_exclude | dropped_ids
-                    )
+                    eye_exclude_ids.update(dropped_ids)
                     # Publish for anyone downstream that may probe
                     # ``source_offline_state`` later.
                     prior_skipped = (
@@ -8443,7 +8438,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 detect_eye_keypoints_stage(
                     thread_db, config=pipeline_cfg, progress_callback=_progress,
                     collection_id=collection_id,
-                    exclude_photo_ids=params.exclude_photo_ids,
+                    exclude_photo_ids=eye_exclude_ids,
                     abort_check=lambda: _should_abort(abort),
                 )
 

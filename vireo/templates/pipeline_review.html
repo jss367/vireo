@@ -2226,7 +2226,7 @@ function escapeHtml(s) {
   if (s == null) return '';
   var d = document.createElement('div');
   d.textContent = String(s);
-  return d.innerHTML;
+  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function formatEncounterTimeRange(timeRange) {
@@ -3726,13 +3726,14 @@ function doReflow() {
     body: JSON.stringify(body),
   }, { toast: false })
   .then(function(data) {
+    if (seq !== reviewScopeRequestSeq) return;
     var indicator = document.getElementById('reflowIndicator');
     if (indicator) indicator.style.display = 'none';
-    if (seq !== reviewScopeRequestSeq) return;
     if (!data || data.error) return;
     applyReviewResults(data, scopedCacheInfoFor(data));
   })
   .catch(function() {
+    if (seq !== reviewScopeRequestSeq) return;
     var indicator = document.getElementById('reflowIndicator');
     if (indicator) indicator.style.display = 'none';
   });
@@ -3753,13 +3754,14 @@ function doRegroupLive() {
     body: JSON.stringify(body),
   }, { toast: false })
   .then(function(data) {
+    if (seq !== reviewScopeRequestSeq) return;
     var indicator = document.getElementById('reflowIndicator');
     if (indicator) indicator.style.display = 'none';
-    if (seq !== reviewScopeRequestSeq) return;
     if (!data || data.error) return;
     applyReviewResults(data, scopedCacheInfoFor(data));
   })
   .catch(function() {
+    if (seq !== reviewScopeRequestSeq) return;
     var indicator = document.getElementById('reflowIndicator');
     if (indicator) indicator.style.display = 'none';
   });
@@ -4434,6 +4436,7 @@ function closeInspect() {
 }
 
 function inspectKeyHandler(e) {
+  if (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))) return;
   if (e.key === 'Escape') { closeInspect(); return; }
   if (pipelineReviewBareKey(e, 'p') || pipelineReviewBareKey(e, 'x')) {
     var flag = pipelineReviewBareKey(e, 'p') ? 'flagged' : 'rejected';
@@ -4505,7 +4508,7 @@ function isScopedReviewView() {
 }
 
 function notifyReadOnlyScopedView() {
-  var label = reviewScopeMode === 'collection' ? 'Collection' : 'Workspace';
+  var label = pipelineResults && pipelineResults.source === 'browse-selection' ? 'Browse selection' : (reviewScopeMode === 'collection' ? 'Collection' : 'Workspace');
   showToast(
     label + ' scope is view-only. Switch to Latest review to make changes.',
     'warning'
@@ -4866,6 +4869,13 @@ function loadPipelinePageInit() {
     applyReviewResults(data.results, resultsCacheInfo);
     openRequestedGroupReviewFromUrl();
     loadReviewScopeCollections();
+  }).catch(function(error) {
+    var empty = document.getElementById('emptyState');
+    if (empty) {
+      empty.style.display = '';
+      empty.textContent = 'Could not load review: ' + (error.message || error) + '. Reload to try again.';
+    }
+    showToast('Could not load review: ' + (error.message || error), 'error');
   });
 }
 
@@ -5184,7 +5194,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   // overwrite the persisted review with only the scoped photo set. Block
   // it here — the inline species chip/dropdown buttons that call us have
   // no scope awareness of their own.
-  if (isScopedReviewView()) {
+  if (isScopedReviewView() || (pipelineResults && pipelineResults.source === 'browse-selection')) {
     notifyReadOnlyScopedView();
     return;
   }
@@ -5273,7 +5283,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
 async function clearBurstOverride(event, encIdx, burstIdx) {
   event.stopPropagation();
   closeAllDropdowns();
-  if (isScopedReviewView()) {
+  if (isScopedReviewView() || (pipelineResults && pipelineResults.source === 'browse-selection')) {
     notifyReadOnlyScopedView();
     return;
   }
@@ -5324,7 +5334,7 @@ window.afterHistoryChange = async function() {
 };
 
 async function detachBurst(encIdx, burstIdx) {
-  if (isScopedReviewView()) {
+  if (isScopedReviewView() || (pipelineResults && pipelineResults.source === 'browse-selection')) {
     notifyReadOnlyScopedView();
     return;
   }
@@ -5346,7 +5356,7 @@ async function detachBurst(encIdx, burstIdx) {
 }
 
 async function detachPhoto(encIdx, burstIdx, photoId) {
-  if (isScopedReviewView()) {
+  if (isScopedReviewView() || (pipelineResults && pipelineResults.source === 'browse-selection')) {
     notifyReadOnlyScopedView();
     return;
   }

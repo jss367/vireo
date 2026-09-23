@@ -575,7 +575,7 @@ def test_final_file_write_pauses_after_completion(
             finish_write()
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        def refresh(database, ident, path):
+        def refresh(database, ident, path, **kwargs):
             database.conn.execute("UPDATE photos SET rating=2 WHERE id=?", (ident,))
 
         monkeypatch.setattr(capture_time.shutil, "which", lambda _: "/usr/bin/exiftool")

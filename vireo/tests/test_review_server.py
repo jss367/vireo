@@ -189,7 +189,7 @@ def test_skip_updates_status():
         results_path = _create_test_review_data(tmpdir)
         app = create_app(tmpdir)
         client = app.test_client()
-        resp = client.post('/api/skip/bird1.jpg')
+        resp = client.post('/api/skip/bird1.jpg', json={})
         assert resp.status_code == 200
         with open(results_path) as f:
             data = json.load(f)
@@ -225,7 +225,7 @@ def test_skip_group_persists():
         results_path = _create_group_data(tmpdir)
         app = create_app(tmpdir)
         client = app.test_client()
-        resp = client.post('/api/skip-group/g0001')
+        resp = client.post('/api/skip-group/g0001', json={})
         assert resp.status_code == 200
         with open(results_path) as f:
             data = json.load(f)

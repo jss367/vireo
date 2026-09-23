@@ -5,6 +5,7 @@ endpoint. The route handler in app.py parses the request and delegates here.
 """
 
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -625,6 +626,8 @@ def _all_photos_cache_satisfied(
         )
         runtime_args = list(expected_runtimes) + [AUTO_MATCH_REVIEW_MARKER]
 
+    runtime_clause += " AND cr.runtime_fingerprint != 'incomplete'"
+
     # Only classifier_runs backed by at least one predictions row — or by a
     # measured ``classifier_match_scores`` summary — count as cache-satisfying.
     # See docstring: a classifier_run without matching predictions is
@@ -852,6 +855,7 @@ def _describe_cached_label_source(
                         WHERE d.photo_id IN ({placeholders})
                           AND {classifiable_detection}
                           AND {predictions_exists}
+                          AND cr.runtime_fingerprint != 'incomplete'
                           AND cr.labels_fingerprint IS NOT NULL
                         LIMIT 1""",
                     filter_args + list(chunk) + [detector_confidence],
@@ -2462,7 +2466,7 @@ def _record_batch_classifier_runs(
     rows are not written until ``_store_grouped_predictions`` runs later.
     Callers must invoke ``_publish_classifier_runs_for_raw_results`` after
     ``_store_grouped_predictions`` completes so fresh runs do not stay
-    stranded on ``runtime_fingerprint = 'legacy'``.
+    stranded on ``runtime_fingerprint = 'incomplete'``.
     """
     if not batch:
         return
@@ -2491,6 +2495,7 @@ def _record_batch_classifier_runs(
         db.record_classifier_run(
             did, model_name, labels_fingerprint,
             prediction_count=n,
+            runtime_fingerprint="incomplete",
             labels_fingerprint_full=labels_fingerprint_full,
             input_recipe=entry.get("input_recipe"),
         )
@@ -2967,7 +2972,10 @@ def _store_grouped_predictions(
             predictions_stored += 1
         else:
             group_count += 1
-            gid = f"g{job_id[-6:]}-{group_count:04d}"
+            group_namespace = hashlib.sha256(
+                json.dumps([job_id, model_name, labels_fingerprint]).encode()
+            ).hexdigest()[:16]
+            gid = f"g{group_namespace}-{group_count:04d}"
             # Vote on identity, retaining the first display spelling for
             # each key. Synonymous prompts must not split a unanimous vote.
             display_by_key = {}
@@ -3052,6 +3060,26 @@ def _store_grouped_predictions(
         skipped_match,
     )
 
+    # A flush only reserves a run. It becomes reusable once its predictions
+    # were actually stored. Cancellation before this point leaves an explicit
+    # cache miss instead of an empty 'legacy' cache hit.
+    for item in raw_results:
+        did = item.get("detection_id")
+        if did is not None and not item.get("_existing"):
+            db.conn.execute(
+                "UPDATE classifier_runs SET runtime_fingerprint='legacy' "
+                "WHERE detection_id=? AND classifier_model=? AND labels_fingerprint=? "
+                "AND runtime_fingerprint='incomplete' AND (EXISTS ("
+                "SELECT 1 FROM predictions p WHERE p.detection_id=classifier_runs.detection_id "
+                "AND p.classifier_model=classifier_runs.classifier_model "
+                "AND p.labels_fingerprint=classifier_runs.labels_fingerprint) OR EXISTS ("
+                "SELECT 1 FROM classifier_match_scores cms "
+                "WHERE cms.detection_id=classifier_runs.detection_id "
+                "AND cms.classifier_model=classifier_runs.classifier_model "
+                "AND cms.labels_fingerprint=classifier_runs.labels_fingerprint))",
+                (did, model_name, labels_fingerprint),
+            )
+    db.conn.commit()
     return {
         "predictions_stored": predictions_stored,
         "burst_groups": group_count,

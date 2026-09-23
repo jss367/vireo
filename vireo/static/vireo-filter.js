@@ -433,6 +433,10 @@
         label: `✦ Visually similar · “${state.visual.prompt}”`,
       });
     }
+    if (state.root.mode && state.root.mode !== 'all' && state.root.rules.length) {
+      entries.push({ node: state.root, label: describeNode(state.root) });
+      return entries;
+    }
     state.root.rules.forEach((node) => {
       const fromShortcut = isGroup(node) && !node._qs ? shortcutLabelFor(node) : null;
       if (isGroup(node) && node._qs) {
@@ -443,7 +447,7 @@
       } else if (isMissingTagGroup(node)) {
         entries.push({ node, label: node.rules.map((rule) => ruleLabel(rule)).join(' OR ') });
       } else {
-        allLeaves(node).forEach((leaf) => entries.push({ node: leaf, label: ruleLabel(leaf) }));
+        entries.push({ node, label: describeNode(node) });
       }
     });
     return entries;
@@ -561,7 +565,7 @@
     fetchJson('/api/photos/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rules, per_page: 1, visual: state.visual || undefined }),
+      body: JSON.stringify({ ...(state.getScope ? state.getScope() : {}), rules, per_page: 1, visual: state.visual || undefined }),
     }).then((data) => {
       if (epoch !== wouldMatchEpoch || !state.muted) return;
       state.wouldMatch = data.total;
@@ -1598,6 +1602,8 @@
             if (entry.visual) {
               state.visual = null;
               state.visualInfo = null;
+            } else if (entry.node === state.root) {
+              state.root = {mode: 'all', rules: []};
             } else if (isGroup(entry.node)) {
               state.root.rules = state.root.rules.filter((n) => n !== entry.node);
             } else removeByReference(state.root, entry.node);

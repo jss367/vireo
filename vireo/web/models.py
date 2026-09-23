@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import uuid
 
 from classification_readiness import classification_readiness
 from db import Database
@@ -208,7 +210,7 @@ def create_models_blueprint(
             }
         )
 
-    @blueprint.route("/api/models/<model_id>", methods=["DELETE"])
+    @blueprint.route("/api/models/<path:model_id>", methods=["DELETE"])
     def api_remove_model(model_id):
         """Remove a model's weights from disk and unregister it."""
         from models import remove_model
@@ -233,6 +235,10 @@ def create_models_blueprint(
     @blueprint.route("/api/models/custom", methods=["POST"])
     def api_add_custom_model():
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        if not isinstance(body.get("name", ""), str) or not isinstance(body.get("weights_path", ""), str):
+            return json_error("name and weights_path must be strings")
         name = body.get("name", "").strip()
         weights_path = body.get("weights_path", "").strip()
         model_str = body.get("model_str", "ViT-B-16")
@@ -240,7 +246,8 @@ def create_models_blueprint(
             return json_error("name and weights_path required")
         from models import register_model
 
-        model_id = "custom-" + name.lower().replace(" ", "-")
+        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "model"
+        model_id = f"custom-{slug}-{uuid.uuid4().hex[:12]}"
         register_model(model_id, name, model_str, weights_path, "Custom model")
         return jsonify({"ok": True, "model_id": model_id})
 
@@ -618,10 +625,15 @@ def create_models_blueprint(
         from labels import delete_labels
 
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         labels_file = body.get("labels_file")
         if not labels_file:
             return json_error("labels_file required")
-        delete_labels(labels_file)
+        try:
+            delete_labels(labels_file)
+        except ValueError as exc:
+            return json_error(str(exc))
         # Every workspace that had this set selected, not just the active
         # one: a selection naming a deleted file blocks classification and
         # no checkbox can clear it, because the UI lists only files it can

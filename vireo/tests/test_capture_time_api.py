@@ -759,3 +759,75 @@ def test_capture_time_job_counts_exiftool_write_error_as_failed(client_with_phot
     # Timestamp untouched — no false "updated" report
     refreshed = db.get_photo(photo_id)
     assert refreshed["timestamp"] == "2026-05-22T20:07:23.560000"
+
+
+def test_capture_time_companion_only_preserves_primary_identity(client_with_photo, monkeypatch):
+    import capture_time
+    import metadata
+
+    _, db, pid = client_with_photo
+    photo = db.get_photo(pid)
+    folder = db.conn.execute("SELECT path FROM folders WHERE id=?", (photo["folder_id"],)).fetchone()[0]
+    companion = os.path.join(folder, photo["filename"])
+    db.conn.execute(
+        "UPDATE photos SET filename='missing.nef', extension='.nef', companion_path=?, "
+        "file_hash='raw-hash', file_size=123456, file_mtime=42, hash_status='ok' WHERE id=?",
+        (photo["filename"], pid),
+    )
+    db.conn.commit()
+    commands = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(metadata, "find_exiftool", lambda: "exiftool")
+    monkeypatch.setattr(capture_time.subprocess, "run", fake_run)
+    monkeypatch.setattr(capture_time, "extract_metadata", lambda paths: {
+        paths[0]: {"EXIF": {"DateTimeOriginal": "2026:05:22 18:00:00"}},
+    })
+    result = capture_time.adjust_capture_time(db, [pid], mode="manual", shift_minutes=60)
+    assert result["updated"] == 1, result
+    assert commands[0][-1] == companion
+    row = db.conn.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone()
+    assert (row["file_hash"], row["file_size"], row["file_mtime"], row["hash_status"]) == (
+        "raw-hash", 123456, 42, "ok",
+    )
+    assert row["timestamp"] == "2026-05-22T18:00:00"
+
+
+def test_capture_time_primary_only_preserves_companion_identity(client_with_photo, monkeypatch, tmp_path):
+    import capture_time
+    import metadata
+    from import_dedup import CatalogIndex, DuplicateChecker
+    from scanner import compute_file_hash
+
+    _, db, pid = client_with_photo
+    source = tmp_path / "offline-companion.jpg"
+    source.write_bytes(b"original companion bytes from card")
+    companion_hash = compute_file_hash(str(source))
+    db.conn.execute("UPDATE photos SET companion_path=? WHERE id=?", (source.name, pid))
+    db.conn.execute(
+        "INSERT INTO companion_identities (photo_id, filename, file_size, file_hash) VALUES (?, ?, ?, ?)",
+        (pid, source.name, source.stat().st_size, companion_hash),
+    )
+    db.conn.commit()
+    monkeypatch.setattr(metadata, "find_exiftool", lambda: "exiftool")
+    commands = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(capture_time.subprocess, "run", fake_run)
+    monkeypatch.setattr(capture_time, "extract_metadata", lambda paths: {
+        paths[0]: {"EXIF": {"DateTimeOriginal": "2026:05:22 18:00:00"}},
+    })
+    result = capture_time.adjust_capture_time(db, [pid], mode="manual", shift_minutes=60)
+    assert result["updated"] == 1, result
+    command = _exiftool_command(commands)
+    assert len(command[command.index("--") + 1:]) == 1
+    identity = db.conn.execute("SELECT file_hash FROM companion_identities WHERE photo_id=?", (pid,)).fetchone()
+    assert identity is not None
+    assert identity["file_hash"] == companion_hash
+    assert DuplicateChecker(CatalogIndex.from_db(db), verify_by_hash=True).match(source)

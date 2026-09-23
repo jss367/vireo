@@ -2068,6 +2068,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     """
     if developed_listing_cache is None:
         developed_listing_cache = {}
+    from file_identity import catalog_folder_path
+
     # ``os.makedirs(..., exist_ok=True)`` raises ``FileExistsError`` when the
     # path exists but is a regular file. That would abort the whole batch
     # with an opaque exception, and for date-organized moves the preflight
@@ -2087,6 +2089,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             "destination_folder_id": None,
         }
     os.makedirs(destination, exist_ok=True)
+    destination = catalog_folder_path(db, destination)
     blocked_developed = _blocked_destination_developed_path(
         destination, developed_dir,
     )

@@ -980,8 +980,11 @@ def test_classify_plan_will_skip_when_disabled(tmp_path):
     assert plan["stages"]["Classify"]["state"] == "will-skip"
 
 
-def test_classify_plan_will_skip_when_no_models_selected(tmp_path):
+def test_classify_plan_will_skip_when_no_models_selected(tmp_path, monkeypatch):
+    import models
     from pipeline_plan import compute_plan
+
+    monkeypatch.setattr(models, "get_active_model", lambda: None)
     db, _ = _make_db(tmp_path)
     plan = compute_plan(db, _params(model_ids=[]), str(tmp_path / "test.db"))
     assert plan["stages"]["Classify"]["state"] == "will-skip"
@@ -1071,7 +1074,8 @@ def test_classify_plan_timm_intrinsic_uses_runtime_fingerprint(
     assert classify["detail"]["fingerprint_outdated"] is False
 
 
-def test_classify_plan_counts_primary_detections_only(tmp_path, monkeypatch):
+@pytest.mark.parametrize("model_ids", [["m1"], []])
+def test_classify_plan_counts_all_eligible_detections(tmp_path, monkeypatch, model_ids):
     from labels_fingerprint import TOL_SENTINEL
     from pipeline_plan import compute_plan
 
@@ -1100,15 +1104,16 @@ def test_classify_plan_counts_primary_detections_only(tmp_path, monkeypatch):
          "model_type": "bioclip", "downloaded": True,
          "weights_path": _tol_weights(tmp_path)},
     ])
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: models_mod.get_models()[0])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
     db.record_classifier_run(det_ids[0], "BioCLIP-2", TOL_SENTINEL, 1)
 
-    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    plan = compute_plan(db, _params(model_ids=model_ids), str(tmp_path / "test.db"))
     classify = plan["stages"]["Classify"]
-    assert classify["state"] == "done-prior"
-    assert classify["detail"]["eligible"] == 1
-    assert classify["detail"]["pending"] == 0
+    assert classify["state"] == "will-run"
+    assert classify["detail"]["eligible"] == 2
+    assert classify["detail"]["pending"] == 1
     assert classify["detail"]["stale"] == 0
 
 
@@ -2561,7 +2566,8 @@ def test_regroup_plan_species_review_skipped_when_selected_model_not_downloaded(
     assert plan["stages"]["Group"]["state"] == "will-skip"
 
 
-def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scoped", [False, True])
+def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path, monkeypatch, scoped):
     """The other headline bug: Group & Score had no signal at all and
     always said "Will run." When the cache exists and no upstream stage
     has work, the next press is a no-op — say so.
@@ -2605,11 +2611,11 @@ def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path
     plan = compute_plan(
         db,
         # Skip eye keypoints so it doesn't surface as upstream "will-run".
-        _params(model_ids=["m1"], skip_eye_keypoints=True),
+        _params(model_ids=["m1"], skip_eye_keypoints=True, photo_ids=[pid] if scoped else None),
         str(tmp_path / "test.db"),
     )
 
-    assert plan["stages"]["Group"]["state"] == "done-prior"
+    assert plan["stages"]["Group"]["state"] == ("will-run" if scoped else "done-prior")
 
 
 def test_regroup_plan_will_run_when_upstream_has_work(tmp_path):
@@ -4086,4 +4092,49 @@ def test_normal_plan_counts_raw_recipe_as_pending(tmp_path, monkeypatch, fallbac
     db.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1)
     stage = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))["stages"]["Classify"]
     assert stage["detail"]["pending"] == 0
+    db.close()
+
+
+@pytest.mark.parametrize("category, expected", [(None, 1), ("animal", 1), ("person", 0)])
+def test_plan_counts_use_runtime_category_defaults(tmp_path, category, expected):
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "legacy.jpg")
+    db.conn.execute("UPDATE detections SET category=? WHERE id=?", (category, did))
+    db.conn.commit()
+    for count in (db.count_real_detections_in_scope, db.count_primary_detections_in_scope):
+        assert count([pid], min_conf=0.2) == {"photos_with_dets": expected, "total_dets": expected}
+    for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
+        assert pending("Model", "current", [pid], min_conf=0.2) == expected
+    db.record_classifier_run(did, "Model", "old", prediction_count=1)
+    for stale in (db.count_classify_stale, db.count_primary_classify_stale):
+        assert stale("Model", "current", [pid], min_conf=0.2) == expected
+    db.record_classifier_run(did, "Model", "current", prediction_count=1)
+    for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
+        assert pending("Model", "current", [pid], min_conf=0.2) == 0
+    db.close()
+
+
+@pytest.mark.parametrize("scope", ["folder", "collection", "excluded"])
+def test_regroup_plan_skips_empty_resolved_scope(tmp_path, scope):
+    from pipeline_plan import PipelinePlanParams, compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "outside-selection.jpg")
+    if scope == "folder":
+        selection = {"photo_ids": []}
+    elif scope == "collection":
+        selection = {"collection_id": db.add_collection(
+            "Empty selection", '[{"field": "rating", "op": ">=", "value": 5}]',
+        )}
+    else:
+        selection = {"exclude_photo_ids": [pid]}
+    params = PipelinePlanParams(
+        skip_classify=True, skip_extract_masks=True, skip_eye_keypoints=True,
+        skip_regroup=False, **selection,
+    )
+    plan = compute_plan(db, params, str(tmp_path / "test.db"))
+    assert plan["scope"]["photo_count"] == 0
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip"
+    assert "no photos" in group["summary"]
     db.close()

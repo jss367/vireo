@@ -9690,6 +9690,7 @@ function lightboxDelete() {
 }
 /* ---------- iNat Submission ---------- */
 var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
+var _inatSubmitOwner = 0;
 var _inatSubmitting = false;  // true while inatDoSubmit's loop is running
 var _inatCancelled = false;   // set by closeInatModal to stop the loop gracefully
 var _inatQuickFailures = [];
@@ -10225,15 +10226,18 @@ async function inatDoSubmit() {
   var text = document.getElementById('inatProgressText');
   progress.style.display = 'block';
 
-  var total = inatQueue.length;
+  var queue = inatQueue;
+  var generation = _inatModalGeneration;
+  var owner = ++_inatSubmitOwner;
+  var total = queue.length;
   var done = 0;
   var succeeded = 0;
   _inatSubmitting = true;
   _inatCancelled = false;
 
   for (var i = 0; i < total; i++) {
-    if (_inatCancelled) break;
-    var item = inatQueue[i];
+    if (_inatCancelled || generation !== _inatModalGeneration) break;
+    var item = queue[i];
     var statusEl = document.getElementById('inatStatus' + i);
     var latValue = document.getElementById('inatLat' + i).value.trim();
     var lngValue = document.getElementById('inatLng' + i).value.trim();
@@ -10259,6 +10263,11 @@ async function inatDoSubmit() {
         body: JSON.stringify(submission),
       }, { toast: false });
 
+      if (generation !== _inatModalGeneration) {
+        if (!result.error) succeeded++;
+        done++;
+        break;
+      }
       if (result.error) {
         statusEl.className = 'inat-card-status error';
         statusEl.textContent = '✗ ' + result.error;
@@ -10272,6 +10281,7 @@ async function inatDoSubmit() {
         succeeded++;
       }
     } catch(e) {
+      if (generation !== _inatModalGeneration) break;
       statusEl.className = 'inat-card-status error';
       if (e.body && e.body.partial && e.body.observation_url) {
         statusEl.innerHTML = '&#10007; ' + escapeHtml(e.message) +
@@ -10282,16 +10292,18 @@ async function inatDoSubmit() {
     }
 
     done++;
+    if (generation !== _inatModalGeneration) break;
     fill.style.width = Math.round((done / total) * 100) + '%';
     text.textContent = done + ' / ' + total + ' processed (' + succeeded + ' succeeded)';
   }
 
+  if (owner !== _inatSubmitOwner) return;
   _inatSubmitting = false;
-  if (_inatCancelled) {
+  if (_inatCancelled || generation !== _inatModalGeneration) {
     // Modal is already closed (closeInatModal deferred the queue cleanup
     // to us) — surface the partial result where the user can see it.
     _inatCancelled = false;
-    inatQueue = [];
+    if (inatQueue === queue) inatQueue = [];
     showToast('iNaturalist: submitted ' + succeeded + ' of ' + total + ', cancelled', 'info');
     return;
   }
@@ -12905,7 +12917,10 @@ function formatDuration(seconds) {
     var isInternalNav = false;
     document.addEventListener('click', function(e) {
       var link = e.target.closest('a[href]');
-      if (link && link.hostname === location.hostname) {
+      if (link && !e.defaultPrevented && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey &&
+          (!e.button || e.button === 0) && link.target !== '_blank' && !link.hasAttribute('download') &&
+          link.hostname === location.hostname && !link.getAttribute('href').startsWith('#') &&
+          !(link.pathname === location.pathname && link.search === location.search && link.hash)) {
         isInternalNav = true;
         // Kill SSE and polling NOW so threads are freed for the next page
         if (lpSource) { lpSource.close(); lpSource = null; }
@@ -12994,16 +13009,23 @@ function formatDuration(seconds) {
 
   /* ---------- History tab ---------- */
   var _historySessionCount = 0;
+  var _historyLoadSeq = 0;
+  var _historyAppendPending = false;
 
   function loadEditHistory(append) {
+    if (append && _historyAppendPending) return;
+    if (!append) { _historyLoadSeq++; _historyAppendPending = false; }
+    var sequence = _historyLoadSeq;
     var list = document.getElementById('bpHistoryList');
     if (!list) return;
+    _historyAppendPending = true;
     var offset = append ? list.querySelectorAll('.bp-history-row').length : 0;
     var historyPromise = safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false});
     var redoPromise = !append ? safeFetch('/api/redo/status', {}, {toast: false}).catch(function() { return null; }) : Promise.resolve(null);
     var undoPromise = safeFetch('/api/undo/status', {}, {toast: false});
     Promise.all([historyPromise, redoPromise, undoPromise])
       .then(function(results) {
+        if (sequence !== _historyLoadSeq) return;
         var data = results[0];
         var redoStatus = results[1];
         if (!append) list.innerHTML = '';
@@ -13023,8 +13045,10 @@ function formatDuration(seconds) {
           return;
         }
         data.forEach(function(entry) {
+          if (list.querySelector('[data-edit-id="' + entry.id + '"]')) return;
           var row = document.createElement('div');
           row.className = 'bp-history-row';
+          row.dataset.editId = entry.id;
           row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);';
 
           var icon = entry.action_type === 'rating' ? '\u2605' :
@@ -13041,7 +13065,9 @@ function formatDuration(seconds) {
           list.appendChild(row);
         });
       })
-      .catch(function() {});
+      .catch(function() {}).finally(function() {
+        if (sequence === _historyLoadSeq) _historyAppendPending = false;
+      });
   }
 
   function _escapeHtml(s) {
@@ -13440,7 +13466,9 @@ function formatDuration(seconds) {
       // "Last run" fallback must exclude live state — running,
       // queued, and pending. A queued job that hasn't started is not a "last
       // run" any more than a running one is.
-      var lastDone = activeJobs.filter(function(j) { return !isLiveJob(j); })[0];
+      var lastDone = activeJobs.filter(function(j) { return !isLiveJob(j); }).sort(function(a, b) {
+        return String(b.finished_at || b.created_at || '').localeCompare(String(a.finished_at || a.created_at || ''));
+      })[0];
       if (lastDone) {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
           bpEscape(window.formatJobType(lastDone.type)) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
@@ -14880,7 +14908,11 @@ async function browseRelocate(path) {
 
   const list = document.getElementById('relocateFolderList');
   list.innerHTML = '';
-  const parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  const normalized = data.path.replace(/\\/g, '/').replace(/\/$/, '');
+  const cut = normalized.lastIndexOf('/');
+  let parent = cut >= 0 ? normalized.substring(0, cut) : '/';
+  if (/^[A-Za-z]:$/.test(parent)) parent += '/';
+  if (!parent) parent = '/';
   if (data.path !== '/') {
     const parentEl = document.createElement('div');
     parentEl.className = 'relocate-folder-item';

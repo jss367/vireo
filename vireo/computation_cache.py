@@ -2230,7 +2230,7 @@ def materialize_artifacts(
                  AND full_fingerprint != ?""",
             (labels["short_fingerprint"], labels["fingerprint"]),
         ).fetchone()
-        if collision:
+        if collision and labels["short_fingerprint"] != "tol":
             result["label_collisions"] += 1
             continue
 

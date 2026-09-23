@@ -596,6 +596,7 @@ def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
     assert os.path.isfile(cached_original)
     assert os.path.isfile(cached_xmp)
 
+    os.remove(os.path.join(folder["path"], photo["filename"]))
     resp = client.post("/api/audit/remove-orphans", json={"photo_ids": [pid]})
     assert resp.status_code == 200
 
@@ -11989,6 +11990,7 @@ def test_api_audit_import_untracked_invalidates_missing_cache(
     def _stub_import_untracked(db_arg, paths, **kwargs):
         assert db_arg._db_path == db._db_path
         assert paths == [str(img_path)]
+        return 1
 
     monkeypatch.setattr(audit_module, "import_untracked", _stub_import_untracked)
     monkeypatch.setattr(metadata, "exiftool_available", lambda: True)

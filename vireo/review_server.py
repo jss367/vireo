@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import webbrowser
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from xmp import write_sidecar
@@ -28,6 +29,19 @@ def create_app(data_dir):
         __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
     )
     app.config["DATA_DIR"] = data_dir
+
+    @app.before_request
+    def protect_writes():
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return None
+        origin = request.headers.get("Origin")
+        if request.headers.get("Sec-Fetch-Site") == "cross-site" or (
+            origin and urlsplit(origin).netloc != request.host
+        ):
+            return jsonify({"error": "Cross-origin writes are not allowed"}), 403
+        if not request.is_json or not isinstance(request.get_json(silent=True), dict):
+            return jsonify({"error": "A JSON object is required"}), 400
+        return None
 
     def _load_results():
         with open(os.path.join(data_dir, "results.json")) as f:
