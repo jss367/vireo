@@ -1825,7 +1825,7 @@
     fetchJson('/api/photos/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...(state.getScope ? state.getScope() : {}), rules, per_page: 1, visual: state.visual || undefined }),
+      body: JSON.stringify({ rules, per_page: 1, visual: state.visual || undefined }),
     }).then((data) => {
       preview.textContent = `${Number(data.total).toLocaleString()} matching photo${data.total === 1 ? '' : 's'} — ${expressionSummary()}`;
     }).catch(() => {});

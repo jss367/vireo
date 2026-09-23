@@ -132,5 +132,35 @@ async function testReadinessAndRegroupRaces() {
   assert.equal(applied, 1);
 }
 
-Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces()])
+async function testSavedCollectionPreviewScope() {
+  const source = fs.readFileSync('vireo/static/vireo-filter.js', 'utf8');
+  const openSaveModal = source.match(/  function openSaveModal\(\) \{[^]*?\n  \}/)[0];
+  for (const scope of [{folder_id: 7}, {collection_id: 9}]) {
+    const elements = new Map();
+    const element = selector => {
+      if (!elements.has(selector)) elements.set(selector, {focus() {}});
+      return elements.get(selector);
+    };
+    const rules = [{field: 'rating', operator: 'gte', value: 3}];
+    const visual = {prompt: 'owl', strength: 'medium'};
+    let request;
+    const ctx = vm.createContext({
+      $: element, state: {getScope: () => scope, visual},
+      userRules: () => rules, expressionSummary: () => 'Saved filter',
+      setTimeout: fn => fn(),
+      fetchJson: async (url, options) => {
+        request = JSON.parse(options.body);
+        return {total: request.folder_id || request.collection_id ? 1 : 9};
+      },
+    });
+    vm.runInContext(openSaveModal, ctx);
+    ctx.openSaveModal();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(element('.vf-save-preview').textContent, '9 matching photos — Saved filter');
+    assert.deepEqual(request.rules, rules);
+    assert.deepEqual(request.visual, visual);
+  }
+}
+
+Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces(), testSavedCollectionPreviewScope()])
   .catch(err => { console.error(err); process.exitCode = 1; });
