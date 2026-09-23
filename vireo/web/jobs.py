@@ -19,6 +19,7 @@ import time
 from db import Database
 from flask import Blueprint, Response, jsonify, request
 from web.background_jobs import make_background_job
+from web.request_args import reject_visual_collection
 from werkzeug.exceptions import BadRequest
 
 log = logging.getLogger(__name__)
@@ -53,16 +54,14 @@ def create_jobs_blueprint(
     get_runner,
     db_path,
     get_thumb_cache_dir,
-    *,
-    reject_visual_collection,
 ):
     """Build the jobs blueprint.
 
     ``get_thumb_cache_dir`` is a callable rather than a path because the
     launchers read ``app.config["THUMB_CACHE_DIR"]`` when the job runs, not
-    when the app is built. ``reject_visual_collection(db, collection_id)``
-    returns a 400 response for visual-only collections (or ``None``); the
-    collection-scoped launchers call it before starting work.
+    when the app is built. The collection-scoped launchers call
+    ``web.request_args.reject_visual_collection`` before starting work so
+    a visual-only collection gets a 400 instead of a widened scope.
     """
     blueprint = Blueprint("jobs", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
@@ -632,7 +631,7 @@ def create_jobs_blueprint(
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
         db = get_db()
-        err = reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
 
@@ -725,7 +724,7 @@ def create_jobs_blueprint(
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
         db = get_db()
-        err = reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         separate_file_types = body.get("separate_file_types", True)
@@ -796,7 +795,7 @@ def create_jobs_blueprint(
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
         db = get_db()
-        err = reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
 

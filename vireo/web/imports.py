@@ -4,9 +4,10 @@ Step 2 of the ``create_app`` split. Everything here moved verbatim out of
 ``app.py``; the closure helpers the routes shared with other domains are
 injected through the factory instead of captured from ``create_app``:
 
-- ``invalidate_missing_originals`` / ``reject_visual_collection`` /
-  ``metadata_repair_count`` / ``bulk_gps_location_payload`` still live in
-  ``app.py`` because other domains call them too.
+- ``invalidate_missing_originals`` / ``metadata_repair_count`` /
+  ``bulk_gps_location_payload`` still live in ``app.py`` because other
+  domains call them too. ``reject_visual_collection`` is imported from
+  ``web.request_args``.
 - ``enqueue_process_job`` and ``chain_after_move`` come from
   ``services.pipeline_launch.PipelineChain``, the job-thread side of the
   after-import chain; ``resolve_remote_archive_target`` is imported from
@@ -39,6 +40,7 @@ from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
 from services.pipeline_launch import resolve_remote_archive_target
 from web.background_jobs import make_background_job
+from web.request_args import reject_visual_collection
 
 log = logging.getLogger(__name__)
 
@@ -361,7 +363,6 @@ def create_imports_blueprint(
     config,
     *,
     invalidate_missing_originals,
-    reject_visual_collection,
     metadata_repair_count,
     enqueue_process_job,
     chain_after_move,
@@ -1505,7 +1506,7 @@ def create_imports_blueprint(
             return json_error("collection_id required", 400)
 
         db = get_db()
-        err = reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         try:

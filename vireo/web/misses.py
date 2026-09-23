@@ -15,6 +15,7 @@ import math
 
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_edit_recipes, attach_species_representatives
+from services.visual_scope import inject_active_visual_model, validate_visual_arg
 
 
 def create_misses_blueprint(
@@ -22,8 +23,6 @@ def create_misses_blueprint(
     json_error,
     *,
     settings_write_lock,
-    inject_active_visual_model,
-    validate_visual_arg,
     resolve_visual,
 ):
     """Build the misses blueprint.
@@ -31,11 +30,12 @@ def create_misses_blueprint(
     ``settings_write_lock`` serializes workspace ``config_overrides`` writes
     with the settings routes, so saving Misses thresholds as workspace
     defaults cannot interleave with another settings save.
-    ``inject_active_visual_model``, ``validate_visual_arg`` and
-    ``resolve_visual`` turn the shared filter bar's rules/visual expression
-    into a photo set the same way ``/api/photos/query`` does. All four are
-    shared with routes still in ``create_app``, so they are injected rather
-    than moved.
+    ``resolve_visual`` is the app's ``VisualScope.resolve``; with
+    ``inject_active_visual_model`` and ``validate_visual_arg`` from
+    ``services.visual_scope`` it turns the shared filter bar's rules/visual
+    expression into a photo set the same way ``/api/photos/query`` does.
+    It is injected because the ``VisualScope`` instance owns the per-app
+    query-text embedding cache.
     """
     blueprint = Blueprint("misses", __name__)
 

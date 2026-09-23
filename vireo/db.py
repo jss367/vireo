@@ -11342,7 +11342,7 @@ class Database:
         :meth:`get_geolocated_photos` and
         :meth:`count_photos_without_coordinates` use.
 
-        Callers pass this to ``_apply_visual_to_rules`` for the Map path so
+        Callers pass this to ``VisualScope.apply_to_rules`` for the Map path so
         the visual candidate set is restricted to plottable photos BEFORE
         the embedding query runs. Without it, a workspace with embeddings
         on non-plottable photos but none on plottable ones returns

@@ -4008,14 +4008,14 @@ def test_compare_predictions_api_can_refresh_selected_photos(app_and_db):
 
 def test_compare_predictions_api_limits_targeted_photo_ids(app_and_db):
     """A targeted refresh cannot build an unbounded collection query."""
-    import app as app_module
+    from web.request_args import MAX_SELECTION_PHOTOS
 
     app, db = app_and_db
     cid = db.add_collection("Target limit", "[]")
     query = [("collection_id", str(cid))]
     query.extend(
         ("photo_id", str(photo_id))
-        for photo_id in range(app_module._MAX_SELECTION_PHOTOS + 1)
+        for photo_id in range(MAX_SELECTION_PHOTOS + 1)
     )
 
     response = app.test_client().get(
@@ -20448,7 +20448,7 @@ def test_batch_accept_rejects_selection_beyond_photo_cap(app_and_db):
     """Enforce the same 1,000-photo cap the selection endpoint uses.
 
     The two Browse panels that feed this route resolve to at most 1,000
-    photos apiece (``_parse_selection_photo_ids``). The batch route now
+    photos apiece (``parse_selection_photo_ids``). The batch route now
     validates the resolved photo count so the semantic constraint holds
     at both ends of the request path.
     """
@@ -21581,18 +21581,18 @@ def test_batch_accept_has_no_prediction_id_count_cap(app_and_db):
 def test_batch_prediction_payload_shares_the_selection_photo_cap(app_and_db):
     """Both batch endpoints stop exactly where the producer stops.
 
-    The bound is one number (``_MAX_SELECTION_PHOTOS``) in one unit
+    The bound is one number (``MAX_SELECTION_PHOTOS``) in one unit
     (photos), so "what a selection may ask for" and "what a batch may act
     on" cannot drift apart again.
     """
-    import app as app_module
+    from web.request_args import MAX_SELECTION_PHOTOS
 
     app, db = app_and_db
     client = app.test_client()
     folder_id = db.get_folder_tree()[0]["id"]
 
     photos, pred_ids = [], []
-    for i in range(app_module._MAX_SELECTION_PHOTOS + 1):
+    for i in range(MAX_SELECTION_PHOTOS + 1):
         photo_id = db.add_photo(
             folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,

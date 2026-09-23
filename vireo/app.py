@@ -78,6 +78,7 @@ from photo_payload import (
     attach_prediction_confidence,
     attach_species,
     attach_species_representatives,
+    prepare_browse_photo_dicts,
     render_key_for_recipe,
 )
 from pipeline_results import auto_detach_burst_for_species
@@ -139,6 +140,13 @@ from services.pending_changes import (
     queue_location_sync_if_enabled,
 )
 from services.pipeline_launch import PipelineChain
+from services.visual_scope import (
+    VISUAL_COLLECTION_MSG,
+    VisualScope,
+    collection_rules_state,
+    inject_active_visual_model,
+    validate_visual_arg,
+)
 from volume_reachability import (  # noqa: F401  (re-exported for tests)
     _NETWORK_PROBE_LOCK,
     _NETWORK_PROBES,
@@ -177,6 +185,18 @@ from web.photo_labels import create_photo_labels_blueprint
 from web.photo_review import create_photo_review_blueprint
 from web.pipeline import create_pipeline_blueprint
 from web.remote_setup import create_remote_setup_blueprint
+from web.request_args import (
+    MAX_FOCUS_PHOTO_IDS,
+    MAX_SELECTION_PHOTOS,
+    coerce_collection_id,
+    dashboard_scope_args,
+    focus_candidate_ids,
+    parse_selection_photo_ids,
+    reject_visual_collection,
+    request_bool_arg,
+    request_rules_arg,
+    request_visual_arg,
+)
 from web.settings import (
     LOCATION_KEYWORDS_SETTING,
     create_settings_blueprint,
@@ -1098,15 +1118,6 @@ def _filter_highlight_curation_state(
 # SQLite versions. Sized below 999 to leave headroom for additional bound
 # parameters in joined statements.
 _SQL_PARAM_CHUNK = 900
-
-
-# Largest photo selection the Browse selection panels will act on. Owned here
-# rather than inline so the producer (``/api/selection/*``, which reads a
-# selection) and the consumers (``/api/predictions/batch-*``, which write one)
-# are bounded by the same number. A batch payload is validated in photos, not
-# in prediction ids, precisely so it cannot be tighter than what the producer
-# is allowed to emit for that selection.
-_MAX_SELECTION_PHOTOS = 1000
 
 
 def _chunked(seq, size=_SQL_PARAM_CHUNK):
@@ -3161,25 +3172,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }), 500
 
     _MAX_PER_PAGE = 500
-    # A focused lookup may be asked about several photos at once (every frame
-    # of the stack Browse is holding onto). Bursts are runs of frames, not
-    # catalogs, so this is a sanity bound on the request rather than a policy
-    # limit — each candidate is one more ID in one ranking query.
-    _MAX_FOCUS_PHOTO_IDS = 200
-
-    def _focus_candidate_ids(focus_photo_id, focus_photo_ids):
-        """The photos a focused request may be placed by, in caller order.
-
-        ``focus_photo_id`` stays first when both are given: it is the card
-        the caller actually wants, and the list is its fallback.
-        """
-        candidates = []
-        for pid in ([focus_photo_id] if focus_photo_id is not None else []) + list(
-            focus_photo_ids or []
-        ):
-            if pid not in candidates:
-                candidates.append(pid)
-        return candidates
 
     def json_error(msg, status=400, *, code=None, message=None):
         """Return a JSON error response with an optional user-facing message."""
@@ -3215,27 +3207,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     location_errors = LocationErrors(
         json_error=json_error, photo_not_found_error=_photo_not_found_error,
     )
-
-    def _coerce_collection_id(raw):
-        """Parse an optional collection_id from a request body.
-
-        Returns ``None`` if absent/blank, an ``int`` if valid, or the
-        sentinel ``False`` if present but unparseable (so callers can
-        distinguish "not provided" from "invalid"). ``bool`` is rejected
-        because it's an ``int`` subclass.
-        """
-        if raw is None or raw == "":
-            return None
-        if isinstance(raw, bool):
-            return False
-        if isinstance(raw, int):
-            return raw
-        if isinstance(raw, str):
-            try:
-                return int(raw)
-            except ValueError:
-                return False
-        return False
 
     def _get_db():
         """Get a Database instance. One connection per request via Flask g."""
@@ -4298,81 +4269,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- API routes --
 
-    def _prepare_browse_photo_dicts(db, photos, stack_items=None):
-        """Normalize photo rows and attach optional Browse stack summaries."""
-        photo_dicts = [dict(photo) for photo in photos]
-        stacks_by_cover = {
-            item["cover_id"]: item for item in (stack_items or [])
-        }
-        # Under a prediction-confidence sort the stacked query reports the
-        # score that positioned each item — read off the stack's *leading*
-        # member, which is usually not the quality-ranked cover. Keep it so
-        # the badge names the number that decided the card's place instead of
-        # the cover's own (Codex P2 on PR #1670). Absent for every other sort
-        # and for unstacked reads, where the card's own score is the one that
-        # positioned it.
-        stack_lead_confidence = {}
-        for photo in photo_dicts:
-            if "_stack_lead_prediction_confidence" in photo:
-                stack_lead_confidence[photo.get("id")] = photo[
-                    "_stack_lead_prediction_confidence"
-                ]
-            projected = (
-                stack_items is not None
-                or "_browse_stack_kind" in photo
-            )
-            kind = photo.pop("_browse_stack_kind", None)
-            raw_count = photo.pop("_browse_stack_count", None)
-            raw_ids = photo.pop("_browse_stack_member_ids", None)
-            # Strip every SQL-only stack helper before the response is
-            # serialized. Their names and values are implementation details;
-            # Browse consumes only the stable summary below.
-            for key in list(photo):
-                if key.startswith("_"):
-                    photo.pop(key, None)
-            item = stacks_by_cover.get(photo.get("id"))
-            if item is not None:
-                kind = item.get("kind")
-                member_ids = list(item.get("member_ids") or [])
-            else:
-                member_ids = []
-                if raw_ids:
-                    member_ids = [
-                        int(value) for value in str(raw_ids).split(",") if value
-                    ]
-            count = len(member_ids) if member_ids else int(raw_count or 1)
-            if projected:
-                photo["browse_stack"] = (
-                    {
-                        "kind": kind,
-                        "count": count,
-                        "photo_ids": member_ids,
-                    }
-                    if kind and count >= 2
-                    else None
-                )
-        attach_location_statuses(db, photo_dicts)
-        attach_species(db, photo_dicts)
-        attach_species_representatives(db, photo_dicts)
-        attach_detections(db, photo_dicts)
-        attach_prediction_confidence(db, photo_dicts)
-        for photo in photo_dicts:
-            if photo.get("id") not in stack_lead_confidence:
-                continue
-            photo["prediction_confidence"] = stack_lead_confidence[photo["id"]]
-            # Say, per card, that this number came off the stack's leading
-            # frame rather than the cover in the thumbnail — the client must
-            # not infer it from the sort dropdown. A healthy visual clause
-            # keeps results similarity-ranked no matter what the dropdown
-            # says, and that path builds its stacks in Python with only the
-            # cover's own score, so a select-derived label would explain the
-            # relevance order with a number that did not produce it (Codex
-            # P2 on PR #1670).
-            if (photo.get("browse_stack") or {}).get("count", 0) >= 2:
-                photo["prediction_confidence_is_stack_lead"] = True
-        attach_edit_recipes(db, photo_dicts)
-        return photo_dicts
-
     def _request_flag_filter():
         flag = request.args.get("flag", None)
         if flag in (None, ""):
@@ -4381,26 +4277,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raise ValueError("flag must be 'none', 'flagged', or 'rejected'")
         return flag
 
-    def _request_bool_arg(name):
-        raw = request.args.get(name, "")
-        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-    def _request_rules_arg():
-        """Parse the optional ``rules`` query param (a JSON universal-filter
-        rule tree). Returns None when absent; raises ValueError on invalid
-        JSON so callers surface a 400. The active visual model is injected
-        exactly as /api/photos/query does, keeping every rules-accepting
-        endpoint's notion of "has a visual index" consistent.
-        """
-        raw = request.args.get("rules")
-        if not raw:
-            return None
-        try:
-            rules = json.loads(raw)
-        except ValueError as exc:
-            raise ValueError("rules must be valid JSON") from exc
-        return _inject_active_visual_model(rules)
-
     def _request_photo_ids_arg():
         """Parse the optional ``photo_ids`` query param (comma-separated ints).
 
@@ -4408,7 +4284,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         raises ValueError on a malformed value so a typo surfaces as a 400
         rather than silently widening the query to the whole workspace.
 
-        Capped at the same 1000 ids ``_parse_selection_photo_ids`` allows:
+        Capped at the same 1000 ids ``parse_selection_photo_ids`` allows:
         ``/api/predictions`` runs one ``_photo_in_workspace`` query per id, so
         an unbounded list turns a single GET into unbounded database work.
         """
@@ -4434,170 +4310,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raise ValueError("too many photo_ids")
         return ids
 
-    _VISUAL_STRENGTH_THRESHOLDS = {"broad": 0.10, "balanced": 0.15, "strict": 0.22}
-    # Query-text embeddings keyed by (model, prompt): the ONNX text encode is
-    # the expensive step and the same prompt is re-resolved by every surface
-    # (grid, summary, calendar, facet counts) plus each typeahead keystroke.
-    _text_query_cache = {}
-
-    def _validate_visual_arg(visual):
-        """Normalize a visual clause payload or raise ValueError."""
-        if visual is None:
-            return None
-        if not isinstance(visual, dict):
-            raise ValueError("visual must be an object")
-        prompt = visual.get("prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("visual.prompt must be a non-empty string")
-        strength = visual.get("strength", "balanced")
-        # An unhashable strength (e.g. ``["broad"]``) makes ``strength in
-        # _VISUAL_STRENGTH_THRESHOLDS`` raise ``TypeError``, which would
-        # escape the 400 handler in the collection create/update paths as
-        # a 500 (CodeRabbit review r3620473547 outside-diff note).
-        if not isinstance(strength, str):
-            raise ValueError("visual.strength must be a string")
-        if strength not in _VISUAL_STRENGTH_THRESHOLDS:
-            raise ValueError("visual.strength must be broad, balanced, or strict")
-        return {"prompt": prompt.strip(), "strength": strength}
-
-    def _request_visual_arg():
-        """Parse the optional ``visual`` query param (JSON clause)."""
-        raw = request.args.get("visual")
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)
-        except ValueError as exc:
-            raise ValueError("visual must be valid JSON") from exc
-        return _validate_visual_arg(parsed)
-
-    def _resolve_visual(
-        db, rules, visual, collection_id=None, folder_id=None,
-        candidate_photo_ids=None,
-        include_offline_folders=False,
-    ):
-        """Run a visual clause over the rule tree's candidate photos.
-
-        Returns ``(info, ordered_ids, sims_by_pid)``. ``info["status"]`` is
-        ``ok`` with ids ordered by similarity, or an unhealthy state
-        (``no_model`` / ``model_no_text_search`` / ``no_embeddings`` /
-        ``encoding_failed``) with ``ordered_ids is None`` — callers then
-        apply metadata rules only and surface the state. Never silently
-        zero results (design hard requirement).
-
-        ``candidate_photo_ids`` further intersects the rule-derived
-        candidate set. The Map endpoint passes plottable ids so a
-        workspace whose only embeddings sit on non-plottable photos
-        surfaces as ``no_embeddings`` (metadata fallback) instead of
-        returning ``ok`` with ids that ``get_geolocated_photos`` will
-        silently intersect down to zero.
-        """
-        import numpy as np
-        from models import get_active_model
-        base = {"prompt": visual["prompt"], "strength": visual["strength"]}
-        active = get_active_model()
-        if not active:
-            return {**base, "status": "no_model", "model": None}, None, None
-        model_name = active["name"]
-        base["model"] = model_name
-        if active.get("model_type", "bioclip") == "timm":
-            return {**base, "status": "model_no_text_search"}, None, None
-        candidates = db.query_photo_ids(
-            rules, collection_id=collection_id, folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-        )
-        if candidate_photo_ids is not None:
-            restrict = set(candidate_photo_ids)
-            candidates = [pid for pid in candidates if pid in restrict]
-        emb_pairs = db.get_photos_with_embedding(
-            model_name,
-            photo_ids=candidates,
-            include_offline_folders=include_offline_folders,
-        )
-        if not emb_pairs:
-            return (
-                {**base, "status": "no_embeddings",
-                 "candidates": len(candidates), "indexed": 0},
-                None, None,
-            )
-        cache_key = (model_name, visual["prompt"])
-        query_vec = _text_query_cache.get(cache_key)
-        if query_vec is None:
-            from text_encoder import encode_text
-            try:
-                query_vec = encode_text(
-                    visual["prompt"],
-                    model_str=active["model_str"],
-                    pretrained_str=active.get("weights_path", ""),
-                )
-            except Exception as exc:
-                log.exception("Visual clause text encoding failed: %r", visual["prompt"])
-                return (
-                    {**base, "status": "encoding_failed", "error": str(exc)},
-                    None, None,
-                )
-            if len(_text_query_cache) > 64:
-                _text_query_cache.clear()
-            _text_query_cache[cache_key] = query_vec
-        pids = [pid for pid, _ in emb_pairs]
-        emb_matrix = np.stack(
-            [np.frombuffer(blob, dtype=np.float32) for _, blob in emb_pairs]
-        )
-        sims = emb_matrix @ query_vec
-        threshold = _VISUAL_STRENGTH_THRESHOLDS[visual["strength"]]
-        ordered_ids = []
-        sims_by_pid = {}
-        for i in np.argsort(sims)[::-1]:
-            if sims[i] < threshold:
-                break
-            pid = pids[int(i)]
-            ordered_ids.append(pid)
-            sims_by_pid[pid] = round(float(sims[i]), 4)
-        info = {**base, "status": "ok", "matched": len(ordered_ids),
-                "candidates": len(candidates), "indexed": len(emb_pairs)}
-        return info, ordered_ids, sims_by_pid
-
-    def _apply_visual_to_rules(
-        db, rules, visual, collection_id=None, folder_id=None,
-        candidate_photo_ids=None,
-    ):
-        """For GET consumers (summary/calendar/values/geo/predictions):
-        when the visual clause is healthy, restrict the rules to the
-        matched ids (inlined photo_ids — no bound-parameter cap) so
-        counts describe the same photos the visually-filtered grid
-        shows. Unhealthy → rules unchanged, matching the grid's
-        metadata-only fallback.
-
-        Returns ``(rules, visual_info)``. ``visual_info`` is ``None`` when
-        no visual clause was requested; otherwise it is the
-        ``_resolve_visual`` status dict — ``{status: "ok", matched, …}``
-        on a successful clause, or an unhealthy state (``no_model`` /
-        ``model_no_text_search`` / ``no_embeddings`` / ``encoding_failed``)
-        when the clause fell back to metadata-only. Endpoints whose UI
-        renders the visual chip (Map, Browse, Review) must surface this
-        so the chip does not silently broaden results.
-
-        ``candidate_photo_ids`` narrows the pre-embedding candidate set —
-        used by ``/api/photos/geo`` to keep the visual search inside the
-        Map's plottable scope so a workspace with embeddings only on
-        non-plottable photos surfaces as ``no_embeddings`` instead of
-        returning ``ok`` ids that the endpoint then intersects away.
-        """
-        if visual is None:
-            return rules, None
-        base_rules = rules if rules is not None else []
-        info, ordered_ids, _sims = _resolve_visual(
-            db, base_rules, visual,
-            collection_id=collection_id, folder_id=folder_id,
-            candidate_photo_ids=candidate_photo_ids,
-        )
-        if ordered_ids is None:
-            return rules, info
-        rules_list = (
-            [] if rules is None
-            else ([rules] if isinstance(rules, dict) else list(rules))
-        )
-        return rules_list + [{"field": "photo_ids", "value": ordered_ids}], info
+    # Resolves visual-search clauses; owns the per-app query-text
+    # embedding cache, so every route shares one instance.
+    visual_scope = VisualScope()
 
     def _request_location_status_filter():
         value = (request.args.get("location_status") or "").strip().lower()
@@ -4608,14 +4323,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "location_status must be 'exif', 'assigned', or 'none'"
             )
         return value
-
-    def _collection_rules_state(db, rules_json):
-        """Return parsed collection rules and whether they are degraded."""
-        try:
-            parsed_rules = json.loads(rules_json)
-        except (TypeError, ValueError):
-            return None, True
-        return parsed_rules, not db.rules_resolvable(parsed_rules)
 
     @app.route("/api/browse/init")
     def api_browse_init():
@@ -4633,7 +4340,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # item. If it is a hidden member of a stack, stack pagination cannot
         # express its position, so focused loads deliberately use ordinary
         # photo rows; the user can re-enable stacks after the handoff.
-        stacks = _request_bool_arg("stacks") and focus_photo_id is None
+        stacks = request_bool_arg("stacks") and focus_photo_id is None
 
         # Keep the combined first-paint payload on one SQLite read snapshot.
         # Independent SELECT snapshots can straddle a background folder-health
@@ -4645,7 +4352,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # ``db.get_photos(collection_id=...)`` / ``count_filtered_photos`` both
         # expand only ``collections.rules`` — the same rules-only path guarded
-        # elsewhere by ``_reject_visual_collection``. A visual-only collection
+        # elsewhere by ``reject_visual_collection``. A visual-only collection
         # stores ``rules: []``, so running it through that path here would
         # silently widen first paint to every workspace photo. The client's
         # ``bootstrapBrowse()`` calls ``filterByCollection()`` right after,
@@ -4797,7 +4504,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
 
-        photo_dicts = _prepare_browse_photo_dicts(db, photos)
+        photo_dicts = prepare_browse_photo_dicts(db, photos)
         collection_dicts = []
         for c in collections:
             d = dict(c)
@@ -4811,7 +4518,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # on every smart-collection query. Malformed JSON is treated
             # as degraded too — those rules would 400 downstream just
             # like an unresolvable rule.
-            parsed_rules, degraded = _collection_rules_state(db, c["rules"])
+            parsed_rules, degraded = collection_rules_state(db, c["rules"])
             if degraded:
                 d["can_add_photos"] = False
                 d["count_error"] = True
@@ -5913,15 +5620,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # scopes to a visual collection here would silently widen to every
         # metadata match instead of the saved visual result set (Codex
         # review r3621634298).
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
-        keyword_match_case = _request_bool_arg("keyword_match_case")
-        keyword_whole_word = _request_bool_arg("keyword_whole_word")
+        keyword_match_case = request_bool_arg("keyword_match_case")
+        keyword_whole_word = request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
@@ -5986,65 +5693,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
         )
 
-    def _inject_active_visual_model(rules):
-        """Fill in the active visual model on ``has_visual_index`` leaves
-        that don't name one.
-
-        ``/api/filters/fields`` advertises ``Has visual index`` as a plain
-        boolean field, so the UI-emitted rule has no ``model`` key. The
-        rule engine's fallback then matches any ``photo_embeddings`` row,
-        so a photo with only stale embeddings from a previously-active
-        model satisfies ``has_visual_index is true`` even though visual
-        search (which only loads embeddings for the active model — see
-        ``api_photo_text_search``) can't use it. Inject the current active
-        model here so the filter and visual search agree on what "has an
-        index" means; smart-collection storage paths (POST/PUT
-        ``/api/collections``) also normalize before persisting so a
-        collection's saved rules match what the preview counter showed at
-        save time (Codex review r3621749904) — otherwise the sidebar
-        count and the reopened result set silently diverge from the
-        preview when embeddings from multiple models exist.
-
-        When no active model is configured (fresh library, or every
-        installed model was removed while cached embeddings remain), the
-        UI-emitted rule must fail closed instead of falling through to
-        "any embedding row" — otherwise ``/api/photos/query`` would
-        report photos as visually indexed while ``/api/photos/search``
-        returns ``no_model``. Inject a sentinel model name that can never
-        match a stored ``photo_embeddings.model`` value, so
-        ``has_visual_index is true`` matches nothing and
-        ``has_visual_index is false`` matches everything — both correct
-        for "there is no usable visual index right now".
-        """
-        try:
-            from models import get_active_model
-            active = get_active_model()
-        except Exception:
-            active = None
-        model_name = active.get("name") if active else None
-        injected_model = model_name or "__no_active_visual_model__"
-
-        def _walk(node):
-            if isinstance(node, dict):
-                if "rules" in node and "field" not in node:
-                    inner = node.get("rules")
-                    # Malformed group (e.g. ``{"mode":"all","rules":null}``):
-                    # leave it untouched so ``Database._validate_node`` can
-                    # raise a ``ValueError`` that the route turns into a 400.
-                    # Iterating ``None`` here would raise ``TypeError`` and
-                    # bypass the 400 handler.
-                    if not isinstance(inner, list):
-                        return node
-                    return {**node, "rules": [_walk(r) for r in inner]}
-                if node.get("field") == "has_visual_index" and "model" not in node:
-                    return {**node, "model": injected_model}
-                return node
-            if isinstance(node, list):
-                return [_walk(r) for r in node]
-            return node
-
-        return _walk(rules)
-
     @app.route("/api/photos/query", methods=["POST"])
     def api_photos_query():
         """Universal-filter photo query: a smart-collection rule tree plus
@@ -6099,7 +5747,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # set; the Browse reopen path already sends the stored ``rules`` +
         # ``visual`` without relying on ``collection_id`` (Codex review
         # r3621903988).
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         folder_id = payload.get("folder_id")
@@ -6128,21 +5776,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         focus_photo_ids = payload.get("focus_photo_ids")
         if focus_photo_ids is not None and (
             not isinstance(focus_photo_ids, list)
-            or len(focus_photo_ids) > _MAX_FOCUS_PHOTO_IDS
+            or len(focus_photo_ids) > MAX_FOCUS_PHOTO_IDS
             or any(not isinstance(pid, int) or isinstance(pid, bool)
                    for pid in focus_photo_ids)
         ):
             return json_error(
                 "focus_photo_ids must be a list of at most "
-                f"{_MAX_FOCUS_PHOTO_IDS} integers", 400,
+                f"{MAX_FOCUS_PHOTO_IDS} integers", 400,
             )
-        focus_candidates = _focus_candidate_ids(focus_photo_id, focus_photo_ids)
+        focus_candidates = focus_candidate_ids(focus_photo_id, focus_photo_ids)
         # One name for "is this a focused request" from here down, so the
         # snapshot, the lookups and the response stay in step.
         focus_photo_id = focus_candidates[0] if focus_candidates else None
-        rules = _inject_active_visual_model(rules)
+        rules = inject_active_visual_model(rules)
         try:
-            visual = _validate_visual_arg(payload.get("visual"))
+            visual = validate_visual_arg(payload.get("visual"))
         except ValueError as exc:
             return json_error(str(exc), 400)
 
@@ -6177,7 +5825,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         visual_info = None
         if visual is not None:
             try:
-                visual_info, ordered_ids, sims_by_pid = _resolve_visual(
+                visual_info, ordered_ids, sims_by_pid = visual_scope.resolve(
                     db, rules, visual,
                     collection_id=collection_id, folder_id=folder_id,
                     include_offline_folders=(
@@ -6293,7 +5941,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     stack_items[start:start + per_page]
                     if stack_items is not None else None
                 )
-                photo_dicts = _prepare_browse_photo_dicts(
+                photo_dicts = prepare_browse_photo_dicts(
                     db,
                     [photos_map[pid] for pid in page_ids if pid in photos_map],
                     stack_items=page_stack_items,
@@ -6441,7 +6089,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except ValueError as exc:
                 return json_error(str(exc), 400)
 
-            photo_dicts = _prepare_browse_photo_dicts(db, photos)
+            photo_dicts = prepare_browse_photo_dicts(db, photos)
 
             response = {
                 "photos": photo_dicts,
@@ -6555,7 +6203,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Without ``visual``, a saved visual collection would silently widen
         # the typeahead counts to every metadata match (Codex review
         # r3622521597).
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         # Clamp ``limit`` to a positive bounded range. Werkzeug's ``type=int``
@@ -6567,10 +6215,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if limit_raw is None:
             limit_raw = 20
         limit = max(1, min(limit_raw, 500))
-        rules = _inject_active_visual_model(rules)
+        rules = inject_active_visual_model(rules)
         try:
-            visual = _request_visual_arg()
-            rules, _visual_info = _apply_visual_to_rules(
+            visual = request_visual_arg()
+            rules, _visual_info = visual_scope.apply_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -6596,15 +6244,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # goes through ``_build_collection_query``, so a visual collection
         # id would silently widen to every metadata match (Codex review
         # r3621634298).
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
-        keyword_match_case = _request_bool_arg("keyword_match_case")
-        keyword_whole_word = _request_bool_arg("keyword_whole_word")
+        keyword_match_case = request_bool_arg("keyword_match_case")
+        keyword_whole_word = request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
@@ -6643,13 +6291,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # which reads only ``collections.rules``. Without ``visual``, a saved
         # visual collection would silently widen calendar counts to every
         # metadata match (Codex review r3622521597).
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         try:
-            rules = _request_rules_arg()
-            visual = _request_visual_arg()
-            rules, _visual_info = _apply_visual_to_rules(
+            rules = request_rules_arg()
+            visual = request_visual_arg()
+            rules, _visual_info = visual_scope.apply_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -6677,13 +6325,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # ``activeCollectionId`` when opening a collection into the filter
         # bar, so its ``/api/browse/summary`` calls never carry a visual
         # collection id; this guards direct API callers.
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         try:
-            rules = _request_rules_arg()
-            visual = _request_visual_arg()
-            rules, _visual_info = _apply_visual_to_rules(
+            rules = request_rules_arg()
+            visual = request_visual_arg()
+            rules, _visual_info = visual_scope.apply_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -6992,8 +6640,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         folder_id = request.args.get("folder_id", None, type=int)
         focus_photo_id = request.args.get("photo_id", None, type=int)
         try:
-            rules = _request_rules_arg()
-            visual = _request_visual_arg()
+            rules = request_rules_arg()
+            visual = request_visual_arg()
             # Fill in the active visual model on any UI-emitted
             # ``has_visual_index`` rule that omits it. Without this a Map
             # filter for "has index" (rule sent without a ``model`` key)
@@ -7002,7 +6650,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # are not indexed for the currently-active visual search —
             # /api/photos/query already injects here (line 5691), so the
             # Map path must match to stay consistent.
-            rules = _inject_active_visual_model(rules)
+            rules = inject_active_visual_model(rules)
             # Restrict the visual candidate set to plottable photos so a
             # workspace whose only embeddings live on non-plottable photos
             # doesn't return ``status: ok`` with ids that
@@ -7013,7 +6661,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 db.get_plottable_photo_ids(folder_id=folder_id)
                 if visual is not None else None
             )
-            rules, visual_info = _apply_visual_to_rules(
+            rules, visual_info = visual_scope.apply_to_rules(
                 db, rules, visual, folder_id=folder_id,
                 candidate_photo_ids=plottable_ids,
             )
@@ -7360,7 +7008,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if raw_ids:
             return _normalize_photo_id_list(raw_ids)
 
-        collection_id = _coerce_collection_id(body.get("collection_id"))
+        collection_id = coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
             return None, json_error("collection_id must be an integer", 400)
         if collection_id is None:
@@ -7377,7 +7025,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # collection would silently expand to every metadata match. The
         # picker filters these out, but reject here as the boundary.
         if row["visual_json"] is not None:
-            return None, json_error(_VISUAL_COLLECTION_MSG, 400)
+            return None, json_error(VISUAL_COLLECTION_MSG, 400)
         return db.get_collection_photo_ids(collection_id), None
 
     def _location_review_groups(photos, cluster_radius_m=750.0):
@@ -8589,7 +8237,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Return selected keywords and which selected photos carry each one."""
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        photo_ids, err = _parse_selection_photo_ids(body)
+        photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error)
         if err is not None:
             return err
 
@@ -8837,40 +8485,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ambiguous.add(row["id"])
         return ambiguous
 
-    def _parse_selection_photo_ids(body, *, limit=_MAX_SELECTION_PHOTOS):
-        """Validate a selection payload's ``photo_ids``.
-
-        Returns ``(photo_ids, None)`` or ``(None, error_response)``. Shared by
-        the keyword and prediction selection panels so both enforce the same
-        cap and workspace scoping — a selection that is safe to read keywords
-        for is exactly the selection that is safe to read predictions for.
-        """
-        db = _get_db()
-        raw_ids = body.get("photo_ids", [])
-        if not isinstance(raw_ids, list) or not raw_ids:
-            return None, json_error("photo_ids required")
-
-        photo_ids = []
-        seen = set()
-        for raw in raw_ids:
-            if isinstance(raw, bool) or not isinstance(raw, int):
-                return None, json_error("photo_ids must be integers")
-            if raw not in seen:
-                photo_ids.append(raw)
-                seen.add(raw)
-        if not photo_ids:
-            return None, json_error("photo_ids required")
-        if limit is not None and len(photo_ids) > limit:
-            return None, json_error("too many photo_ids", 400)
-
-        visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
-        for pid in photo_ids:
-            if pid not in visible_ids:
-                return None, json_error(
-                    f"Photo {pid} does not belong to the active workspace", 403
-                )
-        return photo_ids, None
-
     @app.route("/api/selection/prediction-suggestions", methods=["POST"])
     def api_selection_prediction_suggestions():
         """Aggregate pending predictions across a selection, grouped by species.
@@ -8889,7 +8503,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        photo_ids, err = _parse_selection_photo_ids(body)
+        photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error)
         if err is not None:
             return err
 
@@ -10240,7 +9854,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
             return json_error("request body must be a JSON object")
-        photo_ids, error = _parse_selection_photo_ids(body, limit=None)
+        photo_ids, error = parse_selection_photo_ids(
+            db, body, json_error=json_error, limit=None,
+        )
         if error is not None:
             return error
         keyword_id = body.get("keyword_id")
@@ -11250,14 +10866,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Statistics --
 
-    def _dashboard_scope_args():
-        return {
-            "folder_id": request.args.get("folder_id", None, type=int),
-            "collection_id": request.args.get("collection_id", None, type=int),
-            "date_from": request.args.get("date_from", None),
-            "date_to": request.args.get("date_to", None),
-        }
-
     @app.route("/api/dashboard/options")
     def api_dashboard_options():
         """Return lightweight scope choices without running collection counts.
@@ -11277,7 +10885,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchall()
         collections = []
         for row in collection_rows:
-            _, degraded = _collection_rules_state(db, row["rules"])
+            _, degraded = collection_rules_state(db, row["rules"])
             collections.append({
                 "id": row["id"],
                 "name": row["name"],
@@ -11295,8 +10903,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/stats")
     def api_stats():
         db = _get_db()
-        scope = _dashboard_scope_args()
-        err = _reject_visual_collection(db, scope.get("collection_id"))
+        scope = dashboard_scope_args()
+        err = reject_visual_collection(
+            db, scope.get("collection_id"), json_error=json_error,
+        )
         if err is not None:
             return err
         try:
@@ -11314,8 +10924,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         linked to the workspace). Both share the same coverage keys.
         """
         db = _get_db()
-        scope = _dashboard_scope_args()
-        err = _reject_visual_collection(db, scope.get("collection_id"))
+        scope = dashboard_scope_args()
+        err = reject_visual_collection(
+            db, scope.get("collection_id"), json_error=json_error,
+        )
         if err is not None:
             return err
         try:
@@ -11615,7 +11227,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 d["photo_count"] = None
                 d["available_photo_count"] = None
                 d["offline_photo_count"] = None
-                _, degraded = _collection_rules_state(db, c["rules"])
+                _, degraded = collection_rules_state(db, c["rules"])
                 if degraded:
                     d["count_error"] = True
                     app.logger.warning(
@@ -11695,13 +11307,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # library with embeddings from multiple models silently
             # widens the collection to "any embedding exists" (Codex
             # review r3621749904).
-            rules = _inject_active_visual_model(rules)
+            rules = inject_active_visual_model(rules)
             db.count_photos_for_rules(rules)
             # The visual clause is saved alongside rules — a collection
             # saved from an expression with a visual component must
             # reproduce the same result set on reopen, not silently drop
             # to metadata-only.
-            visual = _validate_visual_arg(body.get("visual"))
+            visual = validate_visual_arg(body.get("visual"))
         except ValueError as e:
             return json_error(str(e), 400)
         cid = db.add_collection(
@@ -11780,7 +11392,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Same active-model pinning as POST so the persisted
                 # rules match what the save-time preview counted
                 # (Codex review r3621749904).
-                rules = _inject_active_visual_model(rules)
+                rules = inject_active_visual_model(rules)
                 db.count_photos_for_rules(rules)
             except ValueError as e:
                 return json_error(str(e), 400)
@@ -11788,7 +11400,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             params.append(json.dumps(rules))
         if "visual" in body:
             try:
-                visual = _validate_visual_arg(body.get("visual"))
+                visual = validate_visual_arg(body.get("visual"))
             except ValueError as e:
                 return json_error(str(e), 400)
             updates.append("visual_json = ?")
@@ -11894,50 +11506,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("collection not found", 404)
         return jsonify({"ok": True, "id": new_id})
 
-    def _collection_row(db, collection_id):
-        """Return the (workspace-scoped) collection row or None."""
-        return db.conn.execute(
-            "SELECT id, name, rules, visual_json FROM collections "
-            "WHERE id = ? AND workspace_id = ?",
-            (collection_id, db._ws_id()),
-        ).fetchone()
-
-    _VISUAL_COLLECTION_MSG = (
-        "This collection has a visual-search clause. The rules-only "
-        "endpoint would silently widen the scope to every metadata "
-        "match, so it is refused here. Open the collection from Browse "
-        "to see the visual results."
-    )
-
-    def _reject_visual_collection(db, collection_id):
-        """Return a 400 response if the collection is visual, else None.
-
-        The consumers that call ``db.get_collection_photos`` /
-        ``collection_photo_ids`` (pipeline stages, sharpness/cull/classify/
-        regroup/masks jobs, predictions-compare, the Misses legacy API, import
-        preview) evaluate ``rules`` only. A visual-only collection would
-        otherwise silently scope those runs to every metadata-matching
-        photo instead of the visually-matched subset — the fix Codex
-        flagged in review r3620423210. Pickers hide these collections too,
-        but this is the source-of-truth boundary check.
-
-        Coerce the raw JSON value before the ``visual_json`` lookup:
-        SQLite's ``WHERE id = ?`` still matches integer id 1 when handed
-        ``"1"`` or ``True``, so an early ``isinstance`` bail-out would let
-        a string- or bool-typed id skip the guard and hit the rules-only
-        path anyway (Codex review r3620636582). Return a 400 on an
-        unparseable id so callers can't silently widen the scope.
-        """
-        coerced = _coerce_collection_id(collection_id)
-        if coerced is None:
-            return None
-        if coerced is False:
-            return json_error("collection_id must be an integer", 400)
-        row = _collection_row(db, coerced)
-        if row is not None and row["visual_json"] is not None:
-            return json_error(_VISUAL_COLLECTION_MSG, 400)
-        return None
-
     @app.route("/api/collections/<int:collection_id>/photos")
     def api_collection_photos(collection_id):
         import config as cfg
@@ -11947,14 +11515,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # visual collections up front so the pipeline/review/etc. consumers
         # that hit it don't silently scope to every metadata-matching
         # photo instead of the visually-matched subset.
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
-        stacks = _request_bool_arg("stacks")
+        stacks = request_bool_arg("stacks")
         # Same focused lookup ``/api/photos/query`` offers, for the same
         # reason: a collection-scoped grid that reloads around a selected
         # card (a re-sort, an undo, a folder-health refresh) has to be told
@@ -11975,12 +11543,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "focus_photo_ids must be a comma-separated list of integers",
                     400,
                 )
-            if len(focus_photo_ids) > _MAX_FOCUS_PHOTO_IDS:
+            if len(focus_photo_ids) > MAX_FOCUS_PHOTO_IDS:
                 return json_error(
                     "focus_photo_ids must hold at most "
-                    f"{_MAX_FOCUS_PHOTO_IDS} integers", 400,
+                    f"{MAX_FOCUS_PHOTO_IDS} integers", 400,
                 )
-        focus_candidates = _focus_candidate_ids(focus_photo_id, focus_photo_ids)
+        focus_candidates = focus_candidate_ids(focus_photo_id, focus_photo_ids)
         # Offset pagination is only self-consistent within one snapshot. A
         # commit landing between the position lookup and the page fetch can
         # move the card across the page boundary, and the response would
@@ -12037,7 +11605,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         finally:
             if focus_snapshot and db.conn.in_transaction:
                 db.conn.rollback()
-        photo_dicts = _prepare_browse_photo_dicts(db, photos)
+        photo_dicts = prepare_browse_photo_dicts(db, photos)
         response = {
             "photos": photo_dicts,
             "page": page,
@@ -12069,11 +11637,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         P2 on PR #1561).
         """
         db = _get_db()
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         sort = request.args.get("sort", "date")
-        stacks = _request_bool_arg("stacks")
+        stacks = request_bool_arg("stacks")
         try:
             if stacks:
                 photo_ids = db.get_collection_photo_ids_stacked(
@@ -12561,11 +12129,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             limit_per_bucket=request.args.get("limit_per_bucket", 20, type=int),
             species_filter=request.args.get("species") or "",
-            species_match_case=_request_bool_arg("species_match_case"),
-            species_whole_word=_request_bool_arg("species_whole_word"),
+            species_match_case=request_bool_arg("species_match_case"),
+            species_whole_word=request_bool_arg("species_whole_word"),
             search_query=request.args.get("q") or "",
-            search_match_case=_request_bool_arg("q_match_case"),
-            search_whole_word=_request_bool_arg("q_whole_word"),
+            search_match_case=request_bool_arg("q_match_case"),
+            search_whole_word=request_bool_arg("q_whole_word"),
             confirmation_filter=request.args.get("confirmation") or "all",
             highlight_filter=request.args.get("highlight_selection") or "all",
             representative_filter=(
@@ -13418,8 +12986,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             buckets,
             unidentified_photos,
             request.args.get("q") or "",
-            _request_bool_arg("q_match_case"),
-            _request_bool_arg("q_whole_word"),
+            request_bool_arg("q_match_case"),
+            request_bool_arg("q_whole_word"),
         )
         _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
@@ -13504,7 +13072,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             lambda: app.config["THUMB_CACHE_DIR"],
-            reject_visual_collection=_reject_visual_collection,
         )
     )
 
@@ -13531,25 +13098,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         f"Photo {pid} does not belong to the active workspace",
                         403,
                     )
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         try:
-            rules = _request_rules_arg()
-            visual = _request_visual_arg()
+            rules = request_rules_arg()
+            visual = request_visual_arg()
             # Fill in the active visual model on any UI-emitted
             # ``has_visual_index`` rule that omits it. /api/photos/query
             # already injects here; the Review GET path must do the same
             # so a workspace with stale embeddings from an inactive model
             # doesn't include predictions for photos that aren't indexed
             # by the currently-active visual model.
-            rules = _inject_active_visual_model(rules)
+            rules = inject_active_visual_model(rules)
             # Forward ``collection_id`` so ``visual_info`` (matched /
             # candidates / indexed) describes the collection-scoped Review
             # queue the filter bar chip is showing — not a workspace-wide
             # proxy that misrepresents the actual queue and also wastes
             # embedding work on photos outside it.
-            rules, visual_info = _apply_visual_to_rules(
+            rules, visual_info = visual_scope.apply_to_rules(
                 db, rules, visual, collection_id=collection_id,
             )
         except ValueError as e:
@@ -13725,7 +13292,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         values = request.args.getlist(name)
         if not values:
             return None, None
-        if len(values) > _MAX_SELECTION_PHOTOS:
+        if len(values) > MAX_SELECTION_PHOTOS:
             return None, json_error(f"too many {name}s")
         try:
             photo_ids = [int(value) for value in values]
@@ -13777,7 +13344,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = request.args.get("collection_id", None, type=int)
         if not collection_id:
             return json_error("collection_id required")
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
 
@@ -14083,7 +13650,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # matching prediction. Their keyword additions share the same undo.
         all_photo_ids = None
         if "photo_ids" in body:
-            all_photo_ids, err = _parse_selection_photo_ids(body)
+            all_photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error)
             if err is not None:
                 return err
         if all_photo_ids is not None and body.get("prediction_ids") == []:
@@ -14129,7 +13696,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if all_photo_ids is not None:
                 # Recheck ownership inside the write transaction, including
                 # photos that have no prediction rows to validate below.
-                all_photo_ids, err = _parse_selection_photo_ids(body)
+                all_photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error)
                 if err is not None:
                     db.conn.rollback()
                     return err
@@ -14917,7 +14484,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         Size is bounded in the one unit the producer bounds: photos. These
         payloads come from ``/api/selection/prediction-suggestions``, which
-        accepts at most ``_MAX_SELECTION_PHOTOS`` photos and then emits every
+        accepts at most ``MAX_SELECTION_PHOTOS`` photos and then emits every
         matching prediction row for them — a count it does not (and should
         not) cap, since a photo legitimately carries one row per detection per
         classifier model. Counting *ids* here therefore cannot be done without
@@ -14958,7 +14525,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             })
             # Bail as soon as the payload outgrows a legal selection rather
             # than resolving the rest of a runaway request.
-            if len(set(photo_by_pred.values())) > _MAX_SELECTION_PHOTOS:
+            if len(set(photo_by_pred.values())) > MAX_SELECTION_PHOTOS:
                 return None, json_error("too many photos in selection", 400)
         for pid in pred_ids:
             if pid not in photo_by_pred:
@@ -17745,7 +17312,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if collection_id is not None and requested_photo_ids is not None:
             return json_error("collection_id and photo_ids cannot be combined")
         db = _get_db()
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
 
@@ -18064,14 +17631,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(body, dict):
             return json_error("request body must be a JSON object")
         raw_ids = body.get("photo_ids", [])
-        collection_id = _coerce_collection_id(body.get("collection_id"))
+        collection_id = coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
             return json_error("collection_id must be an integer")
         if raw_ids and not isinstance(raw_ids, list):
             return json_error("photo_ids must be a list of integers")
 
         db = _get_db()
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         if not raw_ids and collection_id is not None:
@@ -19204,7 +18771,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not collection_id:
             return json_error("collection_id required")
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
 
@@ -20077,7 +19644,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         db = _get_db()
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         effective_cfg = db.get_effective_config(cfg.load())
@@ -21526,8 +21093,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_species_search():
         """Search species names from active label sets for autocomplete."""
         q = request.args.get("q", "").strip()
-        match_case = _request_bool_arg("match_case")
-        whole_word = _request_bool_arg("whole_word")
+        match_case = request_bool_arg("match_case")
+        whole_word = request_bool_arg("whole_word")
         if len(q) < 2:
             return jsonify([])
 
@@ -21766,7 +21333,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ids_only = request.args.get("ids_only", "").lower() in ("1", "true", "yes")
 
         db = _get_db()
-        err = _reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
 
@@ -21786,7 +21353,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "reason": "model_no_text_search"})
 
         try:
-            scope_rules = _request_rules_arg()
+            scope_rules = request_rules_arg()
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -24276,7 +23843,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             token_generation=_inat_token_generation,
             settings_write_lock=_settings_write_lock,
             read_raw_config_file=_read_raw_config_file,
-            max_selection_photos=_MAX_SELECTION_PHOTOS,
+            max_selection_photos=MAX_SELECTION_PHOTOS,
         )
     )
     app.register_blueprint(
@@ -24302,9 +23869,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             settings_write_lock=_settings_write_lock,
-            inject_active_visual_model=_inject_active_visual_model,
-            validate_visual_arg=_validate_visual_arg,
-            resolve_visual=_resolve_visual,
+            resolve_visual=visual_scope.resolve,
         )
     )
     app.register_blueprint(
@@ -24367,7 +23932,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             settings_write_lock=_settings_write_lock,
             build_life_list_payload=_build_life_list_payload,
             build_highlights_payload=_build_highlights_payload,
-            resolve_visual=_resolve_visual,
+            resolve_visual=visual_scope.resolve,
         )
     )
     app.register_blueprint(
@@ -24377,8 +23942,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            reject_visual_collection=_reject_visual_collection,
-            coerce_collection_id=_coerce_collection_id,
             invalidate_missing_originals=_invalidate_missing_originals_cache,
             read_raw_config_file=_read_raw_config_file,
             settings_write_lock=_settings_write_lock,
@@ -24402,7 +23965,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db_path,
             app.config,
             invalidate_missing_originals=_invalidate_missing_originals_cache,
-            reject_visual_collection=_reject_visual_collection,
             metadata_repair_count=_metadata_repair_count,
             enqueue_process_job=pipeline_chain.enqueue_process_job,
             chain_after_move=pipeline_chain.chain_after_move,

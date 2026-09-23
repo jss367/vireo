@@ -37,6 +37,7 @@ from services.pipeline_launch import (
     apply_no_model_auto_skip,
     resolve_remote_archive_target,
 )
+from web.request_args import coerce_collection_id, reject_visual_collection
 
 log = logging.getLogger(__name__)
 
@@ -48,8 +49,6 @@ def create_pipeline_blueprint(
     db_path,
     config,
     *,
-    reject_visual_collection,
-    coerce_collection_id,
     invalidate_missing_originals,
     read_raw_config_file,
     settings_write_lock,
@@ -59,7 +58,7 @@ def create_pipeline_blueprint(
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR`` and
     ``COMPUTATION_CACHE_DIR`` are read when the job runs). The keyword
     arguments are ``create_app`` closures shared with other domains:
-    the collection guards, the missing-originals cache, and the settings
+    the missing-originals cache and the settings
     file's raw reader + write lock (the pipeline route records recent
     destinations and process deletion clears the global default).
     """
@@ -319,7 +318,7 @@ def create_pipeline_blueprint(
         collection_id = coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
             return json_error("collection_id must be an integer", 400)
-        err = reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         if not isinstance(body.get("raw_subject_analysis", False), bool):
@@ -539,7 +538,7 @@ def create_pipeline_blueprint(
         # evaluates ``rules`` only. Reject visual collections here so a
         # run isn't silently scoped to every metadata-matching photo
         # instead of the visually-matched subset.
-        err = reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
 
@@ -1654,7 +1653,7 @@ def create_pipeline_blueprint(
         import config as cfg
 
         db = get_db()
-        err = reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         effective_cfg = db.get_effective_config(cfg.load())
@@ -1751,7 +1750,7 @@ def create_pipeline_blueprint(
         import config as cfg
 
         db = get_db()
-        err = reject_visual_collection(db, collection_id)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
         effective_cfg = db.get_effective_config(cfg.load())
