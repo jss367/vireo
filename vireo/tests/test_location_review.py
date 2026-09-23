@@ -367,8 +367,8 @@ def test_sidecar_change_invalidates_preview(discrepancy_catalog):
 
 @pytest.mark.parametrize('change', ['unrelated', 'coordinates', 'assignment', 'path'])
 def test_sidecar_reads_allow_writers_and_revalidate_database(discrepancy_catalog, monkeypatch, change):
-    import app as app_module
     import location_review
+    import web.locations as locations_module
     from xmp import read_sync_preview_metadata
 
     client, db, _, keyword, _ = discrepancy_catalog
@@ -393,7 +393,7 @@ def test_sidecar_reads_allow_writers_and_revalidate_database(discrepancy_catalog
         db.conn.commit()
         return metadata
 
-    monkeypatch.setattr(app_module, 'read_sync_preview_metadata', concurrent_edit)
+    monkeypatch.setattr(locations_module, 'read_sync_preview_metadata', concurrent_edit)
     monkeypatch.setattr(location_review, 'read_sync_preview_metadata', concurrent_edit)
     response = resolve(client, photos, 'assigned')
     assert response.status_code == (200 if change == 'unrelated' else 409)
