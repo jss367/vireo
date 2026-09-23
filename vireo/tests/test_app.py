@@ -8747,10 +8747,10 @@ def test_rename_species_highlights_species_chunks_scoped_photo_ids(
 
 def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
     """When a species has highlights elsewhere in the workspace but none are
-    present in the current bucket, _apply_ordered_highlights must not re-sort
+    present in the current bucket, apply_ordered_highlights must not re-sort
     the bucket. Re-sorting would drop the picked-first order that
     _highlight_score_bucket already applied on the visible photos."""
-    from app import _apply_ordered_highlights
+    from highlights_payload import apply_ordered_highlights
 
     class FakeDb:
         def get_species_highlights(self, eligible_only=False):
@@ -8762,7 +8762,7 @@ def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
         {"id": 2, "highlight_score": 0.9, "flag": "none"},
     ]
     buckets = [{"species": "Robin", "photos": list(original)}]
-    _apply_ordered_highlights(FakeDb(), buckets)
+    apply_ordered_highlights(FakeDb(), buckets)
     assert [p["id"] for p in buckets[0]["photos"]] == [1, 2]
     assert all(p["is_highlighted"] is False for p in buckets[0]["photos"])
     assert all(p["highlight_rank"] is None for p in buckets[0]["photos"])
@@ -8771,7 +8771,7 @@ def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
 def test_apply_ordered_highlights_resorts_when_visible_match():
     """When at least one visible photo is a stored highlight, the bucket must
     be re-sorted so the highlighted photo leads and follows the stored rank."""
-    from app import _apply_ordered_highlights
+    from highlights_payload import apply_ordered_highlights
 
     class FakeDb:
         def get_species_highlights(self, eligible_only=False):
@@ -8785,7 +8785,7 @@ def test_apply_ordered_highlights_resorts_when_visible_match():
             {"id": 2, "highlight_score": 0.4, "flag": "none"},
         ],
     }]
-    _apply_ordered_highlights(FakeDb(), buckets)
+    apply_ordered_highlights(FakeDb(), buckets)
     order = [p["id"] for p in buckets[0]["photos"]]
     assert order == [2, 1]
     marks = {p["id"]: p["is_highlighted"] for p in buckets[0]["photos"]}
@@ -8797,7 +8797,7 @@ def test_highlight_score_bucket_orders_picks_then_scored_then_unscored():
     picks (scored first, then unscored in capture order), scored non-picks by
     score, then unscored non-picks in capture order. No rich metrics are set,
     so highlight_score collapses to quality_score (+0.08 pick bonus)."""
-    from app import _highlight_score_bucket
+    from highlights_payload import _highlight_score_bucket
 
     photos = [
         # scored non-picks (out of order to prove score sorts them)
@@ -8821,7 +8821,7 @@ def test_highlight_score_bucket_orders_picks_then_scored_then_unscored():
 def test_highlight_score_bucket_picked_first_false_unchanged():
     """Regression: the non-picks-first path (life list / best-photo) still
     ranks purely by score descending, ignoring flag and capture time."""
-    from app import _highlight_score_bucket
+    from highlights_payload import _highlight_score_bucket
 
     photos = [
         {"id": 1, "quality_score": 0.4, "flag": "flagged", "timestamp": "2024-01-01"},
@@ -8833,7 +8833,7 @@ def test_highlight_score_bucket_picked_first_false_unchanged():
 
 
 def test_bucket_unanalyzed_count_counts_unscored_non_picks_only():
-    from app import _bucket_unanalyzed_count
+    from highlights_payload import _bucket_unanalyzed_count
 
     photos = [
         {"id": 1, "quality_score": 0.5, "flag": "flagged"},   # scored pick
@@ -8888,22 +8888,22 @@ def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
     """Unscored photos now flow into Highlights: all three picks appear (the
     real bug was two vanishing), ordered picks -> scored -> unscored, with
     is_analyzed flags and unanalyzed_count set for the divider."""
-    from app import (
-        _apply_highlight_preferences,
-        _apply_ordered_highlights,
-        _collect_highlight_buckets,
+    from highlights_payload import (
+        apply_highlight_preferences,
+        apply_ordered_highlights,
+        collect_highlight_buckets,
     )
 
     app, db = app_and_db
     fid, ids = _seed_anianiau_bucket(db)
 
     candidates = db.get_highlights_candidates(fid, min_quality=0.0)
-    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
-    _apply_ordered_highlights(db, buckets)
-    # unanalyzed_count is assigned in _apply_highlight_preferences (which
+    buckets, _unid = collect_highlight_buckets(candidates, 0.70)
+    apply_ordered_highlights(db, buckets)
+    # unanalyzed_count is assigned in apply_highlight_preferences (which
     # always runs after ordering in the real flow) so its tail count
     # reflects any curated promotion. Mirror the full pipeline here.
-    _apply_highlight_preferences(db, buckets)
+    apply_highlight_preferences(db, buckets)
     bucket = next(b for b in buckets if b["species"] == "Anianiau")
 
     order = [p["filename"] for p in bucket["photos"]]
@@ -8930,13 +8930,13 @@ def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
 def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_and_db):
     """Raising the quality floor above 0 drops unscored photos (no measured
     quality) and low-scored ones, leaving only photos above the floor."""
-    from app import _collect_highlight_buckets
+    from highlights_payload import collect_highlight_buckets
 
     app, db = app_and_db
     fid, ids = _seed_anianiau_bucket(db)
 
     candidates = db.get_highlights_candidates(fid, min_quality=0.5)
-    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    buckets, _unid = collect_highlight_buckets(candidates, 0.70)
     bucket = next(b for b in buckets if b["species"] == "Anianiau")
     names = {p["filename"] for p in bucket["photos"]}
 
@@ -8947,7 +8947,7 @@ def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_an
 def test_highlight_bucket_canonicalizes_accepted_hierarchy_species():
     """Accepted hierarchy aliases use the same canonical bucket key as
     curation setters and root species rows."""
-    from app import _collect_highlight_buckets
+    from highlights_payload import collect_highlight_buckets
 
     candidates = [{
         "id": 1,
@@ -8955,7 +8955,7 @@ def test_highlight_bucket_canonicalizes_accepted_hierarchy_species():
         "species": "Desert Verdin",
         "quality_score": 0.8,
     }]
-    buckets, _unidentified = _collect_highlight_buckets(
+    buckets, _unidentified = collect_highlight_buckets(
         candidates,
         0.7,
         canonicalize_species=lambda _name: "Verdin",
@@ -8992,7 +8992,7 @@ def test_highlights_unscored_only_workspace_returns_content_with_empty_folders(a
 def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotion(app_and_db):
     """Curated promotion of an unscored photo must not misplace the divider.
 
-    ``_apply_highlight_preferences`` runs after the initial bucket sort and
+    ``apply_highlight_preferences`` runs after the initial bucket sort and
     can promote an unscored, non-flagged photo to the front when it's saved
     as the species representative. The tail count anchors the "Not yet
     analyzed" divider, so under the old (total-unscored-non-picks) semantic
@@ -9002,10 +9002,10 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
     count is the number of unscored non-picks that remain at the actual
     tail, not the total in the bucket.
     """
-    from app import (
-        _apply_highlight_preferences,
-        _apply_ordered_highlights,
-        _collect_highlight_buckets,
+    from highlights_payload import (
+        apply_highlight_preferences,
+        apply_ordered_highlights,
+        collect_highlight_buckets,
     )
 
     _app, db = app_and_db
@@ -9037,9 +9037,9 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
     # contiguous tail, so the tail count equals the total unscored non-pick
     # count (2). This is the state the divider was designed for.
     candidates = db.get_highlights_candidates(fid, min_quality=0.0)
-    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
-    _apply_ordered_highlights(db, buckets)
-    _apply_highlight_preferences(db, buckets)
+    buckets, _unid = collect_highlight_buckets(candidates, 0.70)
+    apply_ordered_highlights(db, buckets)
+    apply_highlight_preferences(db, buckets)
     bucket = next(b for b in buckets if b["species"] == "Iiwi")
     assert [p["filename"] for p in bucket["photos"]] == [
         "scored_a.jpg", "scored_b.jpg",
@@ -9054,9 +9054,9 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
     db.set_species_representative("Iiwi", unscored_rep)
 
     candidates = db.get_highlights_candidates(fid, min_quality=0.0)
-    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
-    _apply_ordered_highlights(db, buckets)
-    _apply_highlight_preferences(db, buckets)
+    buckets, _unid = collect_highlight_buckets(candidates, 0.70)
+    apply_ordered_highlights(db, buckets)
+    apply_highlight_preferences(db, buckets)
     bucket = next(b for b in buckets if b["species"] == "Iiwi")
 
     order = [p["filename"] for p in bucket["photos"]]
@@ -9073,7 +9073,7 @@ def test_bucket_unanalyzed_count_ignores_non_trailing_unscored():
     frontend divider would misfire on the first one and leave analyzed
     photos below the label.
     """
-    from app import _bucket_unanalyzed_count
+    from highlights_payload import _bucket_unanalyzed_count
 
     # Interior unscored rep, then a contiguous analyzed run, then two tail
     # photos: only the trailing pair counts.
@@ -14778,7 +14778,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     db.add_prediction(det, "Desert Verdin", 0.88, "m")
     # Curation was saved against the alias but ``add_species_highlight``
     # /``set_species_representative`` canonicalize to the root spelling —
-    # matching what ``_collect_highlight_buckets`` and the buckets UI
+    # matching what ``collect_highlight_buckets`` and the buckets UI
     # would show for this photo.
     db.add_species_highlight("Desert Verdin", pid)
     db.set_species_representative("Desert Verdin", pid)

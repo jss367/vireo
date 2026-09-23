@@ -110,9 +110,10 @@ def create_photos_blueprint(
     ``missing_originals_payload``, ``start_missing_originals_scan``,
     ``invalidate_missing_originals`` -- its state lives on ``app``), and
     ``run_batch_delete`` (shared with ``/api/batch/delete`` and the
-    batch-delete job). ``photo_highlight_entries``, ``best_batch_scope`` and
-    ``build_best_batch_response`` are module-level ``app.py`` helpers built
-    on highlight and burst utilities the Highlights routes still share.
+    batch-delete job). ``photo_highlight_entries`` (from
+    ``highlights_payload``) and ``best_batch_scope`` /
+    ``build_best_batch_response`` (from ``best_batch``) are still injected
+    rather than imported.
     """
     blueprint = Blueprint("photos", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
