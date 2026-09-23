@@ -21,6 +21,14 @@ def test_api_v1_photo_by_id(app_and_db):
     assert resp.get_json()["id"] == pid
 
 
+def test_api_v1_photo_aliases_share_the_photos_blueprint_views(app_and_db):
+    """The v1 photo endpoints keep their names and alias the blueprint views."""
+    app, _ = app_and_db
+    views = app.view_functions
+    assert views["v1_api_photos"] is views["photos.api_photos"]
+    assert views["v1_api_photo_detail"] is views["photos.api_photo_detail"]
+
+
 def test_api_v1_collections(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
