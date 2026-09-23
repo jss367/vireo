@@ -87,32 +87,57 @@ def _add_url_rule_view_names(tree):
     return names
 
 
+def _iter_class_defs(module_label, tree):
+    """Yield ``(class_qname, node)`` for every ``class`` defined in ``tree``.
+
+    A class's qname is ``(module_label, ...enclosing_scope_names, class_name)``,
+    the same form functions use, so the call graph can key methods by the
+    class they were defined in rather than merging every ``apply`` across all
+    scanned classes.
+    """
+    def walk(node, scope):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                qname = scope + (child.name,)
+                yield qname, child
+                yield from walk(child, qname)
+            elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                yield from walk(child, scope + (child.name,))
+            else:
+                yield from walk(child, scope)
+    yield from walk(tree, (module_label,))
+
+
 def _collect_functions(module_label, tree):
-    """Yield ``(qualified_name, node, is_class_method)`` for every function.
+    """Yield ``(qualified_name, node, class_qname_or_None)`` for every function.
 
     The qualified name is ``(module_label, ...enclosing_scope_names, own_name)``
     — the lexical path from the module root, with every enclosing ``def`` and
     ``class`` on the way in. A nested function stays a distinct node from a
     same-named function elsewhere, which is what a name-keyed graph loses.
-    ``is_class_method`` is true when the immediately enclosing scope is a
-    ``class``: a service method (``PhotoReviewService.set_flag``,
-    ``DecisionService.apply``) that another module can invoke via
-    ``ClassName(...).method(...)`` and that the module-level fallback alone
-    cannot see.
+    ``class_qname_or_None`` is the qname of the enclosing class when the
+    immediately enclosing scope is a ``class``: a service method
+    (``PhotoReviewService.set_flag``, ``DecisionService.apply``) that another
+    module can invoke via ``ClassName(...).method(...)`` and that the
+    module-level fallback alone cannot see. It carries the class's *identity*
+    (its own qname), not just its bare name, so two different classes that
+    expose the same method name (``WriterService.apply``,
+    ``LockedService.apply``) stay distinct in the method table.
     """
-    def walk(node, scope, parent_is_class):
+    def walk(node, scope, enclosing_class_qname):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
                 qname = scope + (child.name,)
-                yield qname, child, parent_is_class
+                yield qname, child, enclosing_class_qname
                 # Inside the function body, further nested defs are nested,
                 # not class methods, even if this function itself is one.
-                yield from walk(child, qname, False)
+                yield from walk(child, qname, None)
             elif isinstance(child, ast.ClassDef):
-                yield from walk(child, scope + (child.name,), True)
+                class_qname = scope + (child.name,)
+                yield from walk(child, class_qname, class_qname)
             else:
-                yield from walk(child, scope, parent_is_class)
-    yield from walk(tree, (module_label,), False)
+                yield from walk(child, scope, enclosing_class_qname)
+    yield from walk(tree, (module_label,), None)
 
 
 def _called_names(node):
@@ -131,16 +156,23 @@ def _called_names(node):
     the caller's imports — never to a same-named module-level function in
     an unrelated module.
 
-    ``attr_calls`` are the ``.attr(...)`` invocations, kept as ``(attr_name,
-    receiver_name)`` pairs. ``receiver_name`` is the bare identifier when the
-    receiver is a plain Name (``prediction_decisions.begin_prediction_decision``,
-    ``writer.apply``, ``db.update_prediction_status``), or ``None`` when the
-    receiver is a chained expression the graph can't reason about. A named
-    receiver lets the resolver ask whether that identifier is bound to a
-    scanned module (via an import), in which case ``writer.apply`` resolves to
-    ``services/writer.py::apply`` alone rather than unioning every scanned
-    ``apply`` at module level. Unknown receivers still fall back to that
-    union.
+    ``attr_calls`` are the ``.attr(...)`` invocations, kept as
+    ``(attr_name, receiver_kind, receiver_id)`` triples. ``receiver_kind``
+    is:
+
+    - ``"name"`` — the receiver was a bare Name (``writer.apply``,
+      ``db.update_prediction_status``, ``LockedService.apply``).
+      ``receiver_id`` is that identifier; the resolver may recognize it as
+      a scanned module the caller imported, or a class the caller can name.
+    - ``"class"`` — the receiver was a direct class construction
+      (``DecisionService(db).apply``, ``PhotoReviewService(get_db()).set_flag``).
+      ``receiver_id`` is the class's bare name; the resolver locates that
+      class by its identity (imported class symbol, or a class defined in
+      this module) and dispatches to that specific class's method — not the
+      union of every same-named method across every scanned class.
+    - ``None`` — receiver is a chained expression or a call whose target
+      isn't a bare Name (``obj.a.b.c()``, ``func()()``). ``receiver_id`` is
+      ``None``. The resolver falls back to the same-named union for these.
     """
     bare_names = set()
     attr_calls = []
@@ -156,10 +188,21 @@ def _called_names(node):
                 if isinstance(func, ast.Name):
                     bare_names.add(func.id)
                 elif isinstance(func, ast.Attribute):
-                    receiver = func.value.id if isinstance(
-                        func.value, ast.Name,
-                    ) else None
-                    attr_calls.append((func.attr, receiver))
+                    value = func.value
+                    if isinstance(value, ast.Name):
+                        attr_calls.append((func.attr, "name", value.id))
+                    elif (
+                        isinstance(value, ast.Call)
+                        and isinstance(value.func, ast.Name)
+                    ):
+                        # ``ClassName(...).method(...)`` — a direct
+                        # construction whose class we can name. The resolver
+                        # uses that identity to dispatch to that class's
+                        # own method rather than the union of every
+                        # same-named method across every scanned class.
+                        attr_calls.append((func.attr, "class", value.func.id))
+                    else:
+                        attr_calls.append((func.attr, None, None))
                 for arg in (*child.args, *(kw.value for kw in child.keywords)):
                     if isinstance(arg, ast.Name):
                         bare_names.add(arg.id)
@@ -284,6 +327,53 @@ def _module_aliases(tree, dotted_to_label):
     return aliases
 
 
+def _imported_symbols(tree, dotted_to_label):
+    """Bare names bound to a specific ``(module_label, original_name)`` symbol.
+
+    Lets the resolver locate an imported class or function inside its
+    defining module even when the ``import`` renames it: ``from
+    services.decisions import DecisionService`` and ``from services.review
+    import decide as apply_decision`` both bind names whose target lives in
+    a scanned module and has a known original name there. ``_module_aliases``
+    covers the *module* form (``from services import writer``) — this covers
+    the *symbol* form. Only module-level imports count, matching
+    ``_imported_names``: a function-local ``from services.decisions import
+    DecisionService`` binds only inside that function.
+    """
+    bindings = {}
+
+    def visit(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child, ast.FunctionDef | ast.AsyncFunctionDef
+                | ast.ClassDef | ast.Lambda,
+            ):
+                continue
+            if isinstance(child, ast.ImportFrom):
+                module_path = child.module or ""
+                if not module_path:
+                    continue
+                parent = dotted_to_label.get(module_path)
+                if parent is None:
+                    continue
+                for alias in child.names:
+                    if alias.name == "*":
+                        continue
+                    if dotted_to_label.get(
+                        f"{module_path}.{alias.name}",
+                    ) is not None:
+                        # It's a submodule import (``from services import
+                        # writer``); ``_module_aliases`` already handles it.
+                        continue
+                    bound = alias.asname or alias.name
+                    bindings[bound] = (parent, alias.name)
+            else:
+                visit(child)
+
+    visit(tree)
+    return bindings
+
+
 def _call_graph(sources):
     """Build ``(call_map, routes, resolve)`` from module sources.
 
@@ -298,41 +388,75 @@ def _call_graph(sources):
       ``bare`` is bare ``Name`` calls (and Name arguments passed as helpers)
       — these follow Python's own scoping and resolve inside the caller's
       module, its lexical scopes, or its imports. ``attr_calls`` is a list of
-      ``(attr_name, receiver_name)`` for each ``receiver.attr(...)``. The
-      target intersection in ``_reaches`` matches the bare-name set and the
-      attribute-name set against ``_PREDICTION_MUTATORS`` and
-      ``_DECISION_LOCK`` directly, without needing a graph node for the
-      mutator or the lock.
+      ``(attr_name, receiver_kind, receiver_id)`` triples for each
+      ``receiver.attr(...)``. The target intersection in ``_reaches`` matches
+      the bare-name set and the attribute-name set against
+      ``_PREDICTION_MUTATORS`` and ``_DECISION_LOCK`` directly, without
+      needing a graph node for the mutator or the lock.
     - ``routes[view_function_name]`` — list of ``(qualified, "file:line")`` for
       every place that route is defined. Keyed by bare name because
       ``PREDICTION_DECISION_ROUTES`` names view functions, and the contract
       test enforces that a decision route's name is unique across ``app.py``
       and ``vireo/web/``.
-    - ``resolve(caller_qualified, name, is_bare, receiver=None)`` — set of
-      qualified callees to recurse into. For a bare-Name call, walks the
-      caller's lexical scope chain outward (a helper defined beside the route
-      wins over a same-named helper elsewhere) and then, if the name is not
-      imported here, restricts the module-level fallback to the caller's own
-      module — two blueprints each defining a module-level ``_decide`` do not
-      merge. For an attribute call whose ``receiver`` is a Name bound to a
-      scanned module through an import (``writer.apply(...)`` where the
-      caller's file has ``from services import writer``), the fallback is
-      further restricted to that module, so ``writer.apply`` cannot silently
-      reach an unrelated ``services/locked.py::apply`` through the union.
-      When the name is imported into this module, when the receiver is
-      unknown, or when the call is an attribute call on a runtime instance,
-      any module-level function or class method with that name is a
-      candidate: an attribute name may resolve to a service class method
-      (``PhotoReviewService(db).set_flag(...)``) as well as to a module-level
-      function.
+    - ``resolve(caller_qualified, name, is_bare, receiver=None,
+      class_receiver=None)`` — set of qualified callees to recurse into.
+
+      For a bare-Name call, walks the caller's lexical scope chain outward
+      (a helper defined beside the route wins over a same-named helper
+      elsewhere) and then, if the name is not imported here, restricts the
+      module-level fallback to the caller's own module — two blueprints each
+      defining a module-level ``_decide`` do not merge.
+
+      For a ``class`` receiver (``DecisionService(db).apply(...)``), the
+      resolver uses the class's identity — imported class symbol or a class
+      defined in this module — and dispatches to that specific class's
+      ``apply`` method. Two service classes with the same method name stay
+      apart: a route calling ``WriterService(db).apply(...)`` cannot reach
+      the ``apply`` of some unrelated ``LockedService`` through the
+      same-named union.
+
+      For a ``name`` receiver bound to a scanned module through an import
+      (``writer.apply(...)`` where the caller's file has ``from services
+      import writer``), the module-level and class-method fallbacks are
+      restricted to that module. When the caller's Name refers to a class
+      instead — either an imported class symbol or a class defined here —
+      the resolver dispatches to that class's own method as it does for
+      direct constructions, so ``LockedService.apply()`` in a class-attribute
+      form is treated the same as ``LockedService(...).apply()``.
+
+      For an unknown ``name`` receiver (a runtime instance like ``db``) or a
+      chained expression, any module-level function or class method with
+      that attribute name is a candidate. The class-method union is what
+      lets a route calling ``self.repo.set_flag(...)`` reach into a service's
+      method; without it, a future decision route wrapped inside a service
+      class would be invisible to the graph and could silently write
+      ``prediction_review`` without being flagged as needing the lock.
     """
     call_map = {}
     routes = {}
     module_top = {}
     nested = {}
+    # ``class_methods_by_class[(module, class_name, method_name)]`` — every
+    # method with that name on that exact class. Keyed by defining-class
+    # identity so ``WriterService.apply`` and ``LockedService.apply`` don't
+    # collapse into one node.
+    class_methods_by_class = {}
+    # ``class_methods[method_name]`` — union across every class. Used only
+    # when the resolver cannot pin the receiver to a specific class
+    # (attribute call on a runtime instance, or on a scanned module scope).
     class_methods = {}
+    # ``module_classes[module_label]`` — top-level class names defined at
+    # module scope in that file. Lets a receiver Name that names a locally
+    # defined class dispatch to that class's own method table.
+    module_classes = {}
     module_imports = {}
     module_alias = {}
+    # ``module_symbol[label][local_name]`` — the ``(defining_module_label,
+    # original_name)`` a module-level ``from x import y [as z]`` bound
+    # ``local_name`` to, when ``x`` is a scanned module. Lets the resolver
+    # pin an imported class or function to its defining module and original
+    # name; ``module_alias`` handles the module form of the same problem.
+    module_symbol = {}
 
     parsed = []
     dotted_to_label = {}
@@ -345,6 +469,12 @@ def _call_graph(sources):
     for label, tree, may_register_routes in parsed:
         module_imports[label] = _imported_names(tree)
         module_alias[label] = _module_aliases(tree, dotted_to_label)
+        module_symbol[label] = _imported_symbols(tree, dotted_to_label)
+        module_classes[label] = {
+            class_qname[-1]
+            for class_qname, _ in _iter_class_defs(label, tree)
+            if len(class_qname) == 2
+        }
         # Names registered as views by ``add_url_rule`` in this module. Any
         # function whose name matches counts as a route here, alongside
         # decorator-decorated ones. Confined to the same module because
@@ -353,17 +483,21 @@ def _call_graph(sources):
         add_url_views = (
             _add_url_rule_view_names(tree) if may_register_routes else set()
         )
-        for qname, node, is_class_method in _collect_functions(label, tree):
+        for qname, node, class_qname in _collect_functions(label, tree):
             call_map[qname] = _called_names(node)
             if len(qname) == 2:
                 module_top.setdefault(qname[-1], set()).add(qname)
             else:
                 nested.setdefault((qname[:-1], qname[-1]), set()).add(qname)
-                if is_class_method:
-                    # A class method on ``ClassName``: ``ClassName(db).method``
-                    # or ``ClassName.method`` from another module resolves
-                    # here, past the same-module and lexical fallbacks that
-                    # only see the caller's own scope.
+                if class_qname is not None:
+                    # A class method on ``ClassName``: track it by the
+                    # class's identity so ``ClassName(db).method()`` and
+                    # ``ClassName.method()`` reach here past the same-module
+                    # and lexical fallbacks, while remaining separate from a
+                    # same-named method on some unrelated class.
+                    class_methods_by_class.setdefault(
+                        (class_qname[0], class_qname[-1], qname[-1]), set(),
+                    ).add(qname)
                     class_methods.setdefault(qname[-1], set()).add(qname)
             if may_register_routes and (
                 _is_route(node) or node.name in add_url_views
@@ -372,7 +506,39 @@ def _call_graph(sources):
                     (qname, f"{label}:{node.lineno}"),
                 )
 
-    def resolve(caller_qualified, name, is_bare, receiver=None):
+    def _class_identity_for(caller_module, receiver_name):
+        """Which class, if any, does ``receiver_name`` name in this module?
+
+        Returns ``(class_module, class_name)`` when the receiver is an
+        imported class symbol from another scanned module (``from
+        services.decisions import DecisionService [as X]``) or a class
+        defined at module level in the caller's own file, else ``None``.
+        Only classes the graph can identify get pinned to a single method
+        table.
+        """
+        sym = module_symbol.get(caller_module, {}).get(receiver_name)
+        if sym is not None:
+            sym_module, original = sym
+            if original in module_classes.get(sym_module, set()):
+                return sym_module, original
+        if receiver_name in module_classes.get(caller_module, set()):
+            return caller_module, receiver_name
+        return None
+
+    def resolve(
+        caller_qualified, name, is_bare, receiver=None, class_receiver=None,
+    ):
+        caller_module = caller_qualified[0]
+        # ``ClassName(...).method(...)``: dispatch to that class's own method.
+        if class_receiver is not None:
+            cls = _class_identity_for(caller_module, class_receiver)
+            if cls is not None:
+                return class_methods_by_class.get(
+                    (cls[0], cls[1], name), set(),
+                )
+            # Class isn't a scanned identity — over-approximate rather than
+            # miss a decision route. Union across every same-named method.
+            return class_methods.get(name, set())
         # Bare-Name call: walk lexical scopes outward. A caller's own inner
         # helpers (``def _apply`` inside a route body, captured through
         # ``under_prediction_decision_lock(db, _apply, ...)``) live at
@@ -384,7 +550,6 @@ def _call_graph(sources):
                 found = nested.get((caller_qualified[:depth], name))
                 if found:
                     return found
-        caller_module = caller_qualified[0]
         caller_imports = module_imports.get(caller_module, {})
         if is_bare and name not in caller_imports:
             # A bare Name call whose name isn't imported here can only
@@ -397,6 +562,15 @@ def _call_graph(sources):
                 if q[0] == caller_module
             }
         if not is_bare and receiver is not None:
+            # A Name receiver that itself names a class (imported class
+            # symbol or a locally defined class): ``LockedService.apply()``
+            # dispatches to that class's own method just like the direct
+            # construction form.
+            cls = _class_identity_for(caller_module, receiver)
+            if cls is not None:
+                return class_methods_by_class.get(
+                    (cls[0], cls[1], name), set(),
+                )
             receiver_module = module_alias.get(caller_module, {}).get(receiver)
             if receiver_module is not None:
                 # ``receiver.attr(...)`` where ``receiver`` is a scanned
@@ -449,15 +623,22 @@ def _reaches(start, targets, call_map, resolve):
         bare, attr_calls = call_map.get(current, (set(), []))
         if bare & targets:
             return True
-        if any(name in targets for name, _ in attr_calls):
+        if any(name in targets for name, *_ in attr_calls):
             return True
         for name in bare:
             for qualified in resolve(current, name, True):
                 if qualified not in seen:
                     seen.add(qualified)
                     stack.append(qualified)
-        for name, receiver in attr_calls:
-            for qualified in resolve(current, name, False, receiver):
+        for name, receiver_kind, receiver_id in attr_calls:
+            receiver = receiver_id if receiver_kind == "name" else None
+            class_receiver = (
+                receiver_id if receiver_kind == "class" else None
+            )
+            for qualified in resolve(
+                current, name, False,
+                receiver=receiver, class_receiver=class_receiver,
+            ):
                 if qualified not in seen:
                     seen.add(qualified)
                     stack.append(qualified)
@@ -1050,6 +1231,110 @@ def create_writer_blueprint(get_db, json_error):
     assert any(
         p.startswith("api_w ")
         and "never reaches begin_prediction_decision" in p
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_distinguishes_service_classes():
+    """``ClassName(...).method(...)`` dispatches to that class's own method.
+
+    Two service classes each expose a method named ``apply``:
+    ``services/writer.py::WriterService.apply`` writes a prediction status
+    without locking, ``services/locked.py::LockedService.apply`` reaches
+    ``begin_prediction_decision``. A blueprint constructs one and calls
+    ``WriterService(db).apply(...)`` — unambiguously unlocked. A resolver
+    that unioned every same-named class method under one node would let the
+    walk reach the lock through the unrelated ``LockedService.apply``, so
+    declaring the route would silence the "declared but never reaches lock"
+    check even though the route's actual path never locks. Keying methods by
+    their defining class's identity (module + class name) — and using the
+    receiver's class identity (imported symbol or a class defined in this
+    module) to dispatch — keeps the two apart.
+
+    Also covers the class-attribute form ``LockedService.apply(...)``: the
+    receiver is a bare Name, but the resolver still recognizes it as a class
+    and dispatches to that specific class's method rather than the union.
+    """
+    writer = '''
+class WriterService:
+    def __init__(self, db):
+        self.db = db
+
+    def apply(self, pred_id):
+        self.db.update_prediction_status(pred_id, "rejected")
+'''
+    locked_service = '''
+from services import prediction_decisions
+
+
+class LockedService:
+    def __init__(self, db, json_error):
+        self.db = db
+        self.json_error = json_error
+
+    @staticmethod
+    def apply(db, json_error):
+        return prediction_decisions.under_prediction_decision_lock(
+            db,
+            lambda: db.update_prediction_status(2, "accepted"),
+            json_error=json_error,
+        )
+'''
+    blueprint = '''
+from services.writer import WriterService
+from services.locked import LockedService
+
+
+def create_writer_blueprint(get_db, json_error):
+    bp = Blueprint("w", __name__)
+
+    @bp.post("/api/w")
+    def api_w():
+        return WriterService(get_db()).apply(1)
+
+    @bp.post("/api/locked_attr")
+    def api_locked_attr():
+        return LockedService.apply(get_db(), json_error)
+
+    return bp
+'''
+    service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
+        encoding="utf-8",
+    )
+    call_map, routes, resolve = _call_graph([
+        ("web/writer_route.py", blueprint, True),
+        ("services/writer.py", writer, False),
+        ("services/locked.py", locked_service, False),
+        ("services/prediction_decisions.py", service, False),
+    ])
+    # api_w reaches a mutator through WriterService.apply, so it's flagged
+    # as an undeclared writer. Once declared, it must reach the lock —
+    # which WriterService.apply does not. The class-name-only union
+    # resolver would have silenced this second check by reaching the lock
+    # through the unrelated LockedService.apply.
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
+    problems = _decision_route_problems(
+        call_map, routes, resolve, {"api_w", "api_locked_attr"},
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "never reaches begin_prediction_decision" in p
+        for p in problems
+    ), problems
+    # api_locked_attr goes through LockedService.apply via the class name,
+    # not an instance. The resolver should follow that into the lock, so
+    # declaring it must not produce a "declared but never reaches lock"
+    # problem.
+    assert not any(
+        p.startswith("api_locked_attr ")
         for p in problems
     ), problems
 
