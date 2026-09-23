@@ -1475,12 +1475,12 @@ def test_unrelated_setting_does_not_scan_working_copy_cache(
     app_and_db, monkeypatch,
 ):
     """Only an effective quota reduction needs synchronous WC eviction."""
-    import app as app_module
+    import web.settings as settings_module
 
     app, _db = app_and_db
     calls = []
     monkeypatch.setattr(
-        app_module,
+        settings_module,
         "evict_working_copy_cache_if_over_quota",
         lambda *_args, **_kwargs: calls.append(True),
     )
@@ -1612,7 +1612,7 @@ def test_settings_patch_skips_working_copy_eviction_for_unrelated_writes(
     an over-quota state can arise, so the settings handler only needs to
     enforce a genuine capacity reduction.
     """
-    import app as app_module
+    import web.settings as settings_module
 
     app, _ = app_and_db
     calls = []
@@ -1625,7 +1625,7 @@ def test_settings_patch_skips_working_copy_eviction_for_unrelated_writes(
         }
 
     monkeypatch.setattr(
-        app_module, "evict_working_copy_cache_if_over_quota", spy_evict,
+        settings_module, "evict_working_copy_cache_if_over_quota", spy_evict,
     )
 
     # A token write must not run the working-copy eviction pass — the
