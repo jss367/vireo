@@ -479,6 +479,17 @@ def _call_graph(sources):
     # when the resolver cannot pin the receiver to a specific class
     # (attribute call on a runtime instance, or on a scanned module scope).
     class_methods = {}
+    # ``method_class[qname]`` — the defining class's ``(module, class_name)``
+    # for a function that is itself a method. Lets the resolver dispatch
+    # ``self.method()`` and ``cls.method()`` from inside a method to that
+    # exact class's method table (including inherited methods via
+    # ``_class_method_lookup``) rather than the same-named union across
+    # every scanned class. Without this a service method delegating
+    # through ``self.finish()`` would fall into the union, so an unlocked
+    # writer's ``self.finish()`` could reach a lock through an unrelated
+    # class's ``finish`` and silence the "declared but never reaches
+    # lock" check.
+    method_class = {}
     # ``module_classes[module_label]`` — top-level class names defined at
     # module scope in that file. Lets a receiver Name that names a locally
     # defined class dispatch to that class's own method table.
@@ -546,6 +557,10 @@ def _call_graph(sources):
                         (class_qname[0], class_qname[-1], qname[-1]), set(),
                     ).add(qname)
                     class_methods.setdefault(qname[-1], set()).add(qname)
+                    # Remember which class defined this method so the
+                    # resolver can dispatch its own ``self`` / ``cls``
+                    # method calls back into the same class's method table.
+                    method_class[qname] = (class_qname[0], class_qname[-1])
             if may_register_routes and (
                 _is_route(node) or node.name in add_url_views
             ):
@@ -761,6 +776,23 @@ def _call_graph(sources):
                 q for q in class_methods.get(original, set()) if q[0] == label
             }
         if receiver is not None:
+            # ``self.method(...)`` / ``cls.method(...)`` inside a class
+            # method: dispatch to the caller's own class's method table
+            # (including inherited methods). Without this the walk falls
+            # into the class-method union across every scanned class, so
+            # an unlocked writer's ``self.finish()`` could reach a lock
+            # through an unrelated class's ``finish`` and silence the
+            # "declared but never reaches lock" check. ``self`` and
+            # ``cls`` are conventions, not keywords, but every method in
+            # this codebase uses them — the same convention `ast` itself
+            # uses when it decides an attribute call has "self" as its
+            # receiver.
+            if receiver in {"self", "cls"}:
+                own_class = method_class.get(caller_qualified)
+                if own_class is not None:
+                    return _class_method_lookup(
+                        own_class[0], own_class[1], name,
+                    )
             # A Name receiver that itself names a class (imported class
             # symbol or a locally defined class): ``LockedService.apply()``
             # dispatches to that class's own method just like the direct
@@ -1787,6 +1819,97 @@ def create_writer_blueprint(get_db, json_error):
         p.startswith("api_w ")
         and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
         in p
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_pins_self_calls_to_defining_class():
+    """``self.finish()`` inside a class method dispatches to that class.
+
+    Two service classes each expose ``finish``: ``WriterService.finish``
+    writes a prediction status without locking, ``LockedService.finish``
+    reaches ``begin_prediction_decision``. A route constructs
+    ``WriterService(db).apply(...)`` and that ``apply`` delegates through
+    ``self.finish()``. A resolver that treated ``self`` as an unknown
+    receiver would union every scanned ``finish``, so the walk could
+    reach the lock through the unrelated ``LockedService.finish`` and
+    declaring the route would silence the "declared but never reaches
+    lock" check. Propagating the caller method's defining class into
+    resolution keeps ``self.finish()`` inside ``WriterService``.
+    """
+    writer = '''
+class WriterService:
+    def __init__(self, db):
+        self.db = db
+
+    def apply(self, pred_id):
+        self._prep(pred_id)
+        self.finish(pred_id)
+
+    def _prep(self, pred_id):
+        pass
+
+    def finish(self, pred_id):
+        self.db.update_prediction_status(pred_id, "rejected")
+'''
+    locked_service = '''
+from services import prediction_decisions
+
+
+class LockedService:
+    def __init__(self, db, json_error):
+        self.db = db
+        self.json_error = json_error
+
+    def finish(self, pred_id):
+        return prediction_decisions.under_prediction_decision_lock(
+            self.db,
+            lambda: self.db.update_prediction_status(pred_id, "accepted"),
+            json_error=self.json_error,
+        )
+'''
+    blueprint = '''
+from services.writer import WriterService
+
+
+def create_writer_blueprint(get_db, json_error):
+    bp = Blueprint("w", __name__)
+
+    @bp.post("/api/w")
+    def api_w():
+        return WriterService(get_db()).apply(1)
+
+    return bp
+'''
+    service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
+        encoding="utf-8",
+    )
+    call_map, routes, resolve = _call_graph([
+        ("web/writer_route.py", blueprint, True),
+        ("services/writer.py", writer, False),
+        ("services/locked.py", locked_service, False),
+        ("services/prediction_decisions.py", service, False),
+    ])
+    # api_w reaches a mutator via self.finish(); undeclared, that must be
+    # flagged.
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
+    # Declared, api_w must not silence the "no lock" check by reaching the
+    # lock through LockedService.finish — self.finish() belongs to
+    # WriterService, which does not lock.
+    problems = _decision_route_problems(
+        call_map, routes, resolve, {"api_w"},
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "never reaches begin_prediction_decision" in p
         for p in problems
     ), problems
 
