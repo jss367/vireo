@@ -127,7 +127,7 @@ def test_every_prediction_decision_route_locks():
 # may only go down. New routes belong in a blueprint under ``vireo/web/`` (see
 # docs/ARCHITECTURE.md). When a PR moves routes out of app.py, lower this to
 # the new count in the same PR so the extraction cannot be undone.
-_LEGACY_APP_ROUTE_LIMIT = 242
+_LEGACY_APP_ROUTE_LIMIT = 223
 
 _ROUTE_VERBS = frozenset({"route", "get", "post", "put", "patch", "delete"})
 
