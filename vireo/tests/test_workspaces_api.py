@@ -884,6 +884,24 @@ def test_activate_workspace_takes_no_mutation_reservation(app_and_db, monkeypatc
     assert calls == []
 
 
+def test_v1_activate_workspace_takes_no_mutation_reservation(app_and_db, monkeypatch):
+    """The headless ``POST /api/v1/workspaces/<id>/activate`` alias is the same
+    control request as the UI's ``/api/workspaces/<id>/activate``, so it must be
+    exempt from ``_reserve_workspace_mutation`` too. The alias is registered
+    under its own endpoint name (``v1_api_activate_workspace``); without the
+    exemption a headless client blocks behind an in-flight transfer."""
+    app, _db = app_and_db
+    client = app.test_client()
+    other = client.post("/api/workspaces", json={"name": "Other"}).get_json()["id"]
+    calls = _record_workspace_mutations(app, monkeypatch)
+    resp = client.post(
+        f"/api/v1/workspaces/{other}/activate",
+        headers={"X-Vireo-Token": app.config["API_TOKEN"]},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert calls == []
+
+
 def test_delete_workspace_takes_exclusive_reservation_on_target(app_and_db, monkeypatch):
     """Deleting a workspace must hold an *exclusive* reservation on the target
     so no job or synchronous change is admitted mid-delete. The hook keys this

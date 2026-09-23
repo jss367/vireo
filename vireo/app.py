@@ -4140,19 +4140,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     app._job_runner = JobRunner(db=init_db)
 
+    # Sending and source cleanup establish their own exclusive reservations.
+    # Control requests remain available while a transfer holds the workspace.
+    # The /api/v1 alias loop below adds ``v1_<view>`` for every aliased
+    # endpoint listed here, so headless clients get the same exemptions.
+    _reservation_exempt_endpoints = {
+        "imports.api_send_pending_archive", "workspaces.api_activate_workspace",
+        "api_shutdown", "api_v1_shutdown",
+        "jobs.api_job_cancel", "jobs.api_job_pause", "jobs.api_job_resume",
+        "jobs.api_jobs_cancel_queued",
+        "move_cleanup.source_cleanup",
+    }
+
     @app.before_request
     def _reserve_workspace_mutation():
         if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.path.startswith("/api/"):
             return None
-        # Sending and source cleanup establish their own exclusive reservations.
-        # Control requests remain available while a transfer holds the workspace.
-        if request.endpoint in {
-            "imports.api_send_pending_archive", "workspaces.api_activate_workspace",
-            "api_shutdown", "api_v1_shutdown",
-            "jobs.api_job_cancel", "jobs.api_job_pause", "jobs.api_job_resume",
-            "jobs.api_jobs_cancel_queued",
-            "move_cleanup.source_cleanup",
-        }:
+        if request.endpoint in _reservation_exempt_endpoints:
             return None
         target_ws = (request.view_args or {}).get("ws_id")
         # A request with no active workspace and no explicit target has no
@@ -26146,12 +26150,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         # Blueprint endpoints are aliased under their bare view name so the
         # v1 endpoint names stay ``v1_<view>`` whichever module owns the route.
+        v1_endpoint = f"v1_{endpoint_name.rpartition('.')[2]}"
         app.add_url_rule(
             v1_path,
-            endpoint=f"v1_{endpoint_name.rpartition('.')[2]}",
+            endpoint=v1_endpoint,
             view_func=view,
             methods=methods,
         )
+        # An alias is exempt from the workspace mutation reservation exactly
+        # when the view it aliases is, so the two surfaces can't drift.
+        if endpoint_name in _reservation_exempt_endpoints:
+            _reservation_exempt_endpoints.add(v1_endpoint)
 
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         # Give the main thread enough time to return from create_app and bind
