@@ -21067,7 +21067,7 @@ def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db, monk
         return None
 
     assert _patch_begin_prediction_decision(
-        monkeypatch, app, "api_batch_accept_predictions", _detach_before_lock,
+        monkeypatch, app, "predictions.api_batch_accept_predictions", _detach_before_lock,
     )
 
     resp = client.post(
@@ -21140,7 +21140,7 @@ def test_batch_reject_skips_rows_whose_photo_left_the_workspace(app_and_db, monk
         return None
 
     assert _patch_begin_prediction_decision(
-        monkeypatch, app, "api_batch_reject_predictions", _detach_before_lock,
+        monkeypatch, app, "predictions.api_batch_reject_predictions", _detach_before_lock,
     )
 
     resp = client.post(
@@ -21233,7 +21233,7 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch)
         return None
 
     assert _patch_begin_prediction_decision(
-        monkeypatch, app, "api_batch_accept_predictions", _clear_group_before_lock,
+        monkeypatch, app, "predictions.api_batch_accept_predictions", _clear_group_before_lock,
     )
 
     resp = client.post(

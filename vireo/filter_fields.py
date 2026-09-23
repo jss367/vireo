@@ -156,7 +156,7 @@ FILTER_FIELDS = {
     # at 0.10 does not satisfy ``prediction_confidence <= 0.2``. Accepting
     # or rejecting a prediction flips its sibling alternatives to
     # ``rejected`` (``Database.accept_prediction`` and
-    # ``_batch_reject_under_lock`` in ``app.py``), pulling those low-
+    # ``_batch_reject_under_lock`` in ``web/predictions.py``), pulling those low-
     # confidence runners-up out of the alternative filter and into the
     # rule's row set — so a photo can newly satisfy the confidence rule
     # even though its numeric confidence never changed. Listing
