@@ -72,7 +72,7 @@ def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_pa
 
     import config as cfg
     import inat
-    from app import _paired_render_state_hash
+    from web.media import _paired_render_state_hash
 
     app, db = app_and_db
     folder = tmp_path / 'cache-photos'

@@ -2281,8 +2281,8 @@ def test_original_opens_full_res_working_copy_under_eviction_guard(
     app_and_db, monkeypatch,
 ):
     """Eviction cannot unlink a selected cache hit before send_file opens it."""
-    import app as app_module
     import flask
+    import web.media as media_module
     from PIL import Image
 
     app, db = app_and_db
@@ -2299,7 +2299,7 @@ def test_original_opens_full_res_working_copy_under_eviction_guard(
     )
     db.conn.commit()
 
-    real_guard = app_module.working_copy_publication_guard
+    real_guard = media_module.working_copy_publication_guard
     real_send_file = flask.send_file
     inside_guard = False
 
@@ -2317,7 +2317,7 @@ def test_original_opens_full_res_working_copy_under_eviction_guard(
         assert inside_guard, "working-copy send_file must open under the guard"
         return real_send_file(*args, **kwargs)
 
-    monkeypatch.setattr(app_module, "working_copy_publication_guard", tracking_guard)
+    monkeypatch.setattr(media_module, "working_copy_publication_guard", tracking_guard)
     monkeypatch.setattr(flask, "send_file", guarded_send_file)
 
     response = app.test_client().get(f"/photos/{pid}/original")
@@ -3283,9 +3283,9 @@ def test_transient_full_original_does_not_restore_concurrently_evicted_copy(
     app_and_db, tmp_path, monkeypatch,
 ):
     """Preservation rechecks the capped copy under the eviction guard."""
-    import app as app_module
     import config as cfg
     import image_loader
+    import web.media as media_module
     from PIL import Image
 
     app, db = app_and_db
@@ -3330,7 +3330,7 @@ def test_transient_full_original_does_not_restore_concurrently_evicted_copy(
     monkeypatch.setattr(
         image_loader, "extract_working_copy", oversized_extract,
     )
-    real_guard = app_module.working_copy_publication_guard
+    real_guard = media_module.working_copy_publication_guard
     eviction_simulated = False
 
     @contextlib.contextmanager
@@ -3350,7 +3350,7 @@ def test_transient_full_original_does_not_restore_concurrently_evicted_copy(
             yield
 
     monkeypatch.setattr(
-        app_module,
+        media_module,
         "working_copy_publication_guard",
         evict_before_preservation_check,
     )
@@ -3375,9 +3375,9 @@ def test_transient_original_reloads_quota_raised_during_extraction(
     app_and_db, tmp_path, monkeypatch,
 ):
     """A quota raised mid-extraction must not leave a stale eviction marker."""
-    import app as app_module
     import config as cfg
     import image_loader
+    import web.media as media_module
     from PIL import Image
 
     app, db = app_and_db
@@ -3422,7 +3422,7 @@ def test_transient_original_reloads_quota_raised_during_extraction(
         image_loader, "extract_working_copy", small_extract,
     )
 
-    real_guard = app_module.working_copy_publication_guard
+    real_guard = media_module.working_copy_publication_guard
     raised = False
 
     @contextlib.contextmanager
@@ -3439,7 +3439,7 @@ def test_transient_original_reloads_quota_raised_during_extraction(
             yield
 
     monkeypatch.setattr(
-        app_module,
+        media_module,
         "working_copy_publication_guard",
         raise_quota_before_publication_guard,
     )
@@ -3705,8 +3705,8 @@ def test_edit_preview_pins_working_copy_when_original_is_offline(
     app_and_db, tmp_path, monkeypatch,
 ):
     """The only local edit source stays pinned through selection and decode."""
-    import app as app_module
     import image_loader
+    import web.media as media_module
     import working_copy_cache
     from PIL import Image
 
@@ -3732,7 +3732,7 @@ def test_edit_preview_pins_working_copy_when_original_is_offline(
     db.conn.commit()
     db.set_photo_edit_recipe(pid, {"rotation": 90})
 
-    real_guard = app_module.working_copy_publication_guard
+    real_guard = media_module.working_copy_publication_guard
     guard_entered = False
 
     @contextlib.contextmanager
@@ -3765,7 +3765,7 @@ def test_edit_preview_pins_working_copy_when_original_is_offline(
         return real_load_image(path, *args, **kwargs)
 
     monkeypatch.setattr(
-        app_module, "working_copy_publication_guard", tracking_guard,
+        media_module, "working_copy_publication_guard", tracking_guard,
     )
     monkeypatch.setattr(image_loader, "load_image", probing_load_image)
 
@@ -3788,7 +3788,7 @@ def test_original_cache_hit_survives_working_copy_eviction_race(
     edit-preview, thumbnail, preview materializer, export) already recover
     from this race; the /original cache-hit branch remained the only
     unprotected 500."""
-    import app as app_module
+    import web.media as media_module
     from PIL import Image
 
     app, db, pid = client_with_photo
@@ -3809,7 +3809,7 @@ def test_original_cache_hit_survives_working_copy_eviction_race(
     # handle, but send_file has not opened the path. Deleting while the PIL
     # handle is still open is not portable: Windows correctly refuses that
     # unlink, so the guard boundary is the deterministic cross-platform gap.
-    real_guard = app_module.working_copy_publication_guard
+    real_guard = media_module.working_copy_publication_guard
     dropped_paths = []
 
     @contextlib.contextmanager
@@ -3821,7 +3821,7 @@ def test_original_cache_hit_survives_working_copy_eviction_race(
             yield
 
     monkeypatch.setattr(
-        app_module,
+        media_module,
         "working_copy_publication_guard",
         evict_before_guarded_open,
     )
@@ -4074,7 +4074,7 @@ def test_edit_preview_crop_scales_from_selected_source_dimensions(
     """A differently shaped working source must retain the requested edge."""
     import io
 
-    import app as app_module
+    import web.media as media_module
     from PIL import Image
 
     app, db, photo_id = client_with_photo
@@ -4083,7 +4083,7 @@ def test_edit_preview_crop_scales_from_selected_source_dimensions(
     Image.new("RGB", (800, 450), (30, 80, 120)).save(selected_path, "JPEG")
 
     monkeypatch.setattr(
-        app_module,
+        media_module,
         "_recipe_render_source",
         lambda *_args, **_kwargs: (selected_path, True),
     )
@@ -4300,7 +4300,7 @@ def test_edit_preview_analysis_keeps_raw_on_recipe_render_path(
     ``_recipe_render_source`` to the canonical working copy and produce
     clipped pixels for the highlight/exposure heuristics.
     """
-    import app as app_module
+    import web.media as media_module
 
     app, db, photo_id = client_with_photo
     db.conn.execute(
@@ -4310,13 +4310,13 @@ def test_edit_preview_analysis_keeps_raw_on_recipe_render_path(
     db.conn.commit()
 
     seen_recipes = []
-    real_render_source = app_module._recipe_render_source
+    real_render_source = media_module._recipe_render_source
 
     def spy_render_source(photo, recipe, max_size, vireo_dir, folders):
         seen_recipes.append(recipe)
         return real_render_source(photo, recipe, max_size, vireo_dir, folders)
 
-    monkeypatch.setattr(app_module, "_recipe_render_source", spy_render_source)
+    monkeypatch.setattr(media_module, "_recipe_render_source", spy_render_source)
 
     client = app.test_client()
     client.get(
@@ -14143,7 +14143,7 @@ def test_edit_render_touches_working_copy_source_under_guard(
     import os
     import time
 
-    import app as app_module
+    import web.media as media_module
     import working_copy_cache
     from PIL import Image
 
@@ -14178,7 +14178,7 @@ def test_edit_render_touches_working_copy_source_under_guard(
         lock_held_when_touched.append((os.fspath(path), held))
         return real_touch(path)
 
-    monkeypatch.setattr(app_module, "touch_working_copy_access", spy_touch)
+    monkeypatch.setattr(media_module, "touch_working_copy_access", spy_touch)
 
     resp = app.test_client().get(f"/photos/{photo_id}/original")
     assert resp.status_code == 200, resp.data
@@ -14222,7 +14222,7 @@ def test_edit_preview_touches_working_copy_under_guard(
     import os
     import time
 
-    import app as app_module
+    import web.media as media_module
     import working_copy_cache
     from PIL import Image
 
@@ -14254,7 +14254,7 @@ def test_edit_preview_touches_working_copy_under_guard(
         lock_held_when_touched.append((os.fspath(path), held))
         return real_touch(path)
 
-    monkeypatch.setattr(app_module, "touch_working_copy_access", spy_touch)
+    monkeypatch.setattr(media_module, "touch_working_copy_access", spy_touch)
 
     resp = app.test_client().get(f"/photos/{photo_id}/edit-preview?size=800")
     assert resp.status_code == 200, resp.data
@@ -14312,7 +14312,7 @@ def test_crop_preview_touches_working_copy_under_guard(
     import os
     import time
 
-    import app as app_module
+    import web.media as media_module
     import working_copy_cache
     from PIL import Image
 
@@ -14343,7 +14343,7 @@ def test_crop_preview_touches_working_copy_under_guard(
         lock_held_when_touched.append((os.fspath(path), held))
         return real_touch(path)
 
-    monkeypatch.setattr(app_module, "touch_working_copy_access", spy_touch)
+    monkeypatch.setattr(media_module, "touch_working_copy_access", spy_touch)
 
     resp = app.test_client().get(f"/photos/{photo_id}/crop")
     assert resp.status_code == 200, resp.data
