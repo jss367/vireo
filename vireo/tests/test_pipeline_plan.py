@@ -4112,3 +4112,29 @@ def test_plan_counts_use_runtime_category_defaults(tmp_path, category, expected)
     for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
         assert pending("Model", "current", [pid], min_conf=0.2) == 0
     db.close()
+
+
+@pytest.mark.parametrize("scope", ["folder", "collection", "excluded"])
+def test_regroup_plan_skips_empty_resolved_scope(tmp_path, scope):
+    from pipeline_plan import PipelinePlanParams, compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "outside-selection.jpg")
+    if scope == "folder":
+        selection = {"photo_ids": []}
+    elif scope == "collection":
+        selection = {"collection_id": db.add_collection(
+            "Empty selection", '[{"field": "rating", "op": ">=", "value": 5}]',
+        )}
+    else:
+        selection = {"exclude_photo_ids": [pid]}
+    params = PipelinePlanParams(
+        skip_classify=True, skip_extract_masks=True, skip_eye_keypoints=True,
+        skip_regroup=False, **selection,
+    )
+    plan = compute_plan(db, params, str(tmp_path / "test.db"))
+    assert plan["scope"]["photo_count"] == 0
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip"
+    assert "no photos" in group["summary"]
+    db.close()

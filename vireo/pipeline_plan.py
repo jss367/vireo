@@ -1074,7 +1074,17 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
 
 def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
-                  import_no_new=False):
+                  import_no_new=False, photo_ids=None):
+    # The job leaves the latest review untouched when the resolved selection
+    # is empty, including when exclusions removed every selected photo.
+    # Imports can collect destination photos absent from the preview scope;
+    # their no-work case is handled separately by import_no_new below.
+    if photo_ids is not None and not photo_ids and params.source_paths is None:
+        return {
+            "state": "will-skip",
+            "summary": "Will skip — no photos in scope to group",
+            "detail": {"photo_count": 0},
+        }
     if params.skip_regroup:
         # The identify preset sets ``skip_regroup=True`` but flags
         # ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py)
@@ -1526,7 +1536,7 @@ def compute_plan(db, params, db_path):
     )
     regroup = _regroup_plan(
         db, params, db_path, ws_id, upstream_will_run, effective_cfg,
-        import_no_new=import_no_new,
+        import_no_new=import_no_new, photo_ids=photo_ids,
     )
 
     stages = {
