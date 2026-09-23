@@ -212,63 +212,6 @@ def _called_names(node):
     return bare_names, attr_calls
 
 
-def _imported_names(tree):
-    """Bare names a module's ``import`` statements bring into scope.
-
-    Returns ``{local_name: original_name_or_None}``. ``original_name`` is
-    the symbol's name inside its defining module — ``from services.review
-    import decide as apply_decision`` makes ``apply_decision`` a bare Name
-    here whose target function is defined as ``decide`` in
-    ``services.review``, so a bare-Name call to ``apply_decision()`` must
-    resolve against ``decide`` in ``module_top``, not against
-    ``apply_decision`` (which does not exist there). ``None`` marks a
-    binding that names a module rather than a function (``import a.b`` or
-    ``import a.b as c``): it cannot itself be called as a bare Name and
-    reaches functions only through attribute access.
-
-    Only imports at module scope count. A function-local ``from x import
-    _decide`` used to enter this map through ``ast.walk``, so an unlocked
-    route calling its own module-level ``_decide`` was then resolved
-    against every same-named ``_decide`` in the scanned tree; a locked one
-    in an unrelated module made the route look locked. Python's own scoping
-    binds a function-local import only inside that function, so the graph
-    must not extend it to the module either.
-    """
-    imported = {}
-
-    def visit(node):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(
-                child, ast.FunctionDef | ast.AsyncFunctionDef
-                | ast.ClassDef | ast.Lambda,
-            ):
-                # A ``def``/``class``/``lambda`` starts a new scope; imports
-                # inside its body are bound there, not in the module.
-                continue
-            if isinstance(child, ast.ImportFrom):
-                for alias in child.names:
-                    if alias.name == "*":
-                        continue
-                    imported[alias.asname or alias.name] = alias.name
-            elif isinstance(child, ast.Import):
-                for alias in child.names:
-                    # ``import a.b`` binds ``a`` (or the ``as`` alias) in
-                    # scope; ``import a.b as c`` binds ``c``. Either way the
-                    # bound name refers to a module, not a directly callable
-                    # function, so there is no ``module_top`` target for a
-                    # bare-Name call.
-                    local = alias.asname or alias.name.split(".")[0]
-                    imported[local] = None
-            else:
-                # ``if``, ``try``, ``with``, ``for`` at module scope: their
-                # bodies still run at module import time, so imports inside
-                # them bind at module scope.
-                visit(child)
-
-    visit(tree)
-    return imported
-
-
 def _module_dotted_forms(label):
     """Dotted import paths that could refer to the scanned file ``label``.
 
@@ -285,93 +228,116 @@ def _module_dotted_forms(label):
     return forms
 
 
-def _module_aliases(tree, dotted_to_label):
-    """Bare names that ``tree``'s imports bind to specific scanned modules.
+def _scoped_imports(tree, dotted_to_label):
+    """``{scope: {local_name: (label_or_None, original_or_None)}}``.
 
-    Lets ``receiver.attr(...)`` resolve inside the receiver's own module
-    when the graph knows which module ``receiver`` is: ``from services
-    import writer`` and ``import services.writer as writer`` both bind
-    ``writer`` to ``services/writer.py``, so ``writer.apply(...)`` cannot
-    reach an unrelated ``services/locked.py::apply`` through the union
-    fallback. Names bound to a package (``import services.writer`` alone
-    binds ``services``, the package), to something outside the scanned
-    tree, or to a runtime instance (``db = get_db()``) are not aliases —
-    the union fallback still handles them.
+    One record per lexical binding an ``import`` statement introduces,
+    filed under the scope the binding is visible in. ``scope`` is the
+    lexical path from the module root — ``()`` at module scope,
+    ``(func,)`` inside ``func``, ``(cls, method)`` inside a method — so a
+    function-local ``from services.writer import decide`` stays under that
+    function's scope and never bleeds into the module. Python binds an
+    ``import`` statement only inside the scope that runs it, and the graph
+    must do the same: a module-wide collection re-enables the two-module
+    merge that scope-qualified identities exist to prevent (an unlocked
+    route calling its own module-level ``_decide`` would resolve against
+    a locked ``_decide`` in another module through some unrelated
+    function's local import). It also lets a route with a lazy ``from
+    services.writer import decide`` inside its own body actually reach
+    that decide, which a module-scope-only map dropped.
+
+    Value shape ``(label, original)`` unifies the three imports flavors
+    the resolver needs:
+
+    - ``(label, original)`` with ``original`` not ``None`` — ``from X
+      import original [as local]`` where ``X`` is a scanned module
+      ``label``. Serves bare-Name lookups (resolve to ``original`` inside
+      ``label``) and imported class-symbol identity (is ``local`` a
+      scanned class in ``label``?). The module-restricted lookup keeps
+      ``from services.writer import apply`` from merging with an
+      unrelated ``services/locked.py::apply`` in the union.
+    - ``(None, original)`` with ``original`` not ``None`` — same shape
+      but ``X`` is external. The bare-Name call can't be resolved inside
+      the scanned tree, so the walk stops here rather than falling back
+      to any same-named function anywhere.
+    - ``(label, None)`` — ``local`` names a scanned module (``import X
+      as local`` where ``X`` is scanned, or ``from parent import
+      submodule`` where ``parent.submodule`` is scanned). An attribute
+      call ``local.attr(...)`` restricts inside ``label``, so
+      ``writer.apply`` can't silently reach an unrelated
+      ``services/locked.py::apply`` through the union.
+    - ``(None, None)`` — the binding names a package or an external
+      module. Neither a bare-Name call nor an attribute call resolves
+      through it in the scanned tree, but the binding is still recorded
+      so ``lookup_binding`` reports the name as bound.
     """
-    aliases = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            module_path = node.module or ""
-            if not module_path:
-                continue
-            for alias in node.names:
-                if alias.name == "*":
-                    continue
-                bound = alias.asname or alias.name
-                sub = dotted_to_label.get(f"{module_path}.{alias.name}")
-                if sub:
-                    aliases[bound] = sub
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                # ``import a.b as z`` binds z to a.b; ``import a`` binds a.
-                if alias.asname:
-                    target = dotted_to_label.get(alias.name)
-                    if target:
-                        aliases[alias.asname] = target
-                else:
-                    top = alias.name.split(".")[0]
-                    if "." not in alias.name:
-                        target = dotted_to_label.get(top)
-                        if target:
-                            aliases[top] = target
-    return aliases
+    imports = {}
 
-
-def _imported_symbols(tree, dotted_to_label):
-    """Bare names bound to a specific ``(module_label, original_name)`` symbol.
-
-    Lets the resolver locate an imported class or function inside its
-    defining module even when the ``import`` renames it: ``from
-    services.decisions import DecisionService`` and ``from services.review
-    import decide as apply_decision`` both bind names whose target lives in
-    a scanned module and has a known original name there. ``_module_aliases``
-    covers the *module* form (``from services import writer``) — this covers
-    the *symbol* form. Only module-level imports count, matching
-    ``_imported_names``: a function-local ``from services.decisions import
-    DecisionService`` binds only inside that function.
-    """
-    bindings = {}
-
-    def visit(node):
+    def visit(node, scope):
         for child in ast.iter_child_nodes(node):
-            if isinstance(
-                child, ast.FunctionDef | ast.AsyncFunctionDef
-                | ast.ClassDef | ast.Lambda,
-            ):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                # A ``def`` starts a new scope; recurse under its own name
+                # so imports inside its body bind there, not in the caller.
+                visit(child, scope + (child.name,))
+            elif isinstance(child, ast.ClassDef):
+                visit(child, scope + (child.name,))
+            elif isinstance(child, ast.Lambda):
+                # Lambda bodies are expressions and cannot contain imports.
                 continue
-            if isinstance(child, ast.ImportFrom):
+            elif isinstance(child, ast.ImportFrom):
                 module_path = child.module or ""
                 if not module_path:
                     continue
-                parent = dotted_to_label.get(module_path)
-                if parent is None:
-                    continue
+                module_label = dotted_to_label.get(module_path)
                 for alias in child.names:
                     if alias.name == "*":
                         continue
-                    if dotted_to_label.get(
-                        f"{module_path}.{alias.name}",
-                    ) is not None:
-                        # It's a submodule import (``from services import
-                        # writer``); ``_module_aliases`` already handles it.
-                        continue
                     bound = alias.asname or alias.name
-                    bindings[bound] = (parent, alias.name)
+                    # ``from X import Y`` may name a submodule of X rather
+                    # than a function or class: ``from services import
+                    # writer`` binds ``writer`` to ``services/writer.py``.
+                    sub_label = dotted_to_label.get(
+                        f"{module_path}.{alias.name}",
+                    )
+                    if sub_label is not None:
+                        imports.setdefault(scope, {})[bound] = (
+                            sub_label, None,
+                        )
+                    else:
+                        imports.setdefault(scope, {})[bound] = (
+                            module_label, alias.name,
+                        )
+            elif isinstance(child, ast.Import):
+                for alias in child.names:
+                    if alias.asname:
+                        # ``import a.b as z``: z is a module binding.
+                        label = dotted_to_label.get(alias.name)
+                        imports.setdefault(scope, {})[alias.asname] = (
+                            label, None,
+                        )
+                    elif "." not in alias.name:
+                        # ``import a``: bare a is a module binding.
+                        label = dotted_to_label.get(alias.name)
+                        imports.setdefault(scope, {})[alias.name] = (
+                            label, None,
+                        )
+                    else:
+                        # ``import a.b``: Python binds ``a`` (the package),
+                        # which is not itself a scanned module. Record the
+                        # binding so the bare-Name fallback knows the name
+                        # is imported (not the caller's module) but has no
+                        # scanned target — attribute chains through it fall
+                        # to the union.
+                        top = alias.name.split(".")[0]
+                        imports.setdefault(scope, {})[top] = (None, None)
             else:
-                visit(child)
+                # ``if``, ``try``, ``with``, ``for`` at any scope: their
+                # bodies run under that same lexical scope, so imports
+                # inside bind there.
+                visit(child, scope)
 
-    visit(tree)
-    return bindings
+    visit(tree, ())
+    return imports
 
 
 def _call_graph(sources):
@@ -403,34 +369,44 @@ def _call_graph(sources):
 
       For a bare-Name call, walks the caller's lexical scope chain outward
       (a helper defined beside the route wins over a same-named helper
-      elsewhere) and then, if the name is not imported here, restricts the
-      module-level fallback to the caller's own module — two blueprints each
-      defining a module-level ``_decide`` do not merge.
+      elsewhere), then looks the name up in ``_scoped_imports`` scope-by-
+      scope outward: a function-local ``from services.writer import
+      decide`` binds only for the caller's own lexical chain, and a
+      module-level ``from services.writer import apply`` restricts the
+      module fallback to ``services.writer`` so it cannot union with an
+      unrelated ``services/locked.py::apply``. When the name is not
+      imported at any lexical scope on the way out, the module-level
+      fallback is restricted to the caller's own module — two blueprints
+      each defining a module-level ``_decide`` do not merge.
 
       For a ``class`` receiver (``DecisionService(db).apply(...)``), the
-      resolver uses the class's identity — imported class symbol or a class
-      defined in this module — and dispatches to that specific class's
-      ``apply`` method. Two service classes with the same method name stay
-      apart: a route calling ``WriterService(db).apply(...)`` cannot reach
-      the ``apply`` of some unrelated ``LockedService`` through the
+      resolver uses the class's identity — imported class symbol or a
+      class defined in this module, resolved through the same lexical
+      scope walk — and dispatches to that specific class's ``apply``
+      method. Two service classes with the same method name stay apart:
+      a route calling ``WriterService(db).apply(...)`` cannot reach the
+      ``apply`` of some unrelated ``LockedService`` through the
       same-named union.
 
       For a ``name`` receiver bound to a scanned module through an import
-      (``writer.apply(...)`` where the caller's file has ``from services
-      import writer``), the module-level and class-method fallbacks are
-      restricted to that module. When the caller's Name refers to a class
-      instead — either an imported class symbol or a class defined here —
-      the resolver dispatches to that class's own method as it does for
-      direct constructions, so ``LockedService.apply()`` in a class-attribute
-      form is treated the same as ``LockedService(...).apply()``.
+      at any lexical scope (``writer.apply(...)`` where the caller's file
+      has ``from services import writer``, or a function-local ``import
+      services.writer as w`` for ``w.apply(...)``), the module-level and
+      class-method fallbacks are restricted to that module. When the
+      caller's Name refers to a class instead — either an imported class
+      symbol or a class defined here — the resolver dispatches to that
+      class's own method as it does for direct constructions, so
+      ``LockedService.apply()`` in a class-attribute form is treated the
+      same as ``LockedService(...).apply()``.
 
-      For an unknown ``name`` receiver (a runtime instance like ``db``) or a
-      chained expression, any module-level function or class method with
-      that attribute name is a candidate. The class-method union is what
-      lets a route calling ``self.repo.set_flag(...)`` reach into a service's
-      method; without it, a future decision route wrapped inside a service
-      class would be invisible to the graph and could silently write
-      ``prediction_review`` without being flagged as needing the lock.
+      For an unknown ``name`` receiver (a runtime instance like ``db``)
+      or a chained expression, any module-level function or class method
+      with that attribute name is a candidate. The class-method union is
+      what lets a route calling ``self.repo.set_flag(...)`` reach into a
+      service's method; without it, a future decision route wrapped
+      inside a service class would be invisible to the graph and could
+      silently write ``prediction_review`` without being flagged as
+      needing the lock.
     """
     call_map = {}
     routes = {}
@@ -449,14 +425,13 @@ def _call_graph(sources):
     # module scope in that file. Lets a receiver Name that names a locally
     # defined class dispatch to that class's own method table.
     module_classes = {}
-    module_imports = {}
-    module_alias = {}
-    # ``module_symbol[label][local_name]`` — the ``(defining_module_label,
-    # original_name)`` a module-level ``from x import y [as z]`` bound
-    # ``local_name`` to, when ``x`` is a scanned module. Lets the resolver
-    # pin an imported class or function to its defining module and original
-    # name; ``module_alias`` handles the module form of the same problem.
-    module_symbol = {}
+    # ``scoped_imports[label]`` — ``{scope: {local: (label, original)}}``
+    # for that module's imports at every lexical scope. Serves all three
+    # things earlier module-wide maps did (bare-Name imports, receiver-
+    # module aliases, imported class-symbol identity), keyed lexically so
+    # a function-local ``from x import y`` binds only inside that
+    # function.
+    scoped_imports = {}
 
     parsed = []
     dotted_to_label = {}
@@ -467,9 +442,7 @@ def _call_graph(sources):
             dotted_to_label[form] = label
 
     for label, tree, may_register_routes in parsed:
-        module_imports[label] = _imported_names(tree)
-        module_alias[label] = _module_aliases(tree, dotted_to_label)
-        module_symbol[label] = _imported_symbols(tree, dotted_to_label)
+        scoped_imports[label] = _scoped_imports(tree, dotted_to_label)
         module_classes[label] = {
             class_qname[-1]
             for class_qname, _ in _iter_class_defs(label, tree)
@@ -506,21 +479,45 @@ def _call_graph(sources):
                     (qname, f"{label}:{node.lineno}"),
                 )
 
-    def _class_identity_for(caller_module, receiver_name):
-        """Which class, if any, does ``receiver_name`` name in this module?
+    def _lookup_binding(caller_qualified, key):
+        """Walk lexical scopes outward looking for a binding for ``key``.
+
+        Deepest scope wins: a function-local ``from services.writer import
+        decide`` shadows a module-level one, matching Python's own scoping.
+        Returns the first ``(label, original)`` tuple found, or ``None``
+        when ``key`` isn't imported at any scope on the call's lexical
+        path.
+        """
+        caller_module = caller_qualified[0]
+        scope_map = scoped_imports.get(caller_module, {})
+        caller_scope = caller_qualified[1:]
+        for depth in range(len(caller_scope), -1, -1):
+            binding = scope_map.get(caller_scope[:depth], {}).get(key)
+            if binding is not None:
+                return binding
+        return None
+
+    def _class_identity_for(caller_qualified, receiver_name):
+        """Which class, if any, does ``receiver_name`` name for this caller?
 
         Returns ``(class_module, class_name)`` when the receiver is an
         imported class symbol from another scanned module (``from
-        services.decisions import DecisionService [as X]``) or a class
+        services.decisions import DecisionService [as X]``, at module
+        scope or lazily inside the caller's own function) or a class
         defined at module level in the caller's own file, else ``None``.
         Only classes the graph can identify get pinned to a single method
         table.
         """
-        sym = module_symbol.get(caller_module, {}).get(receiver_name)
-        if sym is not None:
-            sym_module, original = sym
-            if original in module_classes.get(sym_module, set()):
+        binding = _lookup_binding(caller_qualified, receiver_name)
+        if binding is not None:
+            sym_module, original = binding
+            if (
+                sym_module is not None
+                and original is not None
+                and original in module_classes.get(sym_module, set())
+            ):
                 return sym_module, original
+        caller_module = caller_qualified[0]
         if receiver_name in module_classes.get(caller_module, set()):
             return caller_module, receiver_name
         return None
@@ -531,7 +528,7 @@ def _call_graph(sources):
         caller_module = caller_qualified[0]
         # ``ClassName(...).method(...)``: dispatch to that class's own method.
         if class_receiver is not None:
-            cls = _class_identity_for(caller_module, class_receiver)
+            cls = _class_identity_for(caller_qualified, class_receiver)
             if cls is not None:
                 return class_methods_by_class.get(
                     (cls[0], cls[1], name), set(),
@@ -550,66 +547,82 @@ def _call_graph(sources):
                 found = nested.get((caller_qualified[:depth], name))
                 if found:
                     return found
-        caller_imports = module_imports.get(caller_module, {})
-        if is_bare and name not in caller_imports:
-            # A bare Name call whose name isn't imported here can only
-            # resolve inside the caller's own module. Two modules each
-            # defining a bare ``_decide`` at module level do not merge:
-            # an unlocked route calling its own ``_decide`` cannot reach a
-            # locked ``_decide`` in a different blueprint through the graph.
+        if is_bare:
+            binding = _lookup_binding(caller_qualified, name)
+            if binding is None:
+                # A bare Name call whose name isn't imported at any
+                # lexical scope on this call's path can only resolve
+                # inside the caller's own module. Two modules each
+                # defining a bare ``_decide`` at module level do not
+                # merge: an unlocked route calling its own ``_decide``
+                # cannot reach a locked ``_decide`` in a different
+                # blueprint through the graph.
+                return {
+                    q for q in module_top.get(name, set())
+                    if q[0] == caller_module
+                }
+            label, original = binding
+            if original is None:
+                # Binding names a module rather than a callable
+                # (``import X``, ``import X as Y``, or ``from X import
+                # submodule``): a bare-Name call to it isn't meaningful
+                # in the scanned tree.
+                return set()
+            if label is None:
+                # ``from external_package import name`` — the graph
+                # doesn't scan that module, so the call can't be traced
+                # further. Falling back to ``module_top[original]`` here
+                # would re-enable the module merge the label restriction
+                # exists to prevent.
+                return set()
+            # Restrict the module-level and class-method fallbacks to
+            # the binding's defining module. ``from services.writer
+            # import apply`` never reaches an unrelated
+            # ``services/locked.py::apply`` through the union.
             return {
-                q for q in module_top.get(name, set())
-                if q[0] == caller_module
+                q for q in module_top.get(original, set()) if q[0] == label
+            } | {
+                q for q in class_methods.get(original, set()) if q[0] == label
             }
-        if not is_bare and receiver is not None:
+        if receiver is not None:
             # A Name receiver that itself names a class (imported class
             # symbol or a locally defined class): ``LockedService.apply()``
             # dispatches to that class's own method just like the direct
             # construction form.
-            cls = _class_identity_for(caller_module, receiver)
+            cls = _class_identity_for(caller_qualified, receiver)
             if cls is not None:
                 return class_methods_by_class.get(
                     (cls[0], cls[1], name), set(),
                 )
-            receiver_module = module_alias.get(caller_module, {}).get(receiver)
-            if receiver_module is not None:
-                # ``receiver.attr(...)`` where ``receiver`` is a scanned
-                # module the caller imported: an unrelated same-named
-                # function in another scanned module is not on the actual
-                # call path, and unioning it in would let a route reach a
-                # lock (or a mutator) it doesn't actually reach. Restrict
-                # both the module-level and class-method fallbacks to the
-                # receiver module.
-                return {
-                    q for q in module_top.get(name, set())
-                    if q[0] == receiver_module
-                } | {
-                    q for q in class_methods.get(name, set())
-                    if q[0] == receiver_module
-                }
-        # Attribute call with an unknown or runtime receiver, or a bare Name
-        # known to be imported here: match any module-level function AND any
-        # class method with that name. For a bare Name that is an aliased
-        # import (``from services.review import decide as apply_decision``),
-        # look the target up under the imported symbol's *original* name —
-        # the scanned definition is ``decide``, so ``apply_decision`` would
-        # otherwise miss it and an unlocked route calling ``apply_decision``
-        # would appear to reach no writer. The class-method union is what
-        # lets a route calling ``PhotoReviewService(db).set_flag(...)`` from
-        # a blueprint reach into the service's ``set_flag``; without it, a
-        # future decision route wrapped inside a service class would be
-        # invisible to the graph and could silently write
-        # ``prediction_review`` without being flagged as needing the lock.
-        if is_bare:
-            target = caller_imports[name]
-            if target is None:
-                # ``import module`` binds a module, not a function: it has
-                # no bare-Name target of its own.
-                return set()
-            lookup = target
-        else:
-            lookup = name
-        return module_top.get(lookup, set()) | class_methods.get(lookup, set())
+            binding = _lookup_binding(caller_qualified, receiver)
+            if binding is not None:
+                receiver_label, receiver_original = binding
+                if receiver_original is None and receiver_label is not None:
+                    # ``receiver.attr(...)`` where ``receiver`` is a
+                    # scanned module the caller imported at some lexical
+                    # scope on the way out: an unrelated same-named
+                    # function in another scanned module is not on the
+                    # actual call path, and unioning it in would let a
+                    # route reach a lock (or a mutator) it doesn't
+                    # actually reach. Restrict both fallbacks to the
+                    # receiver's module.
+                    return {
+                        q for q in module_top.get(name, set())
+                        if q[0] == receiver_label
+                    } | {
+                        q for q in class_methods.get(name, set())
+                        if q[0] == receiver_label
+                    }
+        # Attribute call with an unknown or runtime receiver, or one whose
+        # receiver is bound to something the graph cannot restrict against:
+        # match any module-level function and any class method with that
+        # name. The class-method union lets a route calling
+        # ``PhotoReviewService(db).set_flag(...)`` from a blueprint reach
+        # into the service's ``set_flag``; without it, a decision route
+        # wrapped inside a service class would be invisible to the graph
+        # and could silently write ``prediction_review`` without being
+        # flagged as needing the lock.
+        return module_top.get(name, set()) | class_methods.get(name, set())
 
     return call_map, routes, resolve
 
@@ -1019,7 +1032,8 @@ def test_decision_route_analysis_ignores_function_local_imports():
     import _decide`` in an unrelated function, but the route calls its own
     module-level ``_decide`` that does not lock. The graph must not merge
     with the locked ``_decide`` in ``services/locked.py`` through that
-    nested import.
+    nested import — the local binding stays lexically confined to
+    ``_unrelated`` and is invisible from the route's own scope chain.
     """
     unlocked = '''
 def _decide(db):
@@ -1066,6 +1080,129 @@ def _decide(db, json_error):
     )
     assert any(
         p.startswith("api_u ") and "never reaches begin_prediction_decision" in p
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_follows_function_local_imports():
+    """A lazy ``from X import Y`` inside a route resolves to Y in X.
+
+    A route body may lazily import a helper (``from services.writer
+    import decide`` inside the ``def``, to keep the module-level import
+    graph small or to avoid a cycle) and then call ``decide(db)``.
+    Python binds that import inside the route's own scope, and a
+    bare-Name lookup that only consults the module-level import list
+    cannot see it: the reachability walk then treats ``decide`` as
+    unimported and either resolves it to a same-named module-level
+    ``decide`` in the caller's file (if one exists) or to nothing at
+    all, so a mutating helper reached through a lazy import silently
+    drops off the call graph. The lexical-scope resolver must record the
+    binding under the route's scope and follow the edge to
+    ``services/writer.py::decide``.
+    """
+    writer = '''
+def decide(db):
+    db.update_prediction_status(1, "rejected")
+'''
+    blueprint = '''
+def create_bp(get_db, json_error):
+    bp = Blueprint("lazy", __name__)
+
+    @bp.post("/api/lazy")
+    def api_lazy():
+        from services.writer import decide
+        return decide(get_db())
+
+    return bp
+'''
+    call_map, routes, resolve = _call_graph([
+        ("services/writer.py", writer, False),
+        ("web/lazy.py", blueprint, True),
+    ])
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_lazy ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
+
+
+def test_decision_route_analysis_pins_from_imports_to_defining_module():
+    """``from services.writer import apply`` restricts to services.writer.
+
+    Two scanned service modules define a module-level ``apply``:
+    ``services/writer.py::apply`` mutates ``prediction_review`` without
+    locking; ``services/locked.py::apply`` reaches
+    ``begin_prediction_decision``. A blueprint that imports the writer's
+    ``apply`` and calls it as a bare Name is unambiguously calling the
+    writer's version, and unambiguously unlocked. A resolver that
+    records only the imported symbol's name (discarding the defining
+    module) then unions every scanned ``apply`` when resolving the bare
+    Name, and the walk reaches the lock through the unrelated
+    ``locked.apply`` — declaring the route silences the "declared but
+    never reaches lock" check even though its actual path never locks.
+    Preserving the defining module in the import record keeps that
+    signal.
+    """
+    writer = '''
+def apply(db):
+    db.update_prediction_status(1, "rejected")
+'''
+    locked_service = '''
+from services import prediction_decisions
+
+
+def apply(db, json_error):
+    return prediction_decisions.under_prediction_decision_lock(
+        db, lambda: db.update_prediction_status(2, "accepted"),
+        json_error=json_error,
+    )
+'''
+    blueprint = '''
+from services.writer import apply
+
+
+def create_bp(get_db, json_error):
+    bp = Blueprint("w", __name__)
+
+    @bp.post("/api/w")
+    def api_w():
+        return apply(get_db())
+
+    return bp
+'''
+    service = (VIREO_DIR / "services" / "prediction_decisions.py").read_text(
+        encoding="utf-8",
+    )
+    call_map, routes, resolve = _call_graph([
+        ("web/writer_route.py", blueprint, True),
+        ("services/writer.py", writer, False),
+        ("services/locked.py", locked_service, False),
+        ("services/prediction_decisions.py", service, False),
+    ])
+    # ``api_w`` reaches the writer's mutator, so it's flagged as a writer
+    # when undeclared; and once declared it still fails the second check
+    # because the actual path never takes the lock. The union-only
+    # resolver would have silenced this second check by reaching the
+    # lock via ``locked.apply``.
+    problems = _decision_route_problems(
+        call_map, routes, resolve, set(),
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "writes prediction decisions but is not in PREDICTION_DECISION_ROUTES"
+        in p
+        for p in problems
+    ), problems
+    problems = _decision_route_problems(
+        call_map, routes, resolve, {"api_w"},
+    )
+    assert any(
+        p.startswith("api_w ")
+        and "never reaches begin_prediction_decision" in p
         for p in problems
     ), problems
 
