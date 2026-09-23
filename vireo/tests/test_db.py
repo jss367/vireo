@@ -28620,7 +28620,7 @@ def test_prediction_confidence_filter_moves_when_alternative_becomes_rejected(tm
                    "value": 0.2}]) == 0
 
     # A reject flips the sibling from 'alternative' to 'rejected' in the
-    # same transaction (mirrors ``_batch_reject_under_lock`` in app.py).
+    # same transaction (mirrors ``_batch_reject_under_lock`` in web/predictions.py).
     db.conn.execute(
         "UPDATE prediction_review SET status = 'rejected', "
         "reviewed_at = '2026-01-03' WHERE prediction_id = ? "

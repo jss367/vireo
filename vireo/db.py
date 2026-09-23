@@ -21264,7 +21264,7 @@ class Database:
                     # Mirror Compare's visibility filter when picking which
                     # neighbouring predictions may protect a species keyword:
                     #   * skip 'alternative' rows (Compare drops them at
-                    #     app.py's api_predictions_compare, alongside
+                    #     web/predictions.py's api_predictions_compare, alongside
                     #     'rejected');
                     #   * skip detections below the workspace's effective
                     #     detector_confidence — Compare marks those "dormant"
