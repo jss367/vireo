@@ -20,6 +20,7 @@ from collections import OrderedDict
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key
 from photo_payload import render_key_for_recipe
+from web.location_edits import walk_parent_chain
 from xmp import location_keyword_entries, read_sync_preview_metadata
 
 log = logging.getLogger(__name__)
@@ -756,19 +757,16 @@ def _sync_preview_change_creates_sidecar(
     return False
 
 
-def create_sync_blueprint(get_db, json_error, get_runner, *, walk_parent_chain):
+def create_sync_blueprint(get_db, json_error, get_runner):
     """Build the sync blueprint.
 
     ``get_runner`` returns the app's job runner, used to spot a sync job
-    already running in the active workspace. ``walk_parent_chain`` resolves
-    a location keyword's ancestors; the single-photo and keyword location
-    serializers still in ``create_app`` share it, so it is injected rather
-    than moved.
+    already running in the active workspace.
     """
     blueprint = Blueprint("sync", __name__)
 
     def _serialize_photo_locations(db, photo_ids):
-        """Bulk form of :func:`_serialize_photo_location`.
+        """Bulk form of :func:`web.location_edits.serialize_photo_location`.
 
         Sync review can contain thousands of location changes.  Looking up
         each leaf and then walking the same parent chain once per photo turns

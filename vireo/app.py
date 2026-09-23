@@ -133,6 +133,11 @@ from services.local_workspace import (
     has_local_workspace,
     stage_boundary_lock,
 )
+from services.pending_changes import (
+    queue_keyword_add,
+    queue_keyword_remove,
+    queue_location_sync_if_enabled,
+)
 from services.pipeline_launch import PipelineChain
 from volume_reachability import (  # noqa: F401  (re-exported for tests)
     _NETWORK_PROBE_LOCK,
@@ -152,6 +157,17 @@ from web.jobs import create_jobs_blueprint
 from web.life_list import create_life_list_blueprint
 from web.local_folder import LOCAL_FOLDER_JOB_TYPES, create_local_folder_blueprint
 from web.local_workspace import LOCAL_WORKSPACE_JOB_TYPES, create_local_workspace_blueprint
+from web.location_edits import (
+    LOCATION_NAME_PIPE_ERROR,
+    LocationErrors,
+    extract_keyword_id,
+    extract_place_id,
+    location_name_conflict_payload,
+    location_name_conflict_response,
+    normalize_client_place_details,
+    serialize_photo_location,
+    walk_parent_chain,
+)
 from web.misses import create_misses_blueprint
 from web.models import create_models_blueprint
 from web.moves import create_moves_blueprint
@@ -3193,77 +3209,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
         )
 
-    def _keyword_not_found_error():
-        return json_error(
-            "keyword_not_found",
-            404,
-            message=(
-                "That saved location no longer exists. Refresh the page and "
-                "select another location."
-            ),
-        )
-
-    def _google_maps_not_configured_error():
-        return json_error(
-            "no_api_key",
-            400,
-            message=(
-                "Google Maps isn’t configured. Add an API key in Settings to "
-                "use Google place search."
-            ),
-        )
-
-    def _google_place_not_found_error():
-        return json_error(
-            "place_not_found",
-            404,
-            message=(
-                "Google Maps couldn’t find that place. Search again and choose "
-                "another result."
-            ),
-        )
-
-    def _location_name_conflict_payload(err):
-        """Describe a location-keyword collision for both people and clients.
-
-        ``error`` remains the stable legacy code because existing clients use
-        it for branching. ``message`` is the text browser surfaces should show
-        to a person; ``error_detail`` retains the lower-level diagnostic for
-        logs and troubleshooting.
-        """
-        detail = str(err)
-        match = re.search(r"(?:child )?keyword '(.+?)' \((?:parent_id|id)=", detail)
-        if match:
-            message = (
-                f"Couldn’t assign this location because “{match.group(1)}” is "
-                "already used by another keyword. Rename that keyword in "
-                "Keywords, then try again."
-            )
-        else:
-            message = (
-                "Couldn’t assign this location because one of its place names "
-                "conflicts with an existing keyword. Rename the conflicting "
-                "keyword in Keywords, then try again."
-            )
-        return {
-            "error": "name_conflict",
-            "code": "name_conflict",
-            "message": message,
-            "error_detail": detail,
-        }
-
-    def _location_name_conflict_response(err):
-        payload = _location_name_conflict_payload(err)
-        payload["request_id"] = getattr(g, "request_id", None)
-        return jsonify(payload), 409
-
-    # Shared message for a location name that carries the XMP hierarchy
-    # delimiter. Rejecting at assignment time (rather than at sync time) is
-    # what keeps the pending change from being silently cleared for a name
-    # ``SidecarEditor.set_location_keywords`` cannot round-trip.
-    _LOCATION_NAME_PIPE_ERROR = (
-        "location name may not contain '|' -- XMP keyword hierarchies "
-        "reserve it as the level delimiter"
+    # Location error responses shared by the location, place, and batch
+    # routes (``web.location_edits``); built once around ``json_error``.
+    location_errors = LocationErrors(
+        json_error=json_error, photo_not_found_error=_photo_not_found_error,
     )
 
     def _coerce_collection_id(raw):
@@ -6809,7 +6758,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Location section: pre-resolved leaf + parent chain so the photo
         # detail panel can render the filled state without a second roundtrip.
-        result["location"] = _serialize_photo_location(db, photo_id)
+        result["location"] = serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
         result["render_key"] = render_key_for_recipe(result["edit_recipe"])
         from camera_denoise import resolve_profile
@@ -7238,90 +7187,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         log.info("Keyword cleanup: merged %d duplicates", merged)
         return jsonify({"ok": True, "merged": merged})
 
-    def _queue_keyword_add(photo_id, keyword_name, workspace_id=None, _commit=True):
-        """Queue a keyword add unless it cancels a pending removal."""
-        # Normalize before the cancellation lookup: queue_change normalizes
-        # on insert, so pending values are stored in clean form and an
-        # exact-match cancel against a raw variant would miss its pair.
-        keyword_name = normalize_keyword_display(keyword_name)
-        if not keyword_name:
-            return
-        db = _get_db()
-        removed = db.remove_pending_changes(
-            photo_id, "keyword_remove", keyword_name,
-            workspace_id=workspace_id, _commit=_commit,
-        )
-        # A migration-generated flat removal is obsolete as soon as the user
-        # explicitly re-adds that term. Clear it across every workspace that
-        # owns the shared sidecar; otherwise "Use XMP" can filter the term
-        # out and detach this fresh association before the add is written.
-        db.clear_equivalent_flat_removals(
-            [{
-                "photo_id": photo_id,
-                "change_type": "keyword_remove_flat",
-                "value": keyword_name,
-            }],
-            _commit=_commit,
-        )
-        if removed == 0:
-            db.queue_change(
-                photo_id, "keyword_add", keyword_name,
-                workspace_id=workspace_id, _commit=_commit,
-            )
-
-    def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None, _commit=True):
-        """Queue a keyword removal unless it cancels a pending add."""
-        # See _queue_keyword_add: keep the cancellation lookup in the same
-        # normalized form queue_change stores.
-        keyword_name = normalize_keyword_display(keyword_name)
-        if not keyword_name:
-            return
-        db = _get_db()
-        removed = db.remove_pending_changes(
-            photo_id, "keyword_add", keyword_name,
-            workspace_id=workspace_id, _commit=_commit,
-        )
-        if removed == 0:
-            db.queue_change(
-                photo_id, "keyword_remove", keyword_name,
-                workspace_id=workspace_id, _commit=_commit,
-            )
-
-    def _queue_location_sync_if_enabled(photo_id, workspace_id=None, _commit=True):
-        """Queue GPS sidecar sync or cleanup work for location edits."""
-        db = _get_db()
-        if workspace_id is None:
-            if not db._photo_in_workspace(photo_id):
-                return
-        elif db.conn.execute(
-            """SELECT 1 FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE p.id = ? AND wf.workspace_id = ?""",
-            (photo_id, workspace_id),
-        ).fetchone() is None:
-            return
-        # Queue even when assigned-location writes are disabled so sync can
-        # remove stale Vireo-authored GPS previously written while enabled.
-        db.remove_pending_changes(
-            photo_id, "location", workspace_id=workspace_id, _commit=_commit,
-        )
-        db.queue_change(
-            photo_id, "location", "effective",
-            workspace_id=workspace_id, _commit=_commit,
-        )
-
-    def _photo_location_edit_error(db, photo_id):
-        """Return an error response when a photo cannot be edited in this workspace."""
-        if db.conn.execute(
-            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone() is None:
-            return _photo_not_found_error()
-        if not db._photo_in_workspace(photo_id):
-            return json_error(
-                f"Photo {photo_id} does not belong to the active workspace", 403,
-            )
-        return None
-
     def _normalize_photo_id_list(raw_ids):
         """Validate and de-dupe a JSON ``photo_ids`` list, preserving order."""
         if not isinstance(raw_ids, list) or not raw_ids:
@@ -7361,16 +7226,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return found
 
     _REVERSE_GEOCODE_CACHE_LANGUAGE_KEY = "_vireo_result_language"
-
-    def _google_maps_result_language(config):
-        """Return Google's language preference for the current configuration."""
-        return "en" if config.get("google_maps_prefer_english", True) else None
-
-    def _google_place_details(place_id, api_key, language):
-        """Fetch details while preserving the wrapper's default-on API."""
-        if language == "en":
-            return places.place_details(place_id, api_key)
-        return places.place_details(place_id, api_key, language=None)
 
     def _google_reverse_geocode(lat, lng, api_key, language):
         """Reverse-geocode while preserving the wrapper's default-on API."""
@@ -7719,7 +7574,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if len(photos_map) != len(photo_ids):
             return json_error("One or more photos were not found", 404)
         for photo_id in photo_ids:
-            edit_error = _photo_location_edit_error(db, photo_id)
+            edit_error = location_errors.photo_location_edit_error(db, photo_id)
             if edit_error is not None:
                 return edit_error
 
@@ -7776,7 +7631,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Network sidecars can take longer than SQLite's busy timeout. Read
         # them before taking the writer lock, after authorizing the selection.
         for photo_id in photo_ids:
-            error = _photo_location_edit_error(db, photo_id)
+            error = location_errors.photo_location_edit_error(db, photo_id)
             if error is not None:
                 return error
         sidecars = {}
@@ -7793,7 +7648,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.conn.execute("BEGIN IMMEDIATE")
         try:
             for photo_id in photo_ids:
-                error = _photo_location_edit_error(db, photo_id)
+                error = location_errors.photo_location_edit_error(db, photo_id)
                 if error is not None:
                     db.conn.rollback()
                     return error
@@ -7810,7 +7665,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     db.conn.rollback()
                     return json_error("Enable Write assigned locations to XMP in Settings before queueing corrections.", 409)
                 for photo_id in photo_ids:
-                    _queue_location_sync_if_enabled(photo_id, _commit=False)
+                    queue_location_sync_if_enabled(db, photo_id, _commit=False)
                     db.conn.execute("DELETE FROM location_gps_reviews WHERE photo_id = ?", (photo_id,))
             else:
                 for photo_id in photo_ids:
@@ -7898,7 +7753,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "longitude": row["longitude"],
                 "photo_count": row["photo_count"],
                 "distance_m": round(distance, 1),
-                "parent_chain": _walk_parent_chain(db, row["parent_id"]),
+                "parent_chain": walk_parent_chain(db, row["parent_id"]),
             })
         suggestions.sort(key=lambda item: (item["distance_m"], -item["photo_count"], item["name"]))
         return jsonify({"suggestions": suggestions[:8]})
@@ -7921,7 +7776,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if len(photos_map) != len(photo_ids):
             return None, json_error("One or more photos were not found", 404)
         for pid in photo_ids:
-            edit_error = _photo_location_edit_error(db, pid)
+            edit_error = location_errors.photo_location_edit_error(db, pid)
             if edit_error is not None:
                 return None, edit_error
 
@@ -7929,7 +7784,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
         maps_config = cfg.load()
         api_key = (maps_config.get("google_maps_api_key", "") or "").strip()
-        language = _google_maps_result_language(maps_config)
+        language = places.result_language(maps_config)
 
         grid_cache = {}
         groups = {}
@@ -8690,7 +8545,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # itself keeps authorship recoverable after _prune_edit_history()
         # drops the keyword_add entry recorded just below.
         db.tag_photo(photo_id, kid, source='manual')
-        _queue_keyword_add(photo_id, name)
+        queue_keyword_add(db, photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
                        [{'photo_id': photo_id, 'old_value': '', 'new_value': str(kid)}])
         return jsonify({"ok": True, "keyword_id": kid})
@@ -8713,7 +8568,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         else:
             return jsonify({"ok": True})
         db.untag_photo(photo_id, keyword_id)
-        _queue_keyword_remove(photo_id, kw_name)
+        queue_keyword_remove(db, photo_id, kw_name)
         # A ``keyword_remove`` on a ``type='location'`` tag strips the flat
         # and hierarchical entries but leaves ``vireo:locationKeywords`` and
         # its ownership claim in the sidecar. If the user later recreates
@@ -8723,7 +8578,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # ``sync_to_xmp`` clears the marker (or rewrites it to a still-
         # tagged location, if the photo has one) on the next sync.
         if kw_type == "location":
-            _queue_location_sync_if_enabled(photo_id)
+            queue_location_sync_if_enabled(db, photo_id)
         db.record_edit('keyword_remove', f'Removed keyword "{kw_name}"', str(keyword_id),
                        [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
@@ -9485,8 +9340,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in affected:
                 if skip_keyword_requeue_by_ws.get(row["workspace_id"], False):
                     continue
-                _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
-                _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
+                queue_keyword_remove(db, row["photo_id"], old_name, workspace_id=row["workspace_id"])
+                queue_keyword_add(db, row["photo_id"], new_name, workspace_id=row["workspace_id"])
         # A location→non-location retype with no name change queues a
         # ``location`` change below but no keyword_add — the name-change
         # block above didn't run. sync_to_xmp() therefore resolves no
@@ -9503,8 +9358,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             and old_row["name"] == new_row["name"]
         ):
             for row in affected:
-                _queue_keyword_add(
-                    row["photo_id"], new_row["name"],
+                queue_keyword_add(
+                    db, row["photo_id"], new_row["name"],
                     workspace_id=row["workspace_id"],
                 )
         # If a location keyword's name or type changed, requeue a
@@ -9556,7 +9411,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 (keyword_id,),
             ).fetchall()
             for row in affected:
-                _queue_keyword_remove(row["photo_id"], kw_row["name"], workspace_id=row["workspace_id"])
+                queue_keyword_remove(db, row["photo_id"], kw_row["name"], workspace_id=row["workspace_id"])
             # Deleting a location ancestor detaches its children (they
             # become root-level keywords) but no photo is tagged with the
             # ancestor directly, so ``affected`` is empty and no
@@ -9638,207 +9493,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return ""
         return " · ".join(parts)
 
-    def _coerce_place_id(candidate):
-        """Return a stripped string ``place_id`` for any JSON scalar value."""
-        if candidate is None:
-            return ""
-        if isinstance(candidate, str):
-            return candidate.strip()
-        return str(candidate).strip()
-
-    def _extract_place_id(body):
-        """Extract ``place_id`` from top-level or nested client place payloads."""
-        candidate = body.get("place_id")
-        if candidate is None and isinstance(body.get("place"), dict):
-            candidate = body["place"].get("place_id")
-        if candidate is None and isinstance(body.get("details"), dict):
-            candidate = body["details"].get("place_id")
-        return _coerce_place_id(candidate)
-
-    def _extract_keyword_id(body):
-        """Return an integer keyword_id from a JSON body, or None."""
-        candidate = body.get("keyword_id")
-        if candidate is None:
-            return None
-        if isinstance(candidate, bool):
-            return None
-        if isinstance(candidate, int):
-            return candidate
-        if isinstance(candidate, str):
-            stripped = candidate.strip()
-            if stripped.isdigit():
-                return int(stripped)
-        return None
-
-    def _location_keyword_edit_error(db, keyword_id):
-        """Return an error response unless ``keyword_id`` is a location keyword."""
-        if keyword_id is None:
-            return json_error("invalid keyword_id", 400)
-        row = db.conn.execute(
-            "SELECT id, type FROM keywords WHERE id = ?", (keyword_id,),
-        ).fetchone()
-        if row is None:
-            return _keyword_not_found_error()
-        if row["type"] != "location":
-            return json_error("keyword is not a location", 400)
-        return None
-
-    def _normalize_client_place_details(body):
-        """Normalize a Google Maps JS Place payload from the request body.
-
-        Browser autocomplete already receives geometry and address components
-        when the Maps JS key is valid. Accepting that payload avoids a second
-        server-side Place Details request, which can fail for correctly
-        referrer-restricted browser keys.
-        """
-        raw = body.get("place") or body.get("details")
-        if not isinstance(raw, dict):
-            return None
-
-        place_id = _coerce_place_id(raw.get("place_id"))
-        if not place_id:
-            return None
-        body_place_id = _coerce_place_id(body.get("place_id"))
-        if body_place_id and body_place_id != place_id:
-            return None
-
-        def first_present(*values):
-            for value in values:
-                if value is not None:
-                    return value
-            return None
-
-        geometry = raw.get("geometry")
-        geometry_location = {}
-        if isinstance(geometry, dict):
-            location = geometry.get("location")
-            if isinstance(location, dict):
-                geometry_location = location
-        lat_value = first_present(
-            raw.get("lat"),
-            raw.get("latitude"),
-            geometry_location.get("lat") if isinstance(geometry_location, dict) else None,
-        )
-        lng_value = first_present(
-            raw.get("lng"),
-            raw.get("longitude"),
-            geometry_location.get("lng") if isinstance(geometry_location, dict) else None,
-        )
-        try:
-            lat = float(lat_value)
-            lng = float(lng_value)
-        except (TypeError, ValueError):
-            return None
-        if (
-            not math.isfinite(lat)
-            or not math.isfinite(lng)
-            or lat < -90
-            or lat > 90
-            or lng < -180
-            or lng > 180
-        ):
-            return None
-
-        raw_components = raw.get("address_components")
-        if not isinstance(raw_components, list):
-            raw_components = []
-        components = []
-        for comp in raw_components:
-            if not isinstance(comp, dict):
-                continue
-            name = comp.get("name") or comp.get("long_name") or ""
-            if not name:
-                continue
-            types = comp.get("types")
-            if not isinstance(types, list):
-                types = []
-            components.append({
-                "name": name,
-                "short_name": comp.get("short_name") or "",
-                "types": types,
-            })
-
-        raw_types = raw.get("types")
-        if not isinstance(raw_types, list):
-            raw_types = []
-
-        return {
-            "place_id": place_id,
-            "name": raw.get("name") or raw.get("formatted_address") or "",
-            "types": raw_types,
-            "lat": lat,
-            "lng": lng,
-            "address_components": components,
-        }
-
-    def _walk_parent_chain(db, leaf_parent_id):
-        """Walk ``parent_id`` upward from ``leaf_parent_id`` to the root.
-
-        Returns a list of ``{"id": int, "name": str}`` dicts in broadest →
-        narrowest order, EXCLUDING the leaf itself. Pass the leaf's
-        ``parent_id`` (i.e. the *first* parent), not the leaf's own id.
-
-        Depth cap of 10 — chains are bounded ~5 in practice, but guard
-        against pathological/malformed cycles (link_keyword_to_place
-        already prevents creating cycles, but a corrupted DB could).
-        """
-        parents = []
-        current_parent_id = leaf_parent_id
-        for _ in range(10):
-            if current_parent_id is None:
-                break
-            row = db.conn.execute(
-                "SELECT id, name, parent_id FROM keywords WHERE id = ?",
-                (current_parent_id,),
-            ).fetchone()
-            if row is None:
-                break
-            parents.append({"id": row["id"], "name": row["name"]})
-            current_parent_id = row["parent_id"]
-        # Reverse so broadest (e.g. country) comes first, narrowest last.
-        parents.reverse()
-        return parents
-
-    def _serialize_photo_location(db, photo_id):
-        """Return a summary dict for the photo's current location keyword.
-
-        The shape matches the JSON the location section UI expects::
-
-            {
-                "keyword_id":   int,
-                "name":         str,
-                "place_id":     str | None,
-                "latitude":     float | None,
-                "longitude":    float | None,
-                "parent_chain": [{"id": int, "name": str}, ...],  # broadest -> narrowest, EXCLUDES leaf
-            }
-
-        Returns ``None`` if the photo has no ``type='location'`` keyword link.
-        """
-        leaf = db.conn.execute(
-            "SELECT k.id, k.name, k.place_id, k.latitude, k.longitude, k.parent_id "
-            "FROM photo_keywords pk "
-            "JOIN keywords k ON k.id = pk.keyword_id "
-            "WHERE pk.photo_id = ? AND k.type = 'location' "
-            "LIMIT 1",
-            (photo_id,),
-        ).fetchone()
-        if leaf is None:
-            return None
-
-        return {
-            "keyword_id": leaf["id"],
-            "name": leaf["name"],
-            "place_id": leaf["place_id"],
-            "latitude": leaf["latitude"],
-            "longitude": leaf["longitude"],
-            "parent_chain": _walk_parent_chain(db, leaf["parent_id"]),
-        }
-
     def _serialize_keyword(db, keyword_id):
         """Return a summary dict for a single ``type='location'`` keyword row.
 
-        Same shape as :func:`_serialize_photo_location` (leaf fields + a
+        Same shape as :func:`serialize_photo_location` (leaf fields + a
         broadest-first parent chain), but keyed on the keyword id directly
         rather than via a photo. Used by the ``link-place`` route, which
         operates on a keyword and isn't tied to a photo.
@@ -9858,7 +9516,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "place_id": leaf["place_id"],
             "latitude": leaf["latitude"],
             "longitude": leaf["longitude"],
-            "parent_chain": _walk_parent_chain(db, leaf["parent_id"]),
+            "parent_chain": walk_parent_chain(db, leaf["parent_id"]),
         }
 
     # Location keywords don't propagate to dc:subject sidecars — structured XMP (exif:GPS*, Iptc4xmpCore:Location) is a future feature.
@@ -9872,8 +9530,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``type='location'`` link).
         """
         body = request.get_json(silent=True) or {}
-        keyword_id = _extract_keyword_id(body)
-        place_id = _extract_place_id(body)
+        keyword_id = extract_keyword_id(body)
+        place_id = extract_place_id(body)
         if keyword_id is None and not place_id:
             return json_error("missing place_id", 400)
 
@@ -9881,17 +9539,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Guard against stale clients (e.g. tab open after photo deleted).
         # Without this, set_photo_location's INSERT into photo_keywords
         # raises a FK IntegrityError that surfaces as a 500.
-        edit_error = _photo_location_edit_error(db, photo_id)
+        edit_error = location_errors.photo_location_edit_error(db, photo_id)
         if edit_error is not None:
             return edit_error
 
         if keyword_id is not None:
-            keyword_error = _location_keyword_edit_error(db, keyword_id)
+            keyword_error = location_errors.location_keyword_edit_error(db, keyword_id)
             if keyword_error is not None:
                 return keyword_error
             db.set_photo_location(photo_id, keyword_id)
-            _queue_location_sync_if_enabled(photo_id)
-            location = _serialize_photo_location(db, photo_id)
+            queue_location_sync_if_enabled(db, photo_id)
+            location = serialize_photo_location(db, photo_id)
             db.record_edit(
                 'location_set',
                 f"set location: {location.get('name', 'unknown') if location else 'unknown'}",
@@ -9900,20 +9558,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             return jsonify({"location": location})
 
-        details = _normalize_client_place_details(body)
+        details = normalize_client_place_details(body)
         if details is None:
             import config as cfg
             maps_config = cfg.load()
             key = maps_config.get("google_maps_api_key", "")
             if not key:
-                return _google_maps_not_configured_error()
-            details = _google_place_details(
+                return location_errors.google_maps_not_configured_error()
+            details = places.place_details_for_language(
                 place_id,
                 key,
-                _google_maps_result_language(maps_config),
+                places.result_language(maps_config),
             )
             if details is None:
-                return _google_place_not_found_error()
+                return location_errors.google_place_not_found_error()
 
         try:
             leaf_id = db.upsert_place_chain(details)
@@ -9921,16 +9579,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # _upsert_one_keyword raises RuntimeError when the parent-chain
             # build hits an existing keyword of a different type at the same
             # (name, parent_id). Mirror /api/keywords/<id>/link-place's 409.
-            return _location_name_conflict_response(err)
+            return location_name_conflict_response(err)
         db.set_photo_location(photo_id, leaf_id)
-        _queue_location_sync_if_enabled(photo_id)
+        queue_location_sync_if_enabled(db, photo_id)
         db.record_edit(
             'location_set',
             f"set location: {details.get('name', 'unknown')}",
             str(leaf_id),
             [{'photo_id': photo_id, 'old_value': '', 'new_value': str(leaf_id)}],
         )
-        return jsonify({"location": _serialize_photo_location(db, photo_id)})
+        return jsonify({"location": serialize_photo_location(db, photo_id)})
 
     @app.route("/api/photos/<int:photo_id>/location/text", methods=["POST"])
     def api_set_photo_location_text(photo_id):
@@ -9952,7 +9610,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # never gets queued in the first place, so no later sync silently
         # loses it.
         if "|" in stripped:
-            return json_error(_LOCATION_NAME_PIPE_ERROR, 400)
+            return json_error(LOCATION_NAME_PIPE_ERROR, 400)
         latitude = body.get("latitude")
         longitude = body.get("longitude")
         if (latitude is None) != (longitude is None):
@@ -9972,7 +9630,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("invalid coordinates", 400)
 
         db = _get_db()
-        edit_error = _photo_location_edit_error(db, photo_id)
+        edit_error = location_errors.photo_location_edit_error(db, photo_id)
         if edit_error is not None:
             return edit_error
         try:
@@ -9989,14 +9647,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             db.conn.commit()
         db.set_photo_location(photo_id, leaf_id)
-        _queue_location_sync_if_enabled(photo_id)
+        queue_location_sync_if_enabled(db, photo_id)
         db.record_edit(
             'location_set',
             f"set location: {stripped}",
             str(leaf_id),
             [{'photo_id': photo_id, 'old_value': '', 'new_value': str(leaf_id)}],
         )
-        return jsonify({"location": _serialize_photo_location(db, photo_id)})
+        return jsonify({"location": serialize_photo_location(db, photo_id)})
 
     @app.route("/api/batch/location/text", methods=["POST"])
     def api_batch_set_photo_location_text():
@@ -10027,7 +9685,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # hierarchy delimiter, and ``SidecarEditor.set_location_keywords``
         # cannot round-trip it.
         if "|" in stripped:
-            return json_error(_LOCATION_NAME_PIPE_ERROR, 400)
+            return json_error(LOCATION_NAME_PIPE_ERROR, 400)
         latitude = body.get("latitude")
         longitude = body.get("longitude")
         if (latitude is None) != (longitude is None):
@@ -10048,7 +9706,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         db = _get_db()
         for pid in photo_ids:
-            edit_error = _photo_location_edit_error(db, pid)
+            edit_error = location_errors.photo_location_edit_error(db, pid)
             if edit_error is not None:
                 return edit_error
 
@@ -10070,7 +9728,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         items = []
         for pid in photo_ids:
             db.set_photo_location(pid, leaf_id)
-            _queue_location_sync_if_enabled(pid, _commit=False)
+            queue_location_sync_if_enabled(db, pid, _commit=False)
             items.append({
                 "photo_id": pid,
                 "old_value": "",
@@ -10090,7 +9748,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify({
             "ok": True,
             "updated": len(items),
-            "location": _serialize_photo_location(db, photo_ids[0]),
+            "location": serialize_photo_location(db, photo_ids[0]),
         })
 
     @app.route("/api/batch/location", methods=["POST"])
@@ -10114,19 +9772,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if len(photo_ids) > 1000:
             return json_error("too many photo_ids", 400)
 
-        keyword_id = _extract_keyword_id(body)
-        place_id = _extract_place_id(body)
+        keyword_id = extract_keyword_id(body)
+        place_id = extract_place_id(body)
         if keyword_id is None and not place_id:
             return json_error("missing place_id", 400)
 
         db = _get_db()
         for pid in photo_ids:
-            edit_error = _photo_location_edit_error(db, pid)
+            edit_error = location_errors.photo_location_edit_error(db, pid)
             if edit_error is not None:
                 return edit_error
 
         if keyword_id is not None:
-            keyword_error = _location_keyword_edit_error(db, keyword_id)
+            keyword_error = location_errors.location_keyword_edit_error(db, keyword_id)
             if keyword_error is not None:
                 return keyword_error
 
@@ -10134,8 +9792,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             items = []
             for pid in photo_ids:
                 db.set_photo_location(pid, keyword_id)
-                _queue_location_sync_if_enabled(pid, _commit=False)
-                loc = _serialize_photo_location(db, pid)
+                queue_location_sync_if_enabled(db, pid, _commit=False)
+                loc = serialize_photo_location(db, pid)
                 if loc and location_name == "unknown":
                     location_name = loc.get("name") or "unknown"
                 items.append({
@@ -10157,33 +9815,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({
                 "ok": True,
                 "updated": len(items),
-                "location": _serialize_photo_location(db, photo_ids[0]),
+                "location": serialize_photo_location(db, photo_ids[0]),
             })
 
-        details = _normalize_client_place_details(body)
+        details = normalize_client_place_details(body)
         if details is None:
             import config as cfg
             maps_config = cfg.load()
             key = maps_config.get("google_maps_api_key", "")
             if not key:
-                return _google_maps_not_configured_error()
-            details = _google_place_details(
+                return location_errors.google_maps_not_configured_error()
+            details = places.place_details_for_language(
                 place_id,
                 key,
-                _google_maps_result_language(maps_config),
+                places.result_language(maps_config),
             )
             if details is None:
-                return _google_place_not_found_error()
+                return location_errors.google_place_not_found_error()
 
         try:
             leaf_id = db.upsert_place_chain(details)
         except RuntimeError as err:
-            return _location_name_conflict_response(err)
+            return location_name_conflict_response(err)
 
         items = []
         for pid in photo_ids:
             db.set_photo_location(pid, leaf_id)
-            _queue_location_sync_if_enabled(pid, _commit=False)
+            queue_location_sync_if_enabled(db, pid, _commit=False)
             items.append({
                 "photo_id": pid,
                 "old_value": "",
@@ -10203,7 +9861,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify({
             "ok": True,
             "updated": len(items),
-            "location": _serialize_photo_location(db, photo_ids[0]),
+            "location": serialize_photo_location(db, photo_ids[0]),
         })
 
     @app.route("/api/batch/location/from-exif", methods=["POST"])
@@ -10254,14 +9912,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 group_errors.append({
                     "place_id": place_id,
                     "summary": group.get("summary") or place_id,
-                    **_location_name_conflict_payload(err),
+                    **location_name_conflict_payload(err),
                 })
                 continue
             keyword_id_by_place_id[place_id] = leaf_id
 
             for pid in group["photo_ids"]:
                 db.set_photo_location(pid, leaf_id)
-                _queue_location_sync_if_enabled(pid, _commit=False)
+                queue_location_sync_if_enabled(db, pid, _commit=False)
                 items.append({
                     "photo_id": pid,
                     "old_value": "",
@@ -10299,11 +9957,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_clear_photo_location(photo_id):
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
         db = _get_db()
-        edit_error = _photo_location_edit_error(db, photo_id)
+        edit_error = location_errors.photo_location_edit_error(db, photo_id)
         if edit_error is not None:
             return edit_error
         db.clear_photo_location(photo_id)
-        _queue_location_sync_if_enabled(photo_id)
+        queue_location_sync_if_enabled(db, photo_id)
         db.record_edit(
             'location_clear',
             "cleared location",
@@ -10341,7 +9999,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         maps_config = cfg.load()
-        language = _google_maps_result_language(maps_config)
+        language = places.result_language(maps_config)
         db = _get_db()
         cached = db.reverse_geocode_cache_get(lat, lng)
         if cached is not None:
@@ -10418,24 +10076,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
           debugging.
         """
         body = request.get_json(silent=True) or {}
-        place_id = _extract_place_id(body)
+        place_id = extract_place_id(body)
         if not place_id:
             return json_error("missing place_id", 400)
 
-        details = _normalize_client_place_details(body)
+        details = normalize_client_place_details(body)
         if details is None:
             import config as cfg
             maps_config = cfg.load()
             key = maps_config.get("google_maps_api_key", "")
             if not key:
-                return _google_maps_not_configured_error()
-            details = _google_place_details(
+                return location_errors.google_maps_not_configured_error()
+            details = places.place_details_for_language(
                 place_id,
                 key,
-                _google_maps_result_language(maps_config),
+                places.result_language(maps_config),
             )
             if details is None:
-                return _google_place_not_found_error()
+                return location_errors.google_place_not_found_error()
 
         db = _get_db()
         try:
@@ -10455,12 +10113,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "error_detail": msg,
                     "request_id": getattr(g, "request_id", None),
                 }), 400
-            return _keyword_not_found_error()
+            return location_errors.keyword_not_found_error()
         except RuntimeError as err:
             # _upsert_one_keyword raises RuntimeError when the parent-chain
             # build hits an existing keyword of a different type at the same
             # (name, parent_id). Surface the message for debugging.
-            return _location_name_conflict_response(err)
+            return location_name_conflict_response(err)
 
         # Audit log: this action isn't tied to a single photo (it operates on
         # a keyword), so we omit the per-photo items list. ``photo_id`` in
@@ -10489,8 +10147,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (result["keyword_id"],),
         ).fetchall()
         for row in photo_rows:
-            _queue_location_sync_if_enabled(
-                row["photo_id"],
+            queue_location_sync_if_enabled(
+                db, row["photo_id"],
                 workspace_id=row["workspace_id"],
                 _commit=False,
             )
@@ -10638,7 +10296,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         with db.conn:
             for pid in added_ids:
                 db.tag_photo(pid, kid, source='manual', _commit=False)
-                _queue_keyword_add(pid, name, _commit=False)
+                queue_keyword_add(db, pid, name, _commit=False)
             items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
             if items:
                 db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
@@ -10796,14 +10454,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         is_location = (keyword_row["type"] or "") == "location"
         for pid in removed_ids:
             db.untag_photo(pid, keyword_id)
-            _queue_keyword_remove(pid, name)
+            queue_keyword_remove(db, pid, name)
             # See ``api_remove_keyword``: a ``keyword_remove`` on a
             # ``type='location'`` tag leaves the sidecar's
             # ``vireo:locationKeywords`` marker and ownership claim in
             # place. Queue a ``location`` change so the next sync clears
             # the marker (or rewrites it to a still-tagged location).
             if is_location:
-                _queue_location_sync_if_enabled(pid)
+                queue_location_sync_if_enabled(db, pid)
 
         items = [
             {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
@@ -13632,12 +13290,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     # normalized `species` to the row it will tag, so `kid`
                     # is authoritative).
                     if old["id"] != kid:
-                        _queue_keyword_remove(
-                            pid, old["name"], workspace_id=ws_id, _commit=False,
+                        queue_keyword_remove(
+                            db, pid, old["name"], workspace_id=ws_id, _commit=False,
                         )
 
                 db.tag_photo(pid, kid, source="manual", _commit=False)
-                _queue_keyword_add(pid, species, workspace_id=ws_id, _commit=False)
+                queue_keyword_add(db, pid, species, workspace_id=ws_id, _commit=False)
                 old_value = str(old_primary["id"]) if old_primary else ""
                 old_keyword_ids = [old["id"] for old in old_rows]
                 hl_prev = hl_prev_by_pid.get(pid) or []
@@ -14701,7 +14359,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # accept_prediction queues an add directly. Reconcile it
                 # with any pending removal before applying the shared helper.
                 db.remove_pending_changes(photo_id, "keyword_add", item_species, _commit=False)
-                _queue_keyword_add(photo_id, item_species, _commit=False)
+                queue_keyword_add(db, photo_id, item_species, _commit=False)
                 # Keep the suppression records cleared by the add, including
                 # those in other workspaces sharing this photo's sidecar.
                 old_meta.update(symmetric_keyword_queue=True, flat_removals=flat_removals)
@@ -22156,16 +21814,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         ):
                             remove_names.append(old["name"])
                     for old_name in remove_names:
-                        _queue_keyword_remove(
-                            pid, old_name, workspace_id=ws_id, _commit=False,
+                        queue_keyword_remove(
+                            db, pid, old_name, workspace_id=ws_id, _commit=False,
                         )
 
             had_old = set(old_rows_by_photo)
 
             for pid in newly_tagged:
                 db.tag_photo(pid, kid, source="manual", _commit=False)
-                _queue_keyword_add(
-                    pid, species, workspace_id=ws_id, _commit=False,
+                queue_keyword_add(
+                    db, pid, species, workspace_id=ws_id, _commit=False,
                 )
 
             photo_edit_id = None
@@ -25392,7 +25050,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             lambda: app._job_runner,
-            walk_parent_chain=_walk_parent_chain,
         )
     )
     from web.move_cleanup import create_move_cleanup_blueprint

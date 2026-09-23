@@ -169,6 +169,22 @@ def place_details(
     }
 
 
+def result_language(config) -> str | None:
+    """Return Google's language preference for a Vireo configuration."""
+    return "en" if config.get("google_maps_prefer_english", True) else None
+
+
+def place_details_for_language(place_id: str, api_key: str, language: str | None) -> dict | None:
+    """Fetch details for ``language`` from :func:`result_language`.
+
+    ``"en"`` calls :func:`place_details` without the keyword so its
+    default-on English preference applies; anything else opts out.
+    """
+    if language == "en":
+        return place_details(place_id, api_key)
+    return place_details(place_id, api_key, language=None)
+
+
 class PlacesTransientError(Exception):
     """Raised by :func:`reverse_geocode` on transient Google API failures
     (rate limits, request denied, malformed response, network/JSON errors).

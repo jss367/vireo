@@ -702,7 +702,7 @@ def create_imports_blueprint(
     def _queue_import_keyword_add(
         db, photo_id, keyword_name, workspace_id, *, commit=False,
     ):
-        """Thread-safe equivalent of _queue_keyword_add for import jobs."""
+        """Thread-safe equivalent of queue_keyword_add for import jobs."""
         removed = db.remove_pending_changes(
             photo_id, "keyword_remove", keyword_name,
             workspace_id=workspace_id, _commit=commit,
@@ -716,7 +716,7 @@ def create_imports_blueprint(
     def _queue_import_location_sync(
         db, photo_id, workspace_id, *, commit=False,
     ):
-        """Thread-safe equivalent of _queue_location_sync_if_enabled."""
+        """Thread-safe equivalent of queue_location_sync_if_enabled."""
         db.remove_pending_changes(
             photo_id, "location", workspace_id=workspace_id, _commit=commit,
         )
