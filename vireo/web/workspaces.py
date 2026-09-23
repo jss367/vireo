@@ -1,7 +1,8 @@
 """Workspaces: CRUD, activation, folder membership, config and new-images.
 
 Every ``/api/workspaces/*`` endpoint owned by the core app lives here, plus the
-``/api/workspace/tabs/*`` navigation endpoints. The local-workspace and
+``/api/workspace/tabs/*`` navigation endpoints and the
+``/api/workspace/classification-inventory`` coverage panel. The local-workspace and
 local-folder staging routes under ``/api/workspaces/active/...`` have their own
 blueprints (``web.local_workspace`` / ``web.local_folder``).
 """
@@ -40,6 +41,51 @@ log = logging.getLogger(__name__)
 # get a real count synchronously. Kept under the 0.5s slow-request
 # threshold so a normal cold probe never logs as a slow request.
 _NEW_IMAGES_SYNC_WAIT_SECS = 0.4
+
+
+def _inventory_pair(label_set, label_set_path, fingerprint, is_tol,
+                    is_intrinsic, db_pair, total):
+    """Build one (model × label-set) row for the classification inventory."""
+    classified = db_pair.get("classified_dets", 0)
+    pending = max(0, total - classified) if not is_intrinsic else max(
+        0, total - classified
+    )
+    if classified == 0:
+        status = "never_run"
+    elif pending == 0:
+        status = "complete"
+    else:
+        status = "partial"
+    denom = classified + pending
+    coverage = round(100.0 * classified / denom, 1) if denom > 0 else 0.0
+    return {
+        "label_set": label_set,
+        "label_set_path": label_set_path,
+        "fingerprint": fingerprint,
+        "is_tol": is_tol,
+        "is_intrinsic": is_intrinsic,
+        "status": status,
+        "classified_dets": classified,
+        "pending_dets": pending,
+        "coverage_pct": coverage,
+        "photos_covered": db_pair.get("photos_covered", 0),
+        "last_run": db_pair.get("last_run"),
+        "median_top1_conf": db_pair.get("median_top1_conf"),
+        "median_sample_size": db_pair.get("median_sample_size", 0),
+    }
+
+
+def _inventory_subtotal(pairs):
+    """Sum classified/pending across a model's pairs into a subtotal dict."""
+    classified = sum(p["classified_dets"] for p in pairs)
+    pending = sum(p["pending_dets"] for p in pairs)
+    denom = classified + pending
+    coverage = round(100.0 * classified / denom, 1) if denom > 0 else 0.0
+    return {
+        "classified_dets": classified,
+        "pending_dets": pending,
+        "coverage_pct": coverage,
+    }
 
 
 def create_workspace_blueprint(
@@ -1132,6 +1178,252 @@ def create_workspace_blueprint(
             "file_count": snap["file_count"],
             "folder_paths": folder_paths,
             "files_sample": files_sample,
+        })
+
+
+    @blueprint.route("/api/workspace/classification-inventory")
+    def api_workspace_classification_inventory():
+        """Per-(model × label-set) classification coverage for the active workspace.
+
+        Builds a cross-product of downloaded or previously used classifier
+        models × label sets on disk, merges in counts from `classifier_runs`, identifies
+        stale rows (predictions whose fingerprint no longer matches any
+        label file) and legacy rows (predictions from a model not in the
+        current registry), and returns a structured payload for the
+        dashboard inventory panel. See
+        ``docs/plans/2026-05-06-classification-inventory-design.md``.
+        """
+        import config as cfg
+        from labels import get_saved_labels, load_label_set, load_merged_labels
+        from labels_fingerprint import TOL_SENTINEL, compute_fingerprint
+        from models import get_models
+
+        db = get_db()
+        ws_id = db._active_workspace_id
+        if not ws_id:
+            return json_error("No active workspace", status=400)
+        ws = db.get_workspace(ws_id)
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2,
+        )
+
+        db_inv = db.get_classification_inventory(ws_id, min_conf=min_conf)
+        total_dets = db_inv["total_real_detections"]
+        db_pairs = {
+            (p["classifier_model"], p["labels_fingerprint"]): p
+            for p in db_inv["pairs"]
+        }
+
+        # Available label sets: read each saved .txt and recompute fingerprint
+        # so the inventory's identity matches what the classify job would use.
+        label_sets = []
+        unusable_label_sets = []
+        seen_paths = set()
+        for ls in get_saved_labels():
+            path = ls.get("labels_file", "")
+            if not path or not os.path.exists(path) or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            try:
+                species = load_label_set(path, ls)
+            except OSError:
+                continue
+            name = ls.get("name") or os.path.splitext(os.path.basename(path))[0]
+            if not species:
+                # ``compute_fingerprint([])`` is the ToL sentinel, so an
+                # empty set would claim Tree of Life's row: its counts
+                # would be double-billed under the set's own name, and a
+                # non-ToL model would show an impossible regional pair.
+                # It classifies nothing — name it as unusable instead.
+                unusable_label_sets.append({
+                    "name": name,
+                    "filename": os.path.basename(path),
+                    "skipped": len(getattr(species, "dropped_ambiguous", ())),
+                })
+                continue
+            label_sets.append({
+                "name": name,
+                "path": path,
+                "filename": os.path.basename(path),
+                "fingerprint": compute_fingerprint(species),
+            })
+
+        # Dedupe by fingerprint: duplicate-content files (rename/copy) share a
+        # fingerprint and the same db_pair stats. Emitting both rows would
+        # double-count subtotals and inflate pending coverage. Keep the
+        # alphabetically-first name as the canonical representative.
+        deduped_by_fp = {}
+        for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
+            deduped_by_fp.setdefault(ls["fingerprint"], ls)
+        label_sets = list(deduped_by_fp.values())
+
+        # Keep the full registry for identifying legacy and stale results.
+        # Custom models without an explicit model_type default to bioclip
+        # (same as classify/pipeline).
+        from models import supports_tree_of_life
+        all_models = [
+            m for m in get_models()
+            if m.get("model_type", "bioclip") in ("bioclip", "timm")
+        ]
+
+        models_out = []
+        seen_keys = set()  # (model_name, fingerprint) we've placed in models_out
+        used_model_names = {model_name for model_name, _fp in db_pairs}
+
+        for m in all_models:
+            model_name = m.get("name") or m.get("id")
+            # Uninstalled models with no history in this workspace are not
+            # pending work and should not inflate inventory coverage totals.
+            if not m.get("downloaded") and model_name not in used_model_names:
+                continue
+            # Capability question — does this model TYPE ship ToL text
+            # embeddings? Ask supports_tree_of_life(model_str), not the raw
+            # `files` manifest: bioclip-2.5's ToL artifacts are declared
+            # under `optional_files` so a straight `"tol_embeddings.npy" in
+            # m.get("files", [])` would drop ToL coverage from this
+            # inventory entirely — no current-pair emit and no stale-row
+            # for prior ToL runs, because TOL_SENTINEL is always in
+            # current_fps for the model.
+            supports_tol = supports_tree_of_life(m.get("model_str", ""))
+            is_closed_set = m.get("model_type") == "timm"
+
+            pairs = []
+            if is_closed_set:
+                key = (model_name, TOL_SENTINEL)
+                pairs.append(_inventory_pair(
+                    label_set="(intrinsic)", label_set_path=None,
+                    fingerprint=TOL_SENTINEL, is_tol=False, is_intrinsic=True,
+                    db_pair=db_pairs.get(key, {}), total=total_dets,
+                ))
+                seen_keys.add(key)
+            else:
+                for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
+                    key = (model_name, ls["fingerprint"])
+                    pairs.append(_inventory_pair(
+                        label_set=ls["name"], label_set_path=ls["filename"],
+                        fingerprint=ls["fingerprint"], is_tol=False,
+                        is_intrinsic=False,
+                        db_pair=db_pairs.get(key, {}), total=total_dets,
+                    ))
+                    seen_keys.add(key)
+                if supports_tol:
+                    key = (model_name, TOL_SENTINEL)
+                    pairs.append(_inventory_pair(
+                        label_set="Tree of Life", label_set_path=None,
+                        fingerprint=TOL_SENTINEL, is_tol=True,
+                        is_intrinsic=False,
+                        db_pair=db_pairs.get(key, {}), total=total_dets,
+                    ))
+                    seen_keys.add(key)
+
+            models_out.append({
+                "id": m.get("id"),
+                "name": model_name,
+                "supports_tol": supports_tol,
+                "downloaded": bool(m.get("downloaded")),
+                "legacy": False,
+                "subtotal": _inventory_subtotal(pairs),
+                "pairs": pairs,
+            })
+
+        # Legacy: a (model, fp) in the DB whose model isn't in the current
+        # registry. Group those rows under one entry per legacy model name.
+        registry_names = {m.get("name") or m.get("id") for m in all_models}
+        legacy_groups = {}
+        for (model_name, fp), p in db_pairs.items():
+            if model_name in registry_names:
+                continue
+            legacy_groups.setdefault(model_name, []).append((fp, p))
+        for model_name, fp_pairs in sorted(legacy_groups.items()):
+            pairs = []
+            for fp, p in sorted(fp_pairs, key=lambda x: x[0]):
+                pairs.append(_inventory_pair(
+                    label_set=("Tree of Life" if fp == TOL_SENTINEL
+                               else "fp:" + fp[:8]),
+                    label_set_path=None, fingerprint=fp,
+                    is_tol=(fp == TOL_SENTINEL), is_intrinsic=False,
+                    db_pair=p, total=total_dets,
+                ))
+                seen_keys.add((model_name, fp))
+            models_out.append({
+                "id": None,
+                "name": model_name,
+                "supports_tol": False,
+                "downloaded": False,
+                "legacy": True,
+                "subtotal": _inventory_subtotal(pairs),
+                "pairs": pairs,
+            })
+
+        # Stale: a (current model, fingerprint) in the DB whose fingerprint
+        # is not currently on disk and isn't TOL. Single-file fingerprints
+        # come from the label_sets above; merged-set fingerprints come from
+        # the labels_fingerprints sidecar (one row per distinct merge the
+        # classify job has ever produced). A merged row is current if all
+        # its sources still exist and re-merging them reproduces the same
+        # fingerprint; otherwise the contents drifted and it's stale.
+        current_fps = {ls["fingerprint"] for ls in label_sets} | {TOL_SENTINEL}
+        for row in db.get_labels_fingerprints():
+            sources = row.get("sources") or []
+            if len(sources) <= 1:
+                continue  # single-file already covered by label_sets
+            if not all(os.path.exists(s) for s in sources):
+                continue
+            try:
+                merged = load_merged_labels([{"labels_file": source} for source in sources])
+            except OSError:
+                continue
+            if compute_fingerprint(merged) == row["fingerprint"]:
+                current_fps.add(row["fingerprint"])
+        stale = []
+        for (model_name, fp), p in db_pairs.items():
+            if model_name not in registry_names:
+                continue  # legacy, already grouped
+            if fp in current_fps:
+                continue
+            # The stale UI labels this column "Predictions", so report rows
+            # from `predictions` (one per species) rather than distinct
+            # detection IDs from `classifier_runs`. A top-k run with k species
+            # per detection would otherwise undercount stale work.
+            stale.append({
+                "model": model_name,
+                "fingerprint": fp,
+                "stale_count": p.get("predictions_count", 0),
+                "last_run": p.get("last_run"),
+            })
+
+        # Grand total: classified across all rows (including stale/legacy);
+        # pending across the current cross-product only (forward-looking work).
+        grand_classified_all = sum(
+            p.get("classified_dets", 0) for p in db_inv["pairs"]
+        )
+        grand_pending = sum(
+            pp["pending_dets"] for m in models_out
+            for pp in m["pairs"] if not m["legacy"]
+        )
+        denom = grand_classified_all + grand_pending
+        grand_coverage = (
+            round(100.0 * grand_classified_all / denom, 1) if denom > 0 else 0.0
+        )
+
+        return jsonify({
+            "workspace_id": ws_id,
+            "workspace_name": ws["name"] if ws else None,
+            "min_conf": min_conf,
+            "total_real_detections": total_dets,
+            "total_photos": db.count_photos(),
+            "models": models_out,
+            "stale": stale,
+            # Saved sets that produce no usable prompt at all, so they have
+            # no inventory row of their own. Named rather than dropped in
+            # silence (CORE_PHILOSOPHY: no black boxes).
+            "unusable_label_sets": unusable_label_sets,
+            "grand_total": {
+                "classified_dets": grand_classified_all,
+                "pending_dets": grand_pending,
+                "coverage_pct": grand_coverage,
+                "total_predictions_rows": db_inv["total_predictions_rows"],
+            },
         })
 
     return blueprint

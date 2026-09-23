@@ -17,8 +17,8 @@ def test_folders_reveal_single_path_macos(app_and_db):
     _seed_folder(db, "/tmp/dupreveal_one")
 
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.folders.sys.platform", "darwin"), \
+         patch("web.folders.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/folders/reveal",
                       json={"paths": ["/tmp/dupreveal_one"]})
@@ -43,8 +43,8 @@ def test_folders_reveal_multiple_paths_calls_each(app_and_db):
     _seed_folder(db, "/tmp/dupreveal_b")
 
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.folders.sys.platform", "darwin"), \
+         patch("web.folders.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/folders/reveal", json={
             "paths": ["/tmp/dupreveal_a", "/tmp/dupreveal_b"],
@@ -64,8 +64,8 @@ def test_folders_reveal_unknown_path_skipped_not_failed(app_and_db):
     _seed_folder(db, "/tmp/dupreveal_known")
 
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.folders.sys.platform", "darwin"), \
+         patch("web.folders.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/folders/reveal", json={
             "paths": ["/tmp/dupreveal_known", "/etc/passwd"],
@@ -97,8 +97,8 @@ def test_folders_reveal_shell_failure_reports_per_path(app_and_db):
         return MagicMock(returncode=0)
 
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run", side_effect=fake_run):
+         patch("web.folders.sys.platform", "darwin"), \
+         patch("web.folders.subprocess.run", side_effect=fake_run):
         resp = c.post("/api/folders/reveal", json={
             "paths": ["/tmp/dupreveal_ok", "/tmp/dupreveal_fail"],
         })
@@ -127,8 +127,8 @@ def test_folders_reveal_allows_cross_workspace_paths_known_to_library(app_and_db
     db.set_active_workspace(default_ws)
 
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.folders.sys.platform", "darwin"), \
+         patch("web.folders.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/folders/reveal",
                       json={"paths": ["/tmp/cross-ws-bucket"]})
@@ -148,8 +148,8 @@ def test_folders_reveal_non_zero_exit_reports_failure(app_and_db):
     _seed_folder(db, "/tmp/dupreveal_nonzero")
 
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.folders.sys.platform", "darwin"), \
+         patch("web.folders.subprocess.run") as run:
         run.return_value = MagicMock(returncode=1)
         resp = c.post("/api/folders/reveal",
                       json={"paths": ["/tmp/dupreveal_nonzero"]})
@@ -173,8 +173,8 @@ def test_folders_reveal_normalizes_path_trailing_slash(app_and_db):
     _seed_folder(db, "/tmp/dupreveal_slash/")
 
     with app.test_client() as c, \
-         patch("vireo.app.sys.platform", "darwin"), \
-         patch("vireo.app.subprocess.run") as run:
+         patch("web.folders.sys.platform", "darwin"), \
+         patch("web.folders.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         # Caller passes the un-slashed form (the form the bucket UI derives).
         resp = c.post("/api/folders/reveal",
