@@ -1918,7 +1918,7 @@ def create_writer_blueprint(get_db, json_error):
 # may only go down. New routes belong in a blueprint under ``vireo/web/`` (see
 # docs/ARCHITECTURE.md). When a PR moves routes out of app.py, lower this to
 # the new count in the same PR so the extraction cannot be undone.
-_LEGACY_APP_ROUTE_LIMIT = 22
+_LEGACY_APP_ROUTE_LIMIT = 12
 
 _ROUTE_VERBS = frozenset({"route", "get", "post", "put", "patch", "delete"})
 
