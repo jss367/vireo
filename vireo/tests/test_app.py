@@ -1797,23 +1797,23 @@ def test_api_storage_reports_each_backing_volume(
     app_and_db, tmp_path, monkeypatch,
 ):
     app, _ = app_and_db
-    import app as app_module
     import classifier
+    import web.storage as storage_module
 
     embedding_dir = tmp_path / "separate-embedding-volume"
     embedding_dir.mkdir()
     (embedding_dir / "labels.npy").write_bytes(b"embedding")
     monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
 
-    real_ismount = app_module.os.path.ismount
+    real_ismount = storage_module.os.path.ismount
     simulated_mounts = {str(tmp_path), str(embedding_dir)}
     monkeypatch.setattr(
-        app_module.os.path, "ismount",
+        storage_module.os.path, "ismount",
         lambda path: path in simulated_mounts or real_ismount(path),
     )
-    disk_usage = app_module.shutil._ntuple_diskusage
+    disk_usage = storage_module.shutil._ntuple_diskusage
     monkeypatch.setattr(
-        app_module.shutil, "disk_usage",
+        storage_module.shutil, "disk_usage",
         lambda path: disk_usage(
             1000, 900 if path == str(embedding_dir) else 600,
             100 if path == str(embedding_dir) else 400,
@@ -1858,7 +1858,7 @@ def test_open_storage_folder_uses_server_selected_path(
     app_and_db, monkeypatch,
 ):
     app, _ = app_and_db
-    import app as app_module
+    import web.storage as storage_module
 
     calls = []
 
@@ -1868,7 +1868,7 @@ def test_open_storage_folder_uses_server_selected_path(
         stdout = ""
 
     monkeypatch.setattr(
-        app_module.subprocess, "run",
+        storage_module.subprocess, "run",
         lambda command, **kwargs: calls.append(command) or Result(),
     )
     response = app.test_client().post('/api/storage/open-folder')
