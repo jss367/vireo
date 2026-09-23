@@ -142,7 +142,9 @@ def create_settings_blueprint(
     The raw config reader and write lock are shared with every other route
     that writes ``config.json``. ``advance_inat_token_generation`` invalidates
     in-flight iNaturalist token validations whenever a settings write changes
-    the token; the counter lives with the iNaturalist routes.
+    the token. It is the bound ``advance`` of the app's one
+    ``web.inat.InatTokenGeneration``, shared with the iNaturalist routes,
+    and is only called while holding ``settings_write_lock``.
     """
     blueprint = Blueprint("settings", __name__)
 

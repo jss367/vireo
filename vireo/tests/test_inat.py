@@ -541,6 +541,58 @@ def test_api_inat_token_rejects_aba_settings_writes(app_and_db):
     assert cfg.load()["inat_token"] == "original-token"
 
 
+def test_api_inat_token_superseded_by_settings_patch(app_and_db):
+    """A schema-settings PATCH of inat_token bumps the shared generation.
+
+    The PATCH writes a different token and then restores the original, so
+    the config file looks untouched when the modal's validation finishes.
+    Only the generation counter shared between the settings and iNaturalist
+    blueprints can tell the modal request it was superseded.
+    """
+    app, _db, _pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "original-token"})
+
+    validation_started = threading.Event()
+    release_validation = threading.Event()
+    responses = {}
+
+    def validate(_token):
+        validation_started.set()
+        assert release_validation.wait(timeout=5)
+        return {"login": "modal-user"}
+
+    def send_modal_request():
+        responses["modal"] = app.test_client().post(
+            "/api/inat/token", json={"token": "modal-token"},
+        )
+
+    with patch("inat.validate_token", side_effect=validate):
+        modal_thread = threading.Thread(target=send_modal_request)
+        modal_thread.start()
+        assert validation_started.wait(timeout=5)
+        client = app.test_client()
+        first_write = client.patch(
+            "/api/settings/global",
+            json={"key": "inat_token", "value": "temporary-token"},
+        )
+        second_write = client.patch(
+            "/api/settings/global",
+            json={"key": "inat_token", "value": "original-token"},
+        )
+        release_validation.set()
+        modal_thread.join(timeout=5)
+
+    assert not modal_thread.is_alive()
+    assert first_write.status_code == 200
+    assert second_write.status_code == 200
+    assert responses["modal"].status_code == 409
+    assert responses["modal"].get_json()["error"] == (
+        "A newer token validation superseded this request"
+    )
+    assert cfg.load()["inat_token"] == "original-token"
+
+
 def test_api_inat_export_uses_only_checked_metadata(app_and_db, tmp_path):
     app, db, pid = app_and_db
     destination = str(tmp_path / "exports")
