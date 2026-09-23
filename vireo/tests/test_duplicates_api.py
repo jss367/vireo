@@ -388,15 +388,22 @@ def test_delete_loser_files_chunks_large_id_lists(app_and_db, tmp_path, monkeypa
 
     SQLite's legacy ``SQLITE_MAX_VARIABLE_NUMBER`` cap is 999, so packaging
     the entire id list into a single IN clause would fail on those builds
-    before any file gets trashed. We patch the cap down to 2 to cover the
-    chunking path without seeding 1000 photos: the test still proves the
+    before any file gets trashed. We patch the chunk size down to 2 to cover
+    the chunking path without seeding 1000 photos: the test still proves the
     endpoint splits the query.
+
+    The duplicates blueprint receives ``app._chunked`` itself, whose chunk
+    size is a default argument bound when the function was defined. Patching
+    the ``_SQL_PARAM_CHUNK`` constant therefore changes nothing; patching the
+    function's defaults reaches the same object the blueprint calls.
     """
     import os
 
     import app as app_module
 
-    monkeypatch.setattr(app_module, "_SQL_PARAM_CHUNK", 2)
+    monkeypatch.setattr(app_module._chunked, "__defaults__", (2,))
+    # Guard against the patch silently becoming a no-op again.
+    assert [len(c) for c in app_module._chunked(list(range(5)))] == [2, 2, 1]
 
     app, db = app_and_db
     loser_ids = []
