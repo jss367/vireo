@@ -50,6 +50,33 @@ def queue_location_keyword_cleanup_for_workspace(db, workspace_id):
     finally:
         db._active_workspace_id = saved_active
 
+
+def workspace_effective_setting(raw_override, global_cfg, key):
+    """Resolve a workspace's effective boolean setting.
+
+    ``raw_override`` is the ``workspaces.config_overrides`` column value
+    (JSON string, dict, or None). If the workspace defines its own value
+    for ``key``, that wins; otherwise the global config value is used.
+    Kept boolean-only because the location-keywords cleanup transition
+    check is boolean-valued; a future generalization would need to widen
+    the return type.
+    """
+    overrides = None
+    if raw_override:
+        try:
+            parsed = (
+                json.loads(raw_override) if isinstance(raw_override, str)
+                else raw_override
+            )
+            if isinstance(parsed, dict):
+                overrides = parsed
+        except (json.JSONDecodeError, TypeError):
+            overrides = None
+    if overrides is not None and key in overrides:
+        return bool(overrides[key])
+    return bool((global_cfg or {}).get(key, False))
+
+
 def queue_location_keyword_cleanup_on_global_off(
     db, previous_global, current_global,
 ):

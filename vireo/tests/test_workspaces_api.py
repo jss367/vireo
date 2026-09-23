@@ -854,3 +854,45 @@ def test_workspaces_listed_pinned_first_then_alphabetical(app_and_db):
     # All pinned come before any unpinned in the combined order.
     assert names.index("apple") < names.index("mango")
     assert names.index("zebra") < names.index("mango")
+
+
+def _record_workspace_mutations(app, monkeypatch):
+    """Record every ``(workspace_id, exclusive)`` reservation a request takes."""
+    calls = []
+    original = app._job_runner.workspace_mutation
+
+    def spy(workspace_id, *, exclusive=False):
+        calls.append((workspace_id, exclusive))
+        return original(workspace_id, exclusive=exclusive)
+
+    monkeypatch.setattr(app._job_runner, "workspace_mutation", spy)
+    return calls
+
+
+def test_activate_workspace_takes_no_mutation_reservation(app_and_db, monkeypatch):
+    """Switching workspaces is a control request: ``_reserve_workspace_mutation``
+    exempts it by endpoint name so a running NAS transfer can't stop the user
+    leaving the workspace. The exemption is keyed on the blueprint-qualified
+    name (``workspaces.api_activate_workspace``); if that drifts from the
+    registered endpoint, activation silently takes a reservation again."""
+    app, _db = app_and_db
+    client = app.test_client()
+    other = client.post("/api/workspaces", json={"name": "Other"}).get_json()["id"]
+    calls = _record_workspace_mutations(app, monkeypatch)
+    resp = client.post(f"/api/workspaces/{other}/activate")
+    assert resp.status_code == 200
+    assert calls == []
+
+
+def test_delete_workspace_takes_exclusive_reservation_on_target(app_and_db, monkeypatch):
+    """Deleting a workspace must hold an *exclusive* reservation on the target
+    so no job or synchronous change is admitted mid-delete. The hook keys this
+    on ``request.endpoint == "workspaces.api_delete_workspace"``."""
+    app, db = app_and_db
+    client = app.test_client()
+    active = db._active_workspace_id
+    doomed = client.post("/api/workspaces", json={"name": "Doomed"}).get_json()["id"]
+    calls = _record_workspace_mutations(app, monkeypatch)
+    resp = client.delete(f"/api/workspaces/{doomed}")
+    assert resp.status_code == 200, resp.get_json()
+    assert sorted(calls) == sorted([(active, False), (doomed, True)])
