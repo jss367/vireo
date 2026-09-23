@@ -401,7 +401,7 @@ def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, pag
     so pressing ``P`` on an unhighlighted photo in a curated bucket shoved
     the stored highlight out of its top slot — changing the visible slice
     and the Save-as-Collection payload — until a full reload restored the
-    server's ``_apply_ordered_highlights`` ordering.
+    server's ``apply_ordered_highlights`` ordering.
     """
     db = live_server["db"]
     data = live_server["data"]
@@ -409,7 +409,7 @@ def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, pag
 
     # photos[1] is a lower-quality hawk than photos[0]; without the stored
     # highlight it would sort second. Marking it a species highlight promotes
-    # it to the top of the bucket via _apply_ordered_highlights.
+    # it to the top of the bucket via apply_ordered_highlights.
     highlighted_id = data["photos"][1]
     unhighlighted_id = data["photos"][0]
     db.add_species_highlight("Red-tailed Hawk", highlighted_id)

@@ -318,7 +318,7 @@ def _normalize_scoring_config(config):
     * A flat pipeline config, e.g. ``effective_cfg["pipeline"]`` — the
       shape ``pipeline_job``'s regroup stage and the test suite pass.
     * A full effective config with pipeline keys nested under
-      ``config["pipeline"]`` — the shape ``_build_best_batch_response`` and
+      ``config["pipeline"]`` — the shape ``build_best_batch_response`` and
       the browse-selection batch review path pass.
 
     Without this normalization, the second shape silently reads pipeline

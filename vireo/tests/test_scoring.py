@@ -485,7 +485,7 @@ def test_score_encounter_honors_nested_pipeline_eye_detect_enabled():
     under ``config['pipeline']``), score_encounter must honor the nested
     ``eye_detect_enabled`` rather than silently reading it as absent.
 
-    ``_build_best_batch_response`` and the browse-selection batch review
+    ``build_best_batch_response`` and the browse-selection batch review
     path both hand ``run_selected_batch_review`` the top-level effective
     config. Without this normalization, photos with a real ``eye_tenengrad``
     would rank by body sharpness in those flows even in workspaces where

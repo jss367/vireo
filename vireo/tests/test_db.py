@@ -27394,7 +27394,7 @@ def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
     """``resolve_species_display_name`` routes a linked hierarchy alias
     (e.g. ``Desert Verdin`` bound to the ``Verdin`` species taxon) to the
     canonical root spelling, so ``add_species_highlight`` /
-    ``_collect_highlight_buckets`` store an unconfirmed prediction's
+    ``collect_highlight_buckets`` store an unconfirmed prediction's
     highlight under ``Verdin``. The prediction-fallback branch of
     ``get_species_highlights(eligible_only=True)`` must apply the same
     canonicalization when it looks up the photo's top prediction —
@@ -27533,7 +27533,7 @@ def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_pa
     """When multiple linked hierarchy leaves share a predicted label but point
     at DIFFERENT taxa, the prediction-fallback canonicalization must NOT pick
     an arbitrary root for the alias — that would silently promote an
-    ambiguous prediction into a specific root bucket. ``_collect_highlight_buckets``
+    ambiguous prediction into a specific root bucket. ``collect_highlight_buckets``
     keeps such ambiguous labels raw, so the eligibility reload path must too:
     highlights saved under either root name must not become eligible for a
     photo whose top prediction is the ambiguous shared label.

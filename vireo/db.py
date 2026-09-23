@@ -15345,7 +15345,7 @@ class Database:
 
         Two sources of the canonical spelling, mirroring
         ``resolve_species_display_name`` (the function
-        ``_collect_highlight_buckets`` uses to canonicalize prediction
+        ``collect_highlight_buckets`` uses to canonicalize prediction
         labels):
 
         1. A single surviving root species keyword for the match_key.
@@ -15502,13 +15502,13 @@ class Database:
     ):
         """Canonical spelling for a curation species value.
 
-        Agrees with ``_collect_highlight_buckets`` / ``resolve_species_display_name``:
+        Agrees with ``collect_highlight_buckets`` / ``resolve_species_display_name``:
 
         - Unambiguous keyword match → use the stored spelling.
         - Ambiguous homonym → leave alone (returns the punctuation-
           normalized input unchanged).
         - No keyword row for the match_key → apply the same case
-          convention ``_collect_highlight_buckets`` uses when it
+          convention ``collect_highlight_buckets`` uses when it
           canonicalizes predicted species labels, so a highlight starred
           from a prediction-only bucket (no keyword exists yet because
           the photo hasn't been accepted) keys on the string the bucket
@@ -18392,7 +18392,7 @@ class Database:
             # reload. ``COALESCE`` falls back to the raw prediction
             # spelling whenever the alias has no linked species-rank
             # root, mirroring ``add_species_highlight`` /
-            # ``_collect_highlight_buckets``.
+            # ``collect_highlight_buckets``.
             # The accepted-keyword branch mirrors
             # :meth:`get_species_representative_lists`: restrict to
             # species-rank taxonomy rows so a genus/family keyword named
@@ -18405,7 +18405,7 @@ class Database:
             # NOT EXISTS condition: a photo carrying only a higher-rank
             # taxonomy keyword (e.g. genus/family) is no longer part of
             # any species accepted bucket, and get_highlights_candidates
-            # / _collect_highlight_buckets will place it in a prediction
+            # / collect_highlight_buckets will place it in a prediction
             # bucket (bp.species is NULL). Without the rank filter here,
             # the saved highlight would vanish on reload because the
             # NOT EXISTS still sees the higher-rank taxonomy row.
@@ -18521,7 +18521,7 @@ class Database:
                                      -- restriction here must mirror
                                      -- ``resolve_species_display_name`` — the
                                      -- canonicalizer ``add_species_highlight``
-                                     -- and ``_collect_highlight_buckets`` use
+                                     -- and ``collect_highlight_buckets`` use
                                      -- when writing ``sh.species``. That
                                      -- helper considers all linked hierarchy
                                      -- taxa regardless of rank. If this

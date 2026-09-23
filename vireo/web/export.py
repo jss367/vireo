@@ -29,7 +29,8 @@ def create_export_blueprint(
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``).
     Presets live in the settings file, hence the raw reader + write lock;
     site publishing renders the same Life List / Highlights payloads the
-    pages use, so those builders are injected until their domains move.
+    pages use; those builders live in ``highlights_payload`` and are still
+    injected rather than imported.
     """
     blueprint = Blueprint("export", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)

@@ -267,11 +267,10 @@ def create_life_list_blueprint(get_db, json_error, *, build_life_list_payload):
     ``build_life_list_payload(db, photos_per_species=12, photo_offset=0,
     species_filter=None)`` assembles the numbered species list with each
     species' curated photos. The export blueprint's website publishing
-    builds the same payload, so both receive the one function. It stays in
-    ``create_app`` and is injected rather than moved because it ranks photos
-    with the highlight scoring and species canonicalization helpers that
-    ``app.py`` shares with the Highlights and photo routes, and this module
-    cannot import them from ``app`` without a circular import.
+    builds the same payload, so both receive the one function; it lives in
+    ``highlights_payload`` with the highlight scoring and species
+    canonicalization helpers it shares with the Highlights routes, and is
+    still injected rather than imported.
     """
     blueprint = Blueprint("life_list", __name__)
 

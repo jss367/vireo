@@ -41,17 +41,18 @@ def create_highlights_blueprint(
 
     Injected from ``create_app``:
 
-    - ``build_highlights_payload`` is ``_build_highlights_payload``, which
-      stays in ``create_app`` because the export blueprint's site publishing
-      also renders it.
+    - ``build_highlights_payload`` is
+      ``highlights_payload.build_highlights_payload``, which the export
+      blueprint's site publishing also renders.
     - ``chunked`` is ``app._chunked`` (SQLite IN-clause batching), shared
       with many routes still in ``app.py``.
     - The highlight-bucket helpers (``species_canonicalizer``,
       ``collect_highlight_buckets``, ``normalize_highlight_confirmation_filter``,
       ``filter_highlight_sections``, ``apply_ordered_highlights``,
       ``apply_highlight_preferences``, ``filter_highlight_curation_state``,
-      ``bucket_best_score``) are ``app.py`` module functions that the
-      highlights payload builder and the Life List payload builder also use.
+      ``bucket_best_score``) are the ``highlights_payload`` functions that
+      the highlights and Life List payload builders also use; they are still
+      injected rather than imported.
 
     The confirm and relabel routes are prediction-decision routes: they take
     the shared writer lock through ``services.prediction_decisions``.

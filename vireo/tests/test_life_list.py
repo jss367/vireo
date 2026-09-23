@@ -322,7 +322,7 @@ def test_unscored_species_highlight_renders_as_highlighted(life_app):
     })
     assert resp.status_code == 200
 
-    # The eligibility-filtered read (what _apply_ordered_highlights uses) must
+    # The eligibility-filtered read (what apply_ordered_highlights uses) must
     # include the unscored row.
     assert db.get_species_highlights("House Sparrow", eligible_only=True) == {
         "House Sparrow": {ids["p3"]: 1},
@@ -1512,7 +1512,7 @@ def test_life_list_alphabetical_key_ignores_apostrophe_variants():
     """Server-side sort key strips the same leading apostrophe variants
     the client's ``lifeListAlphabeticalName`` does, so lifer numbering
     tie-breaks agree with what the alphabetical view renders."""
-    from app import _life_list_alphabetical_key
+    from highlights_payload import _life_list_alphabetical_key
 
     for prefix in ("ʻ", "ʼ", "'", "`", "´", "ʹ", "‘", "’", "‛"):
         assert (
