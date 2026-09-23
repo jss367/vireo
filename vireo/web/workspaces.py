@@ -153,6 +153,16 @@ def create_workspace_blueprint(
         # accessors that expect a JSON object (or NULL) in this column.
         if overrides is not None and not isinstance(overrides, dict):
             return json_error("config_overrides must be an object or null")
+        # workspace_effective_setting() reads this override with bool(), so a
+        # stored string like "false" would resolve to True and the PUT
+        # True -> False transition check would never queue the XMP keyword
+        # cleanup. Require a real boolean (or null / omitted). This is
+        # stricter than config_schema.validate_value, which coerces strings.
+        location_keywords = (overrides or {}).get(LOCATION_KEYWORDS_SETTING)
+        if location_keywords is not None and not isinstance(location_keywords, bool):
+            return json_error(
+                f"{LOCATION_KEYWORDS_SETTING} must be a boolean or null"
+            )
         pipeline_overrides = (overrides or {}).get("pipeline")
         # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
         # name) to ``pipeline.default_process_id`` before existence checks.

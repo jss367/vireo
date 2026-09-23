@@ -142,6 +142,98 @@ def test_update_workspace(app_and_db):
     assert resp.get_json()["name"] == "NewName"
 
 
+def _stored_overrides(db, ws_id):
+    raw = db.get_workspace(ws_id)["config_overrides"]
+    return json.loads(raw) if raw else None
+
+
+def test_create_workspace_rejects_string_location_keywords_override(app_and_db):
+    """A string ``"false"`` would read back as True via bool(), so reject it."""
+    app, db = app_and_db
+    client = app.test_client()
+    before = {ws["id"] for ws in db.get_workspaces()}
+
+    resp = client.post("/api/workspaces", json={
+        "name": "Bad Override",
+        "config_overrides": {"write_location_keywords_to_xmp": "false"},
+    })
+    assert resp.status_code == 400
+    assert "write_location_keywords_to_xmp" in resp.get_json()["error"]
+    assert {ws["id"] for ws in db.get_workspaces()} == before
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+def test_create_workspace_accepts_boolean_location_keywords_override(
+    app_and_db, value,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/workspaces", json={
+        "name": f"Override {value}",
+        "config_overrides": {"write_location_keywords_to_xmp": value},
+    })
+    assert resp.status_code == 200
+    stored = _stored_overrides(db, resp.get_json()["id"])
+    assert stored["write_location_keywords_to_xmp"] is value
+
+
+def test_update_workspace_rejects_string_location_keywords_override(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = client.post("/api/workspaces", json={
+        "name": "WS",
+        "config_overrides": {"write_location_keywords_to_xmp": True},
+    }).get_json()["id"]
+
+    resp = client.put(f"/api/workspaces/{ws_id}", json={
+        "config_overrides": {"write_location_keywords_to_xmp": "false"},
+    })
+    assert resp.status_code == 400
+    assert "write_location_keywords_to_xmp" in resp.get_json()["error"]
+    assert _stored_overrides(db, ws_id) == {"write_location_keywords_to_xmp": True}
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_update_workspace_accepts_boolean_location_keywords_override(
+    app_and_db, value,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = client.post("/api/workspaces", json={"name": "WS"}).get_json()["id"]
+
+    resp = client.put(f"/api/workspaces/{ws_id}", json={
+        "config_overrides": {"write_location_keywords_to_xmp": value},
+    })
+    assert resp.status_code == 200
+    assert _stored_overrides(db, ws_id) == {"write_location_keywords_to_xmp": value}
+
+
+def test_update_workspace_location_keywords_true_to_false_queues_cleanup(
+    app_and_db, monkeypatch,
+):
+    """A bulk PUT flipping the override True -> False still queues cleanup."""
+    import web.workspaces as workspaces_mod
+
+    app, _db = app_and_db
+    client = app.test_client()
+    ws_id = client.post("/api/workspaces", json={
+        "name": "WS",
+        "config_overrides": {"write_location_keywords_to_xmp": True},
+    }).get_json()["id"]
+
+    calls = []
+    monkeypatch.setattr(
+        workspaces_mod,
+        "queue_location_keyword_cleanup_for_workspace",
+        lambda _db, wid: calls.append(wid),
+    )
+    resp = client.put(f"/api/workspaces/{ws_id}", json={
+        "config_overrides": {"write_location_keywords_to_xmp": False},
+    })
+    assert resp.status_code == 200
+    assert calls == [ws_id]
+
+
 def test_delete_workspace(app_and_db):
     """DELETE /api/workspaces/<id> removes the workspace."""
     app, _db = app_and_db
