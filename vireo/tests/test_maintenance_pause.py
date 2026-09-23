@@ -194,22 +194,22 @@ def test_lightroom_import_pauses_during_catalog_read(client_with_photo, monkeypa
 
 @pytest.mark.parametrize("action", ["resume", "cancel"])
 def test_previews_pause_before_eviction(client_with_photo, monkeypatch, action):
-    import app as app_module
+    import web.job_launchers as launchers_module
 
     app, db, photo_id = client_with_photo
     entered = threading.Event()
     release = threading.Event()
     evictions = []
-    original = app_module.materialize_preview
+    original = launchers_module.materialize_preview
 
     def materialize(*args, **kwargs):
         entered.set()
         assert release.wait(5)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(app_module, "materialize_preview", materialize)
+    monkeypatch.setattr(launchers_module, "materialize_preview", materialize)
     monkeypatch.setattr(
-        app_module, "evict_preview_cache_if_over_quota",
+        launchers_module, "evict_preview_cache_if_over_quota",
         lambda *args: evictions.append(True),
     )
     client = app.test_client()
@@ -640,7 +640,7 @@ def test_previews_pause_after_final_photo_defers_eviction(
     the final iteration is not silently overtaken by completion after
     eviction has already unlinked files and rewritten catalog rows.
     """
-    import app as app_module
+    import web.job_launchers as launchers_module
     from preview_materializer import materialize_preview as real_materialize
 
     app, db, first = client_with_photo
@@ -663,9 +663,9 @@ def test_previews_pause_after_final_photo_defers_eviction(
     def evict(*_args, **_kwargs):
         eviction_started.set()
 
-    monkeypatch.setattr(app_module, "materialize_preview", materialize)
+    monkeypatch.setattr(launchers_module, "materialize_preview", materialize)
     monkeypatch.setattr(
-        app_module, "evict_preview_cache_if_over_quota", evict,
+        launchers_module, "evict_preview_cache_if_over_quota", evict,
     )
 
     response = client.post("/api/jobs/previews", json={})
