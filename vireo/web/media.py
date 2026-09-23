@@ -3,8 +3,9 @@
 The browser-facing pixel routes: ``/thumbnails/<filename>``, the per-photo
 ``/photos/<id>/...`` renders (``crop``, ``full``, ``preview``,
 ``edit-mask-preview``, ``edit-preview``, ``original``), and the SAM mask PNGs
-(``/masks/<filename>`` and ``/api/masks/<pid>/<variant>.png``). Every route
-answers only for photos in the active workspace.
+(``/masks/<filename>`` and ``/api/masks/<pid>/<variant>.png``) with the
+per-photo variant listing that points at them (``/api/photos/<pid>/masks``).
+Every route answers only for photos in the active workspace.
 
 The helpers only these routes use live here too: the paired RAW/JPEG source
 selection (``?source=jpeg|raw``) and its short-lived shadow renders, the
@@ -36,6 +37,7 @@ from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from flask import (
     Blueprint,
     Response,
+    jsonify,
     make_response,
     request,
     send_from_directory,
@@ -383,6 +385,7 @@ def create_media_blueprint(
     *,
     invalid_preview_cache_paths,
     clear_preview_cache_invalid,
+    photo_not_found_error=None,
 ):
     """Build the image- and mask-serving blueprint.
 
@@ -396,10 +399,26 @@ def create_media_blueprint(
     from ``create_app`` because the edit-recipe render-cache invalidation
     that stays there writes the same state ``/photos/<id>/preview`` reads.
 
+    ``photo_not_found_error`` is the app's shared photo-not-found response,
+    which ``/api/photos/<pid>/masks`` returns for a photo outside the active
+    workspace. It defaults to an equivalent response built on ``json_error``
+    so callers that predate the mask-listing route keep working.
+
     ``create_app`` also looks up the registered ``serve_original_photo`` view
     so the prepare-full-resolution job renders through this canonical path.
     """
     blueprint = Blueprint("media", __name__)
+
+    if photo_not_found_error is None:
+        def photo_not_found_error(*, legacy_error="photo_not_found"):
+            return json_error(
+                legacy_error,
+                404,
+                message=(
+                    "This photo is no longer available in the active workspace. "
+                    "Refresh the page and try again."
+                ),
+            )
 
     def _requested_pair_source(photo, folder_path):
         """Resolve an explicit RAW/JPEG display choice for a paired photo.
@@ -1032,6 +1051,35 @@ def create_media_blueprint(
                 # this request into a transient 404 or truncated stream.
                 return Response(mask_bytes, mimetype="image/png")
         return "", 404
+
+    @blueprint.route("/api/photos/<int:pid>/masks")
+    def api_photo_masks(pid):
+        """List a photo's available SAM mask variants and the active one.
+
+        Powers the lightbox variant-toggle dropdown: the UI fetches this
+        when opening / navigating to a photo and builds one option per
+        returned variant plus a default "active" option.
+        """
+        db = get_db()
+        if db.get_photo(pid, verify_workspace=True) is None:
+            return photo_not_found_error()
+        masks = db.list_masks_for_photo(pid)
+        row = db.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
+        ).fetchone()
+        active = row["active_mask_variant"] if row else None
+        return jsonify({
+            "photo_id": pid,
+            "active": active,
+            "variants": [
+                {
+                    "variant": m["variant"],
+                    "url": f"/api/masks/{pid}/{m['variant']}.png",
+                    "created_at": m["created_at"],
+                }
+                for m in masks
+            ],
+        })
 
     @blueprint.route("/photos/<int:photo_id>/crop")
     def serve_crop_preview(photo_id):

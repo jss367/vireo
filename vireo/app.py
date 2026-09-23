@@ -97,6 +97,7 @@ from web.duplicates import create_duplicates_blueprint
 from web.editing import create_editing_blueprint
 from web.export import create_export_blueprint
 from web.folders import create_folders_blueprint
+from web.history import create_history_blueprint
 from web.imports import create_imports_blueprint
 from web.inat import InatTokenGeneration, create_inat_blueprint
 from web.job_launchers import create_job_launchers_blueprint
@@ -5836,231 +5837,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _invalidate_missing_originals_cache()
         return jsonify(result)
 
-    # -- Undo --
-
-    def _edit_recipe_history_updates(db, edit_id):
-        from image_edits import recipe_to_json
-        rows = db.conn.execute(
-            "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
-            (edit_id,),
-        ).fetchall()
-        photo_ids = [r["photo_id"] for r in rows]
-        if not photo_ids:
-            return {}
-        _invalidate_photo_render_cache(db, photo_ids)
-        updates = {}
-        for photo_id in photo_ids:
-            recipe = db.get_photo_edit_recipe(photo_id)
-            updates[str(photo_id)] = recipe
-            _queue_edit_recipe_sync(
-                db, photo_id, recipe_to_json(recipe) or "",
-            )
-        return updates
-
-    def _refresh_pipeline_cache_species_from_edit(db, entry):
-        """Rewrite the pipeline cache's species fields to match the DB after
-        undo / redo of a species-affecting edit.
-
-        The ``/api/encounters/species`` route writes the new confirmed set
-        onto its target burst (or encounter) and persists the cache in the
-        same request, so undo / redo of that write leaves the cache showing
-        the pre-undo confirmed set even though the DB tags have flipped. Read
-        the affected photos' current species from the DB and rebuild the
-        cache's per-photo, per-burst, and per-encounter species fields so a
-        Process / Rapid Review reload matches what ``/api/encounters/species``
-        would see now.
-        """
-        action = entry.get("action_type") if entry else None
-        if action == "pipeline_grouping":
-            # A species edit whose cache write changed the encounter
-            # structure is recorded as a grouping edit wrapping the photo
-            # edit; the grouping restore already put bursts and encounters
-            # back from its snapshot, so only the per-photo lists remain.
-            try:
-                payload = json.loads(entry.get("new_value") or "{}")
-            except (TypeError, ValueError):
-                payload = {}
-            if payload.get("photo_only"):
-                # Retired after its cache snapshot went stale: the newer
-                # cache belongs to a later analysis and must stay untouched;
-                # only the photo edit was reversed.
-                return
-            action = (payload.get("photo_edit") or {}).get("action_type")
-        if action not in ("species_replace", "keyword_add", "prediction_accept"):
-            return
-        photo_id_rows = db.conn.execute(
-            "SELECT DISTINCT photo_id FROM edit_history_items WHERE edit_id = ?",
-            (entry["id"],),
-        ).fetchall()
-        photo_ids = [r["photo_id"] for r in photo_id_rows if r["photo_id"] is not None]
-        if not photo_ids:
-            return
-        try:
-            species_by_photo = db.get_species_keywords_for_photos(photo_ids)
-            # Photos with no surviving species tags must still be included so
-            # the cache clears their confirmed_species_list — get_species_
-            # keywords_for_photos omits them entirely.
-            for pid in photo_ids:
-                species_by_photo.setdefault(pid, [])
-            from pipeline import refresh_cache_species_for_photos
-            cache_dir = os.path.dirname(db_path)
-            # Photos only: burst overrides and encounter fields are owned by
-            # the grouping/species-confirm history entries (restored from
-            # their recorded snapshots), and a plain keyword edit never
-            # changed them.
-            refresh_cache_species_for_photos(
-                cache_dir, db._active_workspace_id, species_by_photo,
-                photos_only=True,
-            )
-        except Exception:
-            log.exception(
-                "Failed to refresh pipeline cache species after undo/redo of %s",
-                action,
-            )
-    def _history_flags_changed(db, entry):
-        action = entry["action_type"]
-        if action == "pipeline_grouping":
-            action = (json.loads(entry["new_value"]).get("photo_edit") or {}).get("action_type")
-        if action != "flag":
-            return False
-        return db.conn.execute(
-            "SELECT 1 FROM edit_history_items WHERE edit_id = ? AND old_value != new_value LIMIT 1",
-            (entry["id"],),
-        ).fetchone() is not None
-
-    @app.route("/api/undo", methods=["POST"])
-    def api_undo():
-        """Undo the most recent undoable edit.
-
-        A prediction-decision route, so it takes the shared writer lock:
-        ``prediction_accept`` entries restore ``prediction_review`` statuses,
-        and undo is check-then-write like every other decision path — it reads
-        the newest undoable entry, then rewrites the statuses that entry
-        recorded. Without the lock it can restore a status on top of a batch
-        decision that landed in between, and two overlapping undos can pick
-        the same entry and apply it twice.
-        """
-        db = _get_db()
-        undone = []
-
-        def _apply():
-            entry = db.undo_last_edit()
-            if entry is None:
-                return json_error("nothing to undo")
-            undone.append(entry)
-            return None
-
-        from services.grouping_history import GroupingHistoryConflict
-
-        try:
-            early = prediction_decisions.under_prediction_decision_lock(
-                db, _apply, json_error=json_error,
-            )
-        except GroupingHistoryConflict as exc:
-            return json_error(str(exc), 409)
-        if early is not None:
-            return early
-        result = undone[0]
-        edit_recipe_updates = None
-        if result.get("action_type") == "edit_recipe":
-            # Deliberately outside the locked section: this queues XMP sync
-            # rows and commits them itself, and it touches no prediction
-            # state, so it has nothing to serialize against.
-            edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
-        _refresh_pipeline_cache_species_from_edit(db, result)
-        response = {"ok": True, "undone": result["description"], "flags_changed": _history_flags_changed(db, result)}
-        if edit_recipe_updates is not None:
-            response["action_type"] = "edit_recipe"
-            response["edit_recipes"] = edit_recipe_updates
-        return jsonify(response)
-
-    @app.route("/api/undo/status")
-    def api_undo_status():
-        db = _get_db()
-        from db import Database
-        non_undoable = Database._NON_UNDOABLE
-        placeholders = ",".join("?" for _ in non_undoable)
-        latest = db.conn.execute(
-            f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (db._ws_id(), *non_undoable),
-        ).fetchone()
-        if not latest:
-            return jsonify({"available": False, "description": "", "count": 0})
-        total = db.conn.execute(
-            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders})",
-            (db._ws_id(), *non_undoable),
-        ).fetchone()[0]
-        return jsonify({
-            "available": True,
-            "description": latest["description"],
-            "id": latest["id"],
-            "count": total,
-        })
-
-    @app.route("/api/redo", methods=["POST"])
-    def api_redo():
-        """Redo the most recently undone edit.
-
-        Under the prediction decision lock for the reason ``api_undo`` gives.
-        """
-        db = _get_db()
-        redone = []
-
-        def _apply():
-            entry = db.redo_last_undo()
-            if entry is None:
-                return json_error("nothing to redo")
-            redone.append(entry)
-            return None
-
-        from services.grouping_history import GroupingHistoryConflict
-
-        try:
-            early = prediction_decisions.under_prediction_decision_lock(
-                db, _apply, json_error=json_error,
-            )
-        except GroupingHistoryConflict as exc:
-            return json_error(str(exc), 409)
-        if early is not None:
-            return early
-        result = redone[0]
-        edit_recipe_updates = None
-        if result.get("action_type") == "edit_recipe":
-            # Outside the locked section, for the reason ``api_undo`` gives.
-            edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
-        _refresh_pipeline_cache_species_from_edit(db, result)
-        response = {"ok": True, "redone": result["description"], "flags_changed": _history_flags_changed(db, result)}
-        if edit_recipe_updates is not None:
-            response["action_type"] = "edit_recipe"
-            response["edit_recipes"] = edit_recipe_updates
-        return jsonify(response)
-
-    @app.route("/api/redo/status")
-    def api_redo_status():
-        db = _get_db()
-        from db import Database
-        non_undoable = Database._NON_UNDOABLE
-        placeholders = ",".join("?" for _ in non_undoable)
-        latest = db.conn.execute(
-            f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
-            "ORDER BY created_at ASC, id ASC LIMIT 1",
-            (db._ws_id(), *non_undoable),
-        ).fetchone()
-        if not latest:
-            return jsonify({"available": False, "description": ""})
-        return jsonify({
-            "available": True,
-            "description": latest["description"],
-        })
-
-    @app.route("/api/edit-history")
-    def api_edit_history():
-        db = _get_db()
-        limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
-        offset = max(0, request.args.get("offset", 0, type=int))
-        return jsonify(db.get_edit_history(limit=limit, offset=offset))
-
     # -- Statistics --
 
 
@@ -11237,38 +11013,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             response["summary"] = cached.get("summary", {})
         return jsonify(response)
 
-
-    @app.route("/api/photos/<int:pid>/masks")
-    def api_photo_masks(pid):
-        """List a photo's available SAM mask variants and the active one.
-
-        Powers the lightbox variant-toggle dropdown: the UI fetches this
-        when opening / navigating to a photo and builds one option per
-        returned variant plus a default "active" option.
-        """
-        db = _get_db()
-        if db.get_photo(pid, verify_workspace=True) is None:
-            return _photo_not_found_error()
-        masks = db.list_masks_for_photo(pid)
-        row = db.conn.execute(
-            "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
-        ).fetchone()
-        active = row["active_mask_variant"] if row else None
-        return jsonify({
-            "photo_id": pid,
-            "active": active,
-            "variants": [
-                {
-                    "variant": m["variant"],
-                    "url": f"/api/masks/{pid}/{m['variant']}.png",
-                    "created_at": m["created_at"],
-                }
-                for m in masks
-            ],
-        })
-
-
-
     app.register_blueprint(
         create_media_blueprint(
             _get_db,
@@ -11277,6 +11021,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             app.config,
             invalid_preview_cache_paths=_invalid_preview_cache_paths,
             clear_preview_cache_invalid=_clear_preview_cache_invalid,
+            photo_not_found_error=_photo_not_found_error,
         )
     )
     # The prepare-full-resolution job calls the /original view directly so
@@ -11556,6 +11301,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             json_error,
             app.config,
             photo_not_found_error=_photo_not_found_error,
+            invalidate_photo_render_cache=_invalidate_photo_render_cache,
+            queue_edit_recipe_sync=_queue_edit_recipe_sync,
+        )
+    )
+    app.register_blueprint(
+        create_history_blueprint(
+            _get_db,
+            json_error,
+            db_path,
             invalidate_photo_render_cache=_invalidate_photo_render_cache,
             queue_edit_recipe_sync=_queue_edit_recipe_sync,
         )
