@@ -458,8 +458,8 @@ def test_summary_counts_unique_failed_roots_not_error_entries(
 
     # Also make cache invalidation fail on the SAME bad root so it
     # contributes two error entries but is still only one failed root.
-    import app as app_module
-    real_invalidate = app_module._invalidate_new_images_after_scan
+    from services import scan_work
+    real_invalidate = scan_work._invalidate_new_images_after_scan
 
     def flaky_invalidate(db, root, *args, **kwargs):
         if root == bad:
@@ -467,7 +467,7 @@ def test_summary_counts_unique_failed_roots_not_error_entries(
         return real_invalidate(db, root, *args, **kwargs)
 
     monkeypatch.setattr(
-        app_module, "_invalidate_new_images_after_scan", flaky_invalidate,
+        scan_work, "_invalidate_new_images_after_scan", flaky_invalidate,
     )
 
     resp = client.post("/api/jobs/scan", json={"roots": [bad, good]})
@@ -515,8 +515,8 @@ def test_cache_only_failure_still_runs_thumbnails(
 
     # Cache invalidation fails only on the good root — its scan
     # succeeded (photos indexed), but its cache invalidation raised.
-    import app as app_module
-    real_invalidate = app_module._invalidate_new_images_after_scan
+    from services import scan_work
+    real_invalidate = scan_work._invalidate_new_images_after_scan
 
     def flaky_invalidate(db, root, *args, **kwargs):
         if root == good:
@@ -524,7 +524,7 @@ def test_cache_only_failure_still_runs_thumbnails(
         return real_invalidate(db, root, *args, **kwargs)
 
     monkeypatch.setattr(
-        app_module, "_invalidate_new_images_after_scan", flaky_invalidate,
+        scan_work, "_invalidate_new_images_after_scan", flaky_invalidate,
     )
 
     generate_calls = {"n": 0}
@@ -565,12 +565,12 @@ def test_cache_invalidation_failure_flips_job_to_failed(app_and_db, tmp_path, mo
     root = str(tmp_path / "r")
     _make_photo(root, "a.jpg")
 
-    import app as app_module
+    from services import scan_work
 
     def boom(*args, **kwargs):
         raise RuntimeError("cache invalidation exploded")
 
-    monkeypatch.setattr(app_module, "_invalidate_new_images_after_scan", boom)
+    monkeypatch.setattr(scan_work, "_invalidate_new_images_after_scan", boom)
 
     resp = client.post("/api/jobs/scan", json={"roots": [root]})
     job_id = resp.get_json()["job_id"]

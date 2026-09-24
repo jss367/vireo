@@ -707,7 +707,7 @@ def test_count_new_images_skips_dotfiles(db_with_workspace):
 def test_invalidate_new_images_after_scan_normalizes_trailing_slash(tmp_path):
     """Caller-supplied root with a trailing slash must still match folders stored
     by the scanner as ``str(Path(...))`` (no trailing slash)."""
-    from app import _invalidate_new_images_after_scan
+    from services.scan_work import _invalidate_new_images_after_scan
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -741,7 +741,7 @@ def test_invalidate_new_images_after_scan_preserves_dotdot_segments(tmp_path):
     against a path like ``/data/shoot/../trip``."""
     from pathlib import Path
 
-    from app import _invalidate_new_images_after_scan
+    from services.scan_work import _invalidate_new_images_after_scan
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -790,7 +790,7 @@ def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(t
       db_a, invalidate via db_b, assert db_a sees the cleared cache. This
       locks in the shared-cache contract.
     """
-    from app import _invalidate_new_images_after_scan
+    from services.scan_work import _invalidate_new_images_after_scan
 
     # db_a populates the cache for a workspace whose only linked folder is a
     # descendant of `root`.
@@ -860,7 +860,7 @@ def test_invalidate_new_images_after_scan_uses_os_sep(db_with_workspace):
     """The descendant LIKE pattern must end in ``os.sep + '%'`` so it matches
     folder paths stored by the scanner via ``str(Path(...))`` — which uses
     ``\\`` on Windows and ``/`` on POSIX."""
-    from app import _invalidate_new_images_after_scan
+    from services.scan_work import _invalidate_new_images_after_scan
 
     db, ws_id, tmp_path = db_with_workspace
     captured = {}
@@ -880,7 +880,7 @@ def test_invalidate_new_images_after_scan_windows_separator(db_with_workspace, m
     ``str(Path(...))``, so the LIKE descendant pattern must also use
     backslashes. Verified here by monkeypatching ``os.sep`` to ``\\``."""
     import app as app_module
-    from app import _invalidate_new_images_after_scan
+    from services.scan_work import _invalidate_new_images_after_scan
 
     db, ws_id, tmp_path = db_with_workspace
     captured = {}
@@ -924,7 +924,7 @@ def test_scan_handler_invalidates_cache_when_scan_raises(tmp_path, monkeypatch):
     """If do_scan raises partway through, invalidation must still run because
     scanner.scan commits photo rows incrementally. The try/finally in the scan
     handlers at vireo/app.py guarantees this."""
-    import app as app_module
+    from services import scan_work
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -943,7 +943,7 @@ def test_scan_handler_invalidates_cache_when_scan_raises(tmp_path, monkeypatch):
         try:
             raise RuntimeError("simulated mid-scan failure")
         finally:
-            app_module._invalidate_new_images_after_scan(db, str(root))
+            scan_work._invalidate_new_images_after_scan(db, str(root))
     except RuntimeError:
         pass
 
@@ -963,7 +963,6 @@ def test_pipeline_job_scan_invalidates_cache(tmp_path, monkeypatch):
     skipped so the test completes quickly; asserts the cache for the active
     workspace was cleared by the time the job returns.
     """
-    import app as app_module  # ensures _invalidate_new_images_after_scan is wired up
     import config as cfg
     from PIL import Image
     from pipeline_job import PipelineParams, run_pipeline_job
@@ -1025,10 +1024,11 @@ def test_pipeline_job_scan_invalidates_cache(tmp_path, monkeypatch):
         "pipeline_job scanner_stage must invalidate the new-images cache "
         "for roots fed to do_scan (try/finally mirrors api_job_scan)"
     )
-    # Sanity-check that the helper app.py exposes still resolves to the
+    # Sanity-check that the helper the scan job calls still resolves to the
     # same canonical implementation used by pipeline_job.
     import new_images as new_images_mod
-    assert app_module._invalidate_new_images_after_scan is (
+    from services import scan_work
+    assert scan_work._invalidate_new_images_after_scan is (
         new_images_mod.invalidate_new_images_after_scan
     )
 
