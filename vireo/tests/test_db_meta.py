@@ -2,11 +2,14 @@
 
 The tests exercise ``get_meta`` and ``set_meta`` only through the public
 ``Database`` façade, so they hold regardless of whether the SQL lives in
-``db.py`` or in a repository.
+``db.py`` or in ``repositories/meta.py``; the structural test at the end
+keeps it in the repository.
 """
 
+import ast
 import inspect
 import sqlite3
+import textwrap
 from contextlib import closing
 
 import pytest
@@ -218,3 +221,30 @@ def test_meta_signatures():
     params = inspect.signature(Database.set_meta).parameters
     assert list(params) == ["self", "key", "value", "_commit"]
     assert params["_commit"].default is True
+
+
+# -- structure: the db_meta SQL lives in the repository -----------------------
+
+# Database methods whose SQL moved to repositories/meta.py. Each stays on
+# Database as a thin wrapper so existing call sites keep working; none may
+# reach the connection directly again.
+_DELEGATING_META_METHODS = ("get_meta", "set_meta")
+
+
+@pytest.mark.parametrize("name", _DELEGATING_META_METHODS)
+def test_meta_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to MetaRepository"
+    )
+    assert "_meta_repository" in attrs, (
+        f"Database.{name} no longer delegates to MetaRepository"
+    )
