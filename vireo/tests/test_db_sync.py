@@ -9,15 +9,20 @@ cancel-captured-keyword inverse, token-vs-id clearing, flat-removal
 equivalence across workspaces, the staged sync scope counts, and that
 composition (``queue_change``, ``_pending_keyword_sidecar_alias``,
 ``clear_equivalent_flat_removals``, ``get_effective_config``) still routes
-through the façade so monkeypatches take effect.
+through the façade so monkeypatches take effect. The structural test at
+the end keeps the SQL in ``SyncRepository``.
 """
 
+import ast
 import contextlib
+import inspect
 import os
 import sqlite3
+import textwrap
 import uuid
 
 import pytest
+from db import Database
 
 
 def _visible_rows(db):
@@ -941,3 +946,69 @@ def test_staged_sync_scope_chunks(staged):
     assert sum(1 for s_ in statements if "FROM pending_changes" in s_) == 4
     assert by_folder[1:] == (1, 1, 1)
     assert by_photo[1:] == (1, 0, 1)
+
+
+# -- structure ----------------------------------------------------------------------------
+
+
+_DELEGATING_SYNC_METHODS = (
+    "count_pending_changes",
+    "staged_sync_scope_by_photos",
+    "staged_sync_scope",
+    "queue_change",
+    "get_pending_changes",
+    "claim_pending_changes_for_sync",
+    "get_pending_keyword_removal_keys",
+    "_pending_keyword_sidecar_alias",
+    "remove_pending_changes",
+    "remove_pending_change_token",
+    "clear_pending",
+    "clear_pending_by_token",
+    "clear_equivalent_flat_removals",
+    "queue_flag_change_if_enabled",
+)
+
+
+@pytest.mark.parametrize("name", _DELEGATING_SYNC_METHODS)
+def test_sync_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to SyncRepository"
+    )
+    assert "_sync_repository" in attrs, (
+        f"Database.{name} no longer delegates to SyncRepository"
+    )
+
+
+def test_sync_facade_signatures_unchanged():
+    sig = {n: str(inspect.signature(getattr(Database, n)))
+           for n in _DELEGATING_SYNC_METHODS}
+    assert sig["queue_change"] == (
+        "(self, photo_id, change_type, value, workspace_id=None, _commit=True)"
+    )
+    assert sig["remove_pending_changes"] == (
+        "(self, photo_id, change_type=None, value=None, workspace_id=None, "
+        "_commit=True)"
+    )
+    assert sig["clear_pending"] == (
+        "(self, change_ids, *, clear_equivalent_flat_removals=False, "
+        "expected_tokens=None)"
+    )
+    assert sig["clear_pending_by_token"] == (
+        "(self, change_tokens, *, clear_equivalent_flat_removals=False)"
+    )
+    assert sig["clear_equivalent_flat_removals"] == "(self, changes, _commit=True)"
+    assert sig["queue_flag_change_if_enabled"] == (
+        "(self, photo_id, flag, workspace_id=None, _commit=True)"
+    )
+    assert sig["get_pending_keyword_removal_keys"] == (
+        "(self, photo_id, hierarchical=False)"
+    )
