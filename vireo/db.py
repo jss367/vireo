@@ -7633,6 +7633,18 @@ class Database:
 
         return photo_id
 
+    def _duplicates_repository(self):
+        """Build the duplicates repository on this connection.
+
+        Every duplicate method is catalog-wide (photos are global), so the
+        repository takes no workspace id and never calls ``_ws_id()``.
+        """
+        from repositories.duplicates import DuplicatesRepository
+
+        return DuplicatesRepository(
+            self.conn, chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+        )
+
     def check_and_resolve_duplicates_for_hash(self, file_hash: str) -> dict | None:
         """Look up non-rejected photos sharing this hash; if >=2, resolve.
 
@@ -7643,12 +7655,9 @@ class Database:
         if not file_hash:
             return None
         try:
-            dup_rows = self.conn.execute(
-                "SELECT id FROM photos WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected')",
-                (file_hash,),
-            ).fetchall()
-            if len(dup_rows) > 1:
-                return self.apply_duplicate_resolution([r["id"] for r in dup_rows])
+            dup_ids = self._duplicates_repository().live_ids_for_hash(file_hash)
+            if len(dup_ids) > 1:
+                return self.apply_duplicate_resolution(dup_ids)
         except sqlite3.Error as e:
             logging.getLogger(__name__).warning(
                 "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
@@ -7675,53 +7684,9 @@ class Database:
         resolved groups; downstream code disambiguates by re-querying
         ``flag`` per row.
         """
-        unresolved_rows = self.conn.execute(
-            """
-            SELECT file_hash, GROUP_CONCAT(id) AS ids
-            FROM photos
-            WHERE file_hash IS NOT NULL AND (flag IS NULL OR flag != 'rejected')
-            GROUP BY file_hash
-            HAVING COUNT(*) > 1
-            """
-        ).fetchall()
-        groups = [
-            {
-                "file_hash": r["file_hash"],
-                "photo_ids": [int(x) for x in r["ids"].split(",")],
-                "status": "unresolved",
-            }
-            for r in unresolved_rows
-        ]
-
-        if not include_resolved:
-            return groups
-
-        # Resolved groups: hashes where exactly 1 non-rejected row exists
-        # AND at least 1 rejected row shares the hash. We exclude purely-
-        # rejected hashes (e.g. user manually rejected the only copy of a
-        # photo for non-duplicate reasons) — without the kept-row anchor
-        # there is no "loser of a duplicate group" to clean up.
-        resolved_rows = self.conn.execute(
-            """
-            SELECT file_hash,
-                   GROUP_CONCAT(id) AS ids,
-                   SUM(CASE WHEN flag IS NULL OR flag != 'rejected' THEN 1 ELSE 0 END) AS kept,
-                   SUM(CASE WHEN flag  = 'rejected' THEN 1 ELSE 0 END) AS rejected
-            FROM photos
-            WHERE file_hash IS NOT NULL
-            GROUP BY file_hash
-            HAVING kept = 1 AND rejected >= 1
-            """
-        ).fetchall()
-        groups.extend(
-            {
-                "file_hash": r["file_hash"],
-                "photo_ids": [int(x) for x in r["ids"].split(",")],
-                "status": "resolved",
-            }
-            for r in resolved_rows
+        return self._duplicates_repository().find_groups(
+            include_resolved=include_resolved,
         )
-        return groups
 
     def apply_duplicate_resolution(self, photo_ids):
         """Resolve a group of photos sharing a file_hash.
@@ -7737,44 +7702,10 @@ class Database:
         If fewer than 2 non-rejected candidates remain, returns the no-op
         shape with ``winner_id=None``.
         """
-        from duplicates import DupCandidate, resolve_duplicates
-
-        if not photo_ids or len(photo_ids) < 2:
+        plan = self._duplicates_repository().resolution_plan(photo_ids)
+        if plan is None:
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
-
-        # Chunked — a single duplicate group can exceed the bound-parameter
-        # cap (see duplicate_scan.py, which chunks its own reads).
-        rows = []
-        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
-            placeholders = ",".join("?" * len(chunk))
-            rows.extend(self.conn.execute(
-                f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag,
-                           f.path AS folder_path
-                    FROM photos p
-                    LEFT JOIN folders f ON f.id = p.folder_id
-                    WHERE p.id IN ({placeholders}) AND (p.flag IS NULL OR p.flag != 'rejected')""",
-                list(chunk),
-            ).fetchall())
-        if len(rows) < 2:
-            return {"winner_id": None, "loser_ids": [], "rejected": 0}
-
-        candidates = []
-        for r in rows:
-            path = os.path.join(r["folder_path"] or "", r["filename"] or "")
-            candidates.append(
-                DupCandidate(
-                    id=r["id"],
-                    path=path,
-                    mtime=r["file_mtime"] or 0.0,
-                    # Stat each candidate so the resolver doesn't pick a
-                    # winner whose file was moved/deleted on disk. The DB
-                    # row would otherwise outvote a surviving twin solely
-                    # on path-string heuristics.
-                    exists=os.path.exists(path),
-                )
-            )
-        winner_id, losers_with_reasons = resolve_duplicates(candidates)
-        loser_ids = [lid for lid, _reason in losers_with_reasons]
+        winner_id, loser_ids = plan
 
         self._apply_winner_loser_merge(winner_id, loser_ids)
 
@@ -7790,39 +7721,16 @@ class Database:
         ``apply_duplicate_resolution`` and the user-driven
         ``bulk_resolve_by_folder``.
         """
-        from duplicates import PhotoMetadata, merge_metadata
+        from duplicates import merge_metadata
 
-        def _meta(photo_id):
-            r = self.conn.execute(
-                "SELECT rating FROM photos WHERE id = ?", (photo_id,)
-            ).fetchone()
-            kw_rows = self.conn.execute(
-                "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
-                (photo_id,),
-            ).fetchall()
-            pend = self.conn.execute(
-                "SELECT 1 FROM pending_changes WHERE photo_id = ? LIMIT 1",
-                (photo_id,),
-            ).fetchone()
-            return PhotoMetadata(
-                id=photo_id,
-                rating=(r["rating"] if r and r["rating"] is not None else 0),
-                keyword_ids={kr["keyword_id"] for kr in kw_rows},
-                # Collections in Vireo are rule-based (no junction table); skip.
-                collection_ids=set(),
-                has_pending_edit=pend is not None,
-            )
-
-        winner_meta = _meta(winner_id)
-        loser_metas = [_meta(lid) for lid in loser_ids]
+        repo = self._duplicates_repository()
+        winner_meta = repo.photo_metadata(winner_id)
+        loser_metas = [repo.photo_metadata(lid) for lid in loser_ids]
         merge = merge_metadata(winner_meta, loser_metas)
 
-        with self.conn:  # transaction
+        with repo.transaction():
             if merge.new_rating != winner_meta.rating:
-                self.conn.execute(
-                    "UPDATE photos SET rating = ? WHERE id = ?",
-                    (merge.new_rating, winner_id),
-                )
+                repo.set_rating(winner_id, merge.new_rating)
             # Carry every loser's durable provenance onto the winner,
             # including keyword IDs the winner already has. merge_metadata()
             # omits overlaps from keyword_ids_to_add, but a manual loser must
@@ -7831,19 +7739,11 @@ class Database:
             # tag_photo's upsert folds against the winner's own stamp, so a
             # weak loser can never pull a stronger winner down.
             loser_keyword_sources = {}
-            for chunk in _chunks(loser_ids):
-                loser_placeholders = ",".join("?" * len(chunk))
-                rows = self.conn.execute(
-                    f"""SELECT keyword_id, source
-                        FROM photo_keywords
-                        WHERE photo_id IN ({loser_placeholders})""",
-                    chunk,
-                ).fetchall()
-                for row in rows:
-                    kw_id = row["keyword_id"]
-                    loser_keyword_sources[kw_id] = keyword_source_max(
-                        row["source"], loser_keyword_sources.get(kw_id),
-                    )
+            for row in repo.loser_keyword_rows(loser_ids):
+                kw_id = row["keyword_id"]
+                loser_keyword_sources[kw_id] = keyword_source_max(
+                    row["source"], loser_keyword_sources.get(kw_id),
+                )
             for kw_id, merged_source in loser_keyword_sources.items():
                 self.tag_photo(
                     winner_id, kw_id, source=merged_source, _commit=False,
@@ -7854,14 +7754,7 @@ class Database:
             # this transaction. Rare edge case; revisit if product needs it.
             # Collections are rule-based (no junction table) so
             # merge.collection_ids_to_add has nothing to write either.
-            # Chunked — a single duplicate group's loser list can exceed the
-            # bound-parameter cap.
-            for chunk in _chunks(loser_ids):
-                loser_placeholders = ",".join("?" * len(chunk))
-                self.conn.execute(
-                    f"UPDATE photos SET flag = 'rejected' WHERE id IN ({loser_placeholders})",
-                    list(chunk),
-                )
+            repo.reject(loser_ids)
 
         logging.getLogger(__name__).info(
             "Duplicate resolved: kept id=%s, rejected id(s)=%s",
@@ -7894,8 +7787,6 @@ class Database:
         Returns ``{"resolved": [{"file_hash", "winner_id", "loser_ids"}],
         "skipped": [{"file_hash", "reason"}]}``.
         """
-        from duplicates import DupCandidate, resolve_duplicates
-
         # Normalize once. The bucket UI derives folder paths from
         # ``os.path.dirname(...)`` (never trailing-slashed), but
         # ``folders.path`` rows can carry a trailing separator from
@@ -7903,71 +7794,16 @@ class Database:
         # silently no-ops the action for those users.
         keep_folder_norm = os.path.normpath(keep_folder) if keep_folder else ""
 
+        repo = self._duplicates_repository()
         resolved = []
         skipped = []
         for file_hash in file_hashes:
-            rows = self.conn.execute(
-                """SELECT p.id, p.filename, p.file_mtime, p.rating,
-                          f.path AS folder_path
-                   FROM photos p
-                   LEFT JOIN folders f ON f.id = p.folder_id
-                   WHERE p.file_hash = ? AND (p.flag IS NULL OR p.flag != 'rejected')""",
-                (file_hash,),
-            ).fetchall()
-            if not rows:
-                skipped.append({"file_hash": file_hash, "reason": "no candidates"})
+            winner_id, loser_ids, reason = repo.keep_folder_plan(
+                file_hash, keep_folder_norm,
+            )
+            if reason is not None:
+                skipped.append({"file_hash": file_hash, "reason": reason})
                 continue
-            if len(rows) < 2:
-                skipped.append({
-                    "file_hash": file_hash,
-                    "reason": "fewer than 2 candidates",
-                })
-                continue
-            in_folder = [
-                r for r in rows
-                if os.path.normpath(r["folder_path"] or "") == keep_folder_norm
-            ]
-            if not in_folder:
-                skipped.append({
-                    "file_hash": file_hash,
-                    "reason": "no candidate in keep_folder",
-                })
-                continue
-            # Existence-check the keep_folder candidate(s) before promoting.
-            # If the row's file has been deleted externally but a sibling in
-            # another folder still exists, force-picking the missing row as
-            # winner would reject the surviving copy — and chained delete
-            # would then trash it. Skip the hash instead.
-            in_folder_paths = [
-                (r, os.path.join(r["folder_path"] or "", r["filename"] or ""))
-                for r in in_folder
-            ]
-            present_in_folder = [
-                (r, p) for (r, p) in in_folder_paths if os.path.exists(p)
-            ]
-            if not present_in_folder:
-                skipped.append({
-                    "file_hash": file_hash,
-                    "reason": "keep_folder candidate missing on disk",
-                })
-                continue
-            if len(present_in_folder) == 1:
-                winner_id = present_in_folder[0][0]["id"]
-            else:
-                # Same-folder duplicates among the keep_folder candidates —
-                # let the resolver pick deterministically among them. All
-                # candidates passed in exist on disk (filtered above), so
-                # Rule 0 is a no-op here.
-                cands = [
-                    DupCandidate(
-                        id=r["id"], path=p,
-                        mtime=r["file_mtime"] or 0.0,
-                        exists=True,
-                    )
-                    for (r, p) in present_in_folder
-                ]
-                winner_id, _ = resolve_duplicates(cands)
-            loser_ids = [r["id"] for r in rows if r["id"] != winner_id]
             self._apply_winner_loser_merge(winner_id, loser_ids)
             resolved.append({
                 "file_hash": file_hash,
@@ -7985,13 +7821,7 @@ class Database:
         lets the next proposal pass run Rule 0 and promote the survivor.
         Returns the number of rows un-rejected.
         """
-        with self.conn:
-            cur = self.conn.execute(
-                "UPDATE photos SET flag = 'none' "
-                "WHERE file_hash = ? AND flag = 'rejected'",
-                (file_hash,),
-            )
-            return cur.rowcount
+        return self._duplicates_repository().reopen(file_hash)
 
     # Columns to return in photo list queries (excludes large fields)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
