@@ -8,12 +8,16 @@ retirement, the review pin, rollback), the threshold-at-read-time readers,
 clears and id-based deletes, and the workspace-scoped misses queue.
 """
 
+import ast
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import config as cfg
 import db as db_module
 import pytest
+from db import Database
 from detection_id import detection_id
 
 MODEL = "megadetector-v6"
@@ -876,3 +880,83 @@ def test_bulk_reject_updates_in_chunks_of_500(db):
     assert [s.count(",") + 1 for s in updates] == [500, 1]
     assert {a["photo_id"] for a in affected} == set(pids)
 
+
+# -- structure ---------------------------------------------------------------
+
+_DELEGATING_DETECTION_METHODS = (
+    "save_detections",
+    "_upsert_detection_rows",
+    "write_detection_batch",
+    "get_detections",
+    "get_detections_for_photos",
+    "get_predictions_for_detection",
+    "clear_detections",
+    "list_misses",
+    "clear_miss_flag",
+    "bulk_reject_miss_category",
+    "get_detection_ids_for_photos",
+    "delete_detections_by_ids",
+)
+
+
+def _self_attrs(fn_obj):
+    source = textwrap.dedent(inspect.getsource(fn_obj))
+    fn = ast.parse(source).body[0]
+    return {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_DETECTION_METHODS)
+def test_detection_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to DetectionsRepository"
+    )
+    assert "_detections_repository" in attrs, (
+        f"Database.{name} no longer delegates to DetectionsRepository"
+    )
+
+
+def test_existing_detection_photo_ids_composes_through_the_facade():
+    attrs = _self_attrs(Database.get_existing_detection_photo_ids)
+    assert "conn" not in attrs
+    assert "get_detector_run_photo_ids" in attrs
+
+
+def test_pin_check_stays_on_the_facade():
+    """``detector_run_is_pinned`` belongs to the model-runs domain."""
+    assert "detector_run_is_pinned" in _self_attrs(Database.write_detection_batch)
+
+
+@pytest.mark.parametrize("name", [
+    "get_detections", "get_detections_for_photos",
+    "get_predictions_for_detection", "list_misses",
+])
+def test_floors_read_config_through_the_facade(name):
+    assert "get_effective_config" in _self_attrs(getattr(Database, name))
+
+
+@pytest.mark.parametrize("name", ["list_misses", "bulk_reject_miss_category"])
+def test_misses_scope_through_the_facade(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert {"_ws_id", "_scope_clause"} <= attrs
+
+
+def test_repository_imports_no_db_code():
+    import repositories.detections as module
+
+    tree = ast.parse(inspect.getsource(module))
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".")[0]
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+    }
+    assert "db" not in imported
