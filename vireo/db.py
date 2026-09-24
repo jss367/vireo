@@ -3259,6 +3259,21 @@ class Database:
         ).fetchall()
         return [int(r["folder_id"]) for r in rows]
 
+    def _workspace_folder_repository(self):
+        """Build the workspace-folder membership repository on this connection.
+
+        Every membership method takes its workspace id explicitly, so the
+        repository is not bound to the active workspace; the wrappers that
+        default to it call ``_ws_id()`` themselves.
+        """
+        from repositories.workspace_folders import WorkspaceFolderRepository
+
+        return WorkspaceFolderRepository(
+            self.conn,
+            path_for_subtree_match=_path_for_subtree_match,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+        )
+
     def _add_workspace_folder_no_commit(
             self, workspace_id, folder_id, *, is_root=True, restore_removed=False):
         """Link a folder + descendants to a workspace WITHOUT committing.
@@ -3280,25 +3295,9 @@ class Database:
             # descendants need their own scan or explicit add to restore
             # them; registering a parent must not resurrect missing rows.
             folder_ids = [fid for fid in folder_ids if fid == folder_id or fid not in removed]
-        self.conn.executemany(
-            """INSERT OR IGNORE INTO workspace_folders
-               (workspace_id, folder_id, is_root)
-               SELECT ?, ?, 0 WHERE ? OR NOT EXISTS (
-                   SELECT 1 FROM workspace_removed_folders
-                   WHERE workspace_id = ? AND folder_id = ?
-               )""",
-            [(workspace_id, fid, restore_removed or fid == folder_id, workspace_id, fid)
-             for fid in folder_ids],
-        )
-        if is_root:
-            for chunk in _chunks(folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"""UPDATE workspace_folders
-                        SET is_root = CASE WHEN folder_id = ? THEN 1 ELSE 0 END
-                        WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-                    [folder_id, workspace_id] + chunk,
-                )
+        self._workspace_folder_repository().add_no_commit(
+            workspace_id, folder_id, folder_ids,
+            is_root=is_root, restore_removed=restore_removed)
 
     def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True,
                              restore_removed=True):
@@ -3309,7 +3308,7 @@ class Database:
         """
         self._add_workspace_folder_no_commit(
             workspace_id, folder_id, is_root=is_root, restore_removed=restore_removed)
-        self.conn.commit()
+        self._workspace_folder_repository().commit()
         # The folder's untracked files now count toward this workspace's
         # new-images backlog. Drop any stale cached payload so the next read
         # recomputes against the updated folder set.
@@ -3325,79 +3324,30 @@ class Database:
         subtree for user-selected roots; using it here could attach unrelated
         catalog folders that happen to sit below the same filesystem parent.
         """
-        self.conn.execute(
-            """INSERT OR IGNORE INTO workspace_folders
-               (workspace_id, folder_id, is_root) VALUES (?, ?, ?)""",
-            (workspace_id, folder_id, 1 if is_root else 0),
-        )
-        if is_root:
-            self.conn.execute(
-                """UPDATE workspace_folders SET is_root = 1
-                   WHERE workspace_id = ? AND folder_id = ?""",
-                (workspace_id, folder_id),
-            )
-        self.conn.commit()
+        self._workspace_folder_repository().add_exact(
+            workspace_id, folder_id, is_root=is_root)
         self._new_images_cache.invalidate_workspaces(
             self._db_path, [workspace_id],
         )
 
     def _removed_workspace_folder_ids(self, workspace_id):
-        return {
-            row["folder_id"] for row in self.conn.execute(
-                "SELECT folder_id FROM workspace_removed_folders WHERE workspace_id = ?",
-                (workspace_id,),
-            )
-        }
+        return self._workspace_folder_repository().removed_ids(workspace_id)
 
     def _folder_removal_root_ids(self, folder_ids):
         """Find topmost surviving paths without walking every subtree again."""
-        paths = []
-        for chunk in _chunks(folder_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            paths.extend(
-                (_path_for_subtree_match(row["path"]), row["id"])
-                for row in self.conn.execute(
-                    f"""SELECT f.id, COALESCE(m.source_path, f.path) AS path
-                        FROM folders f
-                        LEFT JOIN local_folder_mappings m ON m.folder_id = f.id
-                        WHERE f.id IN ({placeholders})""", chunk,
-                )
-            )
-        roots = set()
-        root_paths = set()
-        for path, folder_id in sorted(paths):
-            ancestor = path
-            while ancestor not in root_paths and "/" in ancestor:
-                ancestor = ancestor.rpartition("/")[0]
-            if ancestor not in root_paths:
-                roots.add(folder_id)
-                root_paths.add(path)
-        return roots
+        return self._workspace_folder_repository().removal_root_ids(folder_ids)
 
     def _remember_workspace_folder_removals(self, workspace_id, folder_ids, *, recursive=False):
         """Record removals in the caller's unlink/delete transaction."""
         folder_ids = list(folder_ids)
         roots = self._folder_removal_root_ids(folder_ids) if recursive else set()
-        # Keep exact descendant records so importing just one folder does
-        # not restore its children. Only topmost surviving folders need a
-        # recursive record to cover future discoveries.
-        self.conn.executemany(
-            """INSERT INTO workspace_folder_removals (workspace_id, folder_id, recursive)
-               SELECT ?, id, ? FROM folders WHERE id = ?
-               ON CONFLICT(workspace_id, folder_id) DO UPDATE
-               SET recursive = CASE WHEN ? THEN excluded.recursive
-                                    ELSE MAX(recursive, excluded.recursive) END""",
-            [(workspace_id, fid in roots, fid, recursive) for fid in folder_ids],
-        )
+        self._workspace_folder_repository().remember_removals(
+            workspace_id, folder_ids, roots, recursive=recursive)
 
     def remove_workspace_folder(self, workspace_id, folder_id):
         """Unlink a single folder from a workspace."""
         self._remember_workspace_folder_removals(workspace_id, [folder_id])
-        self.conn.execute(
-            "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-            (workspace_id, folder_id),
-        )
-        self.conn.commit()
+        self._workspace_folder_repository().remove(workspace_id, folder_id)
         # The folder no longer contributes to this workspace's new-images
         # backlog. Drop the cached payload so the banner reflects the change.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
@@ -3406,14 +3356,7 @@ class Database:
         """Unlink a folder and its path descendants from a workspace."""
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
         self._remember_workspace_folder_removals(workspace_id, folder_ids, recursive=True)
-        for chunk in _chunks(folder_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            self.conn.execute(
-                f"""DELETE FROM workspace_folders
-                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-                [workspace_id] + chunk,
-            )
-        self.conn.commit()
+        self._workspace_folder_repository().remove_tree(workspace_id, folder_ids)
         # The folder no longer contributes to this workspace's new-images
         # backlog. Drop the cached payload so the banner reflects the change.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
@@ -3427,73 +3370,21 @@ class Database:
         ``local_folder_mappings.source_path`` still records the original
         location and lets us bridge the gap.
         """
-        rows = self.conn.execute(
-            """SELECT DISTINCT child.id
-               FROM workspace_folders wf
-               JOIN folders root ON root.id = wf.folder_id
-               JOIN folders child
-                 ON child.path = root.path
-                 OR substr(
-                      REPLACE(child.path, '\\', '/'),
-                      1,
-                      length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
-                    ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
-               LEFT JOIN workspace_folders existing
-                 ON existing.workspace_id = wf.workspace_id
-                AND existing.folder_id = child.id
-               WHERE wf.workspace_id = ?
-                 AND existing.folder_id IS NULL""",
-            (workspace_id,),
-        ).fetchall()
-        candidate_ids = {r["id"] for r in rows}
-        root_rows = self.conn.execute(
-            """SELECT f.path FROM workspace_folders wf
-               JOIN folders f ON f.id = wf.folder_id
-               WHERE wf.workspace_id = ?""",
-            (workspace_id,),
-        ).fetchall()
-        for root_row in root_rows:
-            candidate_ids.update(self._local_source_descendant_ids(root_row["path"]))
+        repo = self._workspace_folder_repository()
+        candidate_ids = repo.unlinked_descendant_ids(workspace_id)
+        for root_path in repo.linked_paths(workspace_id):
+            candidate_ids.update(self._local_source_descendant_ids(root_path))
         if candidate_ids:
-            existing = {
-                r["folder_id"]
-                for r in self.conn.execute(
-                    "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?",
-                    (workspace_id,),
-                ).fetchall()
-            }
-            candidate_ids -= existing
+            candidate_ids -= repo.linked_ids(workspace_id)
         candidate_ids -= self._removed_workspace_folder_ids(workspace_id)
         if not candidate_ids:
             return
-        # Recheck in the INSERT: a Remove request may have committed after
-        # the discovery snapshot. In that case the stale reader must not
-        # recreate the link and clear its removal record via the trigger.
-        self.conn.executemany(
-            """INSERT OR IGNORE INTO workspace_folders
-               (workspace_id, folder_id, is_root)
-               SELECT ?, ?, 0 WHERE NOT EXISTS (
-                   SELECT 1 FROM workspace_removed_folders
-                   WHERE workspace_id = ? AND folder_id = ?
-               )""",
-            [(workspace_id, fid, workspace_id, fid) for fid in candidate_ids],
-        )
-        self.conn.commit()
+        repo.link_descendants(workspace_id, candidate_ids)
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def mark_workspace_folder_roots(self, workspace_id, folder_ids):
         """Mark specific linked folders as user-facing roots."""
-        if not folder_ids:
-            return
-        for chunk in _chunks(folder_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            self.conn.execute(
-                f"""UPDATE workspace_folders
-                    SET is_root = 1
-                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-                [workspace_id] + chunk,
-            )
-        self.conn.commit()
+        self._workspace_folder_repository().mark_roots(workspace_id, folder_ids)
 
     def get_workspace_folders(self, workspace_id):
         """Return all explicit folder links for a workspace.
@@ -3503,13 +3394,7 @@ class Database:
         existing workspace-scoped photo queries continue to work.
         """
         self._materialize_workspace_descendants(workspace_id)
-        return self.conn.execute(
-            """SELECT f.* FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ?
-               ORDER BY f.path""",
-            (workspace_id,),
-        ).fetchall()
+        return self._workspace_folder_repository().list_folders(workspace_id)
 
     def get_folder_workspaces(self, folder_id):
         """Return every workspace in which ``folder_id`` is visible.
@@ -3519,44 +3404,7 @@ class Database:
         paths create deliberately restricted exact non-root links that must not
         expand merely because the user inspected a folder's memberships.
         """
-        return self.conn.execute(
-            """SELECT w.id, w.name,
-                      MAX(CASE
-                            WHEN wf.folder_id = target.id AND wf.is_root = 1
-                            THEN 1 ELSE 0
-                          END) AS is_root
-               FROM workspaces w
-               JOIN workspace_folders wf ON wf.workspace_id = w.id
-               JOIN folders root ON root.id = wf.folder_id
-               JOIN folders target ON target.id = ?
-               LEFT JOIN local_folder_mappings target_lfm
-                 ON target_lfm.folder_id = target.id
-               WHERE (wf.folder_id = target.id
-                  OR (
-                    wf.is_root = 1
-                    AND (
-                      REPLACE(target.path, '\\', '/') = REPLACE(root.path, '\\', '/')
-                      OR substr(
-                           REPLACE(target.path, '\\', '/'),
-                           1,
-                           length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
-                         ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
-                      OR REPLACE(target_lfm.source_path, '\\', '/') = REPLACE(root.path, '\\', '/')
-                      OR substr(
-                           REPLACE(target_lfm.source_path, '\\', '/'),
-                           1,
-                           length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
-                         ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
-                    )
-                  )
-               ) AND NOT EXISTS (
-                   SELECT 1 FROM workspace_removed_folders removed
-                   WHERE removed.workspace_id = w.id AND removed.folder_id = target.id
-               )
-               GROUP BY w.id, w.name, w.pinned_at
-               ORDER BY (w.pinned_at IS NULL), LOWER(w.name), w.id""",
-            (folder_id,),
-        ).fetchall()
+        return self._workspace_folder_repository().list_workspaces_for_folder(folder_id)
 
     def get_workspace_root_folder_ids(self, workspace_id=None):
         """Return just the ids of the workspace's user-facing roots.
@@ -3580,15 +3428,7 @@ class Database:
         # workspace_local_root_ids even though this fast path skips photo
         # counts. This only writes when an unmaterialized descendant exists.
         self._materialize_workspace_descendants(workspace_id)
-        rows = self.conn.execute(
-            """SELECT f.id
-               FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ? AND wf.is_root = 1
-               ORDER BY f.path""",
-            (workspace_id,),
-        ).fetchall()
-        return [int(row["id"]) for row in rows]
+        return self._workspace_folder_repository().root_ids(workspace_id)
 
     def get_workspace_folder_roots(self, workspace_id):
         """Return user-facing workspace roots, hiding covered descendants.
@@ -3610,35 +3450,7 @@ class Database:
         ``workspace_folders`` still makes them visible.
         """
         self._materialize_workspace_descendants(workspace_id)
-        return self.conn.execute(
-            """SELECT f.*, (
-                   SELECT COUNT(*)
-                   FROM photos p
-                   JOIN folders cf ON cf.id = p.folder_id
-                   JOIN workspace_folders cwf
-                     ON cwf.folder_id = cf.id
-                    AND cwf.workspace_id = wf.workspace_id
-                   LEFT JOIN local_folder_mappings lfm
-                     ON lfm.folder_id = cf.id
-                   WHERE cf.path = f.path
-                      OR substr(
-                           REPLACE(cf.path, '\\', '/'),
-                           1,
-                           length(RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/')
-                         ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'
-                      OR lfm.source_path = f.path
-                      OR substr(
-                           REPLACE(lfm.source_path, '\\', '/'),
-                           1,
-                           length(RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/')
-                         ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'
-               ) AS workspace_photo_count
-               FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ? AND wf.is_root = 1
-               ORDER BY f.path""",
-            (workspace_id,),
-        ).fetchall()
+        return self._workspace_folder_repository().roots(workspace_id)
 
     def get_workspace_extensions(self):
         """Return distinct lowercased file extensions for photos in the
@@ -3659,19 +3471,7 @@ class Database:
         change is meant to prevent.
         """
         ws = self._ws_id()
-        rows = self.conn.execute(
-            """SELECT DISTINCT LOWER(p.extension) AS ext
-               FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id
-                              AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ?
-                 AND p.extension IS NOT NULL
-                 AND p.extension != ''
-               ORDER BY ext""",
-            (ws,),
-        ).fetchall()
-        return [r["ext"] for r in rows]
+        return self._workspace_folder_repository().extensions(ws)
 
     def move_folders_to_workspace(self, source_ws_id, target_ws_id, folder_ids):
         """Move folders and their workspace-scoped data to another workspace.
@@ -3738,174 +3538,13 @@ class Database:
                     seen_folder_ids.add(subtree_id)
                     moved_folder_ids.append(subtree_id)
 
-        try:
-            # Move pending_changes
-            pending_changes_moved = 0
-            for chunk in _chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                cur = self.conn.execute(
-                    f"""UPDATE pending_changes SET workspace_id = ?
-                        WHERE workspace_id = ?
-                        AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
-                    [target_ws_id, source_ws_id] + chunk,
-                )
-                pending_changes_moved += cur.rowcount
-
-            # Move prediction_review rows for predictions whose photo is in
-            # the moved folders. Without this the accepted/rejected/group
-            # metadata stays attached to the source workspace_id and the
-            # target reads all predictions as 'pending' — silently dropping
-            # the user's review decisions during a folder move.
-            #
-            # INSERT OR IGNORE into the target first, then DELETE from the
-            # source. That way if the target already has a review row for
-            # the same (prediction_id), we keep the target's value rather
-            # than overwriting it.
-            for chunk in _chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"""INSERT OR IGNORE INTO prediction_review
-                          (prediction_id, workspace_id, status, reviewed_at,
-                           individual, group_id, vote_count, total_votes)
-                        SELECT pr_rev.prediction_id, ?, pr_rev.status,
-                               pr_rev.reviewed_at, pr_rev.individual,
-                               pr_rev.group_id, pr_rev.vote_count,
-                               pr_rev.total_votes
-                        FROM prediction_review pr_rev
-                        JOIN predictions p ON p.id = pr_rev.prediction_id
-                        JOIN detections d ON d.id = p.detection_id
-                        WHERE pr_rev.workspace_id = ?
-                          AND d.photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )""",
-                    [target_ws_id, source_ws_id] + chunk,
-                )
-                self.conn.execute(
-                    f"""DELETE FROM prediction_review
-                        WHERE workspace_id = ?
-                          AND prediction_id IN (
-                              SELECT pr_rev.prediction_id
-                              FROM prediction_review pr_rev
-                              JOIN predictions p ON p.id = pr_rev.prediction_id
-                              JOIN detections d ON d.id = p.detection_id
-                              WHERE pr_rev.workspace_id = ?
-                                AND d.photo_id IN (
-                                    SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                                )
-                          )""",
-                    [source_ws_id, source_ws_id] + chunk,
-                )
-
-            # Move manually selected Life List / Highlights representative
-            # photos with the folder. If the target already has a preference
-            # for the same (purpose, species), keep the target value and drop
-            # the now-stale source row.
-            photo_preferences_moved = 0
-            species_highlights_moved = 0
-            for chunk in _chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                cur = self.conn.execute(
-                    f"""INSERT OR IGNORE INTO photo_preferences
-                          (workspace_id, purpose, species, photo_id,
-                           created_at, updated_at)
-                        SELECT ?, purpose, species, photo_id,
-                               created_at, updated_at
-                        FROM photo_preferences
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )""",
-                    [target_ws_id, source_ws_id] + chunk,
-                )
-                photo_preferences_moved += cur.rowcount
-                self.conn.execute(
-                    f"""DELETE FROM photo_preferences
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )""",
-                    [source_ws_id] + chunk,
-                )
-
-                # Append moved highlights after the target workspace's
-                # existing rows per species. Preserving the source `rank`
-                # verbatim would collide with the target's ranks (rank is
-                # not part of the PK), corrupting the curated order the
-                # target uses in `ORDER BY rank, created_at, photo_id`.
-                src_highlights = self.conn.execute(
-                    f"""SELECT species, photo_id, rank, created_at, updated_at
-                        FROM species_highlights
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )
-                        ORDER BY species, rank, created_at, photo_id""",
-                    [source_ws_id] + chunk,
-                ).fetchall()
-                by_species = {}
-                for src_row in src_highlights:
-                    by_species.setdefault(src_row["species"], []).append(src_row)
-                for sp, sp_rows in by_species.items():
-                    next_rank = int(self.conn.execute(
-                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                           FROM species_highlights
-                           WHERE workspace_id = ? AND species = ?""",
-                        (target_ws_id, sp),
-                    ).fetchone()["max_rank"] or 0) + 1
-                    for src_row in sp_rows:
-                        cur = self.conn.execute(
-                            """INSERT OR IGNORE INTO species_highlights
-                                   (workspace_id, species, photo_id, rank,
-                                    created_at, updated_at)
-                               VALUES (?, ?, ?, ?, ?, ?)""",
-                            (
-                                target_ws_id,
-                                sp,
-                                src_row["photo_id"],
-                                next_rank,
-                                src_row["created_at"],
-                                src_row["updated_at"],
-                            ),
-                        )
-                        if cur.rowcount:
-                            species_highlights_moved += 1
-                            next_rank += 1
-                self.conn.execute(
-                    f"""DELETE FROM species_highlights
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )""",
-                    [source_ws_id] + chunk,
-                )
-
-            # Move workspace_folders: remove from source, add to target
-            for chunk in _chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"""DELETE FROM workspace_folders
-                        WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-                    [source_ws_id] + chunk,
-                )
-            self.conn.executemany(
-                """INSERT OR IGNORE INTO workspace_folders
-                   (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
-                [(target_ws_id, fid) for fid in moved_folder_ids],
-            )
-            for chunk in _chunks(folder_ids):
-                selected_placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"""UPDATE workspace_folders
-                        SET is_root = 1
-                        WHERE workspace_id = ?
-                          AND folder_id IN ({selected_placeholders})""",
-                    [target_ws_id] + chunk,
-                )
-
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        (
+            pending_changes_moved,
+            photo_preferences_moved,
+            species_highlights_moved,
+        ) = self._workspace_folder_repository().move_folders(
+            source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
+        )
 
         # Folders changed membership for BOTH workspaces, so each workspace's
         # new-images backlog needs to be recomputed on the next read.
@@ -5509,34 +5148,11 @@ class Database:
         to ``/``, trailing slashes stripped) so a Windows-style stored root
         still matches a forward-slash archive path.
         """
-        target = _path_for_subtree_match(path)
-        rows = self.conn.execute(
-            """SELECT f.path FROM workspace_folders wf
-               JOIN folders f ON f.id = wf.folder_id
-               WHERE wf.workspace_id = ? AND wf.is_root = 1""",
-            (workspace_id,),
-        ).fetchall()
-        for r in rows:
-            root = _path_for_subtree_match(r["path"])
-            if target == root or target.startswith(root + "/"):
-                return True
-        return False
+        return self._workspace_folder_repository().root_ancestor_exists(workspace_id, path)
 
     def _active_ws_root_descendant_exists(self, workspace_id, path):
         """True if ``workspace_id`` has a strict root descendant of ``path``."""
-        target = _path_for_subtree_match(path)
-        rows = self.conn.execute(
-            """SELECT f.path FROM workspace_folders wf
-               JOIN folders f ON f.id = wf.folder_id
-               WHERE wf.workspace_id = ? AND wf.is_root = 1""",
-            (workspace_id,),
-        ).fetchall()
-        prefix = target + "/"
-        for r in rows:
-            root = _path_for_subtree_match(r["path"])
-            if root.startswith(prefix):
-                return True
-        return False
+        return self._workspace_folder_repository().root_descendant_exists(workspace_id, path)
 
     def _prune_ws_nonroot_links_outside_roots(self, workspace_id, path):
         """Drop non-root links that could re-materialize ``path``'s subtree.
@@ -5551,45 +5167,9 @@ class Database:
         the caller pruned them, defeating a scoped merge into a workspace
         rooted at ``/archive/USA/2026``.
         """
-        target = _path_for_subtree_match(path)
-        roots = [
-            _path_for_subtree_match(r["path"])
-            for r in self.conn.execute(
-                """SELECT f.path FROM workspace_folders wf
-                   JOIN folders f ON f.id = wf.folder_id
-                   WHERE wf.workspace_id = ? AND wf.is_root = 1""",
-                (workspace_id,),
-            ).fetchall()
-        ]
-        rows = self.conn.execute(
-            """SELECT wf.folder_id, f.path FROM workspace_folders wf
-               JOIN folders f ON f.id = wf.folder_id
-               WHERE wf.workspace_id = ? AND wf.is_root = 0""",
-            (workspace_id,),
-        ).fetchall()
-        target_prefix = target + "/"
-        prune_ids = []
-        for row in rows:
-            current = _path_for_subtree_match(row["path"])
-            current_prefix = current + "/"
-            if (current != target
-                    and not current.startswith(target_prefix)
-                    and not target.startswith(current_prefix)):
-                continue
-            if any(current == root or current.startswith(root + "/")
-                   for root in roots):
-                continue
-            prune_ids.append(row["folder_id"])
-
-        for chunk in _chunks(prune_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            self.conn.execute(
-                f"""DELETE FROM workspace_folders
-                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-                [workspace_id] + chunk,
-            )
+        prune_ids = self._workspace_folder_repository().prune_nonroot_links_outside_roots(
+            workspace_id, path)
         if prune_ids:
-            self.conn.commit()
             self._new_images_cache.invalidate_workspaces(
                 self._db_path, [workspace_id])
 
@@ -7046,22 +6626,7 @@ class Database:
         unique = list({p for p in folder_paths if p})
         if not unique:
             return 0
-        BATCH = 800
-        linked = set()
-        for i in range(0, len(unique), BATCH):
-            chunk = unique[i:i + BATCH]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""SELECT f.path
-                    FROM folders f
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = f.id AND wf.workspace_id = ?
-                    WHERE f.path IN ({placeholders})""",
-                (ws, *chunk),
-            ).fetchall()
-            for r in rows:
-                linked.add(r["path"])
-        return len(unique) - len(linked)
+        return self._workspace_folder_repository().unlinked_folder_count(ws, unique)
 
     def _stage_scope_ids(self, table, ids):
         """Stage a read scope without opening or committing a caller transaction."""
