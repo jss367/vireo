@@ -512,12 +512,30 @@ def test_ensure_default_genre_keywords_is_idempotent(db):
 
 
 def test_migrate_legacy_keyword_types(db):
-    kid = _raw_kw(db, "Legacy", kw_type="species")
+    ids = {
+        legacy: _raw_kw(db, f"Legacy {legacy}", kw_type=legacy)
+        for legacy in ("people", "descriptive", "event", "location")
+    }
     db.conn.commit()
     db.migrate_legacy_keyword_types()
-    row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
-    assert row["type"] in ("taxonomy", "species", "general")
+    assert not db.conn.in_transaction
+    got = {
+        legacy: _visible(db, "SELECT type FROM keywords WHERE id = ?", (kid,))[0][0]
+        for legacy, kid in ids.items()
+    }
+    assert got == {
+        "people": "individual",
+        "descriptive": "general",
+        "event": "general",
+        "location": "location",
+    }
+    # Warm path: nothing legacy left, so only the probe runs.
+    statements = _trace(db)
     db.migrate_legacy_keyword_types()
+    db.conn.set_trace_callback(None)
+    assert [s for s in statements if s.strip()] == [
+        "SELECT 1 FROM keywords WHERE type IN ('people', 'descriptive', 'event') LIMIT 1"
+    ]
 
 
 # -- update_keyword ------------------------------------------------------------------------
