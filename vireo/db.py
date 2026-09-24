@@ -6452,36 +6452,25 @@ class Database:
                 "location_status must be 'exif', 'assigned', or 'none'"
             )
 
+    def _location_repository(self):
+        """Build the locations repository on this connection.
+
+        Photos and keywords are catalog-wide; the few workspace-scoped
+        methods resolve the active workspace through ``self._ws_id`` at the
+        point the original code did, so building the repository never raises.
+        """
+        from repositories.locations import LocationRepository
+
+        return LocationRepository(
+            self.conn,
+            self._ws_id,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+            photo_date_asc_order=_PHOTO_DATE_ASC_ORDER,
+        )
+
     def get_photo_location_statuses(self, photo_ids):
         """Return ``{photo_id: exif|assigned|none}`` for the requested photos."""
-        if not photo_ids:
-            return {}
-        result = {}
-        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""
-                SELECT p.id,
-                       CASE
-                         WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
-                           THEN 'exif'
-                         WHEN EXISTS (
-                           SELECT 1 FROM photo_keywords pk
-                           JOIN keywords k ON k.id = pk.keyword_id
-                           WHERE pk.photo_id = p.id
-                             AND k.type = 'location'
-                             AND k.latitude IS NOT NULL
-                             AND k.longitude IS NOT NULL
-                         ) THEN 'assigned'
-                         ELSE 'none'
-                       END AS location_status
-                FROM photos p
-                WHERE p.id IN ({placeholders})
-                """,
-                list(chunk),
-            ).fetchall()
-            result.update({row["id"]: row["location_status"] for row in rows})
-        return result
+        return self._location_repository().get_photo_statuses(photo_ids)
 
     def get_calendar_data(
         self,
@@ -6681,88 +6670,12 @@ class Database:
         and ``keyword_location_name`` (the location keyword's name when EXIF is
         absent, NULL otherwise) so the map can show provenance.
         """
-        # Paired fallback: either BOTH EXIF axes win, or BOTH keyword axes win.
-        # Per-axis COALESCE would let a photo with partial EXIF (only one axis
-        # populated) emit a mixed pair, producing wrong markers.
-        conditions = [
-            "wf.workspace_id = ?",
-            "((p.latitude IS NOT NULL AND p.longitude IS NOT NULL) "
-            " OR (kl.latitude IS NOT NULL AND kl.longitude IS NOT NULL))",
-        ]
-        params = [self._ws_id()]
-
-        if folder_id is not None:
-            subtree = self.get_folder_subtree_ids(folder_id)
-            placeholders = ",".join("?" for _ in subtree)
-            conditions.append(f"p.folder_id IN ({placeholders})")
-            params.extend(subtree)
-        if rules is not None:
-            r_folder_join, r_join_clause, r_where, r_params = (
-                self._build_query_from_rules(rules)
-            )
-            conditions.append(
-                "p.id IN (SELECT DISTINCT p.id FROM photos p "
-                f"{r_folder_join} {r_join_clause} {r_where})"
-            )
-            params.extend(r_params)
-
-        # Pick one location keyword per photo. Ordering: prefer the deepest-
-        # in-chain row (parent_id NOT NULL ranks before parent_id IS NULL),
-        # tie-break by largest id (most recently inserted, typically the leaf).
-        location_subquery = """
-            LEFT JOIN (
-                SELECT pk_loc.photo_id, k_loc.id AS id, k_loc.name AS name,
-                       k_loc.latitude AS latitude, k_loc.longitude AS longitude,
-                       ROW_NUMBER() OVER (
-                         PARTITION BY pk_loc.photo_id
-                         ORDER BY (k_loc.parent_id IS NULL) ASC, k_loc.id DESC
-                       ) AS rn
-                FROM photo_keywords pk_loc
-                JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
-                WHERE k_loc.type = 'location'
-                  AND k_loc.latitude IS NOT NULL
-                  AND k_loc.longitude IS NOT NULL
-            ) kl ON kl.photo_id = p.id AND kl.rn = 1
-        """
-
-        join_clause = (
-            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-            "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
-            f"\n{location_subquery}"
+        return self._location_repository().get_geolocated_photos(
+            folder_id,
+            rules,
+            folder_subtree_ids=self.get_folder_subtree_ids,
+            build_query_from_rules=self._build_query_from_rules,
         )
-        where = "WHERE " + " AND ".join(conditions)
-
-        # Surface the most-recently-tagged species keyword (highest rowid),
-        # which reflects the user's latest confirmed identification when
-        # multiple tags exist.
-        species_col_sql = (
-            "(SELECT k2.name FROM photo_keywords pk2 "
-            "JOIN keywords k2 ON k2.id = pk2.keyword_id "
-            "WHERE pk2.photo_id = p.id AND k2.is_species = 1 "
-            "ORDER BY pk2.rowid DESC LIMIT 1) AS species"
-        )
-        species_col_params = []
-
-        query = f"""
-            SELECT p.id,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
-                        THEN p.latitude ELSE kl.latitude END AS latitude,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
-                        THEN p.longitude ELSE kl.longitude END AS longitude,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
-                        THEN 'exif' ELSE 'keyword' END AS coord_source,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
-                        THEN NULL ELSE kl.name END AS keyword_location_name,
-                   p.thumb_path, p.filename,
-                   p.timestamp, p.rating, p.folder_id,
-                   {species_col_sql}
-            FROM photos p
-            {join_clause}
-            {where}
-            GROUP BY p.id
-            ORDER BY {_PHOTO_DATE_ASC_ORDER}
-        """
-        return self.conn.execute(query, species_col_params + params).fetchall()
 
     def get_assigned_photo_location(self, photo_id, verify_workspace=True,
                                     allow_sync_only=False):
@@ -6782,71 +6695,11 @@ class Database:
             else:
                 self._verify_photo_in_workspace(photo_id)
 
-        row = self.conn.execute(
-            """
-            SELECT p.id,
-                   kl.latitude AS latitude,
-                   kl.longitude AS longitude,
-                   kl.name AS keyword_location_name,
-                   kl.place_id AS place_id
-            FROM photos p
-            LEFT JOIN (
-                SELECT pk_loc.photo_id, k_loc.name, k_loc.place_id,
-                       k_loc.latitude, k_loc.longitude,
-                       ROW_NUMBER() OVER (
-                         PARTITION BY pk_loc.photo_id
-                         ORDER BY (k_loc.parent_id IS NULL) ASC, k_loc.id DESC
-                       ) AS rn
-                FROM photo_keywords pk_loc
-                JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
-                WHERE pk_loc.photo_id = ?
-                  AND k_loc.type = 'location'
-                  AND k_loc.latitude IS NOT NULL
-                  AND k_loc.longitude IS NOT NULL
-            ) kl ON kl.photo_id = p.id AND kl.rn = 1
-            WHERE p.id = ?
-            """,
-            (photo_id, photo_id),
-        ).fetchone()
-        if row is None or row["latitude"] is None or row["longitude"] is None:
-            return None
-        return {
-            "photo_id": row["id"],
-            "latitude": row["latitude"],
-            "longitude": row["longitude"],
-            "source": "keyword",
-            "keyword_location_name": row["keyword_location_name"],
-            "place_id": row["place_id"],
-        }
+        return self._location_repository().get_assigned(photo_id)
 
     def _get_photo_location_leaves(self, photo_ids):
         """Choose the effective exported location row for each photo."""
-        if not photo_ids:
-            return {}
-
-        leaves = {}
-        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""SELECT photo_id, id, name, parent_id FROM (
-                        SELECT pk.photo_id, k.id, k.name, k.parent_id,
-                               ROW_NUMBER() OVER (
-                                 PARTITION BY pk.photo_id
-                                 ORDER BY (k.latitude IS NULL OR k.longitude IS NULL) ASC,
-                                          (k.parent_id IS NULL) ASC,
-                                          k.id DESC
-                               ) AS rn
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND k.type = 'location'
-                    ) WHERE rn = 1""",
-                list(chunk),
-            ).fetchall()
-            for row in rows:
-                leaves[row["photo_id"]] = row
-
-        return leaves
+        return self._location_repository().get_photo_leaves(photo_ids)
 
     def get_photo_location_keyword_ids(self, photo_ids):
         """Return the keyword IDs owning each photo's exported location."""
@@ -6873,38 +6726,7 @@ class Database:
         we wrote".
         """
         leaves = self._get_photo_location_leaves(photo_ids)
-
-        # One cache for the whole batch: a shoot shares a place, so thousands
-        # of photos resolve the same handful of chains.
-        chains = {}
-
-        def chain_for(keyword_id, name, parent_id):
-            if keyword_id in chains:
-                return chains[keyword_id]
-            parts = [name]
-            seen = {keyword_id}
-            current = parent_id
-            while current is not None and current not in seen:
-                seen.add(current)
-                parent = self.conn.execute(
-                    "SELECT name, parent_id, type FROM keywords WHERE id = ?",
-                    (current,),
-                ).fetchone()
-                # Stop at the first non-location ancestor rather than walking
-                # into an unrelated tree: a location chain re-parented under a
-                # general keyword would otherwise write that keyword into
-                # every sidecar as the root of the place hierarchy.
-                if parent is None or parent["type"] != "location":
-                    break
-                parts.append(parent["name"])
-                current = parent["parent_id"]
-            chains[keyword_id] = list(reversed(parts))
-            return chains[keyword_id]
-
-        return {
-            photo_id: chain_for(row["id"], row["name"], row["parent_id"])
-            for photo_id, row in leaves.items()
-        }
+        return self._location_repository().get_photo_paths(leaves)
 
     def has_pending_location_change(self, photo_id):
         """Return whether a ``location`` change is queued for ``photo_id``.
@@ -6916,23 +6738,11 @@ class Database:
         keywords are still current or describe a place the user has already
         changed in Vireo.
         """
-        return self.conn.execute(
-            "SELECT 1 FROM pending_changes WHERE photo_id = ? "
-            "AND change_type = 'location' LIMIT 1",
-            (photo_id,),
-        ).fetchone() is not None
+        return self._location_repository().has_pending_change(photo_id)
 
     def count_photos_with_location(self):
         """Count photos in the active workspace carrying a location keyword."""
-        return self.conn.execute(
-            """SELECT COUNT(DISTINCT p.id)
-               FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN photo_keywords pk ON pk.photo_id = p.id
-               JOIN keywords k ON k.id = pk.keyword_id
-               WHERE wf.workspace_id = ? AND k.type = 'location'""",
-            (self._ws_id(),),
-        ).fetchone()[0]
+        return self._location_repository().count_photos_with_location()
 
     def queue_location_changes_for_tagged_photos(self):
         """Queue a ``location`` change for every located photo in the workspace.
@@ -6949,36 +6759,14 @@ class Database:
         Returns ``{"photos": n, "queued": k, "already_queued": n - k}``.
         ``queue_change`` skips a duplicate, so re-running this is idempotent.
         """
-        ws_id = self._ws_id()
-        photo_ids = [
-            row[0] for row in self.conn.execute(
-                """SELECT DISTINCT p.id
-                   FROM photos p
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                   JOIN photo_keywords pk ON pk.photo_id = p.id
-                   JOIN keywords k ON k.id = pk.keyword_id
-                   WHERE wf.workspace_id = ? AND k.type = 'location'
-                   ORDER BY p.id""",
-                (ws_id,),
-            ).fetchall()
-        ]
-        queued = 0
-        for photo_id in photo_ids:
-            if self.queue_change(
-                photo_id, "location", "effective",
-                workspace_id=ws_id, _commit=False,
-            ):
-                queued += 1
-        self.conn.commit()
+        result = self._location_repository().queue_changes_for_tagged_photos(
+            queue_change=self.queue_change,
+        )
         log.info(
             "Queued %d location change(s) for %d located photo(s)",
-            queued, len(photo_ids),
+            result["queued"], result["photos"],
         )
-        return {
-            "photos": len(photo_ids),
-            "queued": queued,
-            "already_queued": len(photo_ids) - queued,
-        }
+        return result
 
     def get_effective_photo_location(self, photo_id, verify_workspace=True):
         """Return the coordinates Vireo should use for a single photo.
@@ -6999,90 +6787,9 @@ class Database:
         EXIF-pair preference and linked-location fallback. Photos without a
         complete coordinate pair are omitted from the returned mapping.
         """
-        if not photo_ids:
-            return {}
-
-        photo_ids = list(dict.fromkeys(photo_ids))
-        result = {}
-        seen_ids = set()
-        for chunk in _chunks(photo_ids):
-            selected_values = ",".join("(?)" for _ in chunk)
-            workspace_join = ""
-            params = list(chunk)
-            if verify_workspace:
-                workspace_join = """
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                """
-                params.append(self._ws_id())
-            rows = self.conn.execute(
-                f"""
-                WITH selected(id) AS (VALUES {selected_values}),
-                ranked_locations AS (
-                    SELECT pk_loc.photo_id, k_loc.name, k_loc.place_id,
-                           k_loc.latitude, k_loc.longitude,
-                           ROW_NUMBER() OVER (
-                             PARTITION BY pk_loc.photo_id
-                             ORDER BY (k_loc.parent_id IS NULL) ASC, k_loc.id DESC
-                           ) AS rn
-                    FROM photo_keywords pk_loc
-                    JOIN selected s ON s.id = pk_loc.photo_id
-                    JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
-                    WHERE k_loc.type = 'location'
-                      AND k_loc.latitude IS NOT NULL
-                      AND k_loc.longitude IS NOT NULL
-                )
-                SELECT p.id,
-                       p.latitude AS photo_latitude,
-                       p.longitude AS photo_longitude,
-                       kl.latitude AS keyword_latitude,
-                       kl.longitude AS keyword_longitude,
-                       kl.name AS keyword_location_name,
-                       kl.place_id AS place_id
-                FROM selected s
-                JOIN photos p ON p.id = s.id
-                {workspace_join}
-                LEFT JOIN ranked_locations kl
-                  ON kl.photo_id = p.id AND kl.rn = 1
-                """,
-                params,
-            ).fetchall()
-            seen_ids.update(row["id"] for row in rows)
-            for row in rows:
-                if (
-                    row["photo_latitude"] is not None
-                    and row["photo_longitude"] is not None
-                ):
-                    result[row["id"]] = {
-                        "photo_id": row["id"],
-                        "latitude": row["photo_latitude"],
-                        "longitude": row["photo_longitude"],
-                        "source": "exif",
-                        "keyword_location_name": None,
-                        "place_id": None,
-                    }
-                elif (
-                    row["keyword_latitude"] is not None
-                    and row["keyword_longitude"] is not None
-                ):
-                    result[row["id"]] = {
-                        "photo_id": row["id"],
-                        "latitude": row["keyword_latitude"],
-                        "longitude": row["keyword_longitude"],
-                        "source": "keyword",
-                        "keyword_location_name": row["keyword_location_name"],
-                        "place_id": row["place_id"],
-                    }
-
-        if verify_workspace:
-            missing_id = next(
-                (pid for pid in photo_ids if pid not in seen_ids), None
-            )
-            if missing_id is not None:
-                raise ValueError(
-                    f"Photo {missing_id} does not belong to the active workspace"
-                )
-        return result
+        return self._location_repository().get_effective(
+            photo_ids, verify_workspace=verify_workspace,
+        )
 
     def get_accepted_species(self):
         """Return distinct marker species from geolocated photos in the active workspace.
@@ -7140,25 +6847,7 @@ class Database:
         "Showing N of M geolocated photos" label — keeping the two
         definitions in lockstep so M is never less than N.
         """
-        row = self.conn.execute(
-            """
-            SELECT COUNT(*) FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-            WHERE wf.workspace_id = ?
-              AND (p.latitude IS NULL OR p.longitude IS NULL)
-              AND NOT EXISTS (
-                SELECT 1 FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                WHERE pk.photo_id = p.id
-                  AND k.type = 'location'
-                  AND k.latitude IS NOT NULL
-                  AND k.longitude IS NOT NULL
-              )
-            """,
-            (self._ws_id(),),
-        ).fetchone()
-        return row[0]
+        return self._location_repository().count_photos_without_coordinates()
 
     def get_plottable_photo_ids(self, folder_id=None):
         """Return ids of every photo the Map endpoint could render.
@@ -7177,35 +6866,9 @@ class Database:
         then intersects them away and the map silently renders zero
         markers with no fallback / no-index warning.
         """
-        params = [self._ws_id()]
-        folder_clause = ""
-        if folder_id is not None:
-            subtree = self.get_folder_subtree_ids(folder_id)
-            placeholders = ",".join("?" for _ in subtree)
-            folder_clause = f"AND p.folder_id IN ({placeholders})"
-            params.extend(subtree)
-        rows = self.conn.execute(
-            f"""
-            SELECT p.id FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-            WHERE wf.workspace_id = ?
-              {folder_clause}
-              AND (
-                (p.latitude IS NOT NULL AND p.longitude IS NOT NULL)
-                OR EXISTS (
-                  SELECT 1 FROM photo_keywords pk
-                  JOIN keywords k ON k.id = pk.keyword_id
-                  WHERE pk.photo_id = p.id
-                    AND k.type = 'location'
-                    AND k.latitude IS NOT NULL
-                    AND k.longitude IS NOT NULL
-                )
-              )
-            """,
-            params,
-        ).fetchall()
-        return [row[0] for row in rows]
+        return self._location_repository().get_plottable_photo_ids(
+            folder_id, folder_subtree_ids=self.get_folder_subtree_ids,
+        )
 
     def update_photo_rating(self, photo_id, rating, verify_workspace=True):
         """Set photo rating (0-5).
@@ -8979,40 +8642,9 @@ class Database:
         taxonomy rows. Clear stale taxonomy metadata and restore the
         row's type when evidence is sufficient.
         """
-        row = self.conn.execute(
-            "WITH RECURSIVE descendants(id, type) AS ("
-            "  SELECT child.id, child.type FROM keywords child "
-            "  WHERE child.parent_id = ? "
-            "  UNION "
-            "  SELECT child.id, child.type FROM keywords child "
-            "  JOIN descendants parent ON child.parent_id = parent.id "
-            "  WHERE parent.type = 'taxonomy'"
-            ") "
-            "SELECT k.id FROM keywords k "
-            "LEFT JOIN keywords parent ON parent.id = k.parent_id "
-            "WHERE k.id = ? AND k.type = 'taxonomy' "
-            "  AND (k.parent_id IS NULL OR parent.type = 'location') "
-            "  AND ("
-            "    k.place_id IS NOT NULL "
-            "    OR (parent.type = 'location' AND ("
-            "      ? OR EXISTS ("
-            "        SELECT 1 FROM descendants WHERE type = 'location'"
-            "      )"
-            "    ))"
-            "    OR (? AND EXISTS ("
-            "      SELECT 1 FROM descendants WHERE type = 'location'"
-            "    ))"
-            "  )",
-            (keyword_id, keyword_id, allow_leaf, allow_leaf),
-        ).fetchone()
-        if row is None:
-            return False
-        self.conn.execute(
-            "UPDATE keywords SET type = 'location', is_species = 0, "
-            "taxon_id = NULL WHERE id = ?",
-            (keyword_id,),
+        return self._location_repository().restore_misclassified_ancestor(
+            keyword_id, allow_leaf=allow_leaf,
         )
-        return True
 
     def repair_misclassified_location_ancestors(self):
         """Restore every location-tree node damaged by legacy taxonomy marking.
@@ -9027,24 +8659,12 @@ class Database:
         ``parent_id IS NULL``, so without this later child-place upserts
         would settle on one root and orphan the other's descendants.
         """
-        repaired = 0
-        while True:
-            rows = self.conn.execute(
-                "SELECT k.id FROM keywords k "
-                "LEFT JOIN keywords parent ON parent.id = k.parent_id "
-                "WHERE k.type = 'taxonomy' "
-                "  AND (k.parent_id IS NULL OR parent.type = 'location')"
-            ).fetchall()
-            repaired_this_pass = 0
-            for row in rows:
-                if self._restore_misclassified_location_ancestor(row["id"]):
-                    repaired += 1
-                    repaired_this_pass += 1
-            if not repaired_this_pass:
-                break
-        merged_roots = self._merge_duplicate_location_roots()
-        if repaired or merged_roots:
-            self.conn.commit()
+        repaired, merged_roots = (
+            self._location_repository().repair_misclassified_ancestors(
+                restore_ancestor=self._restore_misclassified_location_ancestor,
+                merge_duplicate_roots=self._merge_duplicate_location_roots,
+            )
+        )
         if repaired:
             log.info(
                 "repaired %d misclassified location ancestor keyword(s)",
@@ -9080,46 +8700,9 @@ class Database:
         consolidate coordless duplicates so ambiguous children still
         share one shared parent.
         """
-        duplicates = self.conn.execute(
-            "SELECT name FROM keywords "
-            "WHERE type = 'location' AND parent_id IS NULL "
-            "GROUP BY name HAVING COUNT(*) > 1"
-        ).fetchall()
-        merged = 0
-        for dup in duplicates:
-            candidates = self.conn.execute(
-                "SELECT id, place_id, latitude, longitude FROM keywords "
-                "WHERE name = ? AND parent_id IS NULL AND type = 'location' "
-                "ORDER BY id",
-                (dup["name"],),
-            ).fetchall()
-            if len(candidates) < 2:
-                continue
-            place_bearing = [c for c in candidates if c["place_id"] is not None]
-            coordless = [c for c in candidates if c["place_id"] is None]
-            if place_bearing:
-                # Any place-bearing root at this name means coordless
-                # anchors cannot be safely merged into it: address
-                # components have no place_id, so coordless-anchor
-                # descendants may refer to a different Google place with
-                # the same name. Preserve place-bearing roots alongside
-                # coordless anchors; only collapse coordless duplicates
-                # into a single shared anchor.
-                if len(coordless) < 2:
-                    continue
-                survivor_id = coordless[0]["id"]
-                for cand in coordless[1:]:
-                    merged += self._merge_keyword_into(
-                        cand["id"], survivor_id,
-                    )
-                continue
-            # No place-bearing roots — every candidate is coordless.
-            # Legacy duplicate anchors describe the same neutral parent
-            # and can safely merge into the oldest survivor.
-            survivor_id = candidates[0]["id"]
-            for cand in candidates[1:]:
-                merged += self._merge_keyword_into(cand["id"], survivor_id)
-        return merged
+        return self._location_repository().merge_duplicate_roots(
+            merge_keyword_into=self._merge_keyword_into,
+        )
 
     @staticmethod
     def _location_component_rank(component):
@@ -9256,11 +8839,9 @@ class Database:
         lng = details.get("lng")
         components = details.get("address_components") or []
 
-        with self.conn:
-            existing_leaf = self.conn.execute(
-                "SELECT id FROM keywords WHERE place_id = ?",
-                (details["place_id"],),
-            ).fetchone()
+        repo = self._location_repository()
+        with repo.transaction():
+            existing_leaf = repo.find_place_keyword(details["place_id"])
             chain = self._upsert_location_parent_chain(
                 components,
                 leaf_name=name,
@@ -9295,22 +8876,10 @@ class Database:
         real location links and replace them with a non-location link that
         :meth:`clear_photo_location` could not clean up.
         """
-        row = self.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (leaf_keyword_id,),
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"keyword id {leaf_keyword_id} does not exist")
-        if row["type"] != "location":
-            raise ValueError(
-                f"keyword {leaf_keyword_id} has type={row['type']!r}, "
-                f"not 'location'"
-            )
-        with self.conn:
-            self.conn.execute(
-                "DELETE FROM photo_keywords WHERE photo_id = ? "
-                "AND keyword_id IN (SELECT id FROM keywords WHERE type='location')",
-                (photo_id,),
-            )
+        repo = self._location_repository()
+        repo.require_location_keyword(leaf_keyword_id)
+        with repo.transaction():
+            repo.delete_photo_links(photo_id)
             # Every caller of this method is a person assigning a place
             # (map click, text entry, batch apply, EXIF-derived confirm), so
             # the association is user-authored.
@@ -9326,12 +8895,7 @@ class Database:
         reference them, and even if they don't, free-text/place-id keywords
         are part of the user's vocabulary.
         """
-        with self.conn:
-            self.conn.execute(
-                "DELETE FROM photo_keywords WHERE photo_id = ? "
-                "AND keyword_id IN (SELECT id FROM keywords WHERE type='location')",
-                (photo_id,),
-            )
+        self._location_repository().clear_photo(photo_id)
 
     def get_or_create_text_location(self, name):
         """Find or create a free-text ``type='location'`` keyword.
@@ -9355,7 +8919,7 @@ class Database:
                 "location name may not contain '|' -- XMP keyword "
                 "hierarchies reserve it as the level delimiter"
             )
-        with self.conn:
+        with self._location_repository().transaction():
             return self._upsert_one_keyword(
                 name=stripped,
                 parent_id=None,
@@ -9567,14 +9131,9 @@ class Database:
         only on a true miss (the cell was never populated).
         """
         lat_grid, lng_grid = self._reverse_geocode_grid(lat, lng)
-        row = self.conn.execute(
-            "SELECT place_id, response FROM place_reverse_geocode_cache "
-            "WHERE lat_grid = ? AND lng_grid = ?",
-            (lat_grid, lng_grid),
-        ).fetchone()
-        if row is None:
-            return None
-        return {"place_id": row["place_id"], "response": row["response"]}
+        return self._location_repository().reverse_geocode_cache_get(
+            lat_grid, lng_grid,
+        )
 
     def reverse_geocode_cache_put(self, lat, lng, place_id, response_json):
         """Upsert reverse-geocode result at the (lat, lng) grid cell.
@@ -9584,18 +9143,9 @@ class Database:
         the caller serializes; we don't re-encode.
         """
         lat_grid, lng_grid = self._reverse_geocode_grid(lat, lng)
-        fetched_at = int(time.time())
-        with self.conn:
-            self.conn.execute(
-                "INSERT INTO place_reverse_geocode_cache "
-                "  (lat_grid, lng_grid, place_id, response, fetched_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(lat_grid, lng_grid) DO UPDATE SET "
-                "  place_id   = excluded.place_id, "
-                "  response   = excluded.response, "
-                "  fetched_at = excluded.fetched_at",
-                (lat_grid, lng_grid, place_id, response_json, fetched_at),
-            )
+        self._location_repository().reverse_geocode_cache_put(
+            lat_grid, lng_grid, place_id, response_json,
+        )
 
     def merge_duplicate_keywords(self):
         """Find and merge normalized duplicate keywords in active workspace.
