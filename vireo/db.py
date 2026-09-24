@@ -6820,6 +6820,22 @@ class Database:
         ]
         return ",\n                ".join(parts)
 
+    def _stats_repository(self, *, scoped=True):
+        """Build the stats repository on this connection.
+
+        ``scoped=True`` binds it to the active workspace (raising
+        ``RuntimeError`` when none is set). ``scoped=False`` serves the
+        readers that take an explicit workspace id (the classification
+        inventory) and the temp-table scope staging.
+        """
+        from repositories.stats import StatsRepository
+
+        return StatsRepository(
+            self.conn,
+            self._ws_id() if scoped else None,
+            coverage_photo_columns=self._COVERAGE_PHOTO_COLUMNS,
+        )
+
     def _dashboard_scope_clause(
         self,
         folder_id=None,
@@ -6840,12 +6856,7 @@ class Database:
         params = []
 
         if folder_id is not None:
-            linked = self.conn.execute(
-                "SELECT 1 FROM workspace_folders "
-                "WHERE workspace_id = ? AND folder_id = ?",
-                (self._ws_id(), folder_id),
-            ).fetchone()
-            if not linked:
+            if not self._stats_repository().folder_linked(folder_id):
                 raise ValueError("folder not found in active workspace")
             subtree = self.get_folder_subtree_ids(folder_id)
             placeholders = ",".join("?" for _ in subtree)
@@ -6893,7 +6904,7 @@ class Database:
         ``classified`` are joined from the detections/predictions tables;
         everything else is a simple NOT NULL check on ``photos``.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         import config as cfg
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -6901,43 +6912,9 @@ class Database:
         scope_sql, scope_params = self._dashboard_scope_clause(
             folder_id, collection_id, date_from, date_to,
         )
-        photo_row = self.conn.execute(
-            f"""SELECT
-                COUNT(*) AS total,
-                {self._coverage_select_fragment()}
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-            WHERE wf.workspace_id = ?{scope_sql}""",
-            (ws, *scope_params),
-        ).fetchone()
-        detected = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT d.photo_id)
-               FROM detections d
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()[0] or 0
-        classified = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT d.photo_id)
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()[0] or 0
-        result = {"total": photo_row["total"] or 0}
-        for key, _ in self._COVERAGE_PHOTO_COLUMNS:
-            result[key] = photo_row[key] or 0
-        result["detected"] = detected
-        result["classified"] = classified
-        return result
+        return repo.get_coverage(
+            min_conf, scope_sql, scope_params, self._coverage_select_fragment(),
+        )
 
     def get_folder_coverage_stats(
         self, folder_id=None, collection_id=None, date_from=None, date_to=None,
@@ -6951,7 +6928,7 @@ class Database:
         Folders with zero photos are included so the dashboard can still
         show them as 0 / 0 if it chooses.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         import config as cfg
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -6966,76 +6943,15 @@ class Database:
         photo_scope_sql, photo_scope_params = self._dashboard_scope_clause(
             None, collection_id, date_from, date_to,
         )
-        folder_filter_sql = ""
-        folder_filter_params = []
+        subtree = None
         if folder_id is not None:
-            linked = self.conn.execute(
-                "SELECT 1 FROM workspace_folders "
-                "WHERE workspace_id = ? AND folder_id = ?",
-                (ws, folder_id),
-            ).fetchone()
-            if not linked:
+            if not repo.folder_linked(folder_id):
                 raise ValueError("folder not found in active workspace")
             subtree = self.get_folder_subtree_ids(folder_id)
-            placeholders = ",".join("?" for _ in subtree)
-            folder_filter_sql = f" AND f.id IN ({placeholders})"
-            folder_filter_params = subtree
-        photo_rows = self.conn.execute(
-            f"""SELECT
-                f.id AS folder_id,
-                f.path AS path,
-                f.name AS name,
-                COUNT(p.id) AS total,
-                {self._coverage_select_fragment()}
-            FROM folders f
-            JOIN workspace_folders wf ON wf.folder_id = f.id
-            LEFT JOIN photos p ON p.folder_id = f.id{photo_scope_sql}
-            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial'){folder_filter_sql}
-            GROUP BY f.id
-            ORDER BY f.path""",
-            (*photo_scope_params, ws, *folder_filter_params),
-        ).fetchall()
-        det_rows = self.conn.execute(
-            f"""SELECT p.folder_id AS folder_id,
-                      COUNT(DISTINCT d.photo_id) AS detected
-               FROM detections d
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}
-               GROUP BY p.folder_id""",
-            (ws, min_conf, *scope_params),
-        ).fetchall()
-        cls_rows = self.conn.execute(
-            f"""SELECT p.folder_id AS folder_id,
-                      COUNT(DISTINCT d.photo_id) AS classified
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}
-               GROUP BY p.folder_id""",
-            (ws, min_conf, *scope_params),
-        ).fetchall()
-        det_by_folder = {r["folder_id"]: r["detected"] for r in det_rows}
-        cls_by_folder = {r["folder_id"]: r["classified"] for r in cls_rows}
-        out = []
-        for r in photo_rows:
-            entry = {
-                "folder_id": r["folder_id"],
-                "path": r["path"],
-                "name": r["name"],
-                "total": r["total"] or 0,
-            }
-            for key, _ in self._COVERAGE_PHOTO_COLUMNS:
-                entry[key] = r[key] or 0
-            entry["detected"] = det_by_folder.get(r["folder_id"], 0)
-            entry["classified"] = cls_by_folder.get(r["folder_id"], 0)
-            out.append(entry)
-        return out
+        return repo.get_folder_coverage(
+            min_conf, scope_sql, scope_params, photo_scope_sql,
+            photo_scope_params, subtree, self._coverage_select_fragment(),
+        )
 
     def photos_by_paths(self, paths):
         """Return {abs_path: photo_id} for any of ``paths`` already in DB.
@@ -7120,23 +7036,7 @@ class Database:
 
     def _stage_scope_ids(self, table, ids):
         """Stage a read scope without opening or committing a caller transaction."""
-        if table not in {"scope_ids", "missing_subtree_ids"}:
-            raise ValueError("Unknown scope table")
-        # An outermost SAVEPOINT releases its own transaction; a nested one
-        # preserves the caller's writes. A plain commit here would break
-        # atomic edits that happen to query a large selection.
-        self.conn.execute("SAVEPOINT stage_read_scope")
-        try:
-            self.conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY)")
-            self.conn.execute(f"DELETE FROM {table}")
-            self.conn.executemany(
-                f"INSERT OR IGNORE INTO {table} (id) VALUES (?)", ((i,) for i in ids),
-            )
-        except BaseException:
-            self.conn.execute("ROLLBACK TO stage_read_scope")
-            raise
-        finally:
-            self.conn.execute("RELEASE stage_read_scope")
+        self._stats_repository(scoped=False).stage_scope_ids(table, ids)
 
     def _scope_clause(self, photo_ids, table_alias="p"):
         """Build a (clause, params) pair to scope a query to photo_ids.
@@ -7173,28 +7073,14 @@ class Database:
 
         Used by the pipeline plan to compute classify scope.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         if min_conf is None:
             import config as cfg
             min_conf = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT COUNT(*) AS total_dets,
-                       COUNT(DISTINCT d.photo_id) AS photos_with_dets
-                FROM detections d
-                JOIN photos p ON p.id = d.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
-                  AND d.detector_confidence >= ?{scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()
-        return {
-            "photos_with_dets": row["photos_with_dets"] or 0,
-            "total_dets": row["total_dets"] or 0,
-        }
+        return repo.count_real_detections_in_scope(min_conf, scope_sql, scope_params)
 
     def count_primary_detections_in_scope(self, photo_ids=None, min_conf=None):
         """Count photos whose primary real detection is pipeline-classifiable.
@@ -7204,38 +7090,14 @@ class Database:
         This mirrors that gate for the Pipeline page plan so secondary boxes
         do not inflate pending classify work.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         if min_conf is None:
             import config as cfg
             min_conf = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""WITH ranked AS (
-                    SELECT d.id, d.photo_id,
-                           ROW_NUMBER() OVER (
-                             PARTITION BY d.photo_id
-                             ORDER BY d.detector_confidence DESC, d.id ASC
-                           ) AS rn
-                      FROM detections d
-                      JOIN photos p ON p.id = d.photo_id
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                     WHERE d.detector_model != 'full-image'
-                       AND COALESCE(d.category, 'animal') = 'animal'
-                       AND d.detector_confidence >= ?{scope_sql}
-                )
-                SELECT COUNT(*) AS primary_dets,
-                       COUNT(DISTINCT photo_id) AS photos_with_dets
-                  FROM ranked
-                 WHERE rn = 1""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()
-        return {
-            "photos_with_dets": row["photos_with_dets"] or 0,
-            "total_dets": row["primary_dets"] or 0,
-        }
+        return repo.count_primary_detections_in_scope(min_conf, scope_sql, scope_params)
 
     def count_classify_pending_pairs(
         self, classifier_model, labels_fingerprint,
@@ -7248,30 +7110,17 @@ class Database:
         with no row in classifier_runs for the given (model, fp) is one
         unit of pending work for the next classify run.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         if min_conf is None:
             import config as cfg
             min_conf = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT COUNT(*) AS pending
-                FROM detections d
-                JOIN photos p ON p.id = d.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                LEFT JOIN classifier_runs cr
-                  ON cr.detection_id = d.id
-                 AND cr.classifier_model = ?
-                 AND cr.labels_fingerprint = ?
-                   AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'
-                WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
-                  AND d.detector_confidence >= ?
-                  AND cr.detection_id IS NULL{scope_sql}""",
-            (ws, classifier_model, labels_fingerprint, min_conf, *scope_params),
-        ).fetchone()
-        return row["pending"] or 0
+        return repo.count_classify_pending_pairs(
+            classifier_model, labels_fingerprint, min_conf, scope_sql,
+            scope_params,
+        )
 
     def count_primary_classify_pending_pairs(
         self, classifier_model, labels_fingerprint,
@@ -7282,40 +7131,17 @@ class Database:
         Mirrors pipeline_job.classify_stage, which picks one primary detection
         per photo rather than classifying every detection row.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         if min_conf is None:
             import config as cfg
             min_conf = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""WITH ranked AS (
-                    SELECT d.id, d.photo_id,
-                           ROW_NUMBER() OVER (
-                             PARTITION BY d.photo_id
-                             ORDER BY d.detector_confidence DESC, d.id ASC
-                           ) AS rn
-                      FROM detections d
-                      JOIN photos p ON p.id = d.photo_id
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                     WHERE d.detector_model != 'full-image'
-                       AND COALESCE(d.category, 'animal') = 'animal'
-                       AND d.detector_confidence >= ?{scope_sql}
-                )
-                SELECT COUNT(*) AS pending
-                  FROM ranked d
-                  LEFT JOIN classifier_runs cr
-                    ON cr.detection_id = d.id
-                   AND cr.classifier_model = ?
-                   AND cr.labels_fingerprint = ?
-                   AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'
-                 WHERE d.rn = 1
-                   AND cr.detection_id IS NULL""",
-            (ws, min_conf, *scope_params, classifier_model, labels_fingerprint),
-        ).fetchone()
-        return row["pending"] or 0
+        return repo.count_primary_classify_pending_pairs(
+            classifier_model, labels_fingerprint, min_conf, scope_sql,
+            scope_params,
+        )
 
     def count_classify_stale(
         self, classifier_model, labels_fingerprint,
@@ -7331,84 +7157,34 @@ class Database:
         their disjoint complement: previously processed under settings
         that no longer match.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         if min_conf is None:
             import config as cfg
             min_conf = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT d.id) AS n
-                FROM detections d
-                JOIN photos p ON p.id = d.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
-                 AND d.detector_confidence >= ?
-                 AND EXISTS (
-                    SELECT 1 FROM classifier_runs cr_stale
-                     WHERE cr_stale.detection_id = d.id
-                       AND cr_stale.classifier_model = ?
-                       AND cr_stale.labels_fingerprint != ?
-                 )
-                 AND NOT EXISTS (
-                    SELECT 1 FROM classifier_runs cr_cur
-                     WHERE cr_cur.detection_id = d.id
-                       AND cr_cur.classifier_model = ?
-                       AND cr_cur.labels_fingerprint = ?
-                 ){scope_sql}""",
-            (ws, min_conf, classifier_model, labels_fingerprint,
-             classifier_model, labels_fingerprint, *scope_params),
-        ).fetchone()
-        return row["n"] or 0
+        return repo.count_classify_stale(
+            classifier_model, labels_fingerprint, min_conf, scope_sql,
+            scope_params,
+        )
 
     def count_primary_classify_stale(
         self, classifier_model, labels_fingerprint,
         photo_ids=None, min_conf=None,
     ):
         """Count stale classifier runs on primary detections only."""
-        ws = self._ws_id()
+        repo = self._stats_repository()
         if min_conf is None:
             import config as cfg
             min_conf = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""WITH ranked AS (
-                    SELECT d.id, d.photo_id,
-                           ROW_NUMBER() OVER (
-                             PARTITION BY d.photo_id
-                             ORDER BY d.detector_confidence DESC, d.id ASC
-                           ) AS rn
-                      FROM detections d
-                      JOIN photos p ON p.id = d.photo_id
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                     WHERE d.detector_model != 'full-image'
-                       AND COALESCE(d.category, 'animal') = 'animal'
-                       AND d.detector_confidence >= ?{scope_sql}
-                )
-                SELECT COUNT(*) AS n
-                  FROM ranked d
-                 WHERE d.rn = 1
-                   AND EXISTS (
-                      SELECT 1 FROM classifier_runs cr_stale
-                       WHERE cr_stale.detection_id = d.id
-                         AND cr_stale.classifier_model = ?
-                         AND cr_stale.labels_fingerprint != ?
-                   )
-                   AND NOT EXISTS (
-                      SELECT 1 FROM classifier_runs cr_cur
-                       WHERE cr_cur.detection_id = d.id
-                         AND cr_cur.classifier_model = ?
-                         AND cr_cur.labels_fingerprint = ?
-                   )""",
-            (ws, min_conf, *scope_params, classifier_model, labels_fingerprint,
-             classifier_model, labels_fingerprint),
-        ).fetchone()
-        return row["n"] or 0
+        return repo.count_primary_classify_stale(
+            classifier_model, labels_fingerprint, min_conf, scope_sql,
+            scope_params,
+        )
 
     def count_full_image_fallback_photos(
         self, photo_ids=None, detector_model="megadetector-v6",
@@ -7424,30 +7200,11 @@ class Database:
         preserves the pre-noise-fallback semantics where any real row
         disqualified the photo.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT COUNT(*) AS n
-                  FROM photos p
-                  JOIN workspace_folders wf
-                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                 JOIN detector_runs dr
-                    ON dr.photo_id = p.id
-                   AND dr.detector_model = ?
-                 WHERE (dr.box_count = 0 OR EXISTS (
-                         SELECT 1 FROM detections consistent
-                          WHERE consistent.photo_id = p.id
-                            AND consistent.detector_model = dr.detector_model
-                       ))
-                   AND NOT EXISTS (
-                         SELECT 1 FROM detections d
-                          WHERE d.photo_id = p.id
-                            AND d.detector_model != 'full-image'
-                            AND d.detector_confidence >= ?
-                       ){scope_sql}""",
-            (ws, detector_model, min_conf, *scope_params),
-        ).fetchone()
-        return row["n"] or 0
+        return repo.count_full_image_fallback_photos(
+            detector_model, min_conf, scope_sql, scope_params,
+        )
 
     def count_full_image_classify_pending_pairs(
         self, classifier_model, labels_fingerprint,
@@ -7461,51 +7218,12 @@ class Database:
         so a MegaDetector run that produced only noise (< ``min_conf``)
         counts alongside truly empty ``box_count = 0`` runs.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""WITH full_anchor AS (
-                    SELECT photo_id, MIN(id) AS detection_id
-                      FROM detections
-                     WHERE detector_model = 'full-image'
-                     GROUP BY photo_id
-                  ),
-                  fallback AS (
-                    SELECT p.id AS photo_id, fa.detection_id
-                      FROM photos p
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                      JOIN detector_runs dr
-                        ON dr.photo_id = p.id
-                       AND dr.detector_model = ?
-                      LEFT JOIN full_anchor fa ON fa.photo_id = p.id
-                     WHERE (dr.box_count = 0 OR EXISTS (
-                             SELECT 1 FROM detections consistent
-                              WHERE consistent.photo_id = p.id
-                                AND consistent.detector_model = dr.detector_model
-                           ))
-                       AND NOT EXISTS (
-                             SELECT 1 FROM detections d
-                              WHERE d.photo_id = p.id
-                                AND d.detector_model != 'full-image'
-                                AND d.detector_confidence >= ?
-                           ){scope_sql}
-                  )
-                SELECT COUNT(*) AS pending
-                  FROM fallback f
-                  LEFT JOIN classifier_runs cr
-                    ON cr.detection_id = f.detection_id
-                   AND cr.classifier_model = ?
-                   AND cr.labels_fingerprint = ?
-                   AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'
-                 WHERE f.detection_id IS NULL
-                    OR cr.detection_id IS NULL""",
-            (
-                ws, detector_model, min_conf, *scope_params,
-                classifier_model, labels_fingerprint,
-            ),
-        ).fetchone()
-        return row["pending"] or 0
+        return repo.count_full_image_classify_pending_pairs(
+            classifier_model, labels_fingerprint, detector_model, min_conf,
+            scope_sql, scope_params,
+        )
 
     def count_full_image_classify_stale(
         self, classifier_model, labels_fingerprint,
@@ -7518,57 +7236,12 @@ class Database:
         photos whose only detections are noise (< ``min_conf``) join the
         stale-anchor scope alongside the ``box_count = 0`` cases.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""WITH full_anchor AS (
-                    SELECT photo_id, MIN(id) AS detection_id
-                      FROM detections
-                     WHERE detector_model = 'full-image'
-                     GROUP BY photo_id
-                  ),
-                  fallback AS (
-                    SELECT p.id AS photo_id, fa.detection_id
-                      FROM photos p
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                      JOIN detector_runs dr
-                        ON dr.photo_id = p.id
-                       AND dr.detector_model = ?
-                      JOIN full_anchor fa ON fa.photo_id = p.id
-                     WHERE (dr.box_count = 0 OR EXISTS (
-                             SELECT 1 FROM detections consistent
-                              WHERE consistent.photo_id = p.id
-                                AND consistent.detector_model = dr.detector_model
-                           ))
-                       AND NOT EXISTS (
-                             SELECT 1 FROM detections d
-                              WHERE d.photo_id = p.id
-                                AND d.detector_model != 'full-image'
-                                AND d.detector_confidence >= ?
-                           ){scope_sql}
-                  )
-                SELECT COUNT(*) AS n
-                  FROM fallback f
-                 WHERE EXISTS (
-                         SELECT 1 FROM classifier_runs cr_stale
-                          WHERE cr_stale.detection_id = f.detection_id
-                            AND cr_stale.classifier_model = ?
-                            AND cr_stale.labels_fingerprint != ?
-                       )
-                   AND NOT EXISTS (
-                         SELECT 1 FROM classifier_runs cr_cur
-                          WHERE cr_cur.detection_id = f.detection_id
-                            AND cr_cur.classifier_model = ?
-                            AND cr_cur.labels_fingerprint = ?
-                       )""",
-            (
-                ws, detector_model, min_conf, *scope_params,
-                classifier_model, labels_fingerprint,
-                classifier_model, labels_fingerprint,
-            ),
-        ).fetchone()
-        return row["n"] or 0
+        return repo.count_full_image_classify_stale(
+            classifier_model, labels_fingerprint, detector_model, min_conf,
+            scope_sql, scope_params,
+        )
 
     def get_classification_inventory(self, workspace_id, min_conf=None,
                                      median_sample_per_pair=2000):
@@ -7608,56 +7281,11 @@ class Database:
             finally:
                 self._active_workspace_id = saved_active
 
-        # Scalar: total real detections in scope.
-        total_row = self.conn.execute(
-            """SELECT COUNT(*) AS n
-               FROM detections d
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?""",
-            (workspace_id, min_conf),
-        ).fetchone()
-        total_real_detections = total_row["n"] or 0
-
-        # Per-pair aggregates from classifier_runs joined to in-scope detections.
-        pair_rows = self.conn.execute(
-            """SELECT cr.classifier_model      AS classifier_model,
-                      cr.labels_fingerprint    AS labels_fingerprint,
-                      COUNT(DISTINCT cr.detection_id) AS classified_dets,
-                      COUNT(DISTINCT d.photo_id)      AS photos_covered,
-                      MAX(cr.run_at)           AS last_run
-               FROM classifier_runs cr
-               JOIN detections d ON d.id = cr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
-               GROUP BY cr.classifier_model, cr.labels_fingerprint""",
-            (workspace_id, min_conf),
-        ).fetchall()
-
-        # Per-pair predictions row count (so the grand total can sum it).
-        pred_count_rows = self.conn.execute(
-            """SELECT pr.classifier_model      AS classifier_model,
-                      pr.labels_fingerprint    AS labels_fingerprint,
-                      COUNT(*)                 AS n
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
-               GROUP BY pr.classifier_model, pr.labels_fingerprint""",
-            (workspace_id, min_conf),
-        ).fetchall()
-        pred_counts = {
-            (r["classifier_model"], r["labels_fingerprint"]): r["n"]
-            for r in pred_count_rows
-        }
+        total_real_detections, pair_rows, pred_counts = (
+            self._stats_repository(scoped=False).classification_inventory_counts(
+                workspace_id, min_conf,
+            )
+        )
 
         # Median top-1 confidence per pair, via a sampled top-1-per-detection set.
         # Bounded by median_sample_per_pair to keep total work small.
@@ -7697,66 +7325,9 @@ class Database:
         fingerprint) tuple and median in Python. Sampling is fine for the UX
         signal — if classified_dets is small, the sample is the whole set.
         """
-        # Top-1 per (detection, model, fp) — predictions UNIQUE on
-        # (detection_id, classifier_model, labels_fingerprint, species), so
-        # MAX(confidence) within that group is the top-1 confidence. The
-        # outer window orders by RANDOM() so the per-pair cap picks an
-        # unbiased sample rather than the oldest detection IDs (which would
-        # under-represent recent reclassifications and bias the median).
-        # Cap rows per (model, fp) pair in SQL via ROW_NUMBER so a workspace
-        # with millions of predictions doesn't materialize them all in Python.
-        rows = self.conn.execute(
-            """SELECT classifier_model, labels_fingerprint, top1
-               FROM (
-                 SELECT classifier_model,
-                        labels_fingerprint,
-                        top1,
-                        ROW_NUMBER() OVER (
-                          PARTITION BY classifier_model, labels_fingerprint
-                          ORDER BY RANDOM()
-                        ) AS rn
-                 FROM (
-                   SELECT pr.classifier_model      AS classifier_model,
-                          pr.labels_fingerprint    AS labels_fingerprint,
-                          pr.detection_id          AS detection_id,
-                          MAX(pr.confidence)       AS top1
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf
-                     ON wf.folder_id = p.folder_id
-                    AND wf.workspace_id = ?
-                   WHERE d.detector_model != 'full-image'
-                     AND d.detector_confidence >= ?
-                     AND pr.confidence IS NOT NULL
-                   GROUP BY pr.classifier_model, pr.labels_fingerprint,
-                            pr.detection_id
-                 )
-               )
-               WHERE rn <= ?""",
-            (workspace_id, min_conf, sample_per_pair),
-        ).fetchall()
-
-        # Bucket by pair (already capped at sample_per_pair by SQL).
-        buckets = {}
-        for r in rows:
-            key = (r["classifier_model"], r["labels_fingerprint"])
-            buckets.setdefault(key, []).append(r["top1"])
-
-        out = {}
-        for key, vals in buckets.items():
-            if not vals:
-                out[key] = (None, 0)
-                continue
-            vals_sorted = sorted(vals)
-            n = len(vals_sorted)
-            mid = n // 2
-            if n % 2 == 1:
-                med = vals_sorted[mid]
-            else:
-                med = (vals_sorted[mid - 1] + vals_sorted[mid]) / 2.0
-            out[key] = (float(med), n)
-        return out
+        return self._stats_repository(scoped=False).sampled_top1_medians(
+            workspace_id, min_conf, sample_per_pair,
+        )
 
     def count_photos_pending_masks(self, photo_ids=None, min_conf=None,
                                    sam2_variant=None):
@@ -7772,55 +7343,16 @@ class Database:
         cache check: masks made by another SAM variant do not make the selected
         variant complete.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         if min_conf is None:
             import config as cfg
             min_conf = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        if sam2_variant:
-            row = self.conn.execute(
-                f"""SELECT
-                      COUNT(DISTINCT p.id) AS eligible,
-                      COUNT(DISTINCT CASE
-                        WHEN p.mask_path IS NULL
-                          OR pm.photo_id IS NULL
-                          OR pm.path IS NULL
-                          OR pm.path = ''
-                        THEN p.id END) AS pending
-                    FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                    JOIN detections d
-                      ON d.photo_id = p.id
-                     AND d.detector_model != 'full-image'
-                     AND d.detector_confidence >= ?
-                    LEFT JOIN photo_masks pm
-                      ON pm.photo_id = p.id AND pm.variant = ?
-                    WHERE 1=1{scope_sql}""",
-                (ws, min_conf, sam2_variant, *scope_params),
-            ).fetchone()
-        else:
-            row = self.conn.execute(
-                f"""SELECT
-                      COUNT(DISTINCT p.id) AS eligible,
-                      COUNT(DISTINCT CASE WHEN p.mask_path IS NULL THEN p.id END)
-                        AS pending
-                    FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                    JOIN detections d
-                      ON d.photo_id = p.id
-                     AND d.detector_model != 'full-image'
-                     AND d.detector_confidence >= ?
-                    WHERE 1=1{scope_sql}""",
-                (ws, min_conf, *scope_params),
-            ).fetchone()
-        return {
-            "eligible": row["eligible"] or 0,
-            "pending": row["pending"] or 0,
-        }
+        return repo.count_photos_pending_masks(
+            min_conf, sam2_variant, scope_sql, scope_params,
+        )
 
     def count_photos_missing_thumb(self, photo_ids=None):
         """Return (eligible, pending) for the thumbnails substage.
@@ -7835,23 +7367,9 @@ class Database:
         clears it for rows whose file has since been deleted), so a
         NULL value is a reliable "needs generating" signal.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT
-                  COUNT(*) AS eligible,
-                  SUM(CASE WHEN p.thumb_path IS NULL THEN 1 ELSE 0 END)
-                    AS pending
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                WHERE 1=1{scope_sql}""",
-            (ws, *scope_params),
-        ).fetchone()
-        return {
-            "eligible": row["eligible"] or 0,
-            "pending": row["pending"] or 0,
-        }
+        return repo.count_photos_missing_thumb(scope_sql, scope_params)
 
     def count_photos_missing_preview(self, size, photo_ids=None):
         """Return (eligible, pending) for the previews substage at ``size``.
@@ -7866,25 +7384,9 @@ class Database:
         file and the row together. So the table is a reliable index
         for "preview present on disk at this size".
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT
-                  COUNT(*) AS eligible,
-                  SUM(CASE WHEN pc.photo_id IS NULL THEN 1 ELSE 0 END)
-                    AS pending
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                LEFT JOIN preview_cache pc
-                  ON pc.photo_id = p.id AND pc.size = ?
-                WHERE 1=1{scope_sql}""",
-            (ws, size, *scope_params),
-        ).fetchone()
-        return {
-            "eligible": row["eligible"] or 0,
-            "pending": row["pending"] or 0,
-        }
+        return repo.count_photos_missing_preview(size, scope_sql, scope_params)
 
     def count_photos_missing_thumb_or_preview(self, size, photo_ids=None):
         """Return (eligible, pending) where ``pending`` counts photos
@@ -7898,26 +7400,9 @@ class Database:
         ``max(thumb_pending, preview_pending)`` undercounts whenever
         the two missing-sets aren't strict subsets of each other.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT
-                  COUNT(*) AS eligible,
-                  SUM(CASE
-                        WHEN p.thumb_path IS NULL OR pc.photo_id IS NULL
-                        THEN 1 ELSE 0 END) AS pending
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                LEFT JOIN preview_cache pc
-                  ON pc.photo_id = p.id AND pc.size = ?
-                WHERE 1=1{scope_sql}""",
-            (ws, size, *scope_params),
-        ).fetchone()
-        return {
-            "eligible": row["eligible"] or 0,
-            "pending": row["pending"] or 0,
-        }
+        return repo.count_photos_missing_thumb_or_preview(size, scope_sql, scope_params)
 
     def count_extract_stale(self, sam2_variant, photo_ids=None,
                              detector_confidence=None):
@@ -7951,50 +7436,15 @@ class Database:
         total work.
         """
         import config as cfg
-        ws = self._ws_id()
-        from subjects import primary_order_sql
+        repo = self._stats_repository()
         if detector_confidence is None:
             detector_confidence = self.get_effective_config(cfg.load()).get(
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
-                FROM photo_masks pm
-                JOIN photos p ON p.id = pm.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE pm.variant = ?
-                 AND p.mask_path IS NOT NULL
-                 AND pm.path IS NOT NULL
-                 AND pm.path != ''
-                 AND EXISTS (
-                    SELECT 1 FROM detections d0
-                     WHERE d0.photo_id = pm.photo_id
-                       AND d0.detector_model != 'full-image'
-                       AND d0.detector_confidence >= ?
-                 )
-                 AND NOT EXISTS (
-                    SELECT 1 FROM detections d
-                     WHERE d.id = (
-                           SELECT d2.id
-                             FROM detections d2
-                            WHERE d2.photo_id = pm.photo_id
-                              AND d2.detector_model != 'full-image'
-                              AND d2.detector_confidence >= ?
-                            ORDER BY {primary_order_sql("d2")}
-                            LIMIT 1
-                       )
-                       AND d.detector_model = pm.detector_model
-                       AND d.box_x = pm.prompt_x
-                       AND d.box_y = pm.prompt_y
-                       AND d.box_w = pm.prompt_w
-                       AND d.box_h = pm.prompt_h
-                 ){scope_sql}""",
-            (ws, sam2_variant, detector_confidence, detector_confidence,
-             *scope_params),
-        ).fetchone()
-        return row["n"] or 0
+        return repo.count_extract_stale(
+            sam2_variant, detector_confidence, scope_sql, scope_params,
+        )
 
     def count_eye_keypoint_eligible(self, photo_ids=None):
         """Count photos eligible for the eye-keypoint stage, ignoring the
@@ -8013,43 +7463,12 @@ class Database:
         stage complete (Codex r4056621190).
         """
         import config as cfg
-        from subjects import primary_order_sql
-        ws = self._ws_id()
+        repo = self._stats_repository()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
         )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT p.id) AS n
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                JOIN detections d
-                  ON d.photo_id = p.id
-                 AND d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
-                JOIN predictions pr ON pr.detection_id = d.id
-                JOIN photo_masks pm
-                  ON pm.photo_id = p.id
-                 AND pm.variant = p.active_mask_variant
-                 AND pm.detector_model = d.detector_model
-                 AND pm.prompt_x = d.box_x
-                 AND pm.prompt_y = d.box_y
-                 AND pm.prompt_w = d.box_w
-                 AND pm.prompt_h = d.box_h
-                WHERE p.mask_path IS NOT NULL
-                  AND p.active_mask_variant IS NOT NULL
-                  AND d.id = (
-                      SELECT d2.id FROM detections d2
-                      WHERE d2.photo_id = p.id
-                        AND d2.detector_confidence >= ?
-                        AND d2.detector_model != 'full-image'
-                      ORDER BY {primary_order_sql("d2")}
-                      LIMIT 1
-                  ){scope_sql}""",
-            (ws, min_conf, min_conf, *scope_params),
-        ).fetchone()
-        return row["n"] or 0
+        return repo.count_eye_keypoint_eligible(min_conf, scope_sql, scope_params)
 
     def count_eye_keypoint_stale(self, photo_ids=None):
         """Count photos in scope whose eye_tenengrad is set under a
@@ -8063,47 +7482,12 @@ class Database:
         change to restamp.
         """
         import config as cfg
-        from pipeline import EYE_KP_FINGERPRINT_VERSION
-        from subjects import primary_order_sql
-        ws = self._ws_id()
+        repo = self._stats_repository()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
         )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT p.id) AS n
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                JOIN detections d
-                  ON d.photo_id = p.id
-                 AND d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
-                JOIN predictions pr ON pr.detection_id = d.id
-                JOIN photo_masks pm
-                  ON pm.photo_id = p.id
-                 AND pm.variant = p.active_mask_variant
-                 AND pm.detector_model = d.detector_model
-                 AND pm.prompt_x = d.box_x
-                 AND pm.prompt_y = d.box_y
-                 AND pm.prompt_w = d.box_w
-                 AND pm.prompt_h = d.box_h
-                WHERE p.mask_path IS NOT NULL
-                  AND p.active_mask_variant IS NOT NULL
-                  AND p.eye_tenengrad IS NOT NULL
-                  AND (p.eye_kp_fingerprint IS NULL
-                       OR p.eye_kp_fingerprint != ?)
-                  AND d.id = (
-                      SELECT d2.id FROM detections d2
-                      WHERE d2.photo_id = p.id
-                        AND d2.detector_confidence >= ?
-                        AND d2.detector_model != 'full-image'
-                      ORDER BY {primary_order_sql("d2")}
-                      LIMIT 1
-                  ){scope_sql}""",
-            (ws, min_conf, EYE_KP_FINGERPRINT_VERSION, min_conf, *scope_params),
-        ).fetchone()
-        return row["n"] or 0
+        return repo.count_eye_keypoint_stale(min_conf, scope_sql, scope_params)
 
     def count_eye_keypoint_attemptable(self, min_species_conf, photo_ids=None):
         """Count photos whose top-routable prediction would actually be
@@ -8131,81 +7515,14 @@ class Database:
         lie — at worst it stays quiet when it could have surfaced.
         """
         import config as cfg
-        from subjects import primary_order_sql
-        ws = self._ws_id()
+        repo = self._stats_repository()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
         )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        # Window function pins the same per-photo prediction the stage
-        # would pick (taxonomy-present first, then detector_conf desc,
-        # then species_conf desc) so the attemptable filter is applied to
-        # the *winner*, not to any prediction the photo happens to carry.
-        # The labels_fingerprint subquery mirrors
-        # list_photos_for_eye_keypoint_stage so re-classified detections
-        # only contribute their latest prediction set. The selected-
-        # primary and active-mask predicates mirror
-        # list_photos_for_eye_keypoint_stage so predictions on non-primary
-        # detections and photos with a stale mask are excluded from the
-        # target — the stage cannot produce keypoints for those.
-        row = self.conn.execute(
-            f"""WITH ranked AS (
-                    SELECT p.id AS photo_id,
-                           pr.confidence AS species_conf,
-                           pr.taxonomy_class,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY p.id
-                               ORDER BY
-                                 CASE
-                                     WHEN pr.taxonomy_class IS NOT NULL
-                                       OR pr.scientific_name IS NOT NULL
-                                     THEN 0 ELSE 1
-                                 END,
-                                 d.detector_confidence DESC,
-                                 pr.confidence DESC
-                           ) AS rn
-                    FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id
-                     AND wf.workspace_id = ?
-                    JOIN detections d
-                      ON d.photo_id = p.id
-                     AND d.detector_model != 'full-image'
-                     AND d.detector_confidence >= ?
-                    JOIN predictions pr ON pr.detection_id = d.id
-                    JOIN photo_masks pm
-                      ON pm.photo_id = p.id
-                     AND pm.variant = p.active_mask_variant
-                     AND pm.detector_model = d.detector_model
-                     AND pm.prompt_x = d.box_x
-                     AND pm.prompt_y = d.box_y
-                     AND pm.prompt_w = d.box_w
-                     AND pm.prompt_h = d.box_h
-                    WHERE p.mask_path IS NOT NULL
-                      AND p.active_mask_variant IS NOT NULL
-                      AND d.id = (
-                          SELECT d2.id FROM detections d2
-                          WHERE d2.photo_id = p.id
-                            AND d2.detector_confidence >= ?
-                            AND d2.detector_model != 'full-image'
-                          ORDER BY {primary_order_sql("d2")}
-                          LIMIT 1
-                      )
-                      AND pr.labels_fingerprint = (
-                          SELECT pr2.labels_fingerprint FROM predictions pr2
-                          WHERE pr2.detection_id = pr.detection_id
-                            AND pr2.classifier_model = pr.classifier_model
-                          ORDER BY pr2.created_at DESC, pr2.id DESC
-                          LIMIT 1
-                      ){scope_sql}
-                )
-                SELECT COUNT(*) AS n FROM ranked
-                WHERE rn = 1
-                  AND taxonomy_class IN ('Aves', 'Mammalia')
-                  AND species_conf >= ?""",
-            (ws, min_conf, min_conf, *scope_params, min_species_conf),
-        ).fetchone()
-        return row["n"] or 0
+        return repo.count_eye_keypoint_attemptable(
+            min_species_conf, min_conf, scope_sql, scope_params,
+        )
 
     def get_dashboard_stats(
         self, folder_id=None, collection_id=None, date_from=None, date_to=None,
@@ -8217,7 +7534,7 @@ class Database:
         as preview generation) separately restrict themselves to accessible
         folders and expose that distinction through ``accessible_photos``.
         """
-        ws = self._ws_id()
+        repo = self._stats_repository()
         # Hoisted: multiple queries below need the workspace-effective
         # detector_confidence to keep classified_count / prediction_status /
         # detected_count in sync as the threshold moves.
@@ -8228,296 +7545,11 @@ class Database:
         scope_sql, scope_params = self._dashboard_scope_clause(
             folder_id, collection_id, date_from, date_to,
         )
-
-        overview = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT p.id) AS total_photos,
-                       COUNT(DISTINCT p.folder_id) AS folder_count,
-                       COUNT(DISTINCT ({identity_sql()})) AS keyword_count,
-                       COUNT(DISTINCT CASE
-                         WHEN f.status IN ('ok', 'partial') THEN p.id END
-                       ) AS accessible_photos,
-                       COUNT(DISTINCT CASE
-                         WHEN f.status NOT IN ('ok', 'partial') THEN f.id END
-                       ) AS missing_folder_count
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                JOIN folders f ON f.id = p.folder_id
-                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
-                LEFT JOIN keywords k ON k.id = pk.keyword_id
-                WHERE 1=1{scope_sql}""",
-            (ws, *scope_params),
-        ).fetchone()
-
-        # The four pure-metadata aggregates below (top_keywords,
-        # photos_by_month, rating_dist, flag_dist) intentionally don't filter
-        # on folder status. They read DB-resident metadata that doesn't depend
-        # on disk access, so an unmounted drive shouldn't blank the charts —
-        # the dashboard should still describe the full workspace inventory.
-        # Share taxon/place identity with Keywords and Browse. Unresolved
-        # same-name tags stay separate until their identity is established.
-        top_keywords = self.conn.execute(
-            f"""WITH scoped_tags AS (
-                 SELECT pk.keyword_id, pk.photo_id FROM photo_keywords pk
-                 JOIN photos p ON p.id = pk.photo_id
-                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                 WHERE wf.workspace_id = ?{scope_sql}
-               ), identified AS (
-                 SELECT k.*, {identity_sql()} AS identity FROM keywords k
-                 WHERE k.id IN (SELECT keyword_id FROM scoped_tags)
-               ), canonical AS (
-                 SELECT *, ROW_NUMBER() OVER (
-                   PARTITION BY identity ORDER BY parent_id IS NOT NULL, id
-                 ) AS rn FROM identified
-               ), counts AS (
-               SELECT k.identity, COUNT(DISTINCT pk.photo_id) AS photo_count
-               FROM identified k
-               JOIN scoped_tags pk ON pk.keyword_id = k.id
-               GROUP BY k.identity
-               )
-               SELECT c.id, c.name, c.is_species, c.identity, counts.photo_count
-               FROM counts JOIN canonical c ON c.identity = counts.identity AND c.rn = 1
-               ORDER BY photo_count DESC, c.name, c.id
-               LIMIT 30""",
-            (ws, *scope_params),
-        ).fetchall()
-
-        photos_by_month = self.conn.execute(
-            f"""SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?{scope_sql}
-            GROUP BY month
-            ORDER BY month""",
-            (ws, *scope_params),
-        ).fetchall()
-
-        rating_dist = self.conn.execute(
-            f"""SELECT p.rating, COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?{scope_sql}
-            GROUP BY p.rating
-            ORDER BY p.rating""",
-            (ws, *scope_params),
-        ).fetchall()
-
-        flag_dist = self.conn.execute(
-            f"""SELECT p.flag, COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?{scope_sql}
-            GROUP BY p.flag""",
-            (ws, *scope_params),
-        ).fetchall()
-
-        # Review status lives in prediction_review (workspace-scoped).
-        # Left-joining lets us count pending rows (those without a review row)
-        # and bucket them into the pending column via COALESCE.
-        #
-        # Filter by detector_confidence so dashboard status counts stay in
-        # sync with what the UI threshold actually shows, and scope to the
-        # most recent labels_fingerprint per (detection, classifier_model)
-        # so stale-label predictions from a prior label set don't drift the
-        # totals away from the active labeling context.
-        prediction_status = self.conn.execute(
-            f"""SELECT COALESCE(pr_rev.status, 'pending') AS status,
-                      COUNT(*) AS count
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
-               WHERE d.detector_confidence >= ?
-                 AND pr.labels_fingerprint = (
-                    SELECT pr2.labels_fingerprint FROM predictions pr2
-                    WHERE pr2.detection_id = pr.detection_id
-                      AND pr2.classifier_model = pr.classifier_model
-                    ORDER BY pr2.created_at DESC, pr2.id DESC
-                    LIMIT 1
-                 ){scope_sql}
-               GROUP BY COALESCE(pr_rev.status, 'pending')""",
-            (ws, ws, min_conf, *scope_params),
-        ).fetchall()
-
-        # Same threshold + fingerprint rules as prediction_status above, so
-        # classified_count can't drift above detected_count as the threshold
-        # moves.
-        classified_count = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT d.photo_id)
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.detector_confidence >= ?
-                 AND pr.labels_fingerprint = (
-                    SELECT pr2.labels_fingerprint FROM predictions pr2
-                    WHERE pr2.detection_id = pr.detection_id
-                      AND pr2.classifier_model = pr.classifier_model
-                    ORDER BY pr2.created_at DESC, pr2.id DESC
-                    LIMIT 1
-                 ){scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()[0]
-
-        # Needs Attention links only open photos that are currently
-        # accessible. Keep the headline classification aggregate metadata-
-        # complete above, but use this reachable subset for operational work.
-        accessible_classified_count = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT d.photo_id)
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               JOIN folders f
-                 ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE d.detector_confidence >= ?
-                 AND pr.labels_fingerprint = (
-                    SELECT pr2.labels_fingerprint FROM predictions pr2
-                    WHERE pr2.detection_id = pr.detection_id
-                      AND pr2.classifier_model = pr.classifier_model
-                    ORDER BY pr2.created_at DESC, pr2.id DESC
-                    LIMIT 1
-                 ){scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()[0]
-
-        # photos_by_hour and quality_dist are also pure-metadata aggregates;
-        # see the comment above the top_keywords block for the rationale.
-        photos_by_hour = self.conn.execute(
-            f"""SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13
-              AND wf.workspace_id = ?{scope_sql}
-            GROUP BY hour
-            ORDER BY hour""",
-            (ws, *scope_params),
-        ).fetchall()
-
-        quality_dist = self.conn.execute(
-            f"""SELECT
-                CASE
-                    WHEN p.quality_score IS NULL THEN -1
-                    ELSE CAST(p.quality_score * 10 AS INTEGER)
-                END as bucket,
-                COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?{scope_sql}
-            GROUP BY bucket
-            ORDER BY bucket""",
-            (ws, *scope_params),
-        ).fetchall()
-
-        # min_conf already hoisted at top of get_dashboard_stats.
-        # No folder-status filter — detections persist in the DB regardless
-        # of disk presence, and prediction_status / classified_count above
-        # don't filter either, so detected_count must match to keep the
-        # dashboard's classified-vs-detected ratio internally consistent
-        # when a folder is offline.
-        detected_count = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT d.photo_id)
-               FROM detections d
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()[0]
-
         location_conditions = []
         self._append_location_status_filter(location_conditions, "none")
-        missing_location = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT p.id)
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                JOIN folders f
-                  ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-                WHERE {' AND '.join(location_conditions)}{scope_sql}""",
-            (ws, *scope_params),
-        ).fetchone()[0]
-
-        pending_changes = self.conn.execute(
-            f"""SELECT COUNT(*)
-                FROM pending_changes pc
-                JOIN photos p ON p.id = pc.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                WHERE pc.workspace_id = ?{scope_sql}""",
-            (ws, ws, *scope_params),
-        ).fetchone()[0]
-
-        if preview_size:
-            missing_previews = self.conn.execute(
-                f"""SELECT COUNT(DISTINCT p.id)
-                    FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                    JOIN folders f
-                      ON f.id = p.folder_id
-                     AND f.status IN ('ok', 'partial')
-                    LEFT JOIN preview_cache pc
-                      ON pc.photo_id = p.id AND pc.size = ?
-                    WHERE pc.photo_id IS NULL{scope_sql}""",
-                (ws, preview_size, *scope_params),
-            ).fetchone()[0]
-        else:
-            missing_previews = 0
-
-        duplicate_groups = self.conn.execute(
-            f"""SELECT COUNT(*) FROM (
-                  SELECT p.file_hash
-                  FROM photos p
-                  JOIN workspace_folders wf
-                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                  JOIN folders f
-                    ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-                  WHERE p.file_hash IS NOT NULL
-                    AND COALESCE(p.flag, 'none') != 'rejected'{scope_sql}
-                  GROUP BY p.file_hash
-                  HAVING COUNT(*) > 1
-                )""",
-            (ws, *scope_params),
-        ).fetchone()[0]
-
-        total_photos = overview["total_photos"] or 0
-
-        return {
-            "top_keywords": [dict(r) for r in top_keywords],
-            "photos_by_month": [dict(r) for r in photos_by_month],
-            "rating_distribution": [dict(r) for r in rating_dist],
-            "flag_distribution": [dict(r) for r in flag_dist],
-            "prediction_status": [dict(r) for r in prediction_status],
-            "classified_count": classified_count,
-            "photos_by_hour": [dict(r) for r in photos_by_hour],
-            "quality_distribution": [dict(r) for r in quality_dist],
-            "detected_count": detected_count,
-            "total_photos": total_photos,
-            "accessible_photos": overview["accessible_photos"] or 0,
-            "missing_folder_count": overview["missing_folder_count"] or 0,
-            "folder_count": overview["folder_count"] or 0,
-            "keyword_count": overview["keyword_count"] or 0,
-            "pending_changes": pending_changes,
-            "attention": {
-                "unclassified": max(
-                    0,
-                    (overview["accessible_photos"] or 0)
-                    - accessible_classified_count,
-                ),
-                "missing_location": missing_location,
-                "missing_previews": missing_previews,
-                "preview_size": preview_size,
-                "preview_enabled": bool(preview_size),
-                "pending_sync": pending_changes,
-                "duplicate_groups": duplicate_groups,
-            },
-        }
+        return repo.get_dashboard(
+            min_conf, preview_size, scope_sql, scope_params, location_conditions,
+        )
 
     @staticmethod
     def _append_location_status_filter(conditions, location_status):

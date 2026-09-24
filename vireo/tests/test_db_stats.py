@@ -11,9 +11,11 @@ masks under two SAM variants and eye keypoints, plus the scope clauses
 scopes), the no-active-workspace errors, and the SQL each reader issues.
 """
 
+import ast
 import inspect
 import json
 import sqlite3
+import textwrap
 
 import config as cfg
 import pytest
@@ -821,3 +823,56 @@ def test_classification_inventory_query_count(db, lib):
     db.get_classification_inventory(lib["ws"], min_conf=0.2)
     assert len(statements) == 4
     assert "ORDER BY RANDOM()" in statements[-1]
+
+
+# -- structure: the SQL lives in StatsRepository ---------------------------------
+#
+# The scope composition (``_scope_clause`` / ``_dashboard_scope_clause``) and the
+# workspace-effective config lookups stay on the façade; only the SQL moved.
+
+
+STATS_METHODS = [
+    "_dashboard_scope_clause",
+    "get_coverage_stats",
+    "get_folder_coverage_stats",
+    "_stage_scope_ids",
+    "count_real_detections_in_scope",
+    "count_primary_detections_in_scope",
+    "count_classify_pending_pairs",
+    "count_primary_classify_pending_pairs",
+    "count_classify_stale",
+    "count_primary_classify_stale",
+    "count_full_image_fallback_photos",
+    "count_full_image_classify_pending_pairs",
+    "count_full_image_classify_stale",
+    "get_classification_inventory",
+    "_sampled_top1_medians",
+    "count_photos_pending_masks",
+    "count_photos_missing_thumb",
+    "count_photos_missing_preview",
+    "count_photos_missing_thumb_or_preview",
+    "count_extract_stale",
+    "count_eye_keypoint_eligible",
+    "count_eye_keypoint_stale",
+    "count_eye_keypoint_attemptable",
+    "get_dashboard_stats",
+]
+
+
+@pytest.mark.parametrize("name", STATS_METHODS)
+def test_stats_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to StatsRepository"
+    )
+    assert "_stats_repository" in attrs, (
+        f"Database.{name} no longer delegates to StatsRepository"
+    )
