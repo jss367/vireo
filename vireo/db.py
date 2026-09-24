@@ -2580,14 +2580,6 @@ class Database:
     # ------------------------------------------------------------------
     # Saved processes (user-editable process presets; global, not scoped)
     # ------------------------------------------------------------------
-    _PROCESS_FLAG_COLS = (
-        "skip_classify",
-        "skip_extract_masks",
-        "skip_eye_keypoints",
-        "skip_regroup",
-        "miss_enabled",
-    )
-
     @staticmethod
     def _saved_process_row_to_dict(row):
         from repositories.processes import ProcessesRepository
