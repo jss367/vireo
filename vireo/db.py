@@ -19832,6 +19832,21 @@ class Database:
         )
         self.conn.commit()
 
+    def _detections_repository(self):
+        """Build the detections repository on this connection.
+
+        ``detections`` is catalog-wide, so the repository takes no workspace
+        id; the misses wrappers resolve ``_ws_id()`` and the scope clause and
+        pass them in, and the readers resolve their confidence floors here.
+        """
+        from repositories.detections import DetectionsRepository
+
+        return DetectionsRepository(
+            self.conn,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+            commit_with_retry=commit_with_retry,
+        )
+
     def save_detections(
         self,
         photo_id,
@@ -19859,11 +19874,9 @@ class Database:
         """
         if detector_model is None:
             raise ValueError("detector_model is required")
-        ids = self._upsert_detection_rows(
-            photo_id, detector_model, detections, runtime_fingerprint,
+        return self._detections_repository().save(
+            photo_id, detections, detector_model, runtime_fingerprint,
         )
-        commit_with_retry(self.conn)
-        return ids
 
     def _upsert_detection_rows(
         self,
@@ -19878,87 +19891,9 @@ class Database:
         the caller controls the transaction so the detector_runs row can be
         written in the same commit (see `write_detection_batch`).
         """
-        from detection_id import detection_id as _detection_id
-
-        unique = {}
-        ordered_ids = []
-        for idx, det in enumerate(detections):
-            box = det["box"]
-            category = det.get("category", "animal")
-            det_id = _detection_id(
-                photo_id, detector_model,
-                (box["x"], box["y"], box["w"], box["h"]),
-                category,
-            )
-            if det_id not in unique:
-                ordered_ids.append(det_id)
-                unique[det_id] = (det, category, idx)
-                continue
-            prev_det, _prev_category, prev_idx = unique[det_id]
-            if (
-                det["confidence"] > prev_det["confidence"]
-                or (
-                    det["confidence"] == prev_det["confidence"]
-                    and idx > prev_idx
-                )
-            ):
-                unique[det_id] = (det, category, idx)
-
-        ids = []
-        for det_id in ordered_ids:
-            det, category, _idx = unique[det_id]
-            box = det["box"]
-            # INSERT ON CONFLICT DO UPDATE — true UPSERT. Do NOT use
-            # `INSERT OR REPLACE`, which DELETEs the conflicting row before
-            # re-inserting; that DELETE fires `predictions.detection_id`
-            # `ON DELETE CASCADE` and silently wipes any predictions another
-            # pipeline has already written for this detection.
-            self.conn.execute(
-                """INSERT INTO detections
-                     (id, photo_id, detector_model, runtime_fingerprint,
-                      box_x, box_y, box_w, box_h, detector_confidence, category)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                     photo_id = excluded.photo_id,
-                     detector_model = excluded.detector_model,
-                     runtime_fingerprint = excluded.runtime_fingerprint,
-                     box_x = excluded.box_x,
-                     box_y = excluded.box_y,
-                     box_w = excluded.box_w,
-                     box_h = excluded.box_h,
-                     detector_confidence = excluded.detector_confidence,
-                     category = excluded.category""",
-                (det_id, photo_id, detector_model, runtime_fingerprint,
-                 box["x"], box["y"], box["w"], box["h"],
-                 det["confidence"], category),
-            )
-            ids.append(det_id)
-
-        # Retire rows the new run no longer produces. Narrow DELETE: only
-        # rows whose ID is NOT in the new set. Safe under concurrent writers
-        # because two writers with the same detections compute the same
-        # `new_ids` set, so neither deletes the other's rows.
-        new_ids = set(ids)
-        existing = [r["id"] for r in self.conn.execute(
-            """SELECT id FROM detections
-               WHERE photo_id = ? AND detector_model = ?
-                 AND runtime_fingerprint = ?""",
-            (photo_id, detector_model, runtime_fingerprint),
-        ).fetchall()]
-        stale = [eid for eid in existing if eid not in new_ids]
-        # Chunk to stay under SQLite's compile-time SQLITE_MAX_VARIABLE_NUMBER
-        # (defaults to 999 in older builds, 32766 in newer). A single photo
-        # rarely has >1k detections today, but the chunking is cheap insurance
-        # against future detectors that produce many small boxes.
-        CHUNK = 500
-        for i in range(0, len(stale), CHUNK):
-            chunk = stale[i:i + CHUNK]
-            placeholders = ",".join("?" for _ in chunk)
-            self.conn.execute(
-                f"DELETE FROM detections WHERE id IN ({placeholders})",
-                chunk,
-            )
-        return ids
+        return self._detections_repository().upsert_rows(
+            photo_id, detector_model, detections, runtime_fingerprint,
+        )
 
     def write_detection_batch(
         self,
@@ -19988,65 +19923,17 @@ class Database:
         """
         if detector_model is None:
             raise ValueError("detector_model is required")
-        try:
-            previous = self.conn.execute(
-                """SELECT runtime_fingerprint, input_fingerprint
-                   FROM detector_runs
-                   WHERE photo_id = ? AND detector_model = ?""",
-                (photo_id, detector_model),
-            ).fetchone()
-            identity_changed = previous is not None and (
-                previous["runtime_fingerprint"] != runtime_fingerprint
-                or (
-                    previous["input_fingerprint"] is not None
-                    and input_fingerprint is not None
-                    and previous["input_fingerprint"] != input_fingerprint
-                )
-            )
-            if (
-                identity_changed
-                and not force_runtime_replace
-                and self.detector_run_is_pinned(photo_id, detector_model)
-            ):
-                rows = self.conn.execute(
-                    """SELECT id FROM detections
-                       WHERE photo_id = ? AND detector_model = ?
-                       ORDER BY detector_confidence DESC, id ASC""",
-                    (photo_id, detector_model),
-                ).fetchall()
-                return [row["id"] for row in rows]
-
-            if identity_changed:
-                # Runtime ownership changes are an explicit retirement event.
-                # Deleting first prevents old-runtime rows from surviving the
-                # new run's same-runtime stale-row sweep.
-                self.conn.execute(
-                    """DELETE FROM detections
-                       WHERE photo_id = ? AND detector_model = ?""",
-                    (photo_id, detector_model),
-                )
-
-            ids = self._upsert_detection_rows(
-                photo_id, detector_model, detections, runtime_fingerprint,
-            )
-            self.conn.execute(
-                """INSERT INTO detector_runs
-                     (photo_id, detector_model, runtime_fingerprint,
-                      input_fingerprint, box_count)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(photo_id, detector_model)
-                   DO UPDATE SET runtime_fingerprint = excluded.runtime_fingerprint,
-                                 input_fingerprint = excluded.input_fingerprint,
-                                 box_count = excluded.box_count,
-                                 run_at = datetime('now')""",
-                (photo_id, detector_model, runtime_fingerprint,
-                 input_fingerprint, len(ids)),
-            )
-            commit_with_retry(self.conn)
-            return ids
-        except Exception:
-            self.conn.rollback()
-            raise
+        # The pin check stays on the façade (model-runs domain), so a patched
+        # ``detector_run_is_pinned`` still applies inside the transaction.
+        return self._detections_repository().write_batch(
+            photo_id,
+            detector_model,
+            detections,
+            runtime_fingerprint,
+            input_fingerprint,
+            force_runtime_replace,
+            is_pinned=self.detector_run_is_pinned,
+        )
 
     def get_detections(self, photo_id, min_conf=None, detector_model=None):
         """Return all boxes for a photo above `min_conf`, globally.
@@ -20065,17 +19952,7 @@ class Database:
             import config as cfg
             effective = self.get_effective_config(cfg.load())
             min_conf = effective.get("detector_confidence", 0.2)
-        q = ("SELECT * FROM detections WHERE photo_id = ? "
-             "AND detector_confidence >= ?")
-        params = [photo_id, min_conf]
-        if detector_model is not None:
-            q += " AND detector_model = ?"
-            params.append(detector_model)
-        # The same ordering drives masks, crop previews, and bulk payloads:
-        # manual choice, subject quality, then confidence and stable ID.
-        from subjects import primary_order_sql
-        q += " ORDER BY " + primary_order_sql()
-        return self.conn.execute(q, params).fetchall()
+        return self._detections_repository().get(photo_id, min_conf, detector_model)
 
     def get_detections_for_photos(self, photo_ids, min_conf=None,
                                   detector_model=None):
@@ -20100,38 +19977,9 @@ class Database:
             import config as cfg
             effective = self.get_effective_config(cfg.load())
             min_conf = effective.get("detector_confidence", 0.2)
-        # Dedup-preserving-order: same id appearing in two chunks would
-        # cause setdefault(...).append(...) below to emit each row twice.
-        photo_ids = list(dict.fromkeys(photo_ids))
-        result = {}
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            q = (
-                f"SELECT id, photo_id, box_x, box_y, box_w, box_h, "
-                f"       detector_confidence, category, detector_model "
-                f"FROM detections "
-                f"WHERE photo_id IN ({placeholders}) "
-                f"  AND detector_confidence >= ?"
-            )
-            params = [*chunk, min_conf]
-            if detector_model is not None:
-                q += " AND detector_model = ?"
-                params.append(detector_model)
-            from subjects import primary_order_sql
-            q += " ORDER BY photo_id, " + primary_order_sql()
-            rows = self.conn.execute(q, params).fetchall()
-            for r in rows:
-                result.setdefault(r["photo_id"], []).append({
-                    "id": r["id"],
-                    "x": r["box_x"],
-                    "y": r["box_y"],
-                    "w": r["box_w"],
-                    "h": r["box_h"],
-                    "confidence": r["detector_confidence"],
-                    "category": r["category"],
-                    "detector_model": r["detector_model"],
-                })
-        return result
+        return self._detections_repository().get_for_photos(
+            photo_ids, min_conf, detector_model,
+        )
 
     def get_predictions_for_detection(self, detection_id,
                                         min_classifier_conf=None,
@@ -20156,17 +20004,9 @@ class Database:
             import config as cfg
             effective = self.get_effective_config(cfg.load())
             min_classifier_conf = effective.get("classifier_confidence", 0.0)
-        q = ("SELECT * FROM predictions WHERE detection_id = ? "
-             "AND confidence >= ?")
-        params = [detection_id, min_classifier_conf]
-        if classifier_model is not None:
-            q += " AND classifier_model = ?"
-            params.append(classifier_model)
-        if labels_fingerprint is not None:
-            q += " AND labels_fingerprint = ?"
-            params.append(labels_fingerprint)
-        q += " ORDER BY confidence DESC"
-        return self.conn.execute(q, params).fetchall()
+        return self._detections_repository().get_predictions(
+            detection_id, min_classifier_conf, classifier_model, labels_fingerprint,
+        )
 
     def clear_detections(self, photo_id, detector_model=None):
         """Remove detections (and cascaded predictions) for a photo.
@@ -20182,23 +20022,7 @@ class Database:
         detector models for this photo are cleared; otherwise only the
         rows for that model.
         """
-        if detector_model is None:
-            self.conn.execute(
-                "DELETE FROM detections WHERE photo_id = ?", (photo_id,)
-            )
-            self.conn.execute(
-                "DELETE FROM detector_runs WHERE photo_id = ?", (photo_id,)
-            )
-        else:
-            self.conn.execute(
-                "DELETE FROM detections WHERE photo_id = ? AND detector_model = ?",
-                (photo_id, detector_model),
-            )
-            self.conn.execute(
-                "DELETE FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
-                (photo_id, detector_model),
-            )
-        self.conn.commit()
+        self._detections_repository().clear(photo_id, detector_model)
 
     def get_existing_detection_photo_ids(self, detector_model="megadetector-v6"):
         """Back-compat shim — prefer get_detector_run_photo_ids."""
@@ -20224,95 +20048,18 @@ class Database:
         DESC.
         """
         ws_id = self._ws_id()
-        if category is None:
-            where = (
-                "p.miss_no_subject=1 OR p.miss_clipped=1 OR p.miss_oof=1"
-            )
-        else:
-            col = {
-                "no_subject": "miss_no_subject",
-                "clipped":    "miss_clipped",
-                "oof":        "miss_oof",
-            }[category]
-            where = f"p.{col}=1"
-
-        params = [ws_id]
-        if since:
-            where = f"({where}) AND p.miss_computed_at >= ?"
-            params.append(since)
+        repo = self._detections_repository()
+        where = repo.miss_where(category)
         scope_clause, scope_params = self._scope_clause(photo_ids)
-        params.extend(scope_params)
-
-        rows = self.conn.execute(
-            f"SELECT p.id, p.folder_id, p.filename, p.companion_path, "
-            f"       p.timestamp, p.burst_id, "
-            f"       p.subject_size, p.crop_complete, "
-            f"       p.subject_tenengrad, p.bg_tenengrad, "
-            f"       p.miss_no_subject, p.miss_clipped, p.miss_oof, "
-            f"       p.miss_computed_at, p.flag "
-            f"FROM photos p "
-            f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
-            f"WHERE wf.workspace_id = ? "
-            f"  AND ({where}) "
-            f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
-            f"  {scope_clause} "
-            f"ORDER BY p.timestamp DESC",
-            params,
-        ).fetchall()
-        photos = [dict(r) for r in rows]
+        photos = repo.list_miss_photos(ws_id, where, since, scope_clause, scope_params)
         if not photos:
             return photos
 
-        import json as _json
-
         import config as cfg
-        from subjects import primary_order_sql
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
-        photo_ids = [p["id"] for p in photos]
-        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
-        # A workspace with thousands of flagged misses would otherwise raise
-        # ``OperationalError: too many SQL variables``.
-        CHUNK = 500
-        primary = {}
-        raw_primary = {}
-        for i in range(0, len(photo_ids), CHUNK):
-            chunk = photo_ids[i:i + CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            det_rows = self.conn.execute(
-                f"SELECT photo_id, box_x, box_y, box_w, box_h, "
-                f"       detector_confidence "
-                f"FROM detections "
-                f"WHERE photo_id IN ({placeholders}) "
-                f"  AND (detector_model IS NULL OR detector_model != 'full-image') "
-                f"  AND COALESCE(category, 'animal') = 'animal' "
-                f"ORDER BY photo_id, {primary_order_sql()}",
-                chunk,
-            ).fetchall()
-            for d in det_rows:
-                previous = raw_primary.get(d["photo_id"])
-                if previous is None or d["detector_confidence"] > previous["detector_confidence"]:
-                    raw_primary[d["photo_id"]] = d
-                if d["detector_confidence"] >= min_conf:
-                    primary.setdefault(d["photo_id"], d)
-        for p in photos:
-            d = primary.get(p["id"])
-            raw = raw_primary.get(p["id"])
-            p["raw_detection_conf"] = (
-                raw["detector_confidence"] if raw is not None else None
-            )
-            p["detector_confidence_threshold"] = min_conf
-            if d is not None:
-                p["detection_box"] = _json.dumps({
-                    "x": d["box_x"], "y": d["box_y"],
-                    "w": d["box_w"], "h": d["box_h"],
-                })
-                p["detection_conf"] = d["detector_confidence"]
-            else:
-                p["detection_box"] = None
-                p["detection_conf"] = None
-        return photos
+        return repo.attach_miss_detections(photos, min_conf)
 
     def clear_miss_flag(self, photo_id, category):
         """Set the given miss column to 0 on the given photo.
@@ -20321,15 +20068,7 @@ class Database:
         that `/api/misses/<id>/unflag` can't touch another workspace's photos.
         """
         self._verify_photo_in_workspace(photo_id)
-        col = {
-            "no_subject": "miss_no_subject",
-            "clipped":    "miss_clipped",
-            "oof":        "miss_oof",
-        }[category]
-        self.conn.execute(
-            f"UPDATE photos SET {col}=0 WHERE id=?", (photo_id,)
-        )
-        self.conn.commit()
+        self._detections_repository().clear_miss_flag(photo_id, category)
 
     def bulk_reject_miss_category(self, category, since=None, photo_ids=None):
         """Set flag='rejected' on every photo flagged with that miss category
@@ -20351,51 +20090,11 @@ class Database:
         an accidental "Reject all" on /misses would be invisible to the
         undo flow.
         """
-        col = {
-            "no_subject": "miss_no_subject",
-            "clipped":    "miss_clipped",
-            "oof":        "miss_oof",
-        }[category]
-        params = [self._ws_id()]
-        since_clause = ""
-        if since:
-            since_clause = "    AND p.miss_computed_at >= ? "
-            params.append(since)
+        repo = self._detections_repository()
+        col = repo.miss_column(category)
+        ws_id = self._ws_id()
         scope_clause, scope_params = self._scope_clause(photo_ids)
-        params.extend(scope_params)
-        rows = self.conn.execute(
-            f"SELECT p.id, p.flag FROM photos p "
-            f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
-            f"WHERE wf.workspace_id = ? "
-            f"  AND p.{col}=1 "
-            f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
-            f"{since_clause}"
-            f"{scope_clause}",
-            params,
-        ).fetchall()
-        # Preserve NULL flag values in old_value so undo is lossless.
-        # Coercing NULL to "" would make _apply_undo restore an empty
-        # string instead of the original NULL, leaving rows in a
-        # non-canonical state that bypasses code paths expecting
-        # none/flagged/rejected (or NULL).
-        affected = [
-            {"photo_id": r["id"], "old_value": r["flag"]}
-            for r in rows
-        ]
-        if not affected:
-            return []
-        ids = [a["photo_id"] for a in affected]
-        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
-        _CHUNK = 500
-        for i in range(0, len(ids), _CHUNK):
-            chunk = ids[i:i + _CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            self.conn.execute(
-                f"UPDATE photos SET flag='rejected' WHERE id IN ({placeholders})",
-                chunk,
-            )
-        self.conn.commit()
-        return affected
+        return repo.reject_misses(col, ws_id, since, scope_clause, scope_params)
 
     def get_detection_ids_for_photos(self, photo_ids):
         """Return {photo_id: set(detection_id, ...)} for the given photo IDs.
@@ -20412,22 +20111,7 @@ class Database:
         SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
         typically 999 in production builds).
         """
-        if not photo_ids:
-            return {}
-        result: dict = {}
-        ids = list(photo_ids)
-        _CHUNK = 900
-        for i in range(0, len(ids), _CHUNK):
-            chunk = ids[i : i + _CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            rows = self.conn.execute(
-                f"SELECT id, photo_id FROM detections "
-                f"WHERE photo_id IN ({placeholders})",
-                tuple(chunk),
-            ).fetchall()
-            for row in rows:
-                result.setdefault(row["photo_id"], set()).add(row["id"])
-        return result
+        return self._detections_repository().get_ids_for_photos(photo_ids)
 
     def delete_detections_by_ids(self, detection_ids):
         """Delete specific detection rows by primary key.
@@ -20443,26 +20127,13 @@ class Database:
         """
         if not detection_ids:
             return
-        ids = list(detection_ids)
-        affected_subject_photos = set()
-        _CHUNK = 900
-        for i in range(0, len(ids), _CHUNK):
-            chunk = ids[i : i + _CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            affected_subject_photos.update(row[0] for row in self.conn.execute(
-                f"SELECT DISTINCT d.photo_id FROM detections d "
-                f"JOIN photo_subject_state s ON s.photo_id=d.photo_id "
-                f"WHERE d.id IN ({placeholders})", chunk,
-            ))
-            self.conn.execute(
-                f"DELETE FROM detections WHERE id IN ({placeholders})",
-                chunk,
-            )
+        repo = self._detections_repository()
+        affected_subject_photos = repo.delete_by_ids(detection_ids)
         if affected_subject_photos:
             from subjects import sync_primary
             for photo_id in affected_subject_photos:
                 sync_primary(self, photo_id)
-        self.conn.commit()
+        repo.commit()
 
     # -- Pending Changes --
 
