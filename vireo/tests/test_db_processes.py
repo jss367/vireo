@@ -9,8 +9,11 @@ rows it must skip). ``test_saved_processes.py`` covers seeding and the
 legacy ``default_strategy`` migration.
 """
 
+import ast
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import process_strategies as ps
 import pytest
@@ -431,3 +434,100 @@ def test_saved_processes_do_not_require_an_active_workspace(db):
     assert db.resolve_process(pid)["skip_classify"] is False
     assert db.update_saved_process(pid, skip_classify=True) is True
     assert db.delete_saved_process(pid) is True
+
+
+# -- structure: the saved-process SQL lives in the repository ------------------
+
+# Database methods whose SQL moved to repositories/processes.py. Each stays on
+# Database as a thin wrapper so existing call sites keep working; none may
+# reach the connection directly again. ``resolve_process`` has no SQL and
+# composes ``get_saved_process`` on the façade, so it is not listed.
+_DELEGATING_PROCESS_METHODS = (
+    "get_saved_processes",
+    "get_saved_process",
+    "create_saved_process",
+    "update_saved_process",
+    "delete_saved_process",
+)
+
+# Pure static helpers that forward to the repository's static helpers.
+_DELEGATING_PROCESS_STATICMETHODS = (
+    "_saved_process_row_to_dict",
+    "_normalize_process_fields",
+)
+
+
+def _parsed(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    return ast.parse(source).body[0]
+
+
+@pytest.mark.parametrize("name", _DELEGATING_PROCESS_METHODS)
+def test_process_method_delegates_to_repository(name):
+    attrs = {
+        node.attr
+        for node in ast.walk(_parsed(name))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to ProcessesRepository"
+    )
+    assert "_processes_repository" in attrs, (
+        f"Database.{name} no longer delegates to ProcessesRepository"
+    )
+
+
+@pytest.mark.parametrize("name", _DELEGATING_PROCESS_STATICMETHODS)
+def test_process_staticmethod_delegates_to_repository(name):
+    assert isinstance(inspect.getattr_static(Database, name), staticmethod)
+    fn = _parsed(name)
+    names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+    assert "ProcessesRepository" in names, (
+        f"Database.{name} no longer forwards to ProcessesRepository"
+    )
+    assert "bool" not in names and "int" not in names, (
+        f"Database.{name} coerces fields itself; keep that in ProcessesRepository"
+    )
+
+
+def test_update_saved_process_shares_the_unset_sentinel_with_the_repository():
+    import db as db_module
+    from repositories import UNSET
+    from repositories.processes import ProcessesRepository
+
+    assert db_module._UNSET is UNSET
+    facade = inspect.signature(Database.update_saved_process).parameters
+    repo = inspect.signature(ProcessesRepository.update).parameters
+    assert facade["review_mode"].default is UNSET
+    assert repo["review_mode"].default is UNSET
+
+
+def test_process_wrapper_signatures_are_unchanged():
+    sig = inspect.signature(Database.create_saved_process)
+    assert str(sig) == (
+        "(self, name, *, skip_classify=False, skip_extract_masks=False, "
+        "skip_eye_keypoints=False, skip_regroup=False, miss_enabled=True, "
+        "review_mode=None)"
+    )
+    sig = inspect.signature(Database.update_saved_process)
+    assert list(sig.parameters) == [
+        "self", "process_id", "name", "skip_classify", "skip_extract_masks",
+        "skip_eye_keypoints", "skip_regroup", "miss_enabled", "review_mode",
+    ]
+    assert all(
+        sig.parameters[k].default is None
+        for k in ("name", "skip_classify", "skip_extract_masks",
+                  "skip_eye_keypoints", "skip_regroup", "miss_enabled")
+    )
+
+
+def test_existence_checks_go_through_the_facade(db, monkeypatch):
+    """update/delete ask ``Database.get_saved_process`` whether the row exists."""
+    pid = db.create_saved_process("Patched")
+    monkeypatch.setattr(db, "get_saved_process", lambda process_id: None)
+    assert db.update_saved_process(pid, name="Nope") is False
+    assert db.delete_saved_process(pid) is False
+    monkeypatch.undo()
+    assert db.get_saved_process(pid)["name"] == "Patched"
