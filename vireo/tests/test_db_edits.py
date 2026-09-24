@@ -2,14 +2,19 @@
 
 The behavior tests exercise per-photo edit recipes and global edit presets
 only through the public ``Database`` façade, so they hold regardless of
-whether the SQL lives in ``db.py`` or in ``repositories/edits.py``.
+whether the SQL lives in ``db.py`` or in ``repositories/edits.py``; the
+structural tests at the end keep it in the repository.
 """
 
+import ast
 import contextlib
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import pytest
+from db import Database
 from image_edits import RecipeError
 
 
@@ -419,3 +424,64 @@ def test_delete_preset_commits_and_reports_removal(db):
     assert db.delete_edit_preset(saved["id"]) is False
     assert db.delete_edit_preset(12345) is False
 
+
+# -- structure: the SQL lives in repositories/edits.py -------------------------
+
+_DELEGATED = [
+    "get_photo_edit_recipe",
+    "get_photo_edit_recipes",
+    "set_photo_edit_recipe",
+    "clear_photo_edit_recipe",
+    "list_edit_presets",
+    "save_edit_preset",
+    "delete_edit_preset",
+]
+
+
+@pytest.mark.parametrize("name", _DELEGATED)
+def test_edits_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to EditsRepository"
+    )
+    assert "_edits_repository" in attrs, (
+        f"Database.{name} no longer delegates to EditsRepository"
+    )
+
+
+def test_edits_facade_signatures_are_unchanged():
+    def params(name):
+        return [
+            (p.name, p.default)
+            for p in inspect.signature(getattr(Database, name)).parameters.values()
+        ]
+
+    empty = inspect.Parameter.empty
+    assert params("get_photo_edit_recipe") == [
+        ("self", empty), ("photo_id", empty), ("verify_workspace", False),
+    ]
+    assert params("set_photo_edit_recipe") == [
+        ("self", empty), ("photo_id", empty), ("recipe", empty),
+        ("verify_workspace", True), ("_commit", True),
+    ]
+    assert params("clear_photo_edit_recipe") == [
+        ("self", empty), ("photo_id", empty), ("verify_workspace", True),
+    ]
+    assert params("save_edit_preset") == [
+        ("self", empty), ("name", empty), ("recipe", empty), ("fields", None),
+    ]
+
+
+def test_edits_repository_builds_without_an_active_workspace(db):
+    db.set_active_workspace(None)
+    repo = db._edits_repository()
+    assert repo.conn is db.conn
+    assert repo.preset_name_max == Database.EDIT_PRESET_NAME_MAX

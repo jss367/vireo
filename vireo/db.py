@@ -11111,48 +11111,29 @@ class Database:
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
+    def _edits_repository(self):
+        """Build the edits repository on this connection.
+
+        Recipes and presets are not workspace-scoped, so this never calls
+        ``self._ws_id()``; the optional workspace check runs in the wrapper.
+        """
+        from repositories.edits import EditsRepository
+
+        return EditsRepository(
+            self.conn,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+            preset_name_max=self.EDIT_PRESET_NAME_MAX,
+        )
+
     def get_photo_edit_recipe(self, photo_id, verify_workspace=False):
         """Return the normalized edit recipe dict for a photo, or None."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
-        row = self.conn.execute(
-            "SELECT recipe_json FROM photo_edit_recipes WHERE photo_id = ?",
-            (photo_id,),
-        ).fetchone()
-        if not row:
-            return None
-        try:
-            from image_edits import copy_recipe
-            return copy_recipe(row["recipe_json"])
-        except Exception:
-            log.warning("Invalid stored edit recipe for photo %s", photo_id, exc_info=True)
-            return None
+        return self._edits_repository().get_photo_recipe(photo_id)
 
     def get_photo_edit_recipes(self, photo_ids):
         """Return {photo_id: normalized recipe dict} for the given photos."""
-        if not photo_ids:
-            return {}
-        out = {}
-        from image_edits import copy_recipe
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"SELECT photo_id, recipe_json FROM photo_edit_recipes "
-                f"WHERE photo_id IN ({placeholders})",
-                list(chunk),
-            ).fetchall()
-            for row in rows:
-                try:
-                    recipe = copy_recipe(row["recipe_json"])
-                except Exception:
-                    log.warning(
-                        "Invalid stored edit recipe for photo %s",
-                        row["photo_id"], exc_info=True,
-                    )
-                    continue
-                if recipe:
-                    out[row["photo_id"]] = recipe
-        return out
+        return self._edits_repository().get_photo_recipes(photo_ids)
 
     def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True, _commit=True):
         """Set or clear a non-destructive edit recipe for a photo.
@@ -11163,38 +11144,15 @@ class Database:
         """
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
-        from image_edits import copy_recipe, recipe_to_json
-        recipe_json = recipe_to_json(recipe)
-        if recipe_json is None:
-            self.conn.execute(
-                "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
-                (photo_id,),
-            )
-            if _commit:
-                self.conn.commit()
-            return None
-        self.conn.execute(
-            """INSERT INTO photo_edit_recipes (photo_id, recipe_json, updated_at)
-               VALUES (?, ?, datetime('now'))
-               ON CONFLICT(photo_id) DO UPDATE SET
-                   recipe_json = excluded.recipe_json,
-                   updated_at = excluded.updated_at""",
-            (photo_id, recipe_json),
+        return self._edits_repository().set_photo_recipe(
+            photo_id, recipe, _commit=_commit
         )
-        if _commit:
-            self.conn.commit()
-        return copy_recipe(recipe_json)
 
     def clear_photo_edit_recipe(self, photo_id, verify_workspace=True):
         """Remove a photo's edit recipe. Returns True if a row was removed."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
-        cur = self.conn.execute(
-            "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
-            (photo_id,),
-        )
-        self.conn.commit()
-        return cur.rowcount > 0
+        return self._edits_repository().clear_photo_recipe(photo_id)
 
     # --- edit presets (global reusable development settings) ----------------------
 
@@ -11206,30 +11164,7 @@ class Database:
         Presets are global (not workspace-scoped): they capture a look, and a
         look is the same look in every workspace.
         """
-        from edit_batch import decode_preset
-
-        rows = self.conn.execute(
-            "SELECT id, name, recipe_json, updated_at FROM edit_presets"
-        ).fetchall()
-        out = []
-        for row in rows:
-            try:
-                recipe, fields = decode_preset(row["recipe_json"])
-            except Exception:
-                log.warning(
-                    "Invalid stored edit preset %s (%r)",
-                    row["id"], row["name"], exc_info=True,
-                )
-                continue
-            out.append({
-                "id": row["id"],
-                "name": row["name"],
-                "recipe": recipe,
-                **({"fields": fields} if fields is not None else {}),
-                "updated_at": row["updated_at"],
-            })
-        out.sort(key=lambda p: p["name"].casefold())
-        return out
+        return self._edits_repository().list_presets()
 
     def save_edit_preset(self, name, recipe, fields=None):
         """Create or overwrite (by trimmed name) a global edit preset.
@@ -11241,67 +11176,11 @@ class Database:
         effective adjustment; explicit fields may store neutral resets.
         Returns the stored preset dict.
         """
-        from image_edits import (
-            RecipeError,
-            normalize_recipe,
-            recipe_to_json,
-        )
-
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("preset name must not be blank")
-        name = name.strip()
-        if len(name) > self.EDIT_PRESET_NAME_MAX:
-            raise ValueError(
-                f"preset name must be {self.EDIT_PRESET_NAME_MAX} "
-                "characters or fewer"
-            )
-
-        if isinstance(recipe, str):
-            recipe = normalize_recipe(recipe) or {}
-        if not isinstance(recipe, dict):
-            raise RecipeError("recipe must be an object")
-        from edit_batch import decode_preset, encode_preset
-
-        if fields is not None:
-            recipe_json = encode_preset(recipe, fields)
-        else:
-            normalized = normalize_recipe(
-                {"adjustments": recipe.get("adjustments") or {}}
-            )
-            if not (normalized or {}).get("adjustments"):
-                raise ValueError("preset must include at least one adjustment")
-            recipe_json = recipe_to_json(normalized)
-
-        self.conn.execute(
-            """INSERT INTO edit_presets (name, recipe_json, updated_at)
-               VALUES (?, ?, datetime('now'))
-               ON CONFLICT(name) DO UPDATE SET
-                   recipe_json = excluded.recipe_json,
-                   updated_at = excluded.updated_at""",
-            (name, recipe_json),
-        )
-        self.conn.commit()
-        row = self.conn.execute(
-            "SELECT id, name, recipe_json, updated_at FROM edit_presets "
-            "WHERE name = ?",
-            (name,),
-        ).fetchone()
-        saved_recipe, saved_fields = decode_preset(row["recipe_json"])
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            "recipe": saved_recipe,
-            **({"fields": saved_fields} if saved_fields is not None else {}),
-            "updated_at": row["updated_at"],
-        }
+        return self._edits_repository().save_preset(name, recipe, fields=fields)
 
     def delete_edit_preset(self, preset_id):
         """Delete an edit preset. Returns True if a row was removed."""
-        cur = self.conn.execute(
-            "DELETE FROM edit_presets WHERE id = ?", (preset_id,)
-        )
-        self.conn.commit()
-        return cur.rowcount > 0
+        return self._edits_repository().delete_preset(preset_id)
 
     def prune_pipeline_cache_for_ids(self, ids):
         """Remove ``ids`` from the workspace's pipeline review cache file.
