@@ -201,13 +201,15 @@ def create_workspace_blueprint(
         # workspace_effective_setting() reads this override with bool(), so a
         # stored string like "false" would resolve to True and the PUT
         # True -> False transition check would never queue the XMP keyword
-        # cleanup. Require a real boolean (or null / omitted). This is
-        # stricter than config_schema.validate_value, which coerces strings.
-        location_keywords = (overrides or {}).get(LOCATION_KEYWORDS_SETTING)
-        if location_keywords is not None and not isinstance(location_keywords, bool):
-            return json_error(
-                f"{LOCATION_KEYWORDS_SETTING} must be a boolean or null"
-            )
+        # cleanup. A stored null would likewise read as False and override a
+        # global True. Require a real boolean when the key is present; omit it
+        # to inherit the global value. This matches the schema (a non-nullable
+        # bool) and is stricter than config_schema.validate_value, which
+        # coerces strings.
+        if LOCATION_KEYWORDS_SETTING in (overrides or {}) and not isinstance(
+            overrides[LOCATION_KEYWORDS_SETTING], bool
+        ):
+            return json_error(f"{LOCATION_KEYWORDS_SETTING} must be a boolean")
         pipeline_overrides = (overrides or {}).get("pipeline")
         # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
         # name) to ``pipeline.default_process_id`` before existence checks.
