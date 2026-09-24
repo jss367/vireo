@@ -1311,3 +1311,161 @@ def test_merge_phantom_sibling_edits_link_staged_survivor(db, tmp_path):
     assert counts["preserved_edit_count"] == 1
     assert db.get_sync_only_photo_paths(sibling) == {
         t["staged"]: str(tmp_path / "arch" / "day")}
+
+
+# -- structure ---------------------------------------------------------------
+
+MOVED = [
+    "create_move_rule", "get_move_rule", "list_move_rules", "update_move_rule",
+    "delete_move_rule", "touch_move_rule", "batch_update_photo_folder",
+    "move_folder_path", "_newest_location_change_key",
+    "_move_location_state_for_merge", "_reconcile_conflicting_keyword_edits",
+    "_carry_keyword_associations_for_merge", "_photo_keyword_ids_matching",
+    "_transfer_gps_review_for_merge", "_transfer_review_state_for_merge",
+    "_transfer_edit_recipe_for_merge", "_link_survivor_for_sibling_edits",
+    "get_sync_only_photo_paths", "merge_staged_tree_into_archive",
+    "check_filename_collisions", "query_move_rule_matches",
+]
+
+
+def _method_ast(name):
+    import ast
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    return ast.parse(source).body[0]
+
+
+def _self_attrs(fn):
+    import ast
+
+    return {
+        node.attr for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name) and node.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", MOVED)
+def test_moves_merge_method_delegates_to_repository(name):
+    attrs = _self_attrs(_method_ast(name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to MovesMergeRepository")
+    assert "_moves_merge_repository" in attrs, (
+        f"Database.{name} no longer delegates to MovesMergeRepository")
+
+
+def test_keyword_retags_stay_on_the_facade():
+    """``test_keyword_provenance_contract`` only sees ``self.tag_photo(...)``."""
+    import ast
+
+    import repositories.moves_merge as repo_module
+
+    for name, expected in (
+        ("_move_location_state_for_merge", {"tag_photo"}),
+        ("_carry_keyword_associations_for_merge", {"tag_photo", "untag_photo"}),
+    ):
+        called = {
+            node.func.attr for node in ast.walk(_method_ast(name))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+        }
+        assert expected <= called, name
+    tree = ast.parse(open(repo_module.__file__, encoding="utf-8").read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            callee = func.attr if isinstance(func, ast.Attribute) else getattr(
+                func, "id", None)
+            assert callee not in {"tag_photo", "untag_photo"}, (
+                "keyword re-tagging must stay on Database so the provenance "
+                "contract sees it")
+
+
+def test_merge_wires_every_callback_to_the_facade():
+    import ast
+
+    expected = {
+        "workspace_id_fn": "_ws_id",
+        "root_ancestor_exists": "_active_ws_root_ancestor_exists",
+        "root_descendant_exists": "_active_ws_root_descendant_exists",
+        "prune_nonroot_links_outside_roots": "_prune_ws_nonroot_links_outside_roots",
+        "materialize_workspace_descendants": "_materialize_workspace_descendants",
+        "add_workspace_folder": "add_workspace_folder",
+        "add_workspace_folder_no_commit": "_add_workspace_folder_no_commit",
+        "move_location_state": "_move_location_state_for_merge",
+        "reconcile_keyword_edits": "_reconcile_conflicting_keyword_edits",
+        "transfer_review_state": "_transfer_review_state_for_merge",
+        "link_survivor_for_sibling_edits": "_link_survivor_for_sibling_edits",
+        "update_folder_counts": "update_folder_counts",
+    }
+    call = next(
+        node for node in ast.walk(_method_ast("merge_staged_tree_into_archive"))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "merge_staged_tree_into_archive"
+    )
+    wired = {
+        kw.arg: kw.value.attr for kw in call.keywords
+        if isinstance(kw.value, ast.Attribute)
+        and isinstance(kw.value.value, ast.Name) and kw.value.value.id == "self"
+    }
+    assert wired == expected
+    others = {kw.arg for kw in call.keywords} - set(expected)
+    assert others == {"case_insensitive_root", "invalidate_new_images"}
+
+
+@pytest.mark.parametrize("name,callback,target", [
+    ("move_folder_path", "relink_parents_by_path", "_relink_parents_by_path"),
+    ("_reconcile_conflicting_keyword_edits", "carry_keyword_associations",
+     "_carry_keyword_associations_for_merge"),
+    ("_transfer_review_state_for_merge", "transfer_gps_review",
+     "_transfer_gps_review_for_merge"),
+    ("_transfer_review_state_for_merge", "transfer_edit_recipe",
+     "_transfer_edit_recipe_for_merge"),
+])
+def test_helper_callbacks_route_through_the_facade(name, callback, target):
+    import ast
+
+    wired = {
+        kw.arg: ast.unparse(kw.value)
+        for node in ast.walk(_method_ast(name)) if isinstance(node, ast.Call)
+        for kw in node.keywords
+    }
+    assert wired[callback] == f"self.{target}"
+
+
+def test_facade_signatures_are_unchanged():
+    import inspect
+
+    from repositories import UNSET
+
+    expected = {
+        "create_move_rule": "(self, name, destination, criteria)",
+        "get_move_rule": "(self, rule_id)",
+        "list_move_rules": "(self)",
+        "delete_move_rule": "(self, rule_id)",
+        "touch_move_rule": "(self, rule_id)",
+        "batch_update_photo_folder": "(self, photo_ids, target_folder_id)",
+        "move_folder_path": "(self, folder_id, new_path, new_name=None)",
+        "_newest_location_change_key": "(self, photo_id)",
+        "_move_location_state_for_merge": "(self, losing_id, surviving_id)",
+        "_reconcile_conflicting_keyword_edits": "(self, losing_id, surviving_id)",
+        "_carry_keyword_associations_for_merge": "(self, losing_id, surviving_id, by_key)",
+        "_photo_keyword_ids_matching": "(self, photo_id, match_key)",
+        "_transfer_gps_review_for_merge": "(self, losing_id, surviving_id)",
+        "_transfer_review_state_for_merge": "(self, losing_id, surviving_id)",
+        "_transfer_edit_recipe_for_merge": "(self, losing_id, surviving_id)",
+        "_link_survivor_for_sibling_edits": "(self, workspace_id, photo_id)",
+        "get_sync_only_photo_paths": "(self, workspace_id=None)",
+        "merge_staged_tree_into_archive": "(self, staged_root_id, archive_path)",
+        "check_filename_collisions": "(self, photo_ids, target_folder_id)",
+        "query_move_rule_matches": "(self, criteria)",
+    }
+    for name, sig in expected.items():
+        assert str(inspect.signature(getattr(Database, name))) == sig, name
+    params = inspect.signature(Database.update_move_rule).parameters
+    assert list(params) == ["self", "rule_id", "name", "destination", "criteria"]
+    assert all(params[p].default is UNSET for p in ("name", "destination", "criteria"))
