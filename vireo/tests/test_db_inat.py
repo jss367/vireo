@@ -7,8 +7,10 @@ hold regardless of whether the SQL lives in ``db.py`` or in
 repository.
 """
 
+import ast
 import inspect
 import sqlite3
+import textwrap
 
 import pytest
 from db import Database
@@ -232,7 +234,34 @@ def test_get_does_not_open_a_transaction(db):
     assert not db.conn.in_transaction
 
 
-# -- signatures ---------------------------------------------------------------
+# -- structure: the iNaturalist SQL lives in the repository -------------------
+
+# Database methods whose SQL moved to repositories/inat.py. Each stays on
+# Database as a thin wrapper so existing call sites keep working; none may
+# reach the connection directly again.
+_DELEGATING_INAT_METHODS = (
+    "record_inat_submission",
+    "get_inat_submissions",
+)
+
+
+@pytest.mark.parametrize("name", _DELEGATING_INAT_METHODS)
+def test_inat_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to InatRepository"
+    )
+    assert "_inat_repository" in attrs, (
+        f"Database.{name} no longer delegates to InatRepository"
+    )
 
 
 def test_inat_signatures_unchanged():

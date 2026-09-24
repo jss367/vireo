@@ -28028,31 +28028,16 @@ class Database:
 
     def record_inat_submission(self, photo_id, observation_id, observation_url):
         """Record a successful iNaturalist submission."""
-        self.conn.execute(
-            """INSERT OR IGNORE INTO inat_submissions
-               (photo_id, observation_id, observation_url)
-               VALUES (?, ?, ?)""",
-            (photo_id, observation_id, observation_url),
+        self._inat_repository().record_submission(
+            photo_id, observation_id, observation_url
         )
-        self.conn.commit()
 
     def get_inat_submissions(self, photo_ids):
         """Return {photo_id: {observation_id, observation_url, submitted_at}} for given IDs."""
-        if not photo_ids:
-            return {}
-        result = {}
-        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
-            placeholders = ",".join("?" * len(chunk))
-            rows = self.conn.execute(
-                f"SELECT photo_id, observation_id, observation_url, submitted_at"
-                f" FROM inat_submissions WHERE photo_id IN ({placeholders})"
-                f" ORDER BY submitted_at DESC, id DESC",
-                list(chunk),
-            ).fetchall()
-            # Rows arrive newest-first; keep the first seen per photo so each
-            # photo maps to its most recent submission (a dict comprehension
-            # here would let older rows overwrite newer ones).
-            for r in rows:
-                if r["photo_id"] not in result:
-                    result[r["photo_id"]] = dict(r)
-        return result
+        return self._inat_repository().get_submissions(photo_ids)
+
+    def _inat_repository(self):
+        """Build the (catalog-wide) iNaturalist repository on this connection."""
+        from repositories.inat import InatRepository
+
+        return InatRepository(self.conn, chunk_size=_SQLITE_PARAM_CHUNK_SIZE)
