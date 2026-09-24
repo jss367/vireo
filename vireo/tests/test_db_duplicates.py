@@ -2,18 +2,21 @@
 
 The behavior tests exercise the duplicate methods only through the public
 ``Database`` façade, so they hold whether the SQL lives in ``db.py`` or in
-``repositories/duplicates.py``. They cover the add-photo auto-resolve
-hook, group listing, resolver-driven and folder-driven resolution, the
-winner/loser merge, and reopening a resolved group.
+``repositories/duplicates.py``; the structural tests at the end keep it in
+the repository. They cover the add-photo auto-resolve hook, group listing,
+resolver-driven and folder-driven resolution, the winner/loser merge, and
+reopening a resolved group.
 
 The pure resolver (``vireo/duplicates.py``) has its own tests; these only pin
 how the database feeds it and applies its verdict.
 """
 
+import ast
 import inspect
 import logging
 import os
 import sqlite3
+import textwrap
 
 import pytest
 from db import Database
@@ -757,7 +760,41 @@ def test_reopen_returns_zero_when_nothing_is_rejected(db, folder):
     assert not db.conn.in_transaction
 
 
-# -- structure --------------------------------------------------------------
+# -- structure: the SQL lives in DuplicatesRepository ---------------------------
+#
+# ``_apply_winner_loser_merge`` keeps its provenance fold (keyword_source_max)
+# and its ``self.tag_photo`` calls on the façade: test_keyword_provenance_contract
+# pins that writer to ("db.py", "_apply_winner_loser_merge"), and patches of
+# ``Database.tag_photo`` must still reach the merge.
+
+
+DUPLICATE_METHODS = [
+    "check_and_resolve_duplicates_for_hash",
+    "find_duplicate_groups",
+    "apply_duplicate_resolution",
+    "_apply_winner_loser_merge",
+    "bulk_resolve_by_folder",
+    "reopen_duplicate_group",
+]
+
+
+@pytest.mark.parametrize("name", DUPLICATE_METHODS)
+def test_duplicate_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to DuplicatesRepository"
+    )
+    assert "_duplicates_repository" in attrs, (
+        f"Database.{name} no longer delegates to DuplicatesRepository"
+    )
 
 
 def test_facade_signatures_are_unchanged():
