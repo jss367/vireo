@@ -4,12 +4,16 @@ The behavior tests exercise collection CRUD, the smart-collection rules
 engine (``_build_query_from_rules``), the rule-driven photo queries, the
 stacked Browse projection, filter-value suggestions, and the
 default-collection migrations only through the ``Database`` façade, so they
-hold whether the SQL lives in ``db.py`` or in ``repositories/collections.py``.
+hold whether the SQL lives in ``db.py`` or in ``repositories/collections.py``;
+the structural tests at the end keep it in the repository.
 """
 
+import ast
 import contextlib
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import config as cfg
 import pytest
@@ -17,6 +21,7 @@ from db import (
     GPS_WITHOUT_LOCATION_KEYWORD_RULES,
     NEEDS_IDENTIFICATION_RULES,
     NO_LOCATION_INFORMATION_RULES,
+    Database,
 )
 
 
@@ -612,3 +617,165 @@ def test_migrate_needs_identification_skips_malformed(db):
     assert rules == [None, json.dumps(NEEDS_IDENTIFICATION_RULES)]
     assert db.migrate_default_needs_identification_collection() == 0
     assert not db.conn.in_transaction
+
+
+# -- structure ----------------------------------------------------------------
+
+
+_DELEGATING_COLLECTION_METHODS = (
+    "add_collection",
+    "get_collections",
+    "delete_collection",
+    "rename_collection",
+    "duplicate_collection",
+    "_build_collection_query",
+    "_build_query_from_rules",
+    "_top_prediction_confidence_params",
+    "_photo_sort_clause",
+    "get_collection_photos",
+    "get_collection_photo_ids",
+    "count_collection_photos",
+    "count_collection_photo_availability",
+    "count_photos_for_rules",
+    "_append_folder_restriction",
+    "_append_collection_restriction",
+    "query_photos",
+    "_burst_run_ctes",
+    "_browse_stack_query_parts",
+    "_stack_sort_spec",
+    "_stack_sort_clause",
+    "_ranked_stack_query",
+    "query_browse_stacks",
+    "browse_stack_totals",
+    "query_browse_stack_position_first",
+    "_stacked_photo_ids",
+    "_burst_keys_for_ids",
+    "collapse_browse_stack_photo_ids",
+    "query_photo_ids",
+    "query_photo_position_first",
+    "get_filter_field_values",
+    "_folder_filter_values",
+    "collection_photo_ids",
+    "create_default_collections",
+    "migrate_default_location_collections",
+    "migrate_default_subject_collection",
+    "migrate_default_needs_identification_collection",
+)
+
+# No SQL of their own: they compose other façade methods, so monkeypatches of
+# those (``query_photo_position_first``, ``get_workspaces``, ...) still apply.
+_COMPOSING_COLLECTION_METHODS = {
+    "rules_resolvable": "_build_query_from_rules",
+    "query_photo_position": "query_photo_position_first",
+    "query_browse_stack_position": "query_browse_stack_position_first",
+    "count_browse_stacks": "browse_stack_totals",
+    "get_collection_photo_ids_stacked": "_stacked_photo_ids",
+    "query_photo_ids_stacked": "_stacked_photo_ids",
+    "create_default_collections_for_all_workspaces": "create_default_collections",
+}
+
+
+def _self_attrs(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    return {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_COLLECTION_METHODS)
+def test_collection_method_delegates_to_repository(name):
+    attrs = _self_attrs(name)
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to CollectionRepository"
+    )
+    assert "_collection_repository" in attrs, (
+        f"Database.{name} no longer delegates to CollectionRepository"
+    )
+
+
+def test_candidate_preference_case_delegates_to_repository():
+    from repositories.collections import CollectionRepository
+
+    source = textwrap.dedent(inspect.getsource(Database._candidate_preference_case))
+    assert "CollectionRepository._candidate_preference_case" in source
+    assert Database._candidate_preference_case("id", [5, 7]) == (
+        CollectionRepository._candidate_preference_case("id", [5, 7])
+    ) == "CASE id WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END"
+
+
+@pytest.mark.parametrize("name, callee", sorted(_COMPOSING_COLLECTION_METHODS.items()))
+def test_collection_composition_stays_on_facade(name, callee):
+    attrs = _self_attrs(name)
+    assert "conn" not in attrs
+    assert "_collection_repository" not in attrs
+    assert callee in attrs
+
+
+def test_collection_repository_wiring(db, monkeypatch):
+    import db as db_module
+
+    db.set_active_workspace(None)
+    repo = db._collection_repository()  # resolves the workspace lazily
+    with pytest.raises(RuntimeError):
+        _ = repo.workspace_id
+    db.set_active_workspace(1)
+    assert repo.workspace_id == 1
+    assert repo.conn is db.conn
+    assert repo.get_effective_config == db.get_effective_config
+    assert repo.get_subject_types == db.get_subject_types
+    assert repo.get_folder_subtree_ids == db.get_folder_subtree_ids
+    assert repo._chunks is db_module._chunks
+    assert repo._escape_like is db_module._escape_like
+    assert repo.PHOTO_COLS is Database.PHOTO_COLS
+    assert repo._STACK_SORT_SPECS is Database._STACK_SORT_SPECS
+    assert repo.NEEDS_IDENTIFICATION_RULES is NEEDS_IDENTIFICATION_RULES
+    # Module constants are read when the repository is built, so a patch of
+    # the ``db`` module still reaches the moved SQL.
+    monkeypatch.setattr(db_module, "BURST_GAP_TOLERANCE_SECONDS", 99)
+    assert db._burst_run_ctes({"split_mode": "break", "time_gap": 1})[1] == [100]
+
+
+def test_collection_repository_imports_no_db_code():
+    import repositories.collections as module
+
+    tree = ast.parse(inspect.getsource(module))
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert "db" not in imported
+
+
+def test_collection_facade_signatures_unchanged():
+    sig = {n: str(inspect.signature(getattr(Database, n)))
+           for n in (*_DELEGATING_COLLECTION_METHODS, *_COMPOSING_COLLECTION_METHODS)}
+    assert sig["add_collection"] == "(self, name, rules_json, visual_json=None)"
+    assert sig["_build_query_from_rules"] == (
+        "(self, rules, include_offline_folders=False, row_scoped=False)"
+    )
+    assert sig["get_collection_photos"] == (
+        "(self, collection_id, page=1, per_page=50, photo_ids=None, sort='date', "
+        "include_offline_folders=False)"
+    )
+    assert sig["query_browse_stacks"] == (
+        "(self, rules, sort='date', page=1, per_page=50, collection_id=None, "
+        "folder_id=None, include_offline_folders=False, stack_config=None)"
+    )
+    assert sig["get_filter_field_values"] == (
+        "(self, field, rules=None, q=None, limit=20, folder_id=None, collection_id=None)"
+    )
+    assert sig["collapse_browse_stack_photo_ids"] == (
+        "(self, photo_ids, standalone_ids=None, stack_config=None)"
+    )
+    assert sig["create_default_collections"] == "(self, workspace_id=None)"
