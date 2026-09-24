@@ -6,12 +6,17 @@ in ``db.py`` or in ``repositories/workspace_folders.py``. They cover linking
 and unlinking folders (single, exact, subtree), removal records, descendant
 materialization, root marking and the root/extension queries, moving folders
 between workspaces, the merge helpers that inspect or prune root links, and
-the import-plan unlinked-folder count.
+the import-plan unlinked-folder count. The structural tests at the end keep
+the SQL in ``WorkspaceFolderRepository``.
 """
 
+import ast
+import inspect
 import sqlite3
+import textwrap
 
 import pytest
+from db import Database
 
 
 class _RecordingCache:
@@ -921,3 +926,65 @@ def test_workspace_unlinked_folder_count_batches(db):
     finally:
         db.conn.set_trace_callback(None)
     assert len({s for s in statements if "FROM folders f" in s}) == 2
+
+
+# -- structure -------------------------------------------------------------------
+
+_MOVED_METHODS = [
+    "_add_workspace_folder_no_commit",
+    "add_workspace_folder",
+    "add_workspace_folder_exact",
+    "_removed_workspace_folder_ids",
+    "_folder_removal_root_ids",
+    "_remember_workspace_folder_removals",
+    "remove_workspace_folder",
+    "remove_workspace_folder_tree",
+    "_materialize_workspace_descendants",
+    "mark_workspace_folder_roots",
+    "get_workspace_folders",
+    "get_folder_workspaces",
+    "get_workspace_root_folder_ids",
+    "get_workspace_folder_roots",
+    "get_workspace_extensions",
+    "move_folders_to_workspace",
+    "_active_ws_root_ancestor_exists",
+    "_active_ws_root_descendant_exists",
+    "_prune_ws_nonroot_links_outside_roots",
+    "workspace_unlinked_folder_count",
+]
+
+
+@pytest.mark.parametrize("name", _MOVED_METHODS)
+def test_workspace_folder_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to WorkspaceFolderRepository"
+    )
+    assert "_workspace_folder_repository" in attrs, (
+        f"Database.{name} no longer delegates to WorkspaceFolderRepository"
+    )
+
+
+def test_wrappers_keep_composition_on_the_facade(db, tree, monkeypatch):
+    """Sibling calls stay on ``Database`` so monkeypatches of them apply."""
+    ws, p, a, b, q = tree
+    calls = []
+    original = Database._removed_workspace_folder_ids
+
+    def spy(self, workspace_id):
+        calls.append(workspace_id)
+        return original(self, workspace_id)
+
+    monkeypatch.setattr(Database, "_removed_workspace_folder_ids", spy)
+    db.add_workspace_folder(ws, p, restore_removed=False)
+    _folder(db, "/p/late", p)
+    db.get_workspace_folders(ws)
+    assert calls == [ws, ws]
