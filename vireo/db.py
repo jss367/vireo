@@ -14394,22 +14394,19 @@ class Database:
         if _commit:
             self.conn.commit()
 
+    def _meta_repository(self):
+        """Build the (catalog-wide) db_meta repository on this connection."""
+        from repositories.meta import MetaRepository
+
+        return MetaRepository(self.conn)
+
     def get_meta(self, key):
         """Return the db_meta value for `key`, or None if unset."""
-        row = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key = ?", (key,)
-        ).fetchone()
-        return row["value"] if row else None
+        return self._meta_repository().get(key)
 
     def set_meta(self, key, value, _commit=True):
         """Upsert a db_meta row."""
-        self.conn.execute(
-            "INSERT INTO db_meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, str(value)),
-        )
-        if _commit:
-            self.conn.commit()
+        self._meta_repository().set(key, value, _commit=_commit)
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
