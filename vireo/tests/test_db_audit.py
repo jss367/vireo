@@ -2,15 +2,17 @@
 
 The behavior tests exercise the audit-run and hash-integrity methods only
 through the public ``Database`` façade, so they hold regardless of whether
-the SQL lives in ``db.py`` or in ``repositories/audit.py``; a structural
-test keeps it in the repository. They cover audit-run records,
+the SQL lives in ``db.py`` or in ``repositories/audit.py``; the structural
+test at the end keeps it in the repository. They cover audit-run records,
 the integrity photo/flagged/stats queries (workspace and folder-status
 scoping, ordering, return shapes), and hash-check verdict writes (the three
 update branches, argument validation, and commit boundaries).
 """
 
+import ast
 import inspect
 import sqlite3
+import textwrap
 from datetime import datetime
 
 import pytest
@@ -301,3 +303,34 @@ def test_update_photo_hash_check_signature_defaults():
     assert params["commit"].default is True
     assert params["clear_file_hash"].default is False
 
+
+# -- structure ---------------------------------------------------------------
+
+
+_DELEGATING_AUDIT_METHODS = (
+    "record_audit_run",
+    "get_audit_runs",
+    "get_integrity_photos",
+    "get_integrity_flagged",
+    "get_integrity_stats",
+    "update_photo_hash_check",
+)
+
+
+@pytest.mark.parametrize("name", _DELEGATING_AUDIT_METHODS)
+def test_audit_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to AuditRepository"
+    )
+    assert "_audit_repository" in attrs, (
+        f"Database.{name} no longer delegates to AuditRepository"
+    )

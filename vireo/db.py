@@ -8,7 +8,6 @@ import sqlite3
 import time
 import unicodedata
 import uuid
-from datetime import datetime
 
 from keyword_identity import (
     free_sibling_name,
@@ -4996,6 +4995,21 @@ class Database:
 
     # -- Library integrity verification --
 
+    def _audit_repository(self, *, scoped=True):
+        """Build the audit repository on this connection.
+
+        ``scoped=True`` binds it to the active workspace (raising
+        ``RuntimeError`` when none is set); the catalog-wide hash-check
+        write passes ``scoped=False`` and takes the photo id as an argument.
+        """
+        from repositories.audit import AuditRepository
+
+        return AuditRepository(
+            self.conn,
+            self._ws_id() if scoped else None,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+        )
+
     def record_audit_run(self, check_name, problem_count):
         """Record that an audit check ran now and what it found.
 
@@ -5003,60 +5017,19 @@ class Database:
         previous row. The audit summary reads these to decide whether the
         archive can honestly be called intact.
         """
-        self.conn.execute(
-            "INSERT OR REPLACE INTO audit_runs "
-            "(workspace_id, check_name, ran_at, problem_count) "
-            "VALUES (?, ?, ?, ?)",
-            (self._ws_id(), check_name, datetime.now().isoformat(),
-             int(problem_count)),
-        )
-        self.conn.commit()
+        self._audit_repository().record_run(check_name, problem_count)
 
     def get_audit_runs(self):
         """Return {check_name: {ran_at, problem_count}} for this workspace."""
-        rows = self.conn.execute(
-            "SELECT check_name, ran_at, problem_count FROM audit_runs "
-            "WHERE workspace_id = ?",
-            (self._ws_id(),),
-        ).fetchall()
-        return {
-            r["check_name"]: {
-                "ran_at": r["ran_at"],
-                "problem_count": r["problem_count"],
-            }
-            for r in rows
-        }
+        return self._audit_repository().get_runs()
 
     def get_integrity_photos(self):
         """Return workspace photos with the fields hash verification needs."""
-        rows = self.conn.execute(
-            """SELECT p.id, p.filename, p.file_hash, p.file_mtime,
-                      p.hash_status, p.hash_checked_at, f.path AS folder_path
-               FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                    AND wf.workspace_id = ?
-               JOIN folders f ON f.id = p.folder_id
-                    AND f.status IN ('ok', 'partial')
-               ORDER BY p.id""",
-            (self._ws_id(),),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return self._audit_repository().get_integrity_photos()
 
     def get_integrity_flagged(self):
         """Return workspace photos whose last hash check found a problem."""
-        rows = self.conn.execute(
-            """SELECT p.id AS photo_id, p.filename, p.hash_status,
-                      p.hash_checked_at, f.path AS folder_path
-               FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                    AND wf.workspace_id = ?
-               JOIN folders f ON f.id = p.folder_id
-                    AND f.status IN ('ok', 'partial')
-               WHERE p.hash_status IN ('modified', 'corrupt', 'unreadable')
-               ORDER BY p.hash_status, p.filename""",
-            (self._ws_id(),),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return self._audit_repository().get_integrity_flagged()
 
     def get_integrity_stats(self):
         """Return hash-verification coverage for the active workspace.
@@ -5065,28 +5038,7 @@ class Database:
         after the last verify run have hash_checked_at NULL, so a green
         light can't silently cover files that were never re-hashed.
         """
-        row = self.conn.execute(
-            """SELECT COUNT(*) AS total,
-                      SUM(CASE WHEN p.hash_checked_at IS NOT NULL
-                          THEN 1 ELSE 0 END) AS checked,
-                      SUM(CASE WHEN p.hash_status IN
-                          ('modified', 'corrupt', 'unreadable')
-                          THEN 1 ELSE 0 END) AS flagged
-               FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                    AND wf.workspace_id = ?
-               JOIN folders f ON f.id = p.folder_id
-                    AND f.status IN ('ok', 'partial')""",
-            (self._ws_id(),),
-        ).fetchone()
-        total = row["total"] or 0
-        checked = row["checked"] or 0
-        return {
-            "total": total,
-            "checked": checked,
-            "unchecked": total - checked,
-            "flagged": row["flagged"] or 0,
-        }
+        return self._audit_repository().get_integrity_stats()
 
     def update_photo_hash_check(self, photo_id, status, file_hash=None,
                                 commit=True, clear_file_hash=False):
@@ -5099,31 +5051,10 @@ class Database:
         the ``file_hash`` column (it would otherwise collide as an exact
         duplicate of every other empty placeholder).
         """
-        if clear_file_hash and file_hash is not None:
-            raise ValueError(
-                "clear_file_hash and file_hash are mutually exclusive"
-            )
-        now = datetime.now().isoformat()
-        if clear_file_hash:
-            self.conn.execute(
-                "UPDATE photos SET hash_status = ?, hash_checked_at = ?, "
-                "file_hash = NULL WHERE id = ?",
-                (status, now, photo_id),
-            )
-        elif file_hash is not None:
-            self.conn.execute(
-                "UPDATE photos SET hash_status = ?, hash_checked_at = ?, "
-                "file_hash = ? WHERE id = ?",
-                (status, now, file_hash, photo_id),
-            )
-        else:
-            self.conn.execute(
-                "UPDATE photos SET hash_status = ?, hash_checked_at = ? "
-                "WHERE id = ?",
-                (status, now, photo_id),
-            )
-        if commit:
-            self.conn.commit()
+        self._audit_repository(scoped=False).update_photo_hash_check(
+            photo_id, status, file_hash=file_hash, commit=commit,
+            clear_file_hash=clear_file_hash,
+        )
 
     def get_missing_folders(self):
         """Return missing folders in the active workspace with photo counts."""
