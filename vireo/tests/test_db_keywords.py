@@ -11,9 +11,12 @@ and duplicate-merge flows (which still run through the provenance-pinned
 through ``Database`` so monkeypatches take effect.
 """
 
+import ast
 import contextlib
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import pytest
 from db import Database
@@ -1178,3 +1181,176 @@ def test_resolve_species_by_lineage(db, lib):
     # Two matching homonyms are ambiguous.
     _taxon(db, 10, "Turdus migratorius", "species", 2)
     assert db._resolve_species_by_lineage("Turdus migratorius", ["Aves"]) is None
+
+
+# -- structure ----------------------------------------------------------------------------
+
+
+_DELEGATING_KEYWORD_METHODS = (
+    "filter_out_subject_tagged",
+    "ensure_default_genre_keywords",
+    "migrate_legacy_keyword_types",
+    "count_keywords",
+    "count_keywords_in_workspace",
+    "get_accepted_species",
+    "detect_keyword_case_convention",
+    "resolve_species_display_name",
+    "_species_root_name_for_taxon",
+    "_lookup_taxon_id_for_keyword",
+    "_add_source_species_keyword",
+    "relink_source_species_keywords",
+    "add_keyword",
+    "merge_duplicate_keywords",
+    "_merge_duplicate_keywords_pass",
+    "_normalize_keyword_row_name",
+    "_rename_keyword_dependents",
+    "normalize_keyword_data",
+    "_fold_prediction_species_apostrophes",
+    "_merge_prediction_review_before_delete",
+    "_merge_prediction_metadata_before_delete",
+    "_retarget_prediction_edit_history",
+    "_align_curation_species_case",
+    "_align_curation_history_species",
+    "_species_keyword_maps",
+    "repair_duplicate_photo_species",
+    "_reparent_disambiguated",
+    "get_keyword_tree",
+    "untag_photo",
+    "get_photo_keywords",
+    "get_keywords_for_photos",
+    "get_species_keywords_for_photos",
+    "get_photos_with_equivalent_species",
+    "update_keyword",
+    "get_all_keywords",
+    "is_keyword_species",
+    "_resolve_species_by_lineage",
+    "mark_species_keywords",
+)
+
+# ``test_keyword_provenance_contract`` keys these writers to db.py, and the
+# methods that call ``_merge_keyword_into`` mid-flight keep that call there.
+_KEYWORD_METHODS_KEPT_ON_DATABASE = (
+    "tag_photo",
+    "_merge_keyword_into",
+    "retire_builtin_wildlife_genre",
+    "_upsert_one_keyword",
+    "_normalize_keyword_data_once",
+)
+
+_PROVENANCE_WRITERS = (
+    "tag_photo",
+    "_merge_keyword_into",
+    "retire_builtin_wildlife_genre",
+    "link_keyword_to_place",
+    "_apply_winner_loser_merge",
+)
+
+
+def _self_attrs(fn):
+    source = textwrap.dedent(inspect.getsource(fn))
+    node = ast.parse(source).body[0]
+    return {
+        n.attr
+        for n in ast.walk(node)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_KEYWORD_METHODS)
+def test_keyword_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to KeywordRepository"
+    )
+    assert "_keyword_repository" in attrs, (
+        f"Database.{name} no longer delegates to KeywordRepository"
+    )
+
+
+@pytest.mark.parametrize("name", _KEYWORD_METHODS_KEPT_ON_DATABASE)
+def test_provenance_writers_and_their_merge_callers_stay_on_database(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert "_keyword_repository" not in attrs, (
+        f"Database.{name} must keep its photo_keywords write (or its "
+        "_merge_keyword_into call) in db.py; see test_keyword_provenance_contract"
+    )
+
+
+@pytest.mark.parametrize("name", ["_merge_duplicate_keywords_pass", "update_keyword"])
+def test_split_methods_still_call_merge_on_the_facade(name):
+    assert "_merge_keyword_into" in _self_attrs(getattr(Database, name))
+
+
+def test_keyword_repository_never_references_provenance_writers():
+    import repositories.keywords as module
+
+    tree = ast.parse(inspect.getsource(module))
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names.add(node.value)
+        elif isinstance(node, ast.FunctionDef):
+            names.add(node.name)
+    assert not names & set(_PROVENANCE_WRITERS)
+    assert not set(module.FACADE_METHODS) & set(_PROVENANCE_WRITERS)
+
+
+def test_keyword_repository_routes_facade_calls_through_database(db):
+    repo = db._keyword_repository()
+    from repositories.keywords import FACADE_METHODS
+
+    for name in FACADE_METHODS:
+        assert getattr(repo, name) == getattr(db, name), name
+
+
+def test_keyword_facade_signatures_unchanged():
+    sig = {n: str(inspect.signature(getattr(Database, n)))
+           for n in _DELEGATING_KEYWORD_METHODS}
+    assert sig["add_keyword"] == (
+        "(self, name, parent_id=None, is_species=False, kw_type=None, "
+        "_commit=True, source_taxon_id=None, _resolve_alias=False)"
+    )
+    assert sig["resolve_species_display_name"].startswith(
+        "(self, name, apply_case_convention=True, case_convention=<object object"
+    )
+    assert sig["_add_source_species_keyword"] == (
+        "(self, name, source_taxon_id, parent_id=None, _commit=True)"
+    )
+    assert sig["untag_photo"] == "(self, photo_id, keyword_id, _commit=True)"
+    assert sig["update_keyword"] == "(self, keyword_id, **kwargs)"
+    assert sig["_lookup_taxon_id_for_keyword"] == (
+        "(self, name, prefer_species=False, species_only=False)"
+    )
+    assert sig["get_photos_with_equivalent_species"] == (
+        "(self, photo_ids, keyword_id, exclude_keyword_ids=None)"
+    )
+    assert sig["get_species_keywords_for_photos"] == (
+        "(self, photo_ids, include_identities=False)"
+    )
+    assert sig["_normalize_keyword_row_name"] == (
+        "(self, keyword_id, disambiguate_on_conflict=False)"
+    )
+
+
+def test_keyword_repository_never_hands_itself_out_as_the_database():
+    """Moved bodies that passed ``self`` (the Database) to a helper must pass
+    ``self.db`` now; a bare ``self`` argument would hand over the repository."""
+    import repositories.keywords as module
+
+    tree = ast.parse(inspect.getsource(module))
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    bare = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "self"
+        and not (isinstance(parents.get(node), ast.Attribute)
+                 and parents[node].value is node)
+        and not isinstance(parents.get(node), ast.arguments)
+    ]
+    # The only one is ``__init__`` storing the façade (``setattr(self, ...)``).
+    assert len(bare) == 1
