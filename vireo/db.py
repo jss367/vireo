@@ -8990,6 +8990,10 @@ class Database:
 
     _DUPLICATE_PHOTO_SPECIES_REPAIR_KEY = "duplicate_photo_species_repaired_v1"
 
+    def has_possible_duplicate_photo_species(self):
+        """Whether ``repair_duplicate_photo_species`` could find anything."""
+        return self._keyword_repository().has_possible_duplicate_photo_species()
+
     def repair_duplicate_photo_species(self):
         """Remove redundant same-photo associations for one species taxon.
 

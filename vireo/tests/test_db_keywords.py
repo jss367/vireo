@@ -1230,6 +1230,7 @@ _DELEGATING_KEYWORD_METHODS = (
     "_align_curation_species_case",
     "_align_curation_history_species",
     "_species_keyword_maps",
+    "has_possible_duplicate_photo_species",
     "repair_duplicate_photo_species",
     "_reparent_disambiguated",
     "get_keyword_tree",

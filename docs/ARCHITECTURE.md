@@ -12,7 +12,7 @@ that information for interactive use.
   Trash helpers (`_trash_paths` and friends, which tests patch on the `app`
   module). `create_app` builds the per-app objects (the request DB getter,
   the job runner, and the services that carry state), runs the startup
-  catalog repairs, registers the request hooks (`web.app_hooks`), registers
+  catalog repairs (`StartupTasks.run_catalog_repairs`), registers the request hooks (`web.app_hooks`), registers
   every blueprint, and adds the `/api/v1` aliases. It defines no routes:
   `test_no_new_routes_in_app_py` holds the limit at zero.
 - Blueprints live in `vireo/web/`, one module per route group, each built by

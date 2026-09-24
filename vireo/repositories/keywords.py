@@ -1842,6 +1842,30 @@ class KeywordRepository:
         }
         return unique, set(species_by_key.keys())
 
+    def has_possible_duplicate_photo_species(self):
+        """Whether any photo carries a typed species/taxonomy tag beside
+        another tag.
+
+        The legacy bug ``repair_duplicate_photo_species`` cleans up always
+        left such a pair, so ``False`` means the repair cannot find anything
+        and its one-shot marker is safe to stamp without parsing taxonomy.
+        """
+        return self.conn.execute(
+            """SELECT 1
+               FROM photo_keywords species_pk
+               JOIN keywords species_k
+                 ON species_k.id = species_pk.keyword_id
+               WHERE (species_k.is_species = 1
+                      OR species_k.type = 'taxonomy')
+                 AND EXISTS (
+                     SELECT 1
+                     FROM photo_keywords other_pk
+                     WHERE other_pk.photo_id = species_pk.photo_id
+                       AND other_pk.keyword_id != species_pk.keyword_id
+                 )
+               LIMIT 1"""
+        ).fetchone() is not None
+
     def repair_duplicate_photo_species(self):
         """Remove redundant same-photo associations for one species taxon.
 
