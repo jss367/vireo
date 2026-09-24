@@ -11775,54 +11775,44 @@ class Database:
     # ------------------------------------------------------------------
     # preview_cache LRU
     # ------------------------------------------------------------------
+    def _caches_repository(self):
+        """Build the preview/offline-original cache repository on this connection.
+
+        Both caches are catalog-wide, so the repository takes no workspace id.
+        The retry helpers are read from this module at call time so tests that
+        patch ``db.commit_with_retry`` / ``db.execute_with_retry`` still apply.
+        """
+        from repositories.caches import CachesRepository
+
+        return CachesRepository(
+            self.conn,
+            execute_with_retry=execute_with_retry,
+            commit_with_retry=commit_with_retry,
+        )
+
     def preview_cache_insert(self, photo_id, size, bytes_):
         """Insert or replace a preview_cache entry. last_access_at = now()."""
-        import time
-        self.conn.execute(
-            "INSERT OR REPLACE INTO preview_cache "
-            "(photo_id, size, bytes, last_access_at) VALUES (?, ?, ?, ?)",
-            (photo_id, size, bytes_, time.time()),
-        )
-        self.conn.commit()
+        self._caches_repository().preview_insert(photo_id, size, bytes_)
 
     def preview_cache_touch(self, photo_id, size):
         """Update last_access_at for an existing entry. No-op if missing."""
-        import time
-        self.conn.execute(
-            "UPDATE preview_cache SET last_access_at=? WHERE photo_id=? AND size=?",
-            (time.time(), photo_id, size),
-        )
-        self.conn.commit()
+        self._caches_repository().preview_touch(photo_id, size)
 
     def preview_cache_delete(self, photo_id, size):
         """Delete a preview_cache entry (caller removes the file)."""
-        self.conn.execute(
-            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
-            (photo_id, size),
-        )
-        self.conn.commit()
+        self._caches_repository().preview_delete(photo_id, size)
 
     def preview_cache_total_bytes(self):
         """Return total bytes tracked in preview_cache."""
-        row = self.conn.execute(
-            "SELECT COALESCE(SUM(bytes), 0) AS total FROM preview_cache"
-        ).fetchone()
-        return row["total"]
+        return self._caches_repository().preview_total_bytes()
 
     def preview_cache_oldest_first(self):
         """Return all rows ordered by last_access_at ascending (oldest first)."""
-        return self.conn.execute(
-            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache "
-            "ORDER BY last_access_at ASC"
-        ).fetchall()
+        return self._caches_repository().preview_oldest_first()
 
     def preview_cache_get(self, photo_id, size):
         """Return the row for (photo_id, size), or None."""
-        return self.conn.execute(
-            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache "
-            "WHERE photo_id=? AND size=?",
-            (photo_id, size),
-        ).fetchone()
+        return self._caches_repository().preview_get(photo_id, size)
 
     # ------------------------------------------------------------------
     # offline original cache
@@ -11840,49 +11830,27 @@ class Database:
         status,
         error=None,
     ):
-        execute_with_retry(
-            self.conn,
-            """INSERT OR REPLACE INTO offline_originals
-               (photo_id, original_path, xmp_path, companion_path, bytes,
-                source_size, source_mtime, cached_at, status, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                photo_id,
-                original_path,
-                xmp_path,
-                companion_path,
-                bytes_,
-                source_size,
-                source_mtime,
-                cached_at,
-                status,
-                error,
-            ),
+        self._caches_repository().offline_original_upsert(
+            photo_id,
+            original_path,
+            xmp_path,
+            companion_path,
+            bytes_,
+            source_size,
+            source_mtime,
+            cached_at,
+            status,
+            error,
         )
-        commit_with_retry(self.conn)
 
     def offline_original_get(self, photo_id):
-        return self.conn.execute(
-            """SELECT photo_id, original_path, xmp_path, companion_path, bytes,
-                      source_size, source_mtime, cached_at, status, error
-               FROM offline_originals WHERE photo_id=?""",
-            (photo_id,),
-        ).fetchone()
+        return self._caches_repository().offline_original_get(photo_id)
 
     def offline_original_delete(self, photo_id):
-        execute_with_retry(
-            self.conn,
-            "DELETE FROM offline_originals WHERE photo_id=?",
-            (photo_id,),
-        )
-        commit_with_retry(self.conn)
+        self._caches_repository().offline_original_delete(photo_id)
 
     def offline_original_total_bytes(self):
-        row = self.conn.execute(
-            "SELECT COALESCE(SUM(bytes), 0) AS total FROM offline_originals "
-            "WHERE status='cached'"
-        ).fetchone()
-        return row["total"]
+        return self._caches_repository().offline_original_total_bytes()
 
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""
