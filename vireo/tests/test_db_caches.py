@@ -8,8 +8,10 @@ return shapes, and which writes go through the lock-retry helpers
 (``execute_with_retry`` / ``commit_with_retry``) and which don't.
 """
 
+import ast
 import inspect
 import sqlite3
+import textwrap
 import time
 
 import db as db_module
@@ -443,3 +445,52 @@ def test_caches_are_catalog_wide(db):
     db.offline_original_delete(pid)
     db.preview_cache_insert(pid, 2560, 5)
     db.offline_original_upsert(**_offline_args(pid))
+
+
+# -- structure ----------------------------------------------------------------
+
+
+_MOVED_CACHE_METHODS = [
+    "preview_cache_insert",
+    "preview_cache_touch",
+    "preview_cache_delete",
+    "preview_cache_total_bytes",
+    "preview_cache_oldest_first",
+    "preview_cache_get",
+    "offline_original_upsert",
+    "offline_original_get",
+    "offline_original_delete",
+    "offline_original_total_bytes",
+]
+
+
+@pytest.mark.parametrize("name", _MOVED_CACHE_METHODS)
+def test_caches_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to CachesRepository"
+    )
+    assert "_caches_repository" in attrs, (
+        f"Database.{name} no longer delegates to CachesRepository"
+    )
+
+
+def test_caches_repository_imports_no_db_code():
+    import repositories.caches as caches_module
+
+    tree = ast.parse(inspect.getsource(caches_module))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module)
+    assert "db" not in imported
