@@ -162,7 +162,7 @@ def test_create_workspace_rejects_string_location_keywords_override(app_and_db):
     assert {ws["id"] for ws in db.get_workspaces()} == before
 
 
-@pytest.mark.parametrize("value", [True, False, None])
+@pytest.mark.parametrize("value", [True, False])
 def test_create_workspace_accepts_boolean_location_keywords_override(
     app_and_db, value,
 ):
@@ -187,6 +187,38 @@ def test_update_workspace_rejects_string_location_keywords_override(app_and_db):
 
     resp = client.put(f"/api/workspaces/{ws_id}", json={
         "config_overrides": {"write_location_keywords_to_xmp": "false"},
+    })
+    assert resp.status_code == 400
+    assert "write_location_keywords_to_xmp" in resp.get_json()["error"]
+    assert _stored_overrides(db, ws_id) == {"write_location_keywords_to_xmp": True}
+
+
+def test_create_workspace_rejects_null_location_keywords_override(app_and_db):
+    """A stored null reads back as False via bool() and would silently
+    override a global True, so the key must be a boolean or omitted."""
+    app, db = app_and_db
+    client = app.test_client()
+    before = {ws["id"] for ws in db.get_workspaces()}
+
+    resp = client.post("/api/workspaces", json={
+        "name": "Null Override",
+        "config_overrides": {"write_location_keywords_to_xmp": None},
+    })
+    assert resp.status_code == 400
+    assert "write_location_keywords_to_xmp" in resp.get_json()["error"]
+    assert {ws["id"] for ws in db.get_workspaces()} == before
+
+
+def test_update_workspace_rejects_null_location_keywords_override(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = client.post("/api/workspaces", json={
+        "name": "WS",
+        "config_overrides": {"write_location_keywords_to_xmp": True},
+    }).get_json()["id"]
+
+    resp = client.put(f"/api/workspaces/{ws_id}", json={
+        "config_overrides": {"write_location_keywords_to_xmp": None},
     })
     assert resp.status_code == 400
     assert "write_location_keywords_to_xmp" in resp.get_json()["error"]
