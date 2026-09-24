@@ -1,4 +1,21 @@
-"""Persistence for workspace-scoped photo color labels."""
+"""Persistence for workspace-scoped photo color labels.
+
+Color labels and their per-color descriptions are scoped to the active
+workspace, so ``Database`` builds the repository with ``self._ws_id()`` and
+this class holds the SQL. Descriptions ride in the workspace's
+``config_overrides`` JSON blob (see ``get_descriptions`` /
+``set_description``); the read fails soft — bad JSON or a stale schema
+returns ``{}`` rather than raising — so a corrupt override never blocks
+labelling. The color-name whitelist and description length cap
+(``VALID_COLOR_LABELS``, ``MAX_COLOR_LABEL_DESCRIPTION_LENGTH``) are module
+constants that ``Database`` re-exports so callers can validate before
+delegating. ``Database`` keeps the wrappers
+(``set_color_label``, ``remove_color_label``, ``get_color_label``,
+``get_color_labels_for_photos``, ``filter_photo_ids_in_workspace``,
+``batch_set_color_label``, ``get_color_label_descriptions``,
+``set_color_label_description``) as one-line delegations and calls in here
+for the SQL.
+"""
 
 import json
 

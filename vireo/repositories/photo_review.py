@@ -1,4 +1,22 @@
-"""Persistence for workspace-scoped photo ratings and flags."""
+"""Persistence for workspace-scoped photo ratings and flags.
+
+Ratings (0-5) and flags (``'none'`` / ``'flagged'`` / ``'rejected'``) live on
+``photos`` rows, but the workspace check runs against ``workspace_folders``
+so a photo whose folder is not linked to the active workspace cannot be
+rated or flagged from the façade's write paths. ``Database`` builds the
+repository with ``self._active_workspace_id`` — not ``self._ws_id()`` — so
+``_photo_review_repository()`` never raises off the active workspace; the
+``verify_workspace=True`` writes still raise if the workspace is unset,
+because ``_verify_photo`` demands one. ``Database`` keeps the wrappers
+(``update_photo_rating``, ``batch_update_photo_rating``,
+``update_photo_flag``, ``batch_update_photo_flag``) as one-line delegations
+and calls in here for the SQL. ``_commit=False`` on ``set_flag`` is
+carried through unchanged for callers that already hold ``BEGIN IMMEDIATE``
+(the prediction-decision lock), so the writer lock is not released
+mid-decision. The wildlife-exclusion toggle (``update_photo_wildlife_excluded``)
+is a different column with its own workspace check and stays on
+``Database``.
+"""
 
 
 class PhotoReviewRepository:
