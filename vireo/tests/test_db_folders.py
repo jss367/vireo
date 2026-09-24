@@ -12,10 +12,13 @@ methods (``add_workspace_folder``, ``delete_photos``,
 that the call still routes through it.
 """
 
+import ast
 import contextlib
+import inspect
 import logging
 import os
 import sqlite3
+import textwrap
 import unicodedata
 
 import db as db_module
@@ -988,3 +991,131 @@ def test_update_folder_counts_recomputes_and_commits(db):
     with _reader(db) as r:
         counts = dict(r.execute("SELECT id, photo_count FROM folders").fetchall())
     assert counts == {a: 2, b: 0}
+
+
+# -- structure ----------------------------------------------------------------
+
+_DELEGATING_FOLDER_METHODS = (
+    "repair_missing_folder_parents",
+    "repair_stale_folder_parents",
+    "_folder_subtree_ids_by_path",
+    "_local_source_descendant_ids",
+    "add_folder",
+    "get_folder_tree",
+    "get_folder_subtree_ids",
+    "get_folder",
+    "check_folder_health",
+    "get_missing_folders",
+    "get_missing_photos",
+    "nearest_ancestor_folder_id",
+    "_relink_parents_by_path",
+    "relocate_folder",
+    "_merge_into_existing",
+    "_folders_linked_in_other_workspace",
+    "delete_folder",
+    "count_folders",
+    "get_folders_with_quality_data",
+    "update_folder_counts",
+)
+
+
+def _method_ast(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    return ast.parse(source).body[0]
+
+
+@pytest.mark.parametrize("name", _DELEGATING_FOLDER_METHODS)
+def test_folder_method_delegates_to_repository(name):
+    fn = _method_ast(name)
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to FolderRepository"
+    )
+    assert "_folder_repository" in attrs, (
+        f"Database.{name} no longer delegates to FolderRepository"
+    )
+
+
+# Façade methods a folder wrapper hands to the repository, so the call still
+# routes through ``Database`` (and its monkeypatches) at the same point in the
+# SQL.
+_FACADE_CALLBACKS = {
+    "repair_stale_folder_parents": {"nearest_ancestor_id": "nearest_ancestor_folder_id"},
+    "_folder_subtree_ids_by_path": {
+        "local_source_descendant_ids": "_local_source_descendant_ids",
+    },
+    "_relink_parents_by_path": {"nearest_ancestor_id": "nearest_ancestor_folder_id"},
+    "relocate_folder": {
+        "merge_into_existing": "_merge_into_existing",
+        "relink_parents_by_path": "_relink_parents_by_path",
+    },
+    "_merge_into_existing": {
+        "transfer_gps_review": "_transfer_gps_review_for_merge",
+        "relink_parents_by_path": "_relink_parents_by_path",
+    },
+    "delete_folder": {
+        "subtree_ids_by_path": "_folder_subtree_ids_by_path",
+        "linked_in_other_workspace": "_folders_linked_in_other_workspace",
+        "delete_photos": "delete_photos",
+        "remember_removals": "_remember_workspace_folder_removals",
+    },
+}
+
+
+@pytest.mark.parametrize("name", sorted(_FACADE_CALLBACKS))
+def test_folder_wrapper_passes_facade_methods_as_callbacks(name):
+    passed = {
+        kw.arg: kw.value.attr
+        for node in ast.walk(_method_ast(name))
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if isinstance(kw.value, ast.Attribute)
+        and isinstance(kw.value.value, ast.Name)
+        and kw.value.value.id == "self"
+    }
+    for kwarg, facade in _FACADE_CALLBACKS[name].items():
+        assert passed.get(kwarg) == facade, (name, kwarg)
+
+
+def test_add_folder_keeps_the_workspace_link_on_the_facade():
+    calls = {
+        node.func.attr
+        for node in ast.walk(_method_ast("add_folder"))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "add_workspace_folder" in calls
+
+
+def test_folder_repository_imports_no_db_code():
+    import repositories.folders as folders_module
+
+    tree = ast.parse(inspect.getsource(folders_module))
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert "db" not in imported
+
+
+def test_folder_repository_chunks_by_its_chunk_size(db):
+    from repositories.folders import FolderRepository
+
+    repo = FolderRepository(
+        db.conn, None, commit_with_retry=None, path_for_subtree_match=None,
+        stored_parent_path=None, subtree_prefix=None, subtree_relative=None,
+        join_subtree_path=None, chunk_size=2,
+    )
+    assert list(repo._chunks(range(5))) == [[0, 1], [2, 3], [4]]
+    assert list(repo._chunks([])) == []
