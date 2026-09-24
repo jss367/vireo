@@ -140,10 +140,13 @@ def test_shared_context_menu_scrolls_within_viewport(app_and_db):
     lower entries (Prepare Full Resolution, Export, Delete) off-screen and
     unclickable after their batch-bar shortcuts were removed."""
     app, _ = app_and_db
-    html = app.test_client().get('/browse').get_data(as_text=True)
-    assert '.vireo-ctx-menu' in html
-    assert 'max-height: calc(100vh - 8px)' in html
-    assert 'overflow-y: auto' in html
+    client = app.test_client()
+    html = client.get('/browse').get_data(as_text=True)
+    assert '/static/vireo-navbar.css' in html
+    css = client.get('/static/vireo-navbar.css').get_data(as_text=True)
+    assert '.vireo-ctx-menu' in css
+    assert 'max-height: calc(100vh - 8px)' in css
+    assert 'overflow-y: auto' in css
 
 
 def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):

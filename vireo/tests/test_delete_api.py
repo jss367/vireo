@@ -247,11 +247,14 @@ def test_delete_modal_marks_files_stage_partial_on_trash_failure(app_and_db):
     failed via ``dataset.failed``.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").data.decode()
+    client = app.test_client()
+    html = client.get("/browse").data.decode()
+    css = client.get("/static/vireo-navbar.css").data.decode()
 
     # A partial CSS state (styled distinctly from complete) must exist so
     # the row can convey "processed with errors" instead of green complete.
-    assert ".delete-progress-stage.partial" in html
+    assert "/static/vireo-navbar.css" in html
+    assert ".delete-progress-stage.partial" in css
     # The set-stage helper must know about the partial state.
     assert "state === 'partial'" in html
     # The updateDeleteProgress function must honour a backend-reported
