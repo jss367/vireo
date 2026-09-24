@@ -9,10 +9,13 @@ pipeline-feature and raw-analysis writers, the mask and eye-keypoint stage
 selectors, and the DINOv2 / per-model embedding stores.
 """
 
+import ast
 import contextlib
+import inspect
 import json
 import os
 import sqlite3
+import textwrap
 
 import config as cfg
 import db as db_module
@@ -935,3 +938,104 @@ def test_get_photos_with_embedding_chunks_photo_ids(db):
     db.conn.set_trace_callback(None)
     selects = [s for s in statements if "FROM photo_embeddings" in s]
     assert len(selects) == 3  # 900 + 900 + 51
+
+
+# -- structure ----------------------------------------------------------------
+
+_DELEGATING_MASKS_FEATURES_METHODS = (
+    "get_photo_mask",
+    "list_masks_for_photo",
+    "set_active_mask_variant",
+    "delete_masks_for_variant",
+    "delete_inactive_masks",
+    "find_stale_masks",
+    "delete_stale_masks",
+    "mask_variant_coverage",
+    "sam_variant_rerun_warning",
+    "mask_variants_summary",
+    "upsert_photo_mask",
+    "save_subject_raw_analysis",
+    "update_photo_pipeline_features",
+    "get_photos_missing_masks",
+    "list_photos_for_eye_keypoint_stage",
+    "update_photo_embeddings",
+    "get_photo_embedding",
+    "upsert_photo_embedding",
+    "get_photos_with_embedding",
+)
+
+
+def _self_attrs(fn_obj):
+    source = textwrap.dedent(inspect.getsource(fn_obj))
+    fn = ast.parse(source).body[0]
+    return {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_MASKS_FEATURES_METHODS)
+def test_masks_features_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to MasksFeaturesRepository"
+    )
+    assert "_masks_features_repository" in attrs, (
+        f"Database.{name} no longer delegates to MasksFeaturesRepository"
+    )
+
+
+@pytest.mark.parametrize("name", ["_masks_dir_real", "_safe_remove_mask_file"])
+def test_mask_file_helpers_hold_no_sql(name):
+    """The containment check reads ``_db_path`` state and stays on ``Database``."""
+    assert "conn" not in _self_attrs(getattr(Database, name))
+
+
+@pytest.mark.parametrize("name", [
+    "delete_masks_for_variant", "delete_inactive_masks", "delete_stale_masks",
+])
+def test_cleanup_deletes_remove_files_through_the_facade(name):
+    assert "_safe_remove_mask_file" in _self_attrs(getattr(Database, name))
+
+
+def test_delete_stale_masks_composes_through_the_facade():
+    assert "find_stale_masks" in _self_attrs(Database.delete_stale_masks)
+
+
+@pytest.mark.parametrize("name", [
+    "set_active_mask_variant", "sam_variant_rerun_warning",
+    "get_photos_missing_masks", "list_photos_for_eye_keypoint_stage",
+])
+def test_detector_floor_reads_config_through_the_facade(name):
+    assert "get_effective_config" in _self_attrs(getattr(Database, name))
+
+
+@pytest.mark.parametrize("name", [
+    "sam_variant_rerun_warning", "list_photos_for_eye_keypoint_stage",
+])
+def test_photo_scope_clause_stays_on_the_facade(name):
+    assert "_scope_clause" in _self_attrs(getattr(Database, name))
+
+
+def test_upsert_photo_embedding_guards_through_the_facade():
+    assert "_verify_photo_in_workspace" in _self_attrs(Database.upsert_photo_embedding)
+
+
+def test_repository_imports_no_db_code():
+    import repositories.masks_features as module
+
+    tree = ast.parse(inspect.getsource(module))
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".")[0]
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+    }
+    assert "db" not in imported
+    assert "pipeline" not in imported
+    assert "config" not in imported
