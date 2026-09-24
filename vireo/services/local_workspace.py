@@ -36,6 +36,12 @@ from pathlib import Path
 from config import _replace_with_windows_retry
 
 MANIFEST_VERSION = 2
+
+# Job types of the workspace-scoped stage/sync/discard transitions. The status
+# endpoint whitelists them, and folder moves refuse to race one.
+LOCAL_WORKSPACE_JOB_TYPES = frozenset(
+    {"work-locally-stage", "work-locally-sync", "work-locally-discard"}
+)
 # Keep at least 5% of a destination volume free after a local copy, with
 # sensible bounds for very small and very large disks.  The lower bound
 # preserves the historical 1 GiB safety margin; the upper bound avoids making

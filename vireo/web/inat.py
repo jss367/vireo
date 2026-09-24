@@ -17,6 +17,7 @@ import os
 import tempfile
 
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
+from config import read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
 from render_source import (
@@ -33,6 +34,7 @@ from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
 from web.background_jobs import make_background_job
+from web.request_args import MAX_SELECTION_PHOTOS
 from working_copy_cache import working_copy_publication_guard
 
 log = logging.getLogger(__name__)
@@ -70,19 +72,14 @@ def create_inat_blueprint(
     config,
     *,
     token_generation,
-    settings_write_lock,
-    read_raw_config_file,
-    max_selection_photos,
 ):
     """Build the iNaturalist blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``).
-    The token route reads and writes the settings file, so it shares
-    ``settings_write_lock`` and ``read_raw_config_file`` with the settings
-    blueprint, and ``token_generation`` (an :class:`InatTokenGeneration`)
-    with the settings writes that change ``inat_token``; all three stay
-    owned by ``create_app``. ``max_selection_photos`` is the app-wide cap
-    on photos in one selection request, still used by routes in app.py.
+    The token route reads and writes the settings file under
+    ``config.settings_write_lock``, and shares ``token_generation`` (the
+    app's one :class:`InatTokenGeneration`) with the settings writes that
+    change ``inat_token``.
     """
     blueprint = Blueprint("inat", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
@@ -234,7 +231,7 @@ def create_inat_blueprint(
             return json_error("destination must be an absolute path")
         if not isinstance(submissions, list) or not submissions:
             return json_error("submissions array is required")
-        if len(submissions) > max_selection_photos:
+        if len(submissions) > MAX_SELECTION_PHOTOS:
             return json_error("too many photos in selection", 400)
         normalized_submissions = []
         for item in submissions:

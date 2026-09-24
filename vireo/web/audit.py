@@ -30,11 +30,10 @@ def create_audit_blueprint(
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``), read
     when a request runs rather than when the app is built.
-    ``cleanup_cached_files_for_deleted_photos`` unlinks the thumbnails,
-    previews and working copies of deleted photos, and
-    ``invalidate_missing_originals`` drops the missing-originals cache after
-    the catalog changes; both are shared with the photo-deletion and import
-    routes still in ``create_app``, so they are injected rather than moved.
+    ``cleanup_cached_files_for_deleted_photos`` (the app's ``PhotoDeletion``)
+    unlinks the thumbnails, previews and working copies of deleted photos, and
+    ``invalidate_missing_originals`` (the app's ``MissingOriginals``) drops
+    the missing-originals cache after the catalog changes.
     """
     blueprint = Blueprint("audit", __name__)
 

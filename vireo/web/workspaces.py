@@ -13,6 +13,7 @@ import json
 import logging
 import os
 
+from config import settings_write_lock
 from db import ALL_NAV_IDS, DEFAULT_TABS
 from flask import Blueprint, abort, jsonify, request
 from services.local_folder import (
@@ -28,6 +29,7 @@ from services.local_workspace import (
     has_local_workspace,
     stage_boundary_lock,
 )
+from services.missing_originals import HEAVY_JOB_TYPES as MISSING_ORIGINALS_HEAVY_JOB_TYPES
 from web.settings import (
     LOCATION_KEYWORDS_SETTING,
     queue_location_keyword_cleanup_for_workspace,
@@ -95,26 +97,23 @@ def create_workspace_blueprint(
     *,
     get_runner,
     invalidate_missing_originals,
-    settings_write_lock,
     new_images_walk_progress,
-    missing_originals_heavy_job_types,
 ):
     """Build the workspaces blueprint.
 
-    Injected from ``create_app`` because they are shared with routes that stay
-    there:
+    Per-app state injected from ``create_app``:
 
     - ``get_runner``: returns the app's ``JobRunner`` (new-images walks are
       recorded jobs, and walks defer while storage moves or heavy jobs run).
     - ``invalidate_missing_originals``: drops cached Missing Originals payloads
       when workspace membership changes or a workspace id is created/deleted.
-    - ``settings_write_lock``: the settings write lock, so the curated
-      workspace config and subject-types writes can't race a schema-driven
-      settings autosave.
     - ``new_images_walk_progress``: the ``app._new_images_walk_progress`` dict,
       so pending new-images responses report live walk totals.
-    - ``missing_originals_heavy_job_types``: job types that defer automatic
-      background walks (shared with the Missing Originals scan).
+
+    The curated workspace config and subject-types writes take
+    ``config.settings_write_lock`` so they can't race a schema-driven
+    settings autosave; automatic background walks defer on the Missing
+    Originals scan's heavy job types.
     """
     blueprint = Blueprint("workspaces", __name__)
 
@@ -967,7 +966,7 @@ def create_workspace_blueprint(
             return None
         for job in get_runner().list_jobs():
             if (job.get("status") in ("running", "pausing", "paused", "queued")
-                    and job.get("type") in missing_originals_heavy_job_types - {"new_images_walk"}):
+                    and job.get("type") in MISSING_ORIGINALS_HEAVY_JOB_TYPES - {"new_images_walk"}):
                 return "foreground_job_active"
         return None
 

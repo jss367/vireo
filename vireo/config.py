@@ -20,6 +20,16 @@ CONFIG_PATH = os.path.expanduser("~/.vireo/config.json")
 
 _lock = threading.Lock()
 
+# Serializes read-modify-write of config.json and the active workspace's
+# config_overrides across the schema-driven settings endpoints (PATCH/DELETE/
+# import) and every other route that rewrites a settings block. Without it,
+# with per-field autosave and ``app.run(threaded=True)``, two concurrent
+# requests can read the same snapshot and the later writer drops the earlier
+# change. config.json is process-global, so one module-level lock covers every
+# app instance. Distinct from ``_lock`` (held inside ``set`` and the
+# migrations) so a holder of this lock can still call those.
+settings_write_lock = threading.Lock()
+
 DEFAULTS = {
     "classification_threshold": 0.4,
     # Per-model floor on the raw, pre-softmax match score, below which the best
@@ -435,6 +445,21 @@ def _read_raw():
         _preserve_corrupt_config()
         return {}
     return raw
+
+
+def read_raw_config_file():
+    """Return the parsed contents of config.json, or ``{}``.
+
+    Unlike ``load()``, this does NOT merge DEFAULTS — so it contains only the
+    keys the user has actually set. Write paths (under
+    ``settings_write_lock``) use it so the on-disk file stays minimal.
+
+    Preserves a ``.corrupt`` backup on unreadable/non-dict content before
+    returning ``{}`` — otherwise the very next PATCH/DELETE via the
+    schema-driven settings routes would call ``save()`` on the empty dict
+    and silently overwrite whatever the user had.
+    """
+    return _read_raw()
 
 
 def _migrations_applied(raw):

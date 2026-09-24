@@ -21,6 +21,7 @@ import os
 
 from flask import Blueprint, jsonify, request
 from services import prediction_decisions
+from services.render_cache import queue_edit_recipe_sync
 
 log = logging.getLogger(__name__)
 
@@ -31,17 +32,17 @@ def create_history_blueprint(
     db_path,
     *,
     invalidate_photo_render_cache,
-    queue_edit_recipe_sync,
 ):
     """Build the undo/redo and edit-history blueprint.
 
     ``db_path`` locates the pipeline cache directory beside the catalog.
 
-    ``invalidate_photo_render_cache`` and ``queue_edit_recipe_sync`` are
-    injected from ``create_app`` because the edit-recipe routes that stay
-    there (and ``web.photo_edit_recipes``) share them: undoing or redoing an
-    ``edit_recipe`` entry must drop the same render caches and queue the same
-    XMP sync rows a direct recipe write does.
+    ``invalidate_photo_render_cache`` is the app's
+    ``services.render_cache.RenderCache`` method, shared with
+    ``web.photo_edit_recipes``: undoing or redoing an ``edit_recipe`` entry
+    must drop the same render caches and queue the same XMP sync rows
+    (``services.render_cache.queue_edit_recipe_sync``) a direct recipe write
+    does.
     """
     blueprint = Blueprint("history", __name__)
 

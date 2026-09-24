@@ -196,21 +196,6 @@ def _highlight_score_bucket(photos, picked_first=False):
         )
 
 
-def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
-    """Move a valid preferred photo to the front of an already-ranked list."""
-    for p in photos:
-        p[marker_key] = False
-    if preferred_photo_id is None:
-        return False
-    for idx, photo in enumerate(photos):
-        if photo.get("id") == preferred_photo_id:
-            photo[marker_key] = True
-            if idx:
-                photos.insert(0, photos.pop(idx))
-            return True
-    return False
-
-
 def _sort_photos_with_representatives_first(photos, representative_order):
     """Promote representative photos while preserving ranked order otherwise."""
     ranked_position = {photo["id"]: idx for idx, photo in enumerate(photos)}

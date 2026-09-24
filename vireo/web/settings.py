@@ -14,6 +14,7 @@ import logging
 import os
 
 import filter_shortcuts
+from config import read_raw_config_file, settings_write_lock
 from db import commit_with_retry
 from flask import Blueprint, g, jsonify, make_response, request
 from preview_cache import (
@@ -158,16 +159,15 @@ def create_settings_blueprint(
     json_error,
     config,
     *,
-    read_raw_config_file,
-    settings_write_lock,
     advance_inat_token_generation,
 ):
     """Build the settings blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``,
     ``DB_PATH``), read when a request runs rather than when the app is built.
-    The raw config reader and write lock are shared with every other route
-    that writes ``config.json``. ``advance_inat_token_generation`` invalidates
+    ``config.read_raw_config_file`` / ``config.settings_write_lock`` are
+    shared with every other route that writes ``config.json``.
+    ``advance_inat_token_generation`` invalidates
     in-flight iNaturalist token validations whenever a settings write changes
     the token. It is the bound ``advance`` of the app's one
     ``web.inat.InatTokenGeneration``, shared with the iNaturalist routes,

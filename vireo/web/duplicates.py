@@ -16,6 +16,7 @@ import os
 
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
+from sql_chunks import chunked
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +25,6 @@ def create_duplicates_blueprint(
     get_db,
     json_error,
     *,
-    chunked,
     trash_paths,
     network_volume_roots,
     path_on_network_volume,
@@ -33,15 +33,13 @@ def create_duplicates_blueprint(
 ):
     """Build the duplicates blueprint.
 
-    Every dependency after ``json_error`` is shared with routes still in
-    ``create_app``, so it is injected rather than moved. ``chunked`` splits
-    id lists under the SQLite parameter cap. ``trash_paths``,
-    ``network_volume_roots`` and ``path_on_network_volume`` are the
-    mount-aware Trash helpers the photo-deletion routes also use.
-    ``cleanup_cached_files_for_deleted_photos`` unlinks the thumbnails,
-    previews and working copies of deleted photos, and
-    ``invalidate_missing_originals`` drops the missing-originals cache
-    after the catalog changes.
+    ``trash_paths``, ``network_volume_roots`` and ``path_on_network_volume``
+    are app.py's mount-aware Trash helpers, late-bound through that module so
+    tests that patch them there still reach these routes.
+    ``cleanup_cached_files_for_deleted_photos`` (the app's ``PhotoDeletion``)
+    unlinks the thumbnails, previews and working copies of deleted photos,
+    and ``invalidate_missing_originals`` (the app's ``MissingOriginals``)
+    drops the missing-originals cache after the catalog changes.
     """
     blueprint = Blueprint("duplicates", __name__)
 

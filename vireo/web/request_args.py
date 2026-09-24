@@ -23,6 +23,7 @@ from services.missing_originals import (
 )
 from services.visual_scope import (
     VISUAL_COLLECTION_MSG,
+    coerce_collection_id,
     collection_row,
     inject_active_visual_model,
     validate_visual_arg,
@@ -35,6 +36,10 @@ from services.visual_scope import (
 # in prediction ids, precisely so it cannot be tighter than what the producer
 # is allowed to emit for that selection.
 MAX_SELECTION_PHOTOS = 1000
+
+# Page-size cap for the paginated photo listings (Browse, ``/api/photos``,
+# collection photos), so every listing clamps ``per_page`` to the same bound.
+MAX_PER_PAGE = 500
 
 # A focused lookup may be asked about several photos at once (every frame
 # of the stack Browse is holding onto). Bursts are runs of frames, not
@@ -138,28 +143,6 @@ def focus_candidate_ids(focus_photo_id, focus_photo_ids):
         if pid not in candidates:
             candidates.append(pid)
     return candidates
-
-
-def coerce_collection_id(raw):
-    """Parse an optional collection_id from a request body.
-
-    Returns ``None`` if absent/blank, an ``int`` if valid, or the
-    sentinel ``False`` if present but unparseable (so callers can
-    distinguish "not provided" from "invalid"). ``bool`` is rejected
-    because it's an ``int`` subclass.
-    """
-    if raw is None or raw == "":
-        return None
-    if isinstance(raw, bool):
-        return False
-    if isinstance(raw, int):
-        return raw
-    if isinstance(raw, str):
-        try:
-            return int(raw)
-        except ValueError:
-            return False
-    return False
 
 
 def reject_visual_collection(db, collection_id, *, json_error):

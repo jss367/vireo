@@ -21,16 +21,16 @@ import time
 
 from db import Database
 from services.local_folder import (
+    LOCAL_FOLDER_JOB_TYPES,
     local_root_for_folder,
     local_root_under_folder,
     workspace_ids_for_folder_tree,
 )
 from services.local_workspace import (
+    LOCAL_WORKSPACE_JOB_TYPES,
     folder_has_local_workspace,
     stage_boundary_lock,
 )
-from web.local_folder import LOCAL_FOLDER_JOB_TYPES
-from web.local_workspace import LOCAL_WORKSPACE_JOB_TYPES
 
 log = logging.getLogger(__name__)
 

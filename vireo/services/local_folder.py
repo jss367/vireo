@@ -47,6 +47,12 @@ from services.local_workspace import (
     stage_boundary_lock,
 )
 
+# Job types of the folder-scoped stage/sync/discard transitions. The folder
+# status endpoint reports them, and folder moves refuse to race one.
+LOCAL_FOLDER_JOB_TYPES = frozenset(
+    {"work-locally-folder-stage", "work-locally-folder-sync", "work-locally-folder-discard"}
+)
+
 _LOCKS: dict[int, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 

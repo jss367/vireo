@@ -26,8 +26,7 @@ import math
 
 import places
 from db import Database
-from services.visual_scope import VISUAL_COLLECTION_MSG
-from web.request_args import coerce_collection_id
+from services.visual_scope import VISUAL_COLLECTION_MSG, coerce_collection_id
 
 log = logging.getLogger(__name__)
 

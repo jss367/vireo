@@ -6,8 +6,10 @@ import os
 import time
 
 import config as cfg
+from config import read_raw_config_file, settings_write_lock
 from db import Database, _chunks
 from flask import Blueprint, jsonify, request
+from highlights_payload import build_highlights_payload, build_life_list_payload
 from web.background_jobs import make_background_job
 
 
@@ -18,19 +20,15 @@ def create_export_blueprint(
     db_path,
     config,
     *,
-    read_raw_config_file,
-    settings_write_lock,
-    build_life_list_payload,
-    build_highlights_payload,
     resolve_visual,
 ):
     """Build the export blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``).
-    Presets live in the settings file, hence the raw reader + write lock;
-    site publishing renders the same Life List / Highlights payloads the
-    pages use; those builders live in ``highlights_payload`` and are still
-    injected rather than imported.
+    Presets live in the settings file, hence ``config``'s raw reader and
+    write lock; site publishing renders the same ``highlights_payload`` Life
+    List / Highlights payloads the pages use. ``resolve_visual`` is the app's
+    ``VisualScope.resolve``.
     """
     blueprint = Blueprint("export", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)

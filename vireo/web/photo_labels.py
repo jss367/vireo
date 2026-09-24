@@ -1,13 +1,12 @@
 """Workspace-scoped photo color-label endpoints."""
 
-from contextlib import nullcontext
-
+from config import settings_write_lock
 from flask import Blueprint, jsonify, request
 from repositories.photo_labels import VALID_COLOR_LABELS
 from services.photo_labels import PhotoLabelService
 
 
-def create_photo_labels_blueprint(get_db, json_error, settings_write_lock=None):
+def create_photo_labels_blueprint(get_db, json_error):
     blueprint = Blueprint("photo_labels", __name__)
 
     @blueprint.get("/api/photos/color_labels")
@@ -36,8 +35,7 @@ def create_photo_labels_blueprint(get_db, json_error, settings_write_lock=None):
         if not isinstance(body, dict) or "description" not in body:
             return json_error("description required")
         try:
-            lock = settings_write_lock or nullcontext()
-            with lock:
+            with settings_write_lock:
                 description = PhotoLabelService(get_db()).set_description(
                     color, body["description"]
                 )

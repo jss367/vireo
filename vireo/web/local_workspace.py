@@ -8,15 +8,12 @@ from db import Database
 from flask import Blueprint, jsonify, request
 from services.local_folder import workspace_local_root_ids
 from services.local_workspace import (
+    LOCAL_WORKSPACE_JOB_TYPES,
     LocalWorkspaceError,
     discard_local,
     stage_workspace,
     status,
     sync_back,
-)
-
-LOCAL_WORKSPACE_JOB_TYPES = frozenset(
-    {"work-locally-stage", "work-locally-sync", "work-locally-discard"}
 )
 
 

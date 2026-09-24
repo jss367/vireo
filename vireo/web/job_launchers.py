@@ -1,12 +1,12 @@
-"""Background-job launchers that need helpers still owned by ``create_app``.
+"""Background-job launchers that call per-app services.
 
 ``web.jobs`` holds job control and the launchers that need nothing beyond the
 standard blueprint arguments. The launchers here start scans, previews,
 ingest/move/offline-cache/full-resolution preparation, folder moves, XMP sync,
 classification, darktable develop, mask extraction, label fetching, embedding
 precompute and the background batch delete. Their request handling leans on
-scan, delete, move-folder and settings helpers that other ``app.py`` routes
-(and startup kickoffs) share, so those helpers are injected rather than moved.
+the app's scan, delete, move-folder and missing-originals services, whose
+bound methods ``create_app`` passes in.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import os
 import time
 
 from artifact_flight import ArtifactProducerFailed
+from config import read_raw_config_file, settings_write_lock
 from db import Database, commit_with_retry
 from flask import Blueprint, current_app, jsonify, request
 from preview_cache import (
@@ -34,6 +35,8 @@ from services.local_workspace import (
     has_local_workspace,
     stage_boundary_lock,
 )
+from services.startup_tasks import metadata_repair_count
+from sql_chunks import chunked
 from web.background_jobs import make_background_job
 from web.request_args import coerce_collection_id, reject_visual_collection
 
@@ -57,14 +60,10 @@ def create_job_launchers_blueprint(
     db_path,
     config,
     *,
-    chunked,
     invalidate_missing_originals,
     run_batch_delete,
     build_scan_work,
     pending_local_workspace_transition,
-    read_raw_config_file,
-    settings_write_lock,
-    metadata_repair_count,
     guard_move_folder,
     start_move_folder_job,
     serve_original_photo,
@@ -74,25 +73,26 @@ def create_job_launchers_blueprint(
 
     ``config`` is the Flask app's config mapping, read when a job starts
     (``THUMB_CACHE_DIR``, ``COMPUTATION_CACHE_DIR``). Everything keyword-only
-    is shared with routes or startup work that still lives in ``create_app``:
+    is per-app state from ``create_app``:
 
-    - ``build_scan_work`` is also used by ``/api/folders/<id>/rescan``;
-      ``pending_local_workspace_transition`` by the move-folder guard.
-    - ``run_batch_delete`` backs ``/api/batch/delete`` and
-      ``/api/photos/missing/remove`` too; ``invalidate_missing_originals``
-      is the app-wide missing-originals cache reset.
-    - ``read_raw_config_file`` / ``settings_write_lock`` are the settings
-      domain's config reader and write lock (the scan launcher remembers
-      its roots in ``config.json``).
-    - ``metadata_repair_count``, ``guard_move_folder`` and
-      ``start_move_folder_job`` are shared with the import blueprint, the
-      move-cleanup blueprint and the post-pipeline NAS move.
+    - ``build_scan_work`` (``services.scan_work.build_scan_work`` bound to
+      the app) is also used by ``/api/folders/<id>/rescan``.
+    - ``pending_local_workspace_transition``, ``guard_move_folder`` and
+      ``start_move_folder_job`` are the app's ``FolderMoves`` methods, shared
+      with the import and move-cleanup blueprints and the post-pipeline NAS
+      move.
+    - ``run_batch_delete`` (the app's ``PhotoDeletion``) backs
+      ``/api/batch/delete`` and ``/api/photos/missing/remove`` too;
+      ``invalidate_missing_originals`` is the app's ``MissingOriginals``
+      cache reset.
     - ``serve_original_photo`` is the ``/photos/<id>/original`` view, which
       full-resolution preparation drives so it renders exactly what the
       lightbox would.
     - ``sync_job_lock`` is ``app._sync_job_lock``, which serializes XMP sync
       with the import-side sync.
-    - ``chunked`` is ``app._chunked`` (SQLite IN-clause batching).
+
+    The scan launcher remembers its roots in ``config.json`` through
+    ``config.read_raw_config_file`` under ``config.settings_write_lock``.
     """
     blueprint = Blueprint("job_launchers", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
