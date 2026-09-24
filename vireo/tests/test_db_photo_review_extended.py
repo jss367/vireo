@@ -504,6 +504,7 @@ _DELEGATING_PHOTO_REVIEW_METHODS = {
     "update_photo_rating": "_photo_review_repository",
     "batch_update_photo_rating": "_photo_review_repository",
     "update_photo_flag": "_photo_review_repository",
+    "update_photo_wildlife_excluded": "_photo_review_repository",
     "batch_update_photo_flag": "_photo_review_repository",
     "set_color_label": "_photo_label_repository",
     "remove_color_label": "_photo_label_repository",
