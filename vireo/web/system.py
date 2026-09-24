@@ -25,6 +25,7 @@ from importlib.metadata import version as package_version
 from pathlib import Path
 
 import config as cfg
+from config import read_raw_config_file, settings_write_lock
 from flask import Blueprint, Response, jsonify, request
 from proc import no_window_kwargs
 from runtime_warnings import runtime_execution_info
@@ -59,8 +60,6 @@ def create_system_blueprint(
     config,
     *,
     get_log_broadcaster,
-    settings_write_lock,
-    read_raw_config_file,
 ):
     """Build the system blueprint.
 
@@ -70,9 +69,8 @@ def create_system_blueprint(
     ``get_log_broadcaster`` return the app's ``JobRunner`` and
     ``LogBroadcaster`` (``app._job_runner`` / ``app._log_broadcaster``),
     looked up per request. ``/api/setup/complete`` and
-    ``/api/recent-destinations`` read-modify-write the settings file, so they
-    share ``settings_write_lock`` and ``read_raw_config_file`` with the
-    settings blueprint; both stay owned by ``create_app``.
+    ``/api/recent-destinations`` read-modify-write the settings file through
+    ``config.read_raw_config_file`` under ``config.settings_write_lock``.
 
     The shutdown endpoints are exempt from ``create_app``'s workspace mutation
     reservation by their blueprint-qualified names (``system.api_shutdown``,

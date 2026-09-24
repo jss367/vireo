@@ -29,7 +29,9 @@ from photo_payload import (
 )
 from services import prediction_decisions
 from services.pending_changes import queue_keyword_add
+from services.prediction_ambiguity import ambiguous_prediction_ids, effective_category_resolver, prediction_is_ambiguous
 from services.visual_scope import inject_active_visual_model
+from sql_chunks import chunked
 from web.request_args import (
     MAX_SELECTION_PHOTOS,
     parse_selection_photo_ids,
@@ -79,10 +81,6 @@ def create_predictions_blueprint(
     config,
     *,
     visual_scope,
-    chunked,
-    ambiguous_prediction_ids,
-    effective_category_resolver,
-    prediction_is_ambiguous,
 ):
     """Build the prediction listing, Compare and review-decision blueprint.
 
@@ -90,15 +88,11 @@ def create_predictions_blueprint(
     ``ID_CONFLICTS_SNAPSHOTS`` store. ``visual_scope`` is the app's one
     ``VisualScope`` (it owns the per-app query-text embedding cache), so the
     listing shares ``create_app``'s instance rather than building its own.
-    ``chunked`` is ``app._chunked``, the IN-clause chunker every bulk query
-    shares.
 
-    ``ambiguous_prediction_ids``, ``effective_category_resolver`` and
-    ``prediction_is_ambiguous`` stay in ``create_app``: together they are the
-    one definition of "a bare Accept must not act on this prediction", and
-    the browse blueprint's selection panel is handed the same
-    ``ambiguous_prediction_ids`` so its split matches what ``batch-accept``
-    re-derives under the lock here.
+    ``services.prediction_ambiguity`` is the one definition of "a bare Accept
+    must not act on this prediction"; the browse blueprint's selection panel
+    uses the same ``ambiguous_prediction_ids`` so its split matches what
+    ``batch-accept`` re-derives under the lock here.
     """
     blueprint = Blueprint("predictions", __name__)
 

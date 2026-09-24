@@ -25,17 +25,17 @@ from web.location_edits import (
     normalize_client_place_details,
     serialize_photo_location,
 )
+from web.responses import photo_not_found_error
 
 
 def create_photo_location_keywords_blueprint(
-    get_db, json_error, *, photo_not_found_error, location_errors,
+    get_db, json_error, *, location_errors,
 ):
     """Build the per-photo keyword/location edit blueprint.
 
-    ``photo_not_found_error`` and ``location_errors`` (the app's one
-    ``web.location_edits.LocationErrors``, bound to ``json_error``) are
-    injected from ``create_app``, which shares them with the batch,
-    place and location-review routes.
+    ``location_errors`` is the app's one ``web.location_edits.LocationErrors``
+    (bound to ``json_error``), shared with the batch, place and
+    location-review routes.
     """
     blueprint = Blueprint("photo_location_keywords", __name__)
 

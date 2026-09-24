@@ -22,9 +22,7 @@ import uuid
 import webbrowser
 
 import id_conflicts
-import places
 import remote_setup
-from best_batch import best_batch_scope, build_best_batch_response
 from db import (
     Database,
     IncompatibleDatabaseError,
@@ -32,36 +30,23 @@ from db import (
 from flask import (
     Flask,
 )
-from highlights_payload import (
-    apply_highlight_preferences,
-    apply_ordered_highlights,
-    bucket_best_score,
-    build_highlights_payload,
-    build_life_list_payload,
-    collect_highlight_buckets,
-    filter_highlight_curation_state,
-    filter_highlight_sections,
-    normalize_highlight_confirmation_filter,
-    photo_highlight_entries,
-    species_canonicalizer,
-)
 from jobs import JobRunner, LogBroadcaster
 from preview_cache import (
     reconcile_preview_cache,
 )
 from proc import no_window_kwargs
 from schema import ensure_schema
-from services import gps_locations, prediction_ambiguity, scan_work, startup_tasks
+from services import scan_work, startup_tasks
 from services.folder_moves import FolderMoves
 from services.gps_locations import BulkGpsLocations
-from services.missing_originals import HEAVY_JOB_TYPES as MISSING_ORIGINALS_HEAVY_JOB_TYPES
 from services.missing_originals import MissingOriginals
 from services.photo_deletion import PhotoDeletion
 from services.pipeline_launch import PipelineChain
-from services.render_cache import RenderCache, queue_edit_recipe_sync
+from services.render_cache import RenderCache
 from services.visual_scope import (
     VisualScope,
 )
+from sql_chunks import chunked as _chunked
 from volume_reachability import (  # noqa: F401  (re-exported for tests)
     _NETWORK_PROBE_LOCK,
     _NETWORK_PROBES,
@@ -70,9 +55,7 @@ from volume_reachability import (
     network_root_reachable as _network_root_reachable,
 )
 from web import app_hooks
-from web import responses as web_responses
 from web.audit import create_audit_blueprint
-from web.background_jobs import make_background_job
 from web.batch import create_batch_blueprint
 from web.browse import create_browse_blueprint
 from web.caches import create_caches_blueprint
@@ -100,6 +83,7 @@ from web.locations import create_locations_blueprint
 from web.media import create_media_blueprint
 from web.misses import create_misses_blueprint
 from web.models import create_models_blueprint
+from web.move_cleanup import create_move_cleanup_blueprint
 from web.moves import create_moves_blueprint
 from web.pages import create_pages_blueprint
 from web.photo_edit_recipes import create_photo_edit_recipes_blueprint
@@ -110,12 +94,7 @@ from web.photos import create_photos_blueprint
 from web.pipeline import create_pipeline_blueprint
 from web.predictions import create_predictions_blueprint
 from web.remote_setup import create_remote_setup_blueprint
-from web.request_args import (
-    MAX_SELECTION_PHOTOS,
-    request_flag_filter,
-    request_location_status_filter,
-    request_missing_originals_folder_id,
-)
+from web.responses import json_error, photo_not_found_error
 from web.settings import create_settings_blueprint
 from web.species import create_species_blueprint
 from web.storage import create_storage_blueprint
@@ -210,22 +189,6 @@ class _QuietRequestFilter(logging.Filter):
 
 
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
-
-
-# Maximum number of bound parameters per SQL statement. SQLite's
-# ``SQLITE_MAX_VARIABLE_NUMBER`` defaults to 32766 on builds since 3.32 but
-# remains 999 on older builds (and on some packagers' default builds). Bulk
-# duplicate-cleanup actions can hand us thousands of photo ids at once, so
-# we chunk every IN-clause query under this cap to stay portable across
-# SQLite versions. Sized below 999 to leave headroom for additional bound
-# parameters in joined statements.
-_SQL_PARAM_CHUNK = 900
-
-
-def _chunked(seq, size=_SQL_PARAM_CHUNK):
-    """Yield ``seq`` in successive lists of at most ``size`` items."""
-    for i in range(0, len(seq), size):
-        yield seq[i:i + size]
 
 
 _FINDER_TRASH_TIMEOUT_SECS = 30
@@ -1662,13 +1625,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     _sweep_abandoned_transient_originals(app)
     _enforce_working_copy_cache_quota_at_startup(app)
 
-    # Response helpers and request hooks live in web.responses and
-    # web.app_hooks; these names stay bound here because every blueprint
-    # factory receives them.
-    json_error = web_responses.json_error
-    _photo_not_found_error = web_responses.photo_not_found_error
-    _request_flag_filter = request_flag_filter
-    _request_location_status_filter = request_location_status_filter
+    # Request hooks live in web.app_hooks; ``_get_db`` is the per-request
+    # catalog connection every blueprint factory receives.
     _get_db = functools.partial(app_hooks.get_request_db, db_path)
     # Endpoints that skip the workspace mutation reservation. Mutable: the
     # /api/v1 alias loop at the end of create_app adds ``v1_<view>`` for
@@ -1681,35 +1639,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         reservation_exempt_endpoints=_reservation_exempt_endpoints,
     )
 
-    _MAX_PER_PAGE = 500
-
     # Location error responses shared by the location, place, and batch
     # routes (``web.location_edits``); built once around ``json_error``.
     location_errors = LocationErrors(
-        json_error=json_error, photo_not_found_error=_photo_not_found_error,
+        json_error=json_error, photo_not_found_error=photo_not_found_error,
     )
 
-    # Shared prologue for routes that launch background jobs. See
-    # web/background_jobs.py: the decorated view receives a ``JobLaunch``
-    # (runner + active workspace + worker-thread db factory) as its first
-    # argument and returns ``ctx.start(job_type, work, ...)``.
-    background_job = make_background_job(
-        lambda: app._job_runner, _get_db, db_path, Database
-    )
-
-    # Render/preview cache invalidation lives in services.render_cache;
-    # the aliases keep the blueprint wiring below unchanged.
+    # Render/preview cache invalidation (services.render_cache).
     render_cache = RenderCache(app.config)
-    _invalid_preview_cache_paths = render_cache.invalid_preview_cache_paths
-    _clear_preview_cache_invalid = render_cache.clear_preview_cache_invalid
-    _invalidate_photo_render_cache = render_cache.invalidate_photo_render_cache
-    _queue_edit_recipe_sync = queue_edit_recipe_sync
 
-    # Batch delete and the post-delete cache sweep live in
-    # services/photo_deletion.py. The filesystem helpers are wrapped in
-    # lambdas so they are looked up on this module at call time — tests
-    # monkeypatch ``app._trash_paths`` / ``app._chunked`` and must keep
-    # reaching the delete path.
+    # Batch delete and the post-delete cache sweep (services.photo_deletion).
+    # The filesystem helpers are wrapped in lambdas so they are looked up on
+    # this module at call time — tests monkeypatch ``app._trash_paths`` /
+    # ``app._chunked`` and must keep reaching the delete path.
     photo_deletion = PhotoDeletion(
         app.config,
         chunked=lambda *args, **kwargs: _chunked(*args, **kwargs),
@@ -1721,10 +1663,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda *args, **kwargs: _path_confirmed_gone(*args, **kwargs)
         ),
     )
-    _cleanup_cached_files_for_deleted_photos = (
-        photo_deletion.cleanup_cached_files_for_deleted_photos
-    )
-    _run_batch_delete = photo_deletion.run_batch_delete
 
     # Load user config (e.g. HF token) on startup
     import config as cfg
@@ -1784,7 +1722,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # taxonomy parse so overlapping one-time migrations and the immediate
     # background species pass do not each parse taxonomy.json.
     startup = startup_tasks.StartupTasks(app, db_path, init_db)
-    _sync_mark_species_only = startup.sync_mark_species_only
 
     # Remove same-photo, same-taxon duplicate associations left by the old
     # hierarchy-import + top-level-confirmation interaction. Idempotent and
@@ -1833,7 +1770,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     if (
         duplicate_repair_pending
-        and _sync_mark_species_only(init_db, "sync-startup-species-mark")
+        and startup.sync_mark_species_only(init_db, "sync-startup-species-mark")
     ):
         init_db.repair_duplicate_photo_species()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
@@ -1901,21 +1838,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # on photos; species marking no longer materializes a Wildlife keyword.
     import threading
 
-    _retire_wildlife_genre = startup.retire_wildlife_genre
-
     # Tests and one-shot tools can invoke the pass deterministically without
     # enabling production timers. Production schedules it only after every
     # route has been registered, immediately before create_app returns.
-    app._retire_wildlife_genre = _retire_wildlife_genre
-
-    _mark_species = startup.mark_species
+    app._retire_wildlife_genre = startup.retire_wildlife_genre
 
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
-        threading.Thread(target=_mark_species, daemon=True).start()
+        threading.Thread(target=startup.mark_species, daemon=True).start()
 
     # Missing Originals scan cache and the folder-health loop. The app
     # attributes below are the service's own lock and dicts (not copies), so
     # code and tests that reach ``app._missing_originals_*`` see live state.
+    # Built before FolderMoves, build_scan_work and PipelineChain, which
+    # capture ``missing_originals.invalidate`` at construction.
     missing_originals = MissingOriginals(
         db_path=db_path,
         config=app.config,
@@ -1926,11 +1861,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._missing_originals_inflight = missing_originals.inflight
     app._missing_originals_errors = missing_originals.errors
     app._missing_originals_generation = missing_originals.generation
-    _MISSING_ORIGINALS_HEAVY_JOB_TYPES = MISSING_ORIGINALS_HEAVY_JOB_TYPES
-    _parse_missing_originals_folder_id = request_missing_originals_folder_id
-    _missing_originals_payload = missing_originals.payload
-    _start_missing_originals_scan = missing_originals.start_scan
-    _invalidate_missing_originals_cache = missing_originals.invalidate
 
     # Suppressed in tests via ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS``: the
     # ``app_and_db`` fixture seeds folders at fictional paths like
@@ -1953,9 +1883,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
-    _cleanup_app_resources = startup.cleanup_app_resources
-
-    app._cleanup_app_resources = _cleanup_app_resources
+    app._cleanup_app_resources = startup.cleanup_app_resources
 
     # Live progress of the most recent new-images walk, keyed by
     # (db_path, workspace_id). Written by the walk's progress callback and
@@ -1970,89 +1898,66 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # Do not warm the library-wide cache at startup: it consumes disk and
     # CPU for photos the user has not requested.
 
-    # ----- thumb_path self-healing backfill -----
-    # Aligns photos.thumb_path with the thumbnails on disk (see
-    # StartupTasks.kickoff_thumb_path_backfill). Same shape as the
-    # working-copy backfill: ephemeral JobRunner job, skipped entirely when a
-    # fast count check finds nothing to do.
-    _kickoff_thumb_path_backfill = startup.kickoff_thumb_path_backfill
-    app._kickoff_thumb_path_backfill = _kickoff_thumb_path_backfill
+    # thumb_path self-healing backfill: aligns photos.thumb_path with the
+    # thumbnails on disk (see StartupTasks.kickoff_thumb_path_backfill).
+    # Ephemeral JobRunner job, skipped entirely when a fast count check finds
+    # nothing to do.
+    app._kickoff_thumb_path_backfill = startup.kickoff_thumb_path_backfill
 
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
-        _thumb_backfill_timer = threading.Timer(6.0, _kickoff_thumb_path_backfill)
+        _thumb_backfill_timer = threading.Timer(6.0, startup.kickoff_thumb_path_backfill)
         _thumb_backfill_timer.daemon = True
         _thumb_backfill_timer.start()
 
-    # -- Page routes --
-
-    app.register_blueprint(create_pages_blueprint(_get_db))
-
-    # -- API routes --
+    # -- Per-app services shared by several blueprints --
 
     # Resolves visual-search clauses; owns the per-app query-text
     # embedding cache, so every route shares one instance.
     visual_scope = VisualScope()
 
-
-
-
-
-
-
-
-
-
-
-    # Bulk EXIF-GPS location flows and the reverse-geocode cache codec
-    # (``services.gps_locations``); the names below are what the imports,
-    # locations and batch blueprints receive.
+    # Bulk EXIF-GPS location flows (services.gps_locations), bound to
+    # ``json_error`` and ``location_errors``.
     bulk_gps_locations = BulkGpsLocations(
         json_error=json_error, location_errors=location_errors,
     )
-    _normalize_photo_id_list = bulk_gps_locations.normalize_photo_id_list
-    _bulk_gps_location_source_ids = bulk_gps_locations.source_ids
-    _bulk_gps_location_payload = bulk_gps_locations.payload
-    _location_keyword_photo_ids = gps_locations.location_keyword_photo_ids
-    _google_reverse_geocode = places.reverse_geocode_for_language
-    _decode_cached_reverse_geocode = gps_locations.decode_cached_reverse_geocode
-    _encode_cached_reverse_geocode = gps_locations.encode_cached_reverse_geocode
-    _summarize_details = gps_locations.summarize_details
 
-    # The ambiguity rule lives in services.prediction_ambiguity; these names
-    # stay bound for the predictions and browse blueprint wiring below.
-    _effective_category_resolver = prediction_ambiguity.effective_category_resolver
-    _prediction_is_ambiguous = prediction_ambiguity.prediction_is_ambiguous
-    _ambiguous_prediction_ids = prediction_ambiguity.ambiguous_prediction_ids
+    # Shared by the iNaturalist and settings blueprints so a settings write
+    # that changes ``inat_token`` supersedes an in-flight modal validation.
+    # Only touched while holding ``config.settings_write_lock``.
+    inat_token_generation = InatTokenGeneration()
 
-
-
-    # -- Statistics --
-
-
-    # -- Highlights --
-
-    _build_highlights_payload = build_highlights_payload
-    _build_life_list_payload = build_life_list_payload
-
-    app.register_blueprint(
-        create_highlights_blueprint(
-            _get_db,
-            json_error,
-            build_highlights_payload=_build_highlights_payload,
-            chunked=_chunked,
-            species_canonicalizer=species_canonicalizer,
-            collect_highlight_buckets=collect_highlight_buckets,
-            normalize_highlight_confirmation_filter=(
-                normalize_highlight_confirmation_filter
-            ),
-            filter_highlight_sections=filter_highlight_sections,
-            apply_ordered_highlights=apply_ordered_highlights,
-            apply_highlight_preferences=apply_highlight_preferences,
-            filter_highlight_curation_state=filter_highlight_curation_state,
-            bucket_best_score=bucket_best_score,
-        )
+    # Scan work and folder moves (services.scan_work, services.folder_moves).
+    build_scan_work = functools.partial(
+        scan_work.build_scan_work,
+        get_runner=lambda: app._job_runner,
+        db_path=db_path,
+        config=app.config,
+        invalidate_missing_originals=missing_originals.invalidate,
+    )
+    folder_moves = FolderMoves(
+        get_runner=lambda: app._job_runner,
+        get_db=_get_db,
+        db_path=db_path,
+        config=app.config,
+        invalidate_missing_originals=missing_originals.invalidate,
     )
 
+    # The import→process→move chain; the after-process NAS move hands off
+    # to ``folder_moves.enqueue_job``.
+    pipeline_chain = PipelineChain(
+        get_runner=lambda: app._job_runner,
+        db_path=db_path,
+        config=app.config,
+        invalidate_missing_originals=missing_originals.invalidate,
+        enqueue_move_folder_job=folder_moves.enqueue_job,
+    )
+
+    # -- Blueprints --
+    # Per-app service methods are passed as bound methods at registration;
+    # pure helpers are imported by the blueprint modules themselves.
+
+    app.register_blueprint(create_pages_blueprint(_get_db))
+    app.register_blueprint(create_highlights_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_local_workspace_blueprint(
             _get_db,
@@ -2060,7 +1965,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             os.path.dirname(app.config["THUMB_CACHE_DIR"]),
-            invalidate_missing_originals=lambda ws_id: _invalidate_missing_originals_cache(
+            invalidate_missing_originals=lambda ws_id: missing_originals.invalidate(
                 workspace_ids=[ws_id]
             ),
         )
@@ -2072,7 +1977,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             os.path.dirname(app.config["THUMB_CACHE_DIR"]),
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
+            invalidate_missing_originals=missing_originals.invalidate,
         )
     )
     app.register_blueprint(
@@ -2084,140 +1989,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app.config["THUMB_CACHE_DIR"],
         )
     )
-
-    # -- Detection API routes --
-
-
-
-    def _read_raw_config_file():
-        """Return the parsed contents of ~/.vireo/config.json, or {}.
-
-        Unlike cfg.load(), this does NOT merge DEFAULTS — so it contains
-        only the keys the user has actually set. Used by write paths so the
-        on-disk file stays minimal.
-
-        Preserves a `.corrupt` backup on unreadable/non-dict content before
-        returning `{}` — otherwise the very next PATCH/DELETE via the
-        schema-driven settings routes would call `cfg.save()` on the empty
-        dict and silently overwrite whatever the user had.
-        """
-        import config as cfg
-
-        if not os.path.exists(cfg.CONFIG_PATH):
-            return {}
-        try:
-            with open(cfg.CONFIG_PATH) as f:
-                raw = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            cfg._preserve_corrupt_config()
-            return {}
-        if not isinstance(raw, dict):
-            cfg._preserve_corrupt_config()
-            return {}
-        return raw
-
-    # Serializes read-modify-write of ~/.vireo/config.json and the active
-    # workspace's config_overrides across the schema-driven settings
-    # endpoints (PATCH/DELETE/import). Without this, with per-field autosave
-    # and `app.run(threaded=True)` two concurrent requests can read the same
-    # snapshot and the later writer drops the earlier change.
-    _settings_write_lock = threading.Lock()
-    # Shared by the iNaturalist and settings blueprints so a settings write
-    # that changes ``inat_token`` supersedes an in-flight modal validation.
-    # Only touched while holding ``_settings_write_lock``.
-    _inat_token_generation = InatTokenGeneration()
-
-
-
-
-    # -- Scan status (kept, non-job) --
-
-    # -- Model & Taxonomy API routes --
-
-
-    # -- Job API routes --
-
-    # Scan work and folder moves live in services; these names stay bound so
-    # the blueprint wiring below (and PipelineChain) is unchanged.
-    _build_scan_work = functools.partial(
-        scan_work.build_scan_work,
-        get_runner=lambda: app._job_runner,
-        db_path=db_path,
-        config=app.config,
-        invalidate_missing_originals=_invalidate_missing_originals_cache,
-    )
-    folder_moves = FolderMoves(
-        get_runner=lambda: app._job_runner,
-        get_db=_get_db,
-        db_path=db_path,
-        config=app.config,
-        invalidate_missing_originals=_invalidate_missing_originals_cache,
-    )
-    _pending_local_workspace_transition = (
-        folder_moves.pending_local_workspace_transition
-    )
-    _move_folder_guard_error = folder_moves.guard_error
-    _start_move_folder_job = folder_moves.start_job
-    _enqueue_move_folder_job = folder_moves.enqueue_job
-
-
-    _metadata_repair_count = startup_tasks.metadata_repair_count
-
-
-    # -- Export presets --
-
-
-
-
-
-
-    # -- Image serving --
-
-
-
-    # -- Pipeline: SAM2 Mask Extraction --
-
-
-
-
-
     app.register_blueprint(
         create_media_blueprint(
             _get_db,
             json_error,
             db_path,
             app.config,
-            invalid_preview_cache_paths=_invalid_preview_cache_paths,
-            clear_preview_cache_invalid=_clear_preview_cache_invalid,
-            photo_not_found_error=_photo_not_found_error,
+            invalid_preview_cache_paths=render_cache.invalid_preview_cache_paths,
+            clear_preview_cache_invalid=render_cache.clear_preview_cache_invalid,
         )
     )
     # The prepare-full-resolution job calls the /original view directly so
     # its RAW/companion/edit fallbacks cannot drift from the lightbox's.
     serve_original_photo = app.view_functions["media.serve_original_photo"]
 
-    app.register_blueprint(
-        create_photo_labels_blueprint(
-            _get_db, json_error, settings_write_lock=_settings_write_lock
-        )
-    )
+    app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))
     app.register_blueprint(create_photo_review_blueprint(_get_db, json_error))
-    app.register_blueprint(
-        create_life_list_blueprint(
-            _get_db,
-            json_error,
-            build_life_list_payload=_build_life_list_payload,
-        )
-    )
+    app.register_blueprint(create_life_list_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_audit_blueprint(
             _get_db,
             json_error,
             app.config,
             cleanup_cached_files_for_deleted_photos=(
-                _cleanup_cached_files_for_deleted_photos
+                photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
+            invalidate_missing_originals=missing_originals.invalidate,
         )
     )
     app.register_blueprint(
@@ -2225,9 +2022,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             app.config,
-            read_raw_config_file=_read_raw_config_file,
-            settings_write_lock=_settings_write_lock,
-            advance_inat_token_generation=_inat_token_generation.advance,
+            advance_inat_token_generation=inat_token_generation.advance,
         )
     )
     app.register_blueprint(
@@ -2237,16 +2032,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            token_generation=_inat_token_generation,
-            settings_write_lock=_settings_write_lock,
-            read_raw_config_file=_read_raw_config_file,
-            max_selection_photos=MAX_SELECTION_PHOTOS,
+            token_generation=inat_token_generation,
         )
     )
     app.register_blueprint(
-        create_storage_blueprint(
-            _get_db, json_error, db_path, app.config, chunked=_chunked,
-        )
+        create_storage_blueprint(_get_db, json_error, db_path, app.config)
     )
     app.register_blueprint(
         create_workspace_blueprint(
@@ -2254,10 +2044,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             json_error,
             ALL_PAGES,
             get_runner=lambda: app._job_runner,
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
-            settings_write_lock=_settings_write_lock,
+            invalidate_missing_originals=missing_originals.invalidate,
             new_images_walk_progress=app._new_images_walk_progress,
-            missing_originals_heavy_job_types=_MISSING_ORIGINALS_HEAVY_JOB_TYPES,
         )
     )
     app.register_blueprint(
@@ -2266,25 +2054,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             json_error,
             lambda: app._job_runner,
             db_path,
-            build_scan_work=_build_scan_work,
+            build_scan_work=build_scan_work,
             cleanup_cached_files_for_deleted_photos=(
-                _cleanup_cached_files_for_deleted_photos
+                photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
+            invalidate_missing_originals=missing_originals.invalidate,
         )
     )
     app.register_blueprint(create_capture_time_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_remote_setup_blueprint(_get_db, json_error, app.config)
     )
-    app.register_blueprint(
-        create_editing_blueprint(
-            _get_db,
-            json_error,
-            settings_write_lock=_settings_write_lock,
-            read_raw_config_file=_read_raw_config_file,
-        )
-    )
+    app.register_blueprint(create_editing_blueprint(_get_db, json_error))
     app.register_blueprint(create_species_blueprint(_get_db))
     app.register_blueprint(
         create_system_blueprint(
@@ -2294,51 +2075,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db_path,
             app.config,
             get_log_broadcaster=lambda: app._log_broadcaster,
-            settings_write_lock=_settings_write_lock,
-            read_raw_config_file=_read_raw_config_file,
         )
     )
     app.register_blueprint(
         create_misses_blueprint(
-            _get_db,
-            json_error,
-            settings_write_lock=_settings_write_lock,
-            resolve_visual=visual_scope.resolve,
+            _get_db, json_error, resolve_visual=visual_scope.resolve,
         )
     )
     app.register_blueprint(
-        create_browse_blueprint(
-            _get_db,
-            json_error,
-            visual_scope=visual_scope,
-            max_per_page=_MAX_PER_PAGE,
-            ambiguous_prediction_ids=_ambiguous_prediction_ids,
-        )
+        create_browse_blueprint(_get_db, json_error, visual_scope=visual_scope)
     )
     app.register_blueprint(
         create_predictions_blueprint(
-            _get_db,
-            json_error,
-            app.config,
-            visual_scope=visual_scope,
-            chunked=_chunked,
-            ambiguous_prediction_ids=_ambiguous_prediction_ids,
-            effective_category_resolver=_effective_category_resolver,
-            prediction_is_ambiguous=_prediction_is_ambiguous,
+            _get_db, json_error, app.config, visual_scope=visual_scope,
         )
     )
-    app.register_blueprint(
-        create_encounters_blueprint(
-            _get_db, json_error, db_path, chunked=_chunked,
-        )
-    )
+    app.register_blueprint(create_encounters_blueprint(_get_db, json_error, db_path))
     # Registered before the /api/v1 alias loop below, which aliases two of
     # these endpoints by their ``collections.``-qualified names.
-    app.register_blueprint(
-        create_collections_blueprint(
-            _get_db, json_error, max_per_page=_MAX_PER_PAGE,
-        )
-    )
+    app.register_blueprint(create_collections_blueprint(_get_db, json_error))
     app.register_blueprint(create_dashboard_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_sync_blueprint(
@@ -2347,17 +2102,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
         )
     )
-    from web.move_cleanup import create_move_cleanup_blueprint
     app.register_blueprint(create_move_cleanup_blueprint(
         _get_db, lambda: app._job_runner, json_error,
-        lambda paths: _trash_paths(paths), _move_folder_guard_error,
+        lambda paths: _trash_paths(paths), folder_moves.guard_error,
     ))
     app.register_blueprint(create_moves_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_duplicates_blueprint(
             _get_db,
             json_error,
-            chunked=_chunked,
             # Late-bound through the module globals, like the move-cleanup
             # blueprint's trash hook above, so a patched ``app._trash_paths``
             # or ``app._network_volume_roots`` still reaches these routes.
@@ -2365,9 +2118,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             network_volume_roots=lambda: _network_volume_roots(),
             path_on_network_volume=_path_on_network_volume,
             cleanup_cached_files_for_deleted_photos=(
-                _cleanup_cached_files_for_deleted_photos
+                photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
+            invalidate_missing_originals=missing_originals.invalidate,
         )
     )
     app.register_blueprint(
@@ -2381,8 +2134,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             json_error,
             lambda: app._job_runner,
             db_path,
-            read_raw_config_file=_read_raw_config_file,
-            settings_write_lock=_settings_write_lock,
             count_keywords=init_db.count_keywords,
         )
     )
@@ -2396,10 +2147,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            read_raw_config_file=_read_raw_config_file,
-            settings_write_lock=_settings_write_lock,
-            build_life_list_payload=_build_life_list_payload,
-            build_highlights_payload=_build_highlights_payload,
             resolve_visual=visual_scope.resolve,
         )
     )
@@ -2410,20 +2157,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
-            read_raw_config_file=_read_raw_config_file,
-            settings_write_lock=_settings_write_lock,
+            invalidate_missing_originals=missing_originals.invalidate,
         )
-    )
-    # Built here rather than at the top: the after-process NAS move hands
-    # off to _enqueue_move_folder_job, which is defined late in create_app
-    # and passed by value.
-    pipeline_chain = PipelineChain(
-        get_runner=lambda: app._job_runner,
-        db_path=db_path,
-        config=app.config,
-        invalidate_missing_originals=_invalidate_missing_originals_cache,
-        enqueue_move_folder_job=_enqueue_move_folder_job,
     )
     app.register_blueprint(
         create_imports_blueprint(
@@ -2432,12 +2167,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
-            metadata_repair_count=_metadata_repair_count,
+            invalidate_missing_originals=missing_originals.invalidate,
             enqueue_process_job=pipeline_chain.enqueue_process_job,
             chain_after_move=pipeline_chain.chain_after_move,
-            bulk_gps_location_payload=_bulk_gps_location_payload,
-            guard_move_folder=_move_folder_guard_error,
+            bulk_gps_location_payload=bulk_gps_locations.payload,
+            guard_move_folder=folder_moves.guard_error,
             sync_job_lock=app._sync_job_lock,
         )
     )
@@ -2447,13 +2181,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             location_errors=location_errors,
-            normalize_photo_id_list=_normalize_photo_id_list,
-            bulk_gps_location_source_ids=_bulk_gps_location_source_ids,
-            location_keyword_photo_ids=_location_keyword_photo_ids,
-            google_reverse_geocode=_google_reverse_geocode,
-            decode_cached_reverse_geocode=_decode_cached_reverse_geocode,
-            encode_cached_reverse_geocode=_encode_cached_reverse_geocode,
-            summarize_details=_summarize_details,
+            normalize_photo_id_list=bulk_gps_locations.normalize_photo_id_list,
+            bulk_gps_location_source_ids=bulk_gps_locations.source_ids,
         )
     )
     app.register_blueprint(
@@ -2461,9 +2190,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             location_errors=location_errors,
-            bulk_gps_location_payload=_bulk_gps_location_payload,
-            run_batch_delete=_run_batch_delete,
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
+            bulk_gps_location_payload=bulk_gps_locations.payload,
+            run_batch_delete=photo_deletion.run_batch_delete,
+            invalidate_missing_originals=missing_originals.invalidate,
         )
     )
     # Registered before the /api/v1 alias loop below, which aliases
@@ -2476,18 +2205,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db_path,
             app.config,
             visual_scope=visual_scope,
-            photo_not_found_error=_photo_not_found_error,
-            max_per_page=_MAX_PER_PAGE,
-            request_flag_filter=_request_flag_filter,
-            request_location_status_filter=_request_location_status_filter,
-            parse_missing_originals_folder_id=_parse_missing_originals_folder_id,
-            missing_originals_payload=_missing_originals_payload,
-            start_missing_originals_scan=_start_missing_originals_scan,
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
-            run_batch_delete=_run_batch_delete,
-            photo_highlight_entries=photo_highlight_entries,
-            best_batch_scope=best_batch_scope,
-            build_best_batch_response=build_best_batch_response,
+            missing_originals_payload=missing_originals.payload,
+            start_missing_originals_scan=missing_originals.start_scan,
+            invalidate_missing_originals=missing_originals.invalidate,
+            run_batch_delete=photo_deletion.run_batch_delete,
         )
     )
     app.register_blueprint(
@@ -2495,9 +2216,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             app.config,
-            photo_not_found_error=_photo_not_found_error,
-            invalidate_photo_render_cache=_invalidate_photo_render_cache,
-            queue_edit_recipe_sync=_queue_edit_recipe_sync,
+            invalidate_photo_render_cache=render_cache.invalidate_photo_render_cache,
         )
     )
     app.register_blueprint(
@@ -2505,19 +2224,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             db_path,
-            invalidate_photo_render_cache=_invalidate_photo_render_cache,
-            queue_edit_recipe_sync=_queue_edit_recipe_sync,
+            invalidate_photo_render_cache=render_cache.invalidate_photo_render_cache,
         )
     )
     app.register_blueprint(
         create_photo_location_keywords_blueprint(
-            _get_db,
-            json_error,
-            photo_not_found_error=_photo_not_found_error,
-            location_errors=location_errors,
+            _get_db, json_error, location_errors=location_errors,
         )
     )
-
     app.register_blueprint(
         create_job_launchers_blueprint(
             _get_db,
@@ -2525,16 +2239,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            chunked=_chunked,
-            invalidate_missing_originals=_invalidate_missing_originals_cache,
-            run_batch_delete=_run_batch_delete,
-            build_scan_work=_build_scan_work,
-            pending_local_workspace_transition=_pending_local_workspace_transition,
-            read_raw_config_file=_read_raw_config_file,
-            settings_write_lock=_settings_write_lock,
-            metadata_repair_count=_metadata_repair_count,
-            guard_move_folder=_move_folder_guard_error,
-            start_move_folder_job=_start_move_folder_job,
+            invalidate_missing_originals=missing_originals.invalidate,
+            run_batch_delete=photo_deletion.run_batch_delete,
+            build_scan_work=build_scan_work,
+            pending_local_workspace_transition=(
+                folder_moves.pending_local_workspace_transition
+            ),
+            guard_move_folder=folder_moves.guard_error,
+            start_move_folder_job=folder_moves.start_job,
             # Late-bound so it resolves whichever ``serve_original_photo``
             # create_app holds when a job runs, not when the app is built.
             serve_original_photo=lambda *args, **kwargs: serve_original_photo(
@@ -2585,7 +2297,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # the HTTP listener before this potentially multi-minute XMP scan
         # starts competing for filesystem and interpreter time.
         _wildlife_retirement_timer = threading.Timer(
-            1.0, _retire_wildlife_genre,
+            1.0, startup.retire_wildlife_genre,
         )
         _wildlife_retirement_timer.daemon = True
         _wildlife_retirement_timer.start()

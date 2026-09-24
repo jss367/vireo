@@ -22,6 +22,7 @@ from services.visual_scope import (
 )
 from web.request_args import (
     MAX_FOCUS_PHOTO_IDS,
+    MAX_PER_PAGE,
     focus_candidate_ids,
     reject_visual_collection,
     request_bool_arg,
@@ -52,12 +53,12 @@ def _collection_accepts_manual_photos(rules):
     return False
 
 
-def create_collections_blueprint(get_db, json_error, *, max_per_page):
+def create_collections_blueprint(get_db, json_error):
     """Build the collections blueprint.
 
-    ``max_per_page`` is ``create_app``'s page-size cap, shared with the
-    ``/api/photos`` listing routes, so a collection page and a Browse page
-    clamp ``per_page`` to the same bound.
+    ``MAX_PER_PAGE`` is the page-size cap shared with the ``/api/photos``
+    listing routes, so a collection page and a Browse page clamp ``per_page``
+    to the same bound.
     """
     blueprint = Blueprint("collections", __name__)
 
@@ -396,7 +397,7 @@ def create_collections_blueprint(get_db, json_error, *, max_per_page):
             return err
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), max_per_page))
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         stacks = request_bool_arg("stacks")
         # Same focused lookup ``/api/photos/query`` offers, for the same

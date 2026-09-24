@@ -14,6 +14,7 @@ import json
 from datetime import UTC, datetime
 
 from flask import Blueprint, jsonify, make_response, request
+from highlights_payload import build_life_list_payload
 
 _EXPLORER_RANKS = ["order", "family", "genus", "species"]
 _EXPLORER_CHILD_RANK = {"class": "order", "order": "family",
@@ -261,16 +262,12 @@ def _build_explorer_rank(db, rank, root_id=None):
     }
 
 
-def create_life_list_blueprint(get_db, json_error, *, build_life_list_payload):
+def create_life_list_blueprint(get_db, json_error):
     """Build the life-list blueprint.
 
-    ``build_life_list_payload(db, photos_per_species=12, photo_offset=0,
-    species_filter=None)`` assembles the numbered species list with each
-    species' curated photos. The export blueprint's website publishing
-    builds the same payload, so both receive the one function; it lives in
-    ``highlights_payload`` with the highlight scoring and species
-    canonicalization helpers it shares with the Highlights routes, and is
-    still injected rather than imported.
+    ``highlights_payload.build_life_list_payload`` assembles the numbered
+    species list with each species' curated photos; the export blueprint's
+    website publishing builds the same payload.
     """
     blueprint = Blueprint("life_list", __name__)
 

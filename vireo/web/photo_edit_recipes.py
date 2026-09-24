@@ -15,6 +15,8 @@ from flask import Blueprint, jsonify, request
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
+from services.render_cache import queue_edit_recipe_sync
+from web.responses import photo_not_found_error
 
 log = logging.getLogger(__name__)
 
@@ -77,17 +79,14 @@ def create_photo_edit_recipes_blueprint(
     json_error,
     config,
     *,
-    photo_not_found_error,
     invalidate_photo_render_cache,
-    queue_edit_recipe_sync,
 ):
     """Build the per-photo edit-recipe blueprint.
 
     ``config`` is ``app.config`` (``THUMB_CACHE_DIR`` is read at request
-    time). ``photo_not_found_error``, ``invalidate_photo_render_cache`` and
-    ``queue_edit_recipe_sync`` are injected from ``create_app`` because
-    routes that stay there (undo/redo's edit-recipe replay, the per-photo
-    lookups of other route groups) still call them.
+    time). ``invalidate_photo_render_cache`` is the app's
+    ``services.render_cache.RenderCache`` method, shared with undo/redo's
+    edit-recipe replay (``web.history``).
     """
     blueprint = Blueprint("photo_edit_recipes", __name__)
 

@@ -18,6 +18,12 @@ import math
 import location_review
 import places
 from flask import Blueprint, current_app, g, jsonify, request
+from services.gps_locations import (
+    decode_cached_reverse_geocode,
+    encode_cached_reverse_geocode,
+    location_keyword_photo_ids,
+    summarize_details,
+)
 from services.pending_changes import queue_location_sync_if_enabled
 from web.location_edits import (
     extract_place_id,
@@ -220,25 +226,16 @@ def create_locations_blueprint(
     location_errors,
     normalize_photo_id_list,
     bulk_gps_location_source_ids,
-    location_keyword_photo_ids,
-    google_reverse_geocode,
-    decode_cached_reverse_geocode,
-    encode_cached_reverse_geocode,
-    summarize_details,
 ):
     """Build the locations blueprint.
 
     ``location_errors`` is the app's one ``web.location_edits.LocationErrors``.
-    The rest are shared with the EXIF-GPS batch location route
-    (``/api/batch/location/from-exif`` and its ``_bulk_gps_location_payload``)
-    still in ``create_app``, so they are injected rather than moved:
-    ``normalize_photo_id_list`` and ``bulk_gps_location_source_ids`` parse the
-    photo selection, ``location_keyword_photo_ids`` finds photos that already
-    have a location, ``google_reverse_geocode`` is the result-language-aware
-    Google lookup, ``decode_cached_reverse_geocode`` /
-    ``encode_cached_reverse_geocode`` read and write the language-tagged
-    reverse-geocode cache rows, and ``summarize_details`` renders the
-    one-line place summary.
+    ``normalize_photo_id_list`` and ``bulk_gps_location_source_ids`` are the
+    app's ``services.gps_locations.BulkGpsLocations`` methods that parse the
+    photo selection (bound to ``json_error``). The reverse-geocode cache codec
+    and place summary come from ``services.gps_locations``; the
+    result-language-aware Google lookup is
+    ``places.reverse_geocode_for_language``.
     """
     blueprint = Blueprint("locations", __name__)
 
@@ -516,7 +513,7 @@ def create_locations_blueprint(
             return jsonify({"place_id": None, "summary": None})
 
         try:
-            details = google_reverse_geocode(lat, lng, key, language)
+            details = places.reverse_geocode_for_language(lat, lng, key, language)
         except places.PlacesTransientError:
             # OVER_QUERY_LIMIT / REQUEST_DENIED / network blip — Google
             # may answer this later, so do NOT cache. Returning null here

@@ -21,9 +21,11 @@ import filter_shortcuts
 from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
+from services.prediction_ambiguity import ambiguous_prediction_ids
 from services.visual_scope import collection_rules_state, inject_active_visual_model
 from web.collections import _collection_accepts_manual_photos
 from web.request_args import (
+    MAX_PER_PAGE,
     parse_selection_photo_ids,
     reject_visual_collection,
     request_bool_arg,
@@ -37,19 +39,17 @@ def create_browse_blueprint(
     json_error,
     *,
     visual_scope,
-    max_per_page,
-    ambiguous_prediction_ids,
 ):
     """Build the browse, filter-bar and selection blueprint.
 
     ``visual_scope`` is the app's one ``VisualScope``: it owns the per-app
     query-text embedding cache, so the summary and typeahead routes must share
-    ``create_app``'s instance rather than build their own. ``max_per_page`` is
-    ``create_app``'s page-size cap, shared with the ``/api/photos`` listing
-    routes. ``ambiguous_prediction_ids`` is the one definition of "a bare
-    Accept must not act on this prediction"; it stays in ``create_app``
-    because ``batch-accept`` re-derives the same verdict under the
-    prediction-decision lock, and the selection panel's split must match it.
+    ``create_app``'s instance rather than build their own. ``MAX_PER_PAGE``
+    is the page-size cap shared with the ``/api/photos`` listing routes.
+    ``services.prediction_ambiguity.ambiguous_prediction_ids`` is the one
+    definition of "a bare Accept must not act on this prediction";
+    ``batch-accept`` re-derives the same verdict under the prediction-decision
+    lock, and the selection panel's split must match it.
     """
     blueprint = Blueprint("browse", __name__)
 
@@ -62,7 +62,7 @@ def create_browse_blueprint(
         db = get_db()
         page = max(1, request.args.get("page", 1, type=int))
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), max_per_page))
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)

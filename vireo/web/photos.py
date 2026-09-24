@@ -21,9 +21,11 @@ import os
 import tempfile
 
 import config as cfg
+from best_batch import best_batch_scope, build_best_batch_response
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from db import Database
 from flask import Blueprint, after_this_request, jsonify, request
+from highlights_payload import photo_highlight_entries
 from photo_payload import (
     attach_detections,
     attach_edit_recipes,
@@ -56,12 +58,17 @@ from web.location_edits import (
 )
 from web.request_args import (
     MAX_FOCUS_PHOTO_IDS,
+    MAX_PER_PAGE,
     focus_candidate_ids,
     reject_visual_collection,
     request_bool_arg,
+    request_flag_filter,
+    request_location_status_filter,
+    request_missing_originals_folder_id,
     request_rules_arg,
     request_visual_arg,
 )
+from web.responses import photo_not_found_error
 from working_copy_cache import working_copy_publication_guard
 
 log = logging.getLogger(__name__)
@@ -81,18 +88,10 @@ def create_photos_blueprint(
     config,
     *,
     visual_scope,
-    photo_not_found_error,
-    max_per_page,
-    request_flag_filter,
-    request_location_status_filter,
-    parse_missing_originals_folder_id,
     missing_originals_payload,
     start_missing_originals_scan,
     invalidate_missing_originals,
     run_batch_delete,
-    photo_highlight_entries,
-    best_batch_scope,
-    build_best_batch_response,
 ):
     """Build the ``/api/photos`` data blueprint.
 
@@ -100,20 +99,13 @@ def create_photos_blueprint(
     time). The subject-analysis launcher builds its own ``background_job``
     from ``get_runner`` / ``db_path``, as ``web/export.py`` does.
 
-    Injected from ``create_app`` because other route groups still use them:
-    ``visual_scope`` (the app's one ``VisualScope``, which owns the per-app
-    query-text embedding cache), ``photo_not_found_error``,
-    ``max_per_page`` (the page-size cap shared with browse init and
-    collection photos), the ``request_flag_filter`` /
-    ``request_location_status_filter`` request parsers, the Missing
-    Originals cache (``parse_missing_originals_folder_id``,
-    ``missing_originals_payload``, ``start_missing_originals_scan``,
-    ``invalidate_missing_originals`` -- its state lives on ``app``), and
-    ``run_batch_delete`` (shared with ``/api/batch/delete`` and the
-    batch-delete job). ``photo_highlight_entries`` (from
-    ``highlights_payload``) and ``best_batch_scope`` /
-    ``build_best_batch_response`` (from ``best_batch``) are still injected
-    rather than imported.
+    Per-app state injected from ``create_app``: ``visual_scope`` (the app's
+    one ``VisualScope``, which owns the per-app query-text embedding cache),
+    the Missing Originals cache methods (``missing_originals_payload``,
+    ``start_missing_originals_scan``, ``invalidate_missing_originals`` --
+    the app's ``MissingOriginals``), and ``run_batch_delete`` (the app's
+    ``PhotoDeletion``, shared with ``/api/batch/delete`` and the
+    batch-delete job).
     """
     blueprint = Blueprint("photos", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
@@ -136,7 +128,7 @@ def create_photos_blueprint(
         """Return cached Missing Originals scan status without filesystem work."""
         db = get_db()
         try:
-            folder_id = parse_missing_originals_folder_id(db)
+            folder_id = request_missing_originals_folder_id(db)
         except ValueError as exc:
             return json_error(str(exc))
         except LookupError:
@@ -148,7 +140,7 @@ def create_photos_blueprint(
         """Start or reuse a background Missing Originals scan."""
         db = get_db()
         try:
-            folder_id = parse_missing_originals_folder_id(db)
+            folder_id = request_missing_originals_folder_id(db)
         except ValueError as exc:
             return json_error(str(exc))
         except LookupError:
@@ -404,7 +396,7 @@ def create_photos_blueprint(
         db = get_db()
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), max_per_page))
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
@@ -526,7 +518,7 @@ def create_photos_blueprint(
             return json_error("sort must be a string", 400)
         if not isinstance(stacks, bool):
             return json_error("stacks must be a boolean", 400)
-        per_page = min(per_page, max_per_page)
+        per_page = min(per_page, MAX_PER_PAGE)
         collection_id = payload.get("collection_id")
         if collection_id is not None and (
             not isinstance(collection_id, int) or isinstance(collection_id, bool)

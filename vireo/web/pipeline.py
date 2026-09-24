@@ -15,6 +15,7 @@ import logging
 import os
 from functools import wraps
 
+from config import read_raw_config_file, settings_write_lock
 from db import _chunks, commit_with_retry
 from flask import Blueprint, jsonify, request
 from jobs import SLOT_CAP
@@ -50,17 +51,15 @@ def create_pipeline_blueprint(
     config,
     *,
     invalidate_missing_originals,
-    read_raw_config_file,
-    settings_write_lock,
 ):
     """Build the pipeline-launch blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR`` and
-    ``COMPUTATION_CACHE_DIR`` are read when the job runs). The keyword
-    arguments are ``create_app`` closures shared with other domains:
-    the missing-originals cache and the settings
-    file's raw reader + write lock (the pipeline route records recent
-    destinations and process deletion clears the global default).
+    ``COMPUTATION_CACHE_DIR`` are read when the job runs).
+    ``invalidate_missing_originals`` is the app's ``MissingOriginals``
+    cache reset. The pipeline route records recent destinations and process
+    deletion clears the global default through ``config``'s raw reader and
+    settings write lock.
     """
     blueprint = Blueprint("pipeline", __name__)
 

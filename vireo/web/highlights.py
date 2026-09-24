@@ -15,44 +15,31 @@ import json
 
 from db import _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
 from flask import Blueprint, jsonify, request
+from highlights_payload import (
+    apply_highlight_preferences,
+    apply_ordered_highlights,
+    bucket_best_score,
+    build_highlights_payload,
+    collect_highlight_buckets,
+    filter_highlight_curation_state,
+    filter_highlight_sections,
+    normalize_highlight_confirmation_filter,
+    species_canonicalizer,
+)
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
 from services import prediction_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
+from sql_chunks import chunked
 from web.request_args import request_bool_arg
 
 
-def create_highlights_blueprint(
-    get_db,
-    json_error,
-    *,
-    build_highlights_payload,
-    chunked,
-    species_canonicalizer,
-    collect_highlight_buckets,
-    normalize_highlight_confirmation_filter,
-    filter_highlight_sections,
-    apply_ordered_highlights,
-    apply_highlight_preferences,
-    filter_highlight_curation_state,
-    bucket_best_score,
-):
+def create_highlights_blueprint(get_db, json_error):
     """Build the highlights / photo-preferences blueprint.
 
-    Injected from ``create_app``:
-
-    - ``build_highlights_payload`` is
-      ``highlights_payload.build_highlights_payload``, which the export
-      blueprint's site publishing also renders.
-    - ``chunked`` is ``app._chunked`` (SQLite IN-clause batching), shared
-      with many routes still in ``app.py``.
-    - The highlight-bucket helpers (``species_canonicalizer``,
-      ``collect_highlight_buckets``, ``normalize_highlight_confirmation_filter``,
-      ``filter_highlight_sections``, ``apply_ordered_highlights``,
-      ``apply_highlight_preferences``, ``filter_highlight_curation_state``,
-      ``bucket_best_score``) are the ``highlights_payload`` functions that
-      the highlights and Life List payload builders also use; they are still
-      injected rather than imported.
+    The payload builder and highlight-bucket helpers come from
+    ``highlights_payload``, shared with the Life List routes and the export
+    blueprint's site publishing.
 
     The confirm and relabel routes are prediction-decision routes: they take
     the shared writer lock through ``services.prediction_decisions``.

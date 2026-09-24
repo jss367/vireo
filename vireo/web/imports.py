@@ -1,17 +1,17 @@
 """Import domain: previews, readiness, and the archive/in-place import jobs.
 
-Step 2 of the ``create_app`` split. Everything here moved verbatim out of
-``app.py``; the closure helpers the routes shared with other domains are
-injected through the factory instead of captured from ``create_app``:
+Per-app state comes in through the factory as bound service methods:
 
-- ``invalidate_missing_originals`` / ``metadata_repair_count`` /
-  ``bulk_gps_location_payload`` still live in ``app.py`` because other
-  domains call them too. ``reject_visual_collection`` is imported from
-  ``web.request_args``.
+- ``invalidate_missing_originals`` (``MissingOriginals``),
+  ``bulk_gps_location_payload`` (``BulkGpsLocations``) and
+  ``guard_move_folder`` (``FolderMoves``).
 - ``enqueue_process_job`` and ``chain_after_move`` come from
   ``services.pipeline_launch.PipelineChain``, the job-thread side of the
-  after-import chain; ``resolve_remote_archive_target`` is imported from
-  the same service.
+  after-import chain.
+
+``metadata_repair_count`` (``services.startup_tasks``),
+``resolve_remote_archive_target`` (``services.pipeline_launch``) and
+``reject_visual_collection`` (``web.request_args``) are imported directly.
 
 The request-parsing halves of ``api_job_import_photos`` and
 ``api_job_import_in_place`` are the next extraction target (a pure
@@ -39,6 +39,7 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
 from services.pipeline_launch import resolve_remote_archive_target
+from services.startup_tasks import metadata_repair_count
 from web.background_jobs import make_background_job
 from web.request_args import reject_visual_collection
 
@@ -363,7 +364,6 @@ def create_imports_blueprint(
     config,
     *,
     invalidate_missing_originals,
-    metadata_repair_count,
     enqueue_process_job,
     chain_after_move,
     bulk_gps_location_payload,
@@ -374,9 +374,8 @@ def create_imports_blueprint(
 
     ``config`` is the Flask app's config mapping (read at request and job
     time for ``THUMB_CACHE_DIR`` and ``REQUIRE_EXIFTOOL_FOR_IMPORT``, so
-    runtime overrides keep working). The keyword arguments are the
-    ``create_app`` closures this domain still shares with others; see the
-    module docstring.
+    runtime overrides keep working). The keyword arguments are per-app
+    service methods; see the module docstring.
     """
     blueprint = Blueprint("imports", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)

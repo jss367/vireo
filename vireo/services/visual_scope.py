@@ -119,6 +119,28 @@ def inject_active_visual_model(rules):
     return _walk(rules)
 
 
+def coerce_collection_id(raw):
+    """Parse an optional collection_id from a request body.
+
+    Returns ``None`` if absent/blank, an ``int`` if valid, or the
+    sentinel ``False`` if present but unparseable (so callers can
+    distinguish "not provided" from "invalid"). ``bool`` is rejected
+    because it's an ``int`` subclass.
+    """
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return False
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return False
+    return False
+
+
 def collection_row(db, collection_id):
     """Return the (workspace-scoped) collection row or None."""
     return db.conn.execute(

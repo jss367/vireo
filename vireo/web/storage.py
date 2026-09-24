@@ -18,19 +18,18 @@ import sys
 
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
+from sql_chunks import chunked
 from working_copy_cache import working_copy_stats
 
 log = logging.getLogger(__name__)
 
 
-def create_storage_blueprint(get_db, json_error, db_path, config, *, chunked):
+def create_storage_blueprint(get_db, json_error, db_path, config):
     """Build the storage blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``,
     ``CARD_CLEANUP_DIR``, ``COMPUTATION_CACHE_DIR``), read when a request runs
-    rather than when the app is built. ``chunked`` is app.py's ``_chunked``,
-    which splits an id list under SQLite's bind-variable cap; it stays in
-    app.py because the batch-delete routes share it.
+    rather than when the app is built.
     """
     blueprint = Blueprint("storage", __name__)
 

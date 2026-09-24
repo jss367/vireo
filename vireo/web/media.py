@@ -74,6 +74,7 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from web.responses import photo_not_found_error
 from working_copy_cache import (
     evict_if_over_quota as evict_working_copy_cache_if_over_quota,
 )
@@ -385,7 +386,6 @@ def create_media_blueprint(
     *,
     invalid_preview_cache_paths,
     clear_preview_cache_invalid,
-    photo_not_found_error=None,
 ):
     """Build the image- and mask-serving blueprint.
 
@@ -395,30 +395,14 @@ def create_media_blueprint(
     beside the catalog.
 
     ``invalid_preview_cache_paths`` (the app's one set of preview files that
-    could not be unlinked) and ``clear_preview_cache_invalid`` are injected
-    from ``create_app`` because the edit-recipe render-cache invalidation
-    that stays there writes the same state ``/photos/<id>/preview`` reads.
-
-    ``photo_not_found_error`` is the app's shared photo-not-found response,
-    which ``/api/photos/<pid>/masks`` returns for a photo outside the active
-    workspace. It defaults to an equivalent response built on ``json_error``
-    so callers that predate the mask-listing route keep working.
+    could not be unlinked) and ``clear_preview_cache_invalid`` are the app's
+    ``services.render_cache.RenderCache`` methods: the edit-recipe render-cache
+    invalidation writes the same state ``/photos/<id>/preview`` reads.
 
     ``create_app`` also looks up the registered ``serve_original_photo`` view
     so the prepare-full-resolution job renders through this canonical path.
     """
     blueprint = Blueprint("media", __name__)
-
-    if photo_not_found_error is None:
-        def photo_not_found_error(*, legacy_error="photo_not_found"):
-            return json_error(
-                legacy_error,
-                404,
-                message=(
-                    "This photo is no longer available in the active workspace. "
-                    "Refresh the page and try again."
-                ),
-            )
 
     def _requested_pair_source(photo, folder_path):
         """Resolve an explicit RAW/JPEG display choice for a paired photo.

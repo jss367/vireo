@@ -5,15 +5,43 @@ server-rendered vanilla JavaScript interface, and a Tauri native shell. The
 filesystem and XMP sidecars remain the durable source of truth; SQLite indexes
 that information for interactive use.
 
+## Application layout
+
+- `vireo/app.py` holds the app factory and its wiring, plus the process
+  entry point (`main()`), the startup cache migrations, and the mount-aware
+  Trash helpers (`_trash_paths` and friends, which tests patch on the `app`
+  module). `create_app` builds the per-app objects (the request DB getter,
+  the job runner, and the services that carry state), runs the startup
+  catalog repairs, registers the request hooks (`web.app_hooks`), registers
+  every blueprint, and adds the `/api/v1` aliases. It defines no routes:
+  `test_no_new_routes_in_app_py` holds the limit at zero.
+- Blueprints live in `vireo/web/`, one module per route group, each built by
+  `create_<domain>_blueprint(get_db, json_error, ...)`. A factory takes as
+  arguments only what is per-app: the request DB getter, `json_error`, the
+  job-runner getter, `db_path` / `app.config`, and methods of per-app service
+  instances. `create_app` passes the bound method a blueprint calls (for
+  example `run_batch_delete=photo_deletion.run_batch_delete`), not the whole
+  service, except for objects a blueprint uses as a unit (`VisualScope`,
+  `LocationErrors`, `InatTokenGeneration`). Anything without per-app state
+  (pure helpers, constants, module-level locks) is imported by the blueprint
+  module directly, never threaded through `create_app`.
+- Shared helpers, by kind: response shapes in `web.responses` (`json_error`,
+  `photo_not_found_error`); request parsers, scope guards and page/selection
+  caps in `web.request_args`; the settings-file raw reader and write lock in
+  `config` (`read_raw_config_file`, `settings_write_lock`, process-global
+  because `config.json` is); SQLite IN-clause chunking in `sql_chunks`;
+  page payload builders in `highlights_payload` and `best_batch`.
+
 ## Dependency boundaries
 
 - HTTP blueprints validate requests and serialize responses. New route groups
-  belong under `vireo/web`; do not add routes to the legacy application module.
-  `test_no_new_routes_in_app_py` enforces this with a route limit that only
-  goes down; lower it in the same PR that moves routes out of `vireo/app.py`.
-- Services own filesystem work, subprocesses, cache invalidation, and workflow
-  coordination. A route should call a service rather than implement those
-  operations itself.
+  belong under `vireo/web`; do not add routes to `vireo/app.py`.
+- Services (`vireo/services/`) own filesystem work, subprocesses, cache
+  invalidation, and workflow coordination. A route should call a service
+  rather than implement those operations itself. Services never import from
+  `vireo/web/`; a definition both layers need (job-type constants, value
+  parsers) lives in the service or another neutral module and the web layer
+  imports it from there.
 - Routes that launch a background job use `@background_job` from
   `vireo/web/background_jobs.py`. The view receives a `JobLaunch` (runner,
   active workspace id, worker-thread database factory) and returns

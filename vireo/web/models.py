@@ -15,6 +15,7 @@ import sys
 import uuid
 
 from classification_readiness import classification_readiness
+from config import read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
 from web.background_jobs import make_background_job
@@ -73,15 +74,13 @@ def create_models_blueprint(
     get_runner,
     db_path,
     *,
-    read_raw_config_file,
-    settings_write_lock,
     count_keywords,
 ):
     """Build the models blueprint.
 
-    ``read_raw_config_file`` / ``settings_write_lock`` are the settings
-    file's raw reader and write lock; the darktable download records the
-    installed binary through them. ``count_keywords`` is the startup
+    The darktable download records the installed binary through
+    ``config.read_raw_config_file`` under ``config.settings_write_lock``.
+    ``count_keywords`` is the startup
     database's ``count_keywords`` (``init_db`` in ``create_app``), which
     ``/api/classify/config`` reports as the taxonomy species count.
     """

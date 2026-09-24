@@ -19,16 +19,16 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 from pipeline_results import auto_detach_burst_for_species
 from services import prediction_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
+from sql_chunks import chunked
 
 log = logging.getLogger(__name__)
 
 
-def create_encounters_blueprint(get_db, json_error, db_path, *, chunked):
+def create_encounters_blueprint(get_db, json_error, db_path):
     """Build the encounter species-confirmation blueprint.
 
     ``db_path`` locates the pipeline results cache (it lives next to the
-    database). ``chunked`` is ``app._chunked``, the IN-clause chunker every
-    bulk query shares.
+    database).
     """
     blueprint = Blueprint("encounters", __name__)
 

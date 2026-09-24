@@ -6,18 +6,16 @@ ratio (``/api/editor/crop-ratio``). Per-photo edit-recipe routes live with
 the other ``/api/photos`` routes.
 """
 
+from config import read_raw_config_file, settings_write_lock
 from flask import Blueprint, jsonify, request
 
 
-def create_editing_blueprint(
-    get_db, json_error, *, settings_write_lock, read_raw_config_file
-):
+def create_editing_blueprint(get_db, json_error):
     """Build the editing blueprint.
 
-    ``settings_write_lock`` and ``read_raw_config_file`` are injected from
-    ``create_app`` because the crop-ratio preference is a raw read-modify-write
-    of the user's config file, and every such writer must share the app's one
-    lock (see ``create_settings_blueprint``).
+    The crop-ratio preference is a raw read-modify-write of the user's config
+    file, so it goes through ``config.read_raw_config_file`` under
+    ``config.settings_write_lock`` like every other such writer.
     """
     blueprint = Blueprint("editing", __name__)
 

@@ -9,6 +9,7 @@ import unicodedata
 from db import Database
 from flask import Blueprint, jsonify, request
 from services.local_folder import (
+    LOCAL_FOLDER_JOB_TYPES,
     LocalWorkspaceCancelled,
     LocalWorkspaceError,
     affected_workspace_ids,
@@ -26,10 +27,6 @@ from services.local_folder import (
 )
 from services.local_workspace import destination_case_insensitive
 from services.local_workspace import local_state as legacy_local_state
-
-LOCAL_FOLDER_JOB_TYPES = frozenset(
-    {"work-locally-folder-stage", "work-locally-folder-sync", "work-locally-folder-discard"}
-)
 
 
 def create_local_folder_blueprint(

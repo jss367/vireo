@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 
+from config import settings_write_lock
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_edit_recipes, attach_species_representatives
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
@@ -22,13 +23,12 @@ def create_misses_blueprint(
     get_db,
     json_error,
     *,
-    settings_write_lock,
     resolve_visual,
 ):
     """Build the misses blueprint.
 
-    ``settings_write_lock`` serializes workspace ``config_overrides`` writes
-    with the settings routes, so saving Misses thresholds as workspace
+    ``config.settings_write_lock`` serializes workspace ``config_overrides``
+    writes with the settings routes, so saving Misses thresholds as workspace
     defaults cannot interleave with another settings save.
     ``resolve_visual`` is the app's ``VisualScope.resolve``; with
     ``inject_active_visual_model`` and ``validate_visual_arg`` from

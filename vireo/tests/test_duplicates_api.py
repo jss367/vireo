@@ -392,10 +392,11 @@ def test_delete_loser_files_chunks_large_id_lists(app_and_db, tmp_path, monkeypa
     the chunking path without seeding 1000 photos: the test still proves the
     endpoint splits the query.
 
-    The duplicates blueprint receives ``app._chunked`` itself, whose chunk
-    size is a default argument bound when the function was defined. Patching
-    the ``_SQL_PARAM_CHUNK`` constant therefore changes nothing; patching the
-    function's defaults reaches the same object the blueprint calls.
+    The duplicates blueprint calls ``sql_chunks.chunked`` (re-exported as
+    ``app._chunked``), whose chunk size is a default argument bound when the
+    function was defined. Patching the ``SQL_PARAM_CHUNK`` constant therefore
+    changes nothing; patching the function's defaults reaches the same object
+    the blueprint calls.
     """
     import os
 
