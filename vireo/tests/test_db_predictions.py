@@ -13,9 +13,12 @@ repair, and that composition (``get_effective_config``,
 ``set_meta``) still routes through the façade so monkeypatches take effect.
 """
 
+import ast
 import contextlib
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import pytest
 from db import AUTO_MATCH_REVIEW_MARKER, Database
@@ -722,3 +725,144 @@ def test_accept_subject_species_no_accept(db, cat, monkeypatch):
 
 def test_decided_statuses_are_pinned():
     assert Database.DECIDED_PREDICTION_STATUSES == ("accepted", "rejected", "reviewed")
+
+
+# -- structure ----------------------------------------------------------------------------
+
+
+_DELEGATING_PREDICTION_METHODS = (
+    "add_prediction",
+    "retain_prediction_candidates",
+    "reconcile_match_review_state",
+    "clear_predictions",
+    "get_prediction_states",
+    "get_predictions",
+    "update_prediction_status",
+    "get_group_predictions",
+    "update_predictions_status_by_photo",
+    "repair_mixed_species_prediction_groups",
+    "ungroup_prediction",
+    "get_existing_prediction_photo_ids",
+    "get_top_prediction_for_photo",
+    "get_top_prediction_confidences",
+    "get_prediction_for_photo",
+    "clear_prediction_group_info",
+    "update_prediction_group_info",
+    "accept_subject_species",
+    "get_review_status",
+    "set_review_status",
+)
+
+# ``test_route_contract`` looks these up by name on ``Database``.
+_PREDICTION_MUTATORS = (
+    "accept_prediction",
+    "accept_subject_species",
+    "update_prediction_status",
+    "update_predictions_status_by_photo",
+    "ungroup_prediction",
+    "set_review_status",
+)
+
+
+def _self_attrs(fn):
+    source = textwrap.dedent(inspect.getsource(fn))
+    node = ast.parse(source).body[0]
+    return {
+        n.attr
+        for n in ast.walk(node)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_PREDICTION_METHODS)
+def test_prediction_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to PredictionRepository"
+    )
+    assert "_prediction_repository" in attrs, (
+        f"Database.{name} no longer delegates to PredictionRepository"
+    )
+
+
+@pytest.mark.parametrize("name", _PREDICTION_MUTATORS)
+def test_prediction_mutators_keep_their_database_names(name):
+    assert callable(getattr(Database, name, None))
+
+
+def test_accept_prediction_stays_on_database():
+    """It tags through the provenance-pinned ``tag_photo`` mid-transaction."""
+    attrs = _self_attrs(Database.accept_prediction)
+    assert "tag_photo" in attrs
+    assert "_prediction_repository" not in attrs
+
+
+def test_prediction_repository_never_references_keyword_writers():
+    import repositories.predictions as module
+
+    tree = ast.parse(inspect.getsource(module))
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names.add(node.value)
+    assert not names & {"tag_photo", "untag_photo", "_merge_keyword_into",
+                        "retire_builtin_wildlife_genre", "link_keyword_to_place"}
+
+
+def test_prediction_repository_routes_facade_calls_through_database(db):
+    repo = db._prediction_repository()
+    from repositories.predictions import FACADE_METHODS
+
+    for name in FACADE_METHODS:
+        assert getattr(repo, name) == getattr(db, name), name
+
+
+def test_prediction_repository_never_hands_itself_out_as_the_database():
+    import repositories.predictions as module
+
+    tree = ast.parse(inspect.getsource(module))
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    bare = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "self"
+        and not (isinstance(parents.get(node), ast.Attribute)
+                 and parents[node].value is node)
+        and not isinstance(parents.get(node), ast.arguments)
+    ]
+    assert len(bare) == 1  # ``setattr(self, ...)`` in ``__init__``
+
+
+def test_prediction_facade_signatures_unchanged():
+    sig = {n: str(inspect.signature(getattr(Database, n)))
+           for n in _DELEGATING_PREDICTION_METHODS}
+    assert sig["add_prediction"] == (
+        "(self, detection_id, species, confidence, model, category='new', "
+        "status='pending', group_id=None, vote_count=None, total_votes=None, "
+        "individual=None, taxonomy=None, labels_fingerprint='legacy', "
+        "labels_fingerprint_full=None, preserve_manual_review=False, "
+        "match_score=None, from_fresh_inference=False, refresh_output=False)"
+    )
+    assert sig["clear_predictions"] == (
+        "(self, model=None, collection_photo_ids=None, labels_fingerprint=None, "
+        "clear_run_keys=True)"
+    )
+    assert sig["update_prediction_status"] == (
+        "(self, prediction_id, status, _commit=True)"
+    )
+    assert sig["update_predictions_status_by_photo"] == (
+        "(self, photo_id, status, _commit=True)"
+    )
+    assert sig["ungroup_prediction"] == "(self, prediction_id, _commit=True)"
+    assert sig["accept_subject_species"] == "(self, prediction_id, _commit=True)"
+    assert sig["set_review_status"] == (
+        "(self, prediction_id, workspace_id, status, individual=None, group_id=None)"
+    )
+    assert sig["get_predictions"] == (
+        "(self, photo_ids=None, model=None, status=None, rules=None)"
+    )
