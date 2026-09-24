@@ -11,9 +11,12 @@ active workspace is resolved, chunking, and the façade calls
 patchable on ``Database``.
 """
 
+import ast
 import contextlib
+import inspect
 import logging
 import sqlite3
+import textwrap
 
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, KEYWORD_SOURCE_MANUAL, Database
@@ -833,3 +836,101 @@ def test_reverse_geocode_cache_put_upserts_negative_result(db):
         "SELECT COUNT(*) FROM place_reverse_geocode_cache"
     ).fetchone()[0] == 1
     assert Database._reverse_geocode_grid(-0.0004, 0.0006) == (0, 1)
+
+
+# -- structure: the location SQL lives in the repository -----------------------
+
+# Database methods whose SQL moved to repositories/locations.py. Each stays on
+# Database as a thin wrapper so existing call sites keep working; none may
+# reach the connection directly again. ``link_keyword_to_place`` is not here:
+# test_keyword_provenance_contract pins it to db.py as a photo_keywords writer.
+_DELEGATING_LOCATION_METHODS = (
+    "get_photo_location_statuses",
+    "get_geolocated_photos",
+    "get_assigned_photo_location",
+    "_get_photo_location_leaves",
+    "get_photo_location_paths",
+    "has_pending_location_change",
+    "count_photos_with_location",
+    "queue_location_changes_for_tagged_photos",
+    "get_effective_photo_locations",
+    "count_photos_without_coordinates",
+    "get_plottable_photo_ids",
+    "_restore_misclassified_location_ancestor",
+    "repair_misclassified_location_ancestors",
+    "_merge_duplicate_location_roots",
+    "upsert_place_chain",
+    "set_photo_location",
+    "clear_photo_location",
+    "get_or_create_text_location",
+    "reverse_geocode_cache_get",
+    "reverse_geocode_cache_put",
+)
+
+
+def _self_attrs(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    return fn, {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_LOCATION_METHODS)
+def test_location_method_delegates_to_repository(name):
+    _fn, attrs = _self_attrs(name)
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to LocationRepository"
+    )
+    assert "_location_repository" in attrs, (
+        f"Database.{name} no longer delegates to LocationRepository"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "facade_calls"),
+    [
+        ("get_geolocated_photos", {"get_folder_subtree_ids", "_build_query_from_rules"}),
+        ("get_plottable_photo_ids", {"get_folder_subtree_ids"}),
+        ("queue_location_changes_for_tagged_photos", {"queue_change"}),
+        (
+            "repair_misclassified_location_ancestors",
+            {"_restore_misclassified_location_ancestor", "_merge_duplicate_location_roots"},
+        ),
+        ("_merge_duplicate_location_roots", {"_merge_keyword_into"}),
+        ("set_photo_location", {"tag_photo"}),
+        ("upsert_place_chain", {"_upsert_location_parent_chain", "_upsert_one_keyword"}),
+        ("get_or_create_text_location", {"_upsert_one_keyword"}),
+    ],
+)
+def test_cross_domain_calls_stay_on_the_facade(name, facade_calls):
+    """Composition is routed through ``Database`` so its patches still apply."""
+    _fn, attrs = _self_attrs(name)
+    assert facade_calls <= attrs
+
+
+def test_set_photo_location_tags_as_an_attribute_call():
+    """The provenance contract only recognises ``self.tag_photo(...)`` calls."""
+    fn, _attrs = _self_attrs("set_photo_location")
+    calls = [
+        node for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "tag_photo"
+    ]
+    assert len(calls) == 1
+    source = {kw.arg: kw.value for kw in calls[0].keywords}["source"]
+    assert isinstance(source, ast.Name) and source.id == "KEYWORD_SOURCE_MANUAL"
+
+
+def test_repository_builds_without_an_active_workspace(db):
+    db.set_active_workspace(None)
+    repo = db._location_repository()
+    assert repo.conn is db.conn
+    assert repo.chunk_size == _SQLITE_PARAM_CHUNK_SIZE
+    with pytest.raises(RuntimeError):
+        repo.workspace_id_fn()
