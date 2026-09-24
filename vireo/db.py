@@ -2696,26 +2696,7 @@ class Database:
 
     def repair_missing_folder_parents(self):
         """Fill parent_id for legacy folder rows whose parent path is known."""
-        rows = self.conn.execute(
-            "SELECT id, path, parent_id FROM folders"
-        ).fetchall()
-        path_to_id = {r["path"]: r["id"] for r in rows}
-        updates = []
-        for row in rows:
-            if row["parent_id"] is not None:
-                continue
-            parent_path = _stored_parent_path(row["path"])
-            parent_id = path_to_id.get(parent_path)
-            if parent_id is None or parent_id == row["id"]:
-                continue
-            updates.append((parent_id, row["id"]))
-        if not updates:
-            return
-        self.conn.executemany(
-            "UPDATE folders SET parent_id = ? WHERE id = ?",
-            updates,
-        )
-        self.conn.commit()
+        self._folder_repository(scoped=False).repair_missing_parents()
 
     def repair_stale_folder_parents(self):
         """Repair parent links left behind by older folder moves.
@@ -2726,32 +2707,9 @@ class Database:
         This runs on startup and is idempotent; no filesystem access or photo
         and workspace membership changes are needed, even for offline paths.
         """
-        with self.conn:
-            # Read and repair one snapshot: a concurrent move or local-copy
-            # activation must not change paths after we validate the links.
-            self.conn.execute("BEGIN IMMEDIATE")
-            managed_ids = {
-                row[0] for row in self.conn.execute(
-                    "SELECT folder_id FROM local_folder_mappings "
-                    "UNION SELECT folder_id FROM local_workspace_folders"
-                )
-            }
-            rows = self.conn.execute(
-                "SELECT id, path, parent_id FROM folders"
-            ).fetchall()
-            paths = {row["id"]: _path_for_subtree_match(row["path"]) for row in rows}
-            updates = []
-            for row in rows:
-                fid, parent_id = row["id"], row["parent_id"]
-                if parent_id is None or fid in managed_ids or parent_id in managed_ids:
-                    continue
-                parent_path = paths.get(parent_id)
-                if parent_path is not None and paths[fid].startswith(parent_path + "/"):
-                    continue
-                updates.append((self.nearest_ancestor_folder_id(row["path"], exclude_id=fid), fid))
-            self.conn.executemany(
-                "UPDATE folders SET parent_id = ? WHERE id = ?", updates,
-            )
+        updates = self._folder_repository(scoped=False).repair_stale_parents(
+            nearest_ancestor_id=self.nearest_ancestor_folder_id,
+        )
         if updates:
             log.info("Repaired %d stale folder parent links", len(updates))
         return len(updates)
@@ -3205,23 +3163,10 @@ class Database:
         rebased descendant (:func:`workspace_local_root_ids` and
         :func:`affected_workspace_ids` both key off that link).
         """
-        row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
-        if row is None or not row["path"]:
-            return [folder_id]
-        root_path = _path_for_subtree_match(row["path"])
-        prefix = root_path + "/"
-        rows = self.conn.execute(
-            """SELECT id FROM folders
-               WHERE id = ?
-                  OR substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
-            (folder_id, len(prefix), prefix),
-        ).fetchall()
-        ids = {folder_id}
-        ids.update(r["id"] for r in rows)
-        ids.update(self._local_source_descendant_ids(row["path"]))
-        return list(ids)
+        return self._folder_repository(scoped=False).subtree_ids_by_path(
+            folder_id,
+            local_source_descendant_ids=self._local_source_descendant_ids,
+        )
 
     def _local_source_descendant_ids(self, root_path):
         """Return folder ids whose local_folder_mappings.source_path is under root_path.
@@ -3236,16 +3181,7 @@ class Database:
         would omit that workspace and the UI would report the ancestor root
         as fully remote.
         """
-        if not root_path:
-            return []
-        prefix = _path_for_subtree_match(root_path) + "/"
-        rows = self.conn.execute(
-            """SELECT folder_id FROM local_folder_mappings
-               WHERE source_path = ?
-                  OR substr(REPLACE(source_path, '\\', '/'), 1, ?) = ?""",
-            (root_path, len(prefix), prefix),
-        ).fetchall()
-        return [int(r["folder_id"]) for r in rows]
+        return self._folder_repository(scoped=False).local_source_descendant_ids(root_path)
 
     def _workspace_folder_repository(self):
         """Build the workspace-folder membership repository on this connection.
@@ -4298,6 +4234,29 @@ class Database:
 
     # -- Folders --
 
+    def _folder_repository(self, *, scoped=True):
+        """Build the folder repository on this connection.
+
+        ``scoped=True`` binds it to the active workspace (raising
+        ``RuntimeError`` when none is set) for the workspace-scoped reads;
+        catalog-wide methods pass ``scoped=False``. ``commit_with_retry`` and
+        the path helpers are looked up here, so monkeypatches of the ``db``
+        module functions still reach the moved SQL.
+        """
+        from repositories.folders import FolderRepository
+
+        return FolderRepository(
+            self.conn,
+            self._ws_id() if scoped else None,
+            commit_with_retry=commit_with_retry,
+            path_for_subtree_match=_path_for_subtree_match,
+            stored_parent_path=_stored_parent_path,
+            subtree_prefix=_subtree_prefix,
+            subtree_relative=_subtree_relative,
+            join_subtree_path=_join_subtree_path,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+        )
+
     def add_folder(self, path, name=None, parent_id=None, *,
                    workspace_root=True, link_to_workspace=True):
         """Insert a folder. Automatically links it to the active workspace.
@@ -4316,28 +4275,7 @@ class Database:
 
         Returns the folder id.
         """
-        cur = self.conn.execute(
-            "INSERT OR IGNORE INTO folders (path, name, parent_id) VALUES (?, ?, ?)",
-            (path, name, parent_id),
-        )
-        commit_with_retry(self.conn)
-        if cur.rowcount > 0:
-            folder_id = cur.lastrowid
-        else:
-            row = self.conn.execute(
-                "SELECT id, parent_id FROM folders WHERE path = ?", (path,)
-            ).fetchone()
-            folder_id = row["id"]
-            if (
-                parent_id is not None
-                and row["parent_id"] is None
-                and folder_id != parent_id
-            ):
-                self.conn.execute(
-                    "UPDATE folders SET parent_id = ? WHERE id = ?",
-                    (parent_id, folder_id),
-                )
-                commit_with_retry(self.conn)
+        folder_id = self._folder_repository(scoped=False).add(path, name, parent_id)
         # Auto-link to active workspace
         if link_to_workspace and self._active_workspace_id is not None:
             self.add_workspace_folder(
@@ -4363,41 +4301,7 @@ class Database:
         sidebar) never leave a linked folder dangling under an ancestor that
         was filtered out of the result.
         """
-        ws = self._ws_id()
-        return self.conn.execute(
-            """WITH RECURSIVE
-               visible(id, is_workspace_root) AS (
-                   SELECT f.id, wf.is_root FROM folders f
-                   JOIN workspace_folders wf ON wf.folder_id = f.id
-                   WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')
-               ),
-               walk(start_id, current_id) AS (
-                   SELECT v.id, f.parent_id
-                   FROM visible v
-                   JOIN folders f ON f.id = v.id
-                   UNION ALL
-                   SELECT w.start_id, f.parent_id
-                   FROM walk w
-                   JOIN folders f ON f.id = w.current_id
-                   WHERE w.current_id IS NOT NULL
-                     AND w.current_id NOT IN (SELECT id FROM visible)
-               ),
-               effective AS (
-                   SELECT start_id, current_id AS parent_id
-                   FROM walk
-                   WHERE current_id IS NULL
-                      OR current_id IN (SELECT id FROM visible)
-               )
-               SELECT f.id, f.path, f.name,
-                      e.parent_id AS parent_id,
-                      f.photo_count, f.status,
-                      v.is_workspace_root
-               FROM folders f
-               JOIN visible v ON v.id = f.id
-               JOIN effective e ON e.start_id = f.id
-               ORDER BY f.path""",
-            (ws,),
-        ).fetchall()
+        return self._folder_repository().tree()
 
     def get_folder_subtree_ids(self, folder_id):
         """Return [folder_id, ...descendant_ids] restricted to the active workspace.
@@ -4410,22 +4314,7 @@ class Database:
         or crafted ``folder_id`` for a folder that is no longer in the active
         workspace will not expand into its active descendants.
         """
-        ws = self._ws_id()
-        rows = self.conn.execute(
-            """WITH RECURSIVE tree(id) AS (
-                   SELECT ?
-                   UNION ALL
-                   SELECT f.id FROM folders f
-                   JOIN tree t ON f.parent_id = t.id
-                   JOIN workspace_folders wf_t
-                     ON wf_t.folder_id = t.id AND wf_t.workspace_id = ?
-                   JOIN workspace_folders wf_f
-                     ON wf_f.folder_id = f.id AND wf_f.workspace_id = ?
-               )
-               SELECT id FROM tree""",
-            (folder_id, ws, ws),
-        ).fetchall()
-        return [r["id"] for r in rows]
+        return self._folder_repository().subtree_ids(folder_id)
 
     def get_folder(self, folder_id):
         """Return a single folder row by id, or None if not found.
@@ -4434,11 +4323,7 @@ class Database:
         scoping should additionally verify membership via
         ``workspace_folders``.
         """
-        return self.conn.execute(
-            "SELECT id, path, name, parent_id, status, photo_count "
-            "FROM folders WHERE id = ?",
-            (folder_id,),
-        ).fetchone()
+        return self._folder_repository(scoped=False).get(folder_id)
 
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
@@ -4452,48 +4337,7 @@ class Database:
 
         Returns the number of folders whose status changed.
         """
-        rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
-        changed = 0
-        newly_missing_paths = []
-        for row in rows:
-            exists = os.path.exists(row["path"])
-            if not exists:
-                new_status = "missing"
-            elif row["status"] == "partial":
-                new_status = "partial"
-            else:
-                new_status = "ok"
-            if new_status != row["status"]:
-                self.conn.execute(
-                    "UPDATE folders SET status = ? WHERE id = ?",
-                    (new_status, row["id"]),
-                )
-                changed += 1
-                if new_status == "missing":
-                    stored_path = row["path"] or ""
-                    if stored_path:
-                        newly_missing_paths.append(stored_path)
-        # A folder going missing frees its stored path to be reused by an
-        # unrelated mount without a corresponding row-delete: the folder row
-        # stays put in case the same content comes back, but a different
-        # removable card mounted at the same path can later be rescanned
-        # into it. Any destination photo whose ``last_move_source_folder_path``
-        # still equals that path would then compare equal to the new card's
-        # ``src_dir`` in ``move_photos`` and slip past the same-stem developed-
-        # render collision guard, letting an unrelated photo share the moved
-        # photo's rendered output (developed lookup is only by destination
-        # folder + stem). Clear provenance in the same transaction as the
-        # status flip so a rollback restores both together.
-        for chunk in _chunks(newly_missing_paths):
-            placeholders = ",".join("?" for _ in chunk)
-            self.conn.execute(
-                f"UPDATE photos SET last_move_source_folder_path = NULL "
-                f"WHERE last_move_source_folder_path IN ({placeholders})",
-                chunk,
-            )
-        if changed:
-            self.conn.commit()
-        return changed
+        return self._folder_repository(scoped=False).check_health()
 
     # -- Library integrity verification --
 
@@ -4560,17 +4404,7 @@ class Database:
 
     def get_missing_folders(self):
         """Return missing folders in the active workspace with photo counts."""
-        return self.conn.execute(
-            """SELECT f.id, f.path, f.name, f.parent_id,
-                      COUNT(p.id) as photo_count
-               FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               LEFT JOIN photos p ON p.folder_id = f.id
-               WHERE wf.workspace_id = ? AND f.status = 'missing'
-               GROUP BY f.id
-               ORDER BY f.path""",
-            (self._ws_id(),),
-        ).fetchall()
+        return self._folder_repository().missing()
 
     def get_folder_health_version(self):
         """Return the monotonic version for folder-health-visible changes."""
@@ -4648,17 +4482,9 @@ class Database:
                     " AND f.id IN (SELECT id FROM missing_subtree_ids)"
                 )
         check_cancelled()
-        rows = self.conn.execute(
-            f"""SELECT p.id, p.filename, p.extension, p.file_size,
-                      p.timestamp, p.working_copy_path,
-                      f.id AS folder_id, f.path AS folder_path
-               FROM photos p
-               JOIN folders f ON p.folder_id = f.id
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ? AND f.status != 'missing'{subtree_clause}
-               ORDER BY f.path, p.filename""",
-            params,
-        ).fetchall()
+        rows = self._folder_repository(scoped=False).photos_in_present_folders(
+            subtree_clause, params,
+        )
         check_cancelled()
         # One readdir per folder instead of one stat per photo. On a 50k-photo
         # library across a network volume the per-photo `os.path.exists` was
@@ -4764,19 +4590,9 @@ class Database:
         moved onto another volume staying linked to its original parent).
         Folder counts are small, so the linear scan is fine.
         """
-        target = _path_for_subtree_match(path)
-        best_id = None
-        best_len = -1
-        for row in self.conn.execute("SELECT id, path FROM folders"):
-            if exclude_id is not None and row["id"] == exclude_id:
-                continue
-            cand = _path_for_subtree_match(row["path"])
-            if target == cand or not target.startswith(cand + "/"):
-                continue
-            if len(cand) > best_len:
-                best_id = row["id"]
-                best_len = len(cand)
-        return best_id
+        return self._folder_repository(scoped=False).nearest_ancestor_id(
+            path, exclude_id=exclude_id,
+        )
 
     def _relink_parents_by_path(self, folder_ids):
         """Re-derive ``parent_id`` from the current ``path`` for each folder.
@@ -4786,16 +4602,9 @@ class Database:
         browse tree. Call this after path rewrites — all affected paths must
         already be committed to the rows so ancestor lookup sees them.
         """
-        for fid in folder_ids:
-            row = self.conn.execute(
-                "SELECT path FROM folders WHERE id = ?", (fid,)
-            ).fetchone()
-            if row is None:
-                continue
-            self.conn.execute(
-                "UPDATE folders SET parent_id = ? WHERE id = ?",
-                (self.nearest_ancestor_folder_id(row["path"], exclude_id=fid), fid),
-            )
+        self._folder_repository(scoped=False).relink_parents_by_path(
+            folder_ids, nearest_ancestor_id=self.nearest_ancestor_folder_id,
+        )
 
     def relocate_folder(self, folder_id, new_path):
         """Update folder path and set status to 'ok'.
@@ -4808,101 +4617,12 @@ class Database:
 
         Returns list of child folder dicts that were also relocated.
         """
-        # Check for duplicate path
-        conflict = self.conn.execute(
-            "SELECT id FROM folders WHERE path = ? AND id != ?",
-            (new_path, folder_id),
-        ).fetchone()
-        if conflict:
-            # Only merge if source folder is missing; for ok folders, reject
-            source_row = self.conn.execute(
-                "SELECT status, path FROM folders WHERE id = ?", (folder_id,)
-            ).fetchone()
-            if source_row and source_row["status"] == "missing":
-                # Revalidate: if original path came back, refresh status instead
-                if os.path.isdir(source_row["path"]):
-                    self.conn.execute(
-                        "UPDATE folders SET status = 'ok' WHERE id = ?",
-                        (folder_id,),
-                    )
-                    self.conn.commit()
-                    raise ValueError(
-                        f"Path is already tracked as folder {conflict['id']}"
-                    )
-                return self._merge_into_existing(folder_id, conflict["id"], new_path)
-            raise ValueError(
-                f"Path is already tracked as folder {conflict['id']}"
-            )
-
-        old_row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
-        old_path = old_row["path"] if old_row else ""
-
-        self.conn.execute(
-            "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
-            (new_path, folder_id),
+        return self._folder_repository(scoped=False).relocate(
+            folder_id,
+            new_path,
+            merge_into_existing=self._merge_into_existing,
+            relink_parents_by_path=self._relink_parents_by_path,
         )
-
-        # Check missing children for cascade
-        cascaded = []
-        skipped_prefixes = []
-        children = self.conn.execute(
-            """SELECT id, path FROM folders
-               WHERE status = 'missing'
-                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
-               ORDER BY length(REPLACE(path, '\\', '/')),
-                        REPLACE(path, '\\', '/')""",
-            (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
-        ).fetchall()
-        for child in children:
-            # Skip descendants of conflicted folders
-            child_match_path = _path_for_subtree_match(child["path"])
-            if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
-                continue
-            relative = _subtree_relative(child["path"], old_path)
-            candidate = _join_subtree_path(new_path, relative)
-            if os.path.exists(candidate):
-                # Skip if another folder already has this path
-                child_conflict = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ? AND id != ?",
-                    (candidate, child["id"]),
-                ).fetchone()
-                if child_conflict:
-                    skipped_prefixes.append(child_match_path)
-                    continue
-                self.conn.execute(
-                    "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
-                    (candidate, child["id"]),
-                )
-                cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
-
-        # Cascade the rebase into ``photos.last_move_source_folder_path``.
-        # ``move_folder_path`` already does this for the whole-folder move
-        # flow; ``relocate_folder`` runs when a missing folder is remapped
-        # to a new location (or a cascaded missing child is rediscovered
-        # under the new root), which frees each old path for reuse the same
-        # way. Without the rebase, a later scan of an unrelated folder at
-        # the freed path would compare equal to a stale stored provenance
-        # in ``move_photos`` and slip a same-stem developed-render collision
-        # past the guard, letting two unrelated destination rows share the
-        # developed-output lookup by folder+stem.
-        rebased_paths = [(old_path, new_path)]
-        rebased_paths.extend(
-            (c["old_path"], c["new_path"]) for c in cascaded
-        )
-        for prior_path, updated_path in rebased_paths:
-            if not prior_path or prior_path == updated_path:
-                continue
-            self.conn.execute(
-                "UPDATE photos SET last_move_source_folder_path = ? "
-                "WHERE last_move_source_folder_path = ?",
-                (updated_path, prior_path),
-            )
-
-        self._relink_parents_by_path([folder_id] + [c["id"] for c in cascaded])
-        self.conn.commit()
-        return cascaded
 
     def _merge_into_existing(self, source_folder_id, target_folder_id, new_path, *, commit=True):
         """Merge photos from a missing folder into an existing folder at the same path.
@@ -4918,152 +4638,14 @@ class Database:
         used by ``services.local_workspace._restore_catalog`` so the whole
         catalog restore (merges + rebase + state-row cleanup) commits atomically.
         """
-        old_row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
-        ).fetchone()
-        old_path = old_row["path"] if old_row else ""
-
-        # Get photos from the missing folder
-        source_photos = self.conn.execute(
-            "SELECT id, filename FROM photos WHERE folder_id = ?",
-            (source_folder_id,),
-        ).fetchall()
-
-        # Reassign or drop each photo
-        drop_ids = []
-        for photo in source_photos:
-            existing = self.conn.execute(
-                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
-                (target_folder_id, photo["filename"]),
-            ).fetchone()
-            if existing:
-                self._transfer_gps_review_for_merge(photo["id"], existing["id"])
-                drop_ids.append(photo["id"])
-            elif os.path.exists(os.path.join(new_path, photo["filename"])):
-                self.conn.execute(
-                    "UPDATE photos SET folder_id = ? WHERE id = ?",
-                    (target_folder_id, photo["id"]),
-                )
-            else:
-                # File doesn't exist on disk at target — drop phantom record
-                drop_ids.append(photo["id"])
-
-        # Delete duplicate photos and their associated data
-        if drop_ids:
-            ph = ",".join("?" for _ in drop_ids)
-            self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", drop_ids)
-            self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", drop_ids)
-            self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", drop_ids)
-            self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", drop_ids)
-
-        # Reparent child folders from source to target
-        self.conn.execute(
-            "UPDATE folders SET parent_id = ? WHERE parent_id = ?",
-            (target_folder_id, source_folder_id),
+        return self._folder_repository(scoped=False).merge_into_existing(
+            source_folder_id,
+            target_folder_id,
+            new_path,
+            commit=commit,
+            transfer_gps_review=self._transfer_gps_review_for_merge,
+            relink_parents_by_path=self._relink_parents_by_path,
         )
-
-        # Transfer workspace visibility from source to target while preserving
-        # whether the source link was a user-facing root or a materialized
-        # descendant.
-        workspace_links = self.conn.execute(
-            "SELECT workspace_id, is_root FROM workspace_folders WHERE folder_id = ?",
-            (source_folder_id,),
-        ).fetchall()
-        for link in workspace_links:
-            self.conn.execute(
-                """INSERT OR IGNORE INTO workspace_folders
-                   (workspace_id, folder_id, is_root) VALUES (?, ?, ?)""",
-                (link["workspace_id"], target_folder_id, link["is_root"]),
-            )
-            if link["is_root"]:
-                self.conn.execute(
-                    """UPDATE workspace_folders
-                       SET is_root = 1
-                       WHERE workspace_id = ? AND folder_id = ?""",
-                    (link["workspace_id"], target_folder_id),
-                )
-
-        # Remove source folder
-        self.conn.execute(
-            "DELETE FROM workspace_folders WHERE folder_id = ?",
-            (source_folder_id,),
-        )
-        self.conn.execute(
-            "DELETE FROM folders WHERE id = ?", (source_folder_id,)
-        )
-        # Clear stale move provenance keyed on the merged source folder's
-        # path. Mirrors ``delete_folder``: once the folder row is gone,
-        # any destination photo whose ``last_move_source_folder_path``
-        # still points at ``old_path`` would silently match a new
-        # unrelated folder that later appears at that same path — the
-        # same-stem developed-render collision guard in ``move_photos``
-        # compares the stored origin to a candidate move's ``src_dir``
-        # by string equality and would let two unrelated destination rows
-        # share developed-output lookup by folder+stem. Runs inside the
-        # merge's transaction so a rollback restores both together.
-        if old_path:
-            self.conn.execute(
-                "UPDATE photos SET last_move_source_folder_path = NULL "
-                "WHERE last_move_source_folder_path = ?",
-                (old_path,),
-            )
-
-        # Ensure target folder is marked ok and recompute its photo count
-        self.conn.execute(
-            "UPDATE folders SET status = 'ok', photo_count = "
-            "(SELECT COUNT(*) FROM photos WHERE folder_id = ?) "
-            "WHERE id = ?",
-            (target_folder_id, target_folder_id),
-        )
-
-        # Cascade to missing children (same logic as relocate_folder)
-        cascaded = []
-        skipped_prefixes = []
-        children = self.conn.execute(
-            """SELECT id, path FROM folders
-               WHERE status = 'missing'
-                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
-               ORDER BY length(REPLACE(path, '\\', '/')),
-                        REPLACE(path, '\\', '/')""",
-            (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
-        ).fetchall()
-        for child in children:
-            child_match_path = _path_for_subtree_match(child["path"])
-            if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
-                continue
-            relative = _subtree_relative(child["path"], old_path)
-            candidate = _join_subtree_path(new_path, relative)
-            if os.path.exists(candidate):
-                child_conflict = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ? AND id != ?",
-                    (candidate, child["id"]),
-                ).fetchone()
-                if child_conflict:
-                    skipped_prefixes.append(child_match_path)
-                    continue
-                self.conn.execute(
-                    "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
-                    (candidate, child["id"]),
-                )
-                cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
-
-        # The surviving missing-child rows above have moved from each old
-        # path to its candidate under the existing target root. Keep any
-        # moved-photo provenance aligned with those live source rows. Clearing
-        # only the merged root path is insufficient: a same-stem sibling from
-        # a cascaded child would otherwise compare against its stale old path,
-        # and that freed path could later be reused by unrelated content.
-        for child in cascaded:
-            self.conn.execute(
-                "UPDATE photos SET last_move_source_folder_path = ? "
-                "WHERE last_move_source_folder_path = ?",
-                (child["new_path"], child["old_path"]),
-            )
-
-        self._relink_parents_by_path([c["id"] for c in cascaded])
-        if commit:
-            self.conn.commit()
-        return cascaded
 
     # -- Move operations --
 
@@ -5622,22 +5204,9 @@ class Database:
         the folder is still visible in that workspace, so it must never be
         deleted, only unlinked. With active_ws None, any link qualifies.
         """
-        linked = set()
-        for chunk in _chunks(folder_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            sql = (
-                f"SELECT DISTINCT folder_id FROM workspace_folders "
-                f"WHERE folder_id IN ({placeholders})"
-            )
-            params = list(chunk)
-            if active_ws is not None:
-                sql += " AND workspace_id != ?"
-                params.append(active_ws)
-            linked.update(
-                row["folder_id"]
-                for row in self.conn.execute(sql, params).fetchall()
-            )
-        return linked
+        return self._folder_repository(scoped=False).linked_in_other_workspace(
+            folder_ids, active_ws,
+        )
 
     def delete_folder(self, folder_id):
         """Delete a folder, its descendant folders, and all their photos/data.
@@ -5673,139 +5242,14 @@ class Database:
         'files': []}.
         """
         active_ws = self._ws_id()
-        # Everything under the target, by path, including legacy
-        # NULL-parent_id descendants a parent_id walk would miss.
-        candidates = set(self._folder_subtree_ids_by_path(folder_id))
-
-        # Candidates that another workspace has a link for are never
-        # deleted, and each protected folder keeps its whole subtree. Any
-        # foreign link counts — root or scanner-materialized — since either
-        # means the folder is still visible in that workspace. When the
-        # target itself is protected, the kept set covers every candidate
-        # and this degenerates to unlink-only: nothing is deleted, no
-        # reparenting happens, and only the active workspace's links go.
-        protected = self._folders_linked_in_other_workspace(candidates, active_ws)
-        kept_subtree_ids = set()
-        for fid in protected:
-            kept_subtree_ids.update(self._folder_subtree_ids_by_path(fid))
-        delete_ids = candidates - kept_subtree_ids
-
-        # Kept folders whose parent row is being deleted must be reparented
-        # to NULL before the folder DELETE — folders.parent_id has no ON
-        # DELETE action. (Kept folders whose parent also survives keep
-        # their chain intact.)
-        kept_head_ids = []
-        for chunk in _chunks(kept_subtree_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            kept_head_ids.extend(
-                row["id"]
-                for row in self.conn.execute(
-                    f"SELECT id, parent_id FROM folders WHERE id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-                if row["parent_id"] in delete_ids
-            )
-
-        # Delete children before parents, else the multi-statement delete
-        # trips the parent_id FK at the end of an earlier chunk's statement.
-        # Order by path depth descending — a parent's normalized path always
-        # has fewer separators than its child's, and parent_id order can't
-        # be trusted for the legacy path-only rows.
-        depth_by_id = {}
-        # Collect the raw stored paths of the folders about to be deleted so we
-        # can invalidate stale ``last_move_source_folder_path`` provenance on
-        # photos moved out earlier. Without this, a new folder that later ends
-        # up at the same path (e.g. a removable card re-mounted at the same
-        # spot after the earlier scan was cleared) would compare equal to the
-        # stored provenance and silently bypass the same-stem developed-render
-        # collision guard in ``move_photos``.
-        deleted_folder_paths = []
-        for chunk in _chunks(delete_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in self.conn.execute(
-                f"SELECT id, path FROM folders WHERE id IN ({placeholders})",
-                chunk,
-            ).fetchall():
-                stored_path = row["path"] or ""
-                if stored_path:
-                    deleted_folder_paths.append(stored_path)
-                path = _path_for_subtree_match(stored_path)
-                depth_by_id[row["id"]] = path.count("/")
-        ordered_delete_ids = sorted(
-            delete_ids, key=lambda fid: depth_by_id.get(fid, 0), reverse=True
+        deleted_ids, files = self._folder_repository(scoped=False).delete(
+            folder_id,
+            active_ws,
+            subtree_ids_by_path=self._folder_subtree_ids_by_path,
+            linked_in_other_workspace=self._folders_linked_in_other_workspace,
+            delete_photos=self.delete_photos,
+            remember_removals=self._remember_workspace_folder_removals,
         )
-
-        photo_ids = []
-        for chunk in _chunks(ordered_delete_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            photo_ids.extend(
-                row["id"]
-                for row in self.conn.execute(
-                    f"SELECT id FROM photos WHERE folder_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-            )
-
-        # One outer transaction so a failure partway can't commit the photo
-        # deletes while leaving the folder rows behind. ``commit=False`` also
-        # defers delete_photos' pipeline-cache prune (a non-transactional
-        # file write) until after the commit succeeds.
-        files = []
-        deleted_ids = []
-        try:
-            for chunk in _chunks(photo_ids):
-                inner = self.delete_photos(chunk, commit=False)
-                files.extend(inner.get("files", []))
-                deleted_ids.extend(inner.get("ids", []))
-            # Reparent kept subtree heads before any folder DELETE — their
-            # parent_id points at a row being deleted, and the FK has no ON
-            # DELETE action.
-            for chunk in _chunks(kept_head_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"UPDATE folders SET parent_id = NULL "
-                    f"WHERE id IN ({placeholders})",
-                    chunk,
-                )
-            # Kept subtrees disappear from this workspace's view: drop the
-            # active workspace's links, leaving the other workspaces' links
-            # (and the folder rows and photos) untouched.
-            if active_ws is not None:
-                self._remember_workspace_folder_removals(active_ws, kept_subtree_ids, recursive=True)
-                for chunk in _chunks(kept_subtree_ids):
-                    placeholders = ",".join("?" for _ in chunk)
-                    self.conn.execute(
-                        f"DELETE FROM workspace_folders WHERE workspace_id = ? "
-                        f"AND folder_id IN ({placeholders})",
-                        [active_ws] + chunk,
-                    )
-            for chunk in _chunks(ordered_delete_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"DELETE FROM workspace_folders WHERE folder_id IN ({placeholders})",
-                    chunk,
-                )
-                self.conn.execute(
-                    f"DELETE FROM folders WHERE id IN ({placeholders})",
-                    chunk,
-                )
-            # Clear stale move provenance that would otherwise let a new
-            # unrelated folder appearing at one of these deleted paths bypass
-            # the same-stem developed-render collision guard in
-            # ``move_photos``. Run after the folder DELETEs (nothing left in
-            # this transaction can re-populate it) and inside the same outer
-            # transaction so a rollback restores both together.
-            for chunk in _chunks(deleted_folder_paths):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"UPDATE photos SET last_move_source_folder_path = NULL "
-                    f"WHERE last_move_source_folder_path IN ({placeholders})",
-                    chunk,
-                )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
         self.prune_pipeline_cache_for_ids(deleted_ids)
 
         # delete_photos' finally-clause invalidation only covers folders that
@@ -6163,12 +5607,7 @@ class Database:
 
     def count_folders(self):
         """Return folder count for the active workspace."""
-        return self.conn.execute(
-            """SELECT COUNT(*) FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')""",
-            (self._ws_id(),),
-        ).fetchone()[0]
+        return self._folder_repository().count()
 
     def count_keywords(self):
         """Return count of keywords used by photos in the active workspace.
@@ -13503,39 +12942,7 @@ class Database:
         is ``'ok'``) — matching the subtree scope of
         :meth:`get_highlights_candidates`.
         """
-        ws = self._ws_id()
-        # The recursive step also joins workspace_folders on the current
-        # folder: propagation stops at any ancestor that is not in the active
-        # workspace, which matches get_folder_subtree_ids and keeps the
-        # dropdown counts aligned with get_highlights_candidates.
-        return self.conn.execute(
-            """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
-                   SELECT p.id, p.folder_id, p.timestamp
-                   FROM photos p
-                   JOIN folders f0 ON f0.id = p.folder_id AND f0.status IN ('ok', 'partial')
-                   JOIN workspace_folders wf0
-                     ON wf0.folder_id = p.folder_id AND wf0.workspace_id = ?
-                   WHERE p.quality_score IS NOT NULL
-                   UNION ALL
-                   SELECT a.photo_id, f.parent_id, a.timestamp
-                   FROM ancestors a
-                   JOIN folders f ON f.id = a.folder_id
-                   JOIN workspace_folders wf_step
-                     ON wf_step.folder_id = f.id AND wf_step.workspace_id = ?
-                   WHERE f.parent_id IS NOT NULL
-               )
-               SELECT f.id, f.path, f.name,
-                      COUNT(a.photo_id) as photo_count,
-                      MAX(a.timestamp) as latest_photo
-               FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               JOIN ancestors a ON a.folder_id = f.id
-               WHERE wf.workspace_id = ?
-                 AND f.status IN ('ok', 'partial')
-               GROUP BY f.id
-               ORDER BY latest_photo DESC""",
-            (ws, ws, ws),
-        ).fetchall()
+        return self._folder_repository().with_quality_data()
 
     def update_keyword(self, keyword_id, **kwargs):
         """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name.
@@ -20477,14 +19884,7 @@ class Database:
 
     def update_folder_counts(self):
         """Recalculate photo_count for all folders."""
-        self.conn.execute(
-            """
-            UPDATE folders SET photo_count = (
-                SELECT COUNT(*) FROM photos WHERE photos.folder_id = folders.id
-            )
-        """
-        )
-        self.conn.commit()
+        self._folder_repository(scoped=False).update_counts()
 
     def _resolve_species_by_lineage(self, species_name, expected_ancestors):
         """Pick the species-rank taxon matching ``species_name`` and lineage.
