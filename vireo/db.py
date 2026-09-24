@@ -6915,11 +6915,7 @@ class Database:
         """Set whether a photo is excluded from wildlife detection/classification."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
-        self.conn.execute(
-            "UPDATE photos SET wildlife_excluded = ? WHERE id = ?",
-            (1 if excluded else 0, photo_id),
-        )
-        self.conn.commit()
+        self._photo_review_repository().set_wildlife_excluded(photo_id, excluded)
 
     def batch_update_photo_flag(self, photo_ids, flag, verify_workspace=True):
         """Set flag for multiple photos in a single transaction.

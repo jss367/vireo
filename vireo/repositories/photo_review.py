@@ -50,6 +50,13 @@ class PhotoReviewRepository:
         if _commit:
             self.conn.commit()
 
+    def set_wildlife_excluded(self, photo_id, excluded):
+        self.conn.execute(
+            "UPDATE photos SET wildlife_excluded = ? WHERE id = ?",
+            (1 if excluded else 0, photo_id),
+        )
+        self.conn.commit()
+
     def set_flags(self, photo_ids, flag, *, verify_workspace=True):
         self._set_many(
             photo_ids,
