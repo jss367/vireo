@@ -22,10 +22,9 @@ from keyword_normalization import (
     species_match_key,
 )
 from new_images import get_shared_cache
+from repositories import UNSET as _UNSET  # sentinel for "not provided" vs explicit None
 
 log = logging.getLogger(__name__)
-
-_UNSET = object()  # sentinel for "not provided" vs explicit None
 
 AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
 
@@ -845,12 +844,10 @@ class Database:
 
     def _restore_active_workspace(self):
         """Restore the last-used workspace on an already initialized schema."""
-        last = self.conn.execute(
-            "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
-        ).fetchone()
-        if last is None:
+        last_id = self._workspace_repository(scoped=False).most_recently_opened_id()
+        if last_id is None:
             raise RuntimeError("Vireo database has no workspace after schema initialization")
-        self.set_active_workspace(last[0])
+        self.set_active_workspace(last_id)
 
     def close(self):
         """Close the underlying sqlite3 connection.
@@ -2867,22 +2864,7 @@ class Database:
         """Clear cache for every workspace linked to any of the given folder_ids."""
         if not folder_ids:
             return
-        # Chunk to stay well under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
-        # A scan of a deep tree can auto-register thousands of descendant folders;
-        # a single IN (?, ?, ...) across all of them would raise
-        # ``OperationalError: too many SQL variables``.
-        CHUNK = 500
-        ws_ids = set()
-        folder_ids = list(folder_ids)
-        for i in range(0, len(folder_ids), CHUNK):
-            chunk = folder_ids[i:i + CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            rows = self.conn.execute(
-                f"SELECT DISTINCT workspace_id FROM workspace_folders "
-                f"WHERE folder_id IN ({placeholders})",
-                tuple(chunk),
-            ).fetchall()
-            ws_ids.update(r["workspace_id"] for r in rows)
+        ws_ids = self._workspace_repository(scoped=False).ids_for_folders(folder_ids)
         self._new_images_cache.invalidate_workspaces(self._db_path, ws_ids)
 
     def invalidate_new_images_cache_for_workspace(self, workspace_id):
@@ -2972,16 +2954,9 @@ class Database:
 
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
-        cur = self.conn.execute(
-            """INSERT INTO workspaces (name, config_overrides, ui_state, tabs)
-               VALUES (?, ?, ?, ?)""",
-            (name,
-             json.dumps(config_overrides) if config_overrides else None,
-             json.dumps(ui_state) if ui_state else None,
-             json.dumps(DEFAULT_TABS)),
+        workspace_id = self._workspace_repository(scoped=False).create(
+            name, config_overrides, ui_state
         )
-        self.conn.commit()
-        workspace_id = cur.lastrowid
         # SQLite INTEGER PRIMARY KEY (without AUTOINCREMENT) can reuse a deleted
         # rowid, so a freshly created workspace may collide with the stale cache
         # entry of a prior workspace that shared this id. Clear any lingering
@@ -2991,16 +2966,11 @@ class Database:
 
     def get_workspace(self, workspace_id):
         """Return a single workspace by id, or None."""
-        return self.conn.execute(
-            "SELECT * FROM workspaces WHERE id = ?", (workspace_id,)
-        ).fetchone()
+        return self._workspace_repository(scoped=False).get(workspace_id)
 
     def get_workspaces(self):
         """Return all workspaces, pinned first then alphabetical."""
-        return self.conn.execute(
-            "SELECT * FROM workspaces "
-            "ORDER BY (pinned_at IS NULL), LOWER(name)"
-        ).fetchall()
+        return self._workspace_repository(scoped=False).list_all()
 
     def update_workspace(self, workspace_id, name=None, config_overrides=_UNSET,
                          ui_state=_UNSET, last_opened_at=None,
@@ -3010,30 +2980,14 @@ class Database:
         For config_overrides and ui_state, pass None to clear the value
         (set DB column to NULL), or omit the argument to leave it unchanged.
         """
-        updates = []
-        params = []
-        if name is not None:
-            updates.append("name = ?")
-            params.append(name)
-        if config_overrides is not _UNSET:
-            updates.append("config_overrides = ?")
-            params.append(json.dumps(config_overrides) if config_overrides is not None else None)
-        if ui_state is not _UNSET:
-            updates.append("ui_state = ?")
-            params.append(json.dumps(ui_state) if ui_state is not None else None)
-        if last_opened_at is not None:
-            updates.append("last_opened_at = ?")
-            params.append(last_opened_at)
-        if pinned_at is not _UNSET:
-            updates.append("pinned_at = ?")
-            params.append(pinned_at)
-        if not updates:
-            return
-        params.append(workspace_id)
-        self.conn.execute(
-            f"UPDATE workspaces SET {', '.join(updates)} WHERE id = ?", params
+        self._workspace_repository(scoped=False).update(
+            workspace_id,
+            name=name,
+            config_overrides=config_overrides,
+            ui_state=ui_state,
+            last_opened_at=last_opened_at,
+            pinned_at=pinned_at,
         )
-        self.conn.commit()
 
     def get_effective_config(self, global_config):
         """Return config with workspace overrides applied over global config.
@@ -3260,15 +3214,22 @@ class Database:
         """
         return self._workspace_repository().unpin_tab(nav_id)
 
-    def _workspace_repository(self):
+    def _workspace_repository(self, *, scoped=True):
+        """Build the workspace repository on this connection.
+
+        ``scoped=True`` binds it to the active workspace (raising
+        ``RuntimeError`` when none is set); catalog-wide methods pass
+        ``scoped=False`` and take the workspace id as an argument.
+        """
         from repositories.workspaces import WorkspaceRepository
 
         return WorkspaceRepository(
             self.conn,
-            self._ws_id(),
+            self._ws_id() if scoped else None,
             allowed_nav_ids=ALL_NAV_IDS,
             default_tabs=DEFAULT_TABS,
             nav_id_aliases=NAV_ID_ALIASES,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
     def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
@@ -3276,12 +3237,9 @@ class Database:
         with the given `fingerprint`. Pipeline page treats fingerprint
         mismatch as "Outdated" so the user knows a regroup is pending.
         """
-        self.conn.execute(
-            "UPDATE workspaces SET last_grouped_at = ?, last_group_fingerprint = ? "
-            "WHERE id = ?",
-            (when_ts, fingerprint, workspace_id),
+        self._workspace_repository(scoped=False).set_group_state(
+            workspace_id, fingerprint, when_ts
         )
-        self.conn.commit()
 
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
@@ -3306,42 +3264,11 @@ class Database:
         checkbox can clear because the UI only lists files it can find.
         Returns the number of workspaces changed.
         """
-        rows = self.conn.execute(
-            "SELECT id, config_overrides FROM workspaces "
-            "WHERE config_overrides IS NOT NULL"
-        ).fetchall()
-        changed = 0
-        for row in rows:
-            try:
-                overrides = json.loads(row["config_overrides"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(overrides, dict):
-                continue
-            active = overrides.get("active_labels")
-            if not isinstance(active, list) or labels_file not in active:
-                continue
-            overrides["active_labels"] = [
-                path for path in active if path != labels_file
-            ]
-            self.conn.execute(
-                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
-                (json.dumps(overrides), row["id"]),
-            )
-            changed += 1
-        if changed:
-            self.conn.commit()
-        return changed
+        return self._workspace_repository(scoped=False).forget_label_file(labels_file)
 
     def delete_workspace(self, workspace_id):
         """Delete a workspace and all its scoped data (cascade)."""
-        try:
-            self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
-        except sqlite3.IntegrityError as e:
-            if "Send pending photos to NAS" in str(e):
-                raise ValueError(str(e)) from e
-            raise
-        self.conn.commit()
+        self._workspace_repository(scoped=False).delete(workspace_id)
         # Drop any cached new-images payload for this workspace. Without this,
         # if the deleted id is later reused by SQLite for a new workspace,
         # ``get_new_images_for_workspace`` could serve the prior workspace's
@@ -4066,11 +3993,9 @@ class Database:
 
     def ensure_default_workspace(self):
         """Create the Default workspace if it doesn't exist. Returns its id."""
-        row = self.conn.execute(
-            "SELECT id FROM workspaces WHERE name = 'Default'"
-        ).fetchone()
-        if row:
-            return row[0]
+        default_id = self._workspace_repository(scoped=False).default_id()
+        if default_id is not None:
+            return default_id
         return self.create_workspace("Default")
 
     def ensure_default_genre_keywords(self):
@@ -24978,21 +24903,7 @@ class Database:
         Returns the new snapshot id. An empty path list is allowed — the caller
         decides how to handle zero-file snapshots (the pipeline short-circuits).
         """
-        ws_id = self._ws_id()
-        unique_paths = sorted(set(file_paths or []))
-        cur = self.conn.execute(
-            "INSERT INTO new_image_snapshots (workspace_id, created_at, file_count) "
-            "VALUES (?, datetime('now'), ?)",
-            (ws_id, len(unique_paths)),
-        )
-        snap_id = cur.lastrowid
-        if unique_paths:
-            self.conn.executemany(
-                "INSERT INTO new_image_snapshot_files (snapshot_id, file_path) VALUES (?, ?)",
-                [(snap_id, p) for p in unique_paths],
-            )
-        self.conn.commit()
-        return snap_id
+        return self._workspace_repository().create_new_images_snapshot(file_paths)
 
     def get_new_images_snapshot(self, snapshot_id):
         """Return snapshot metadata + file paths, or None if not found / cross-workspace.
@@ -25006,28 +24917,7 @@ class Database:
         """
         if not -(1 << 63) <= snapshot_id <= (1 << 63) - 1:
             return None
-        row = self.conn.execute(
-            "SELECT id, workspace_id, created_at, file_count "
-            "FROM new_image_snapshots WHERE id = ? AND workspace_id = ?",
-            (snapshot_id, self._ws_id()),
-        ).fetchone()
-        if row is None:
-            return None
-        paths = [
-            r["file_path"]
-            for r in self.conn.execute(
-                "SELECT file_path FROM new_image_snapshot_files WHERE snapshot_id = ? "
-                "ORDER BY file_path",
-                (snapshot_id,),
-            ).fetchall()
-        ]
-        return {
-            "id": row["id"],
-            "workspace_id": row["workspace_id"],
-            "created_at": row["created_at"],
-            "file_count": row["file_count"],
-            "file_paths": paths,
-        }
+        return self._workspace_repository().get_new_images_snapshot(snapshot_id)
 
     def _build_collection_query(self, collection_id, include_offline_folders=False):
         """Build SQL clauses from collection rules.
@@ -28087,37 +27977,9 @@ class Database:
         once per install — a user who later explicitly re-saves the
         legacy pair via the settings UI keeps that setting.
         """
-        rows = self.conn.execute(
-            "SELECT id, config_overrides FROM workspaces "
-            "WHERE config_overrides IS NOT NULL"
-        ).fetchall()
-        updated = 0
-        for row in rows:
-            raw = row["config_overrides"]
-            try:
-                overrides = json.loads(raw) if isinstance(raw, str) else raw
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(overrides, dict):
-                continue
-            pipeline = overrides.get("pipeline")
-            if not isinstance(pipeline, dict):
-                continue
-            if (
-                pipeline.get("miss_det_confidence") != legacy_det
-                or pipeline.get("miss_det_confidence_burst") != legacy_burst
-            ):
-                continue
-            pipeline["miss_det_confidence"] = new_det
-            pipeline["miss_det_confidence_burst"] = new_burst
-            self.conn.execute(
-                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
-                (json.dumps(overrides), row["id"]),
-            )
-            updated += 1
-        if updated:
-            self.conn.commit()
-        return updated
+        return self._workspace_repository(scoped=False).rewrite_legacy_miss_thresholds(
+            legacy_det, legacy_burst, new_det, new_burst
+        )
 
     def rewrite_legacy_w_species_default_in_workspaces(self, legacy, new):
         """Rewrite the exact legacy ``pipeline.w_species`` default in every
@@ -28133,33 +27995,9 @@ class Database:
         ``last_group_fingerprint`` will already stop matching on the next
         Process-page load.
         """
-        rows = self.conn.execute(
-            "SELECT id, config_overrides FROM workspaces "
-            "WHERE config_overrides IS NOT NULL"
-        ).fetchall()
-        updated = 0
-        for row in rows:
-            raw = row["config_overrides"]
-            try:
-                overrides = json.loads(raw) if isinstance(raw, str) else raw
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(overrides, dict):
-                continue
-            pipeline = overrides.get("pipeline")
-            if not isinstance(pipeline, dict):
-                continue
-            if pipeline.get("w_species") != legacy:
-                continue
-            pipeline["w_species"] = new
-            self.conn.execute(
-                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
-                (json.dumps(overrides), row["id"]),
-            )
-            updated += 1
-        if updated:
-            self.conn.commit()
-        return updated
+        return self._workspace_repository(scoped=False).rewrite_legacy_w_species_default(
+            legacy, new
+        )
 
     def rewrite_legacy_eye_detect_default_in_workspaces(self):
         """Rewrite the exact legacy eye-detection default in workspace overrides.
@@ -28169,35 +28007,7 @@ class Database:
         those results were scored with eye detection on, and the workspace's
         effective ``eye_detect_enabled`` just changed to False.
         """
-        rows = self.conn.execute(
-            "SELECT id, config_overrides FROM workspaces "
-            "WHERE config_overrides IS NOT NULL"
-        ).fetchall()
-        updated = 0
-        for row in rows:
-            raw = row["config_overrides"]
-            try:
-                overrides = json.loads(raw) if isinstance(raw, str) else raw
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(overrides, dict):
-                continue
-            pipeline = overrides.get("pipeline")
-            if not isinstance(pipeline, dict):
-                continue
-            if pipeline.get("eye_detect_enabled") is not True:
-                continue
-            pipeline["eye_detect_enabled"] = False
-            self.conn.execute(
-                "UPDATE workspaces "
-                "SET config_overrides = ?, last_group_fingerprint = NULL "
-                "WHERE id = ?",
-                (json.dumps(overrides), row["id"]),
-            )
-            updated += 1
-        if updated:
-            self.conn.commit()
-        return updated
+        return self._workspace_repository(scoped=False).rewrite_legacy_eye_detect_default()
 
     def invalidate_group_fingerprints_without_explicit_eye_false(self):
         """Clear last_group_fingerprint on workspaces without an explicit
@@ -28211,35 +28021,8 @@ class Database:
         explicit False override were already producing eye-disabled scoring
         and don't need invalidation.
         """
-        rows = self.conn.execute(
-            "SELECT id, config_overrides FROM workspaces "
-            "WHERE last_group_fingerprint IS NOT NULL"
-        ).fetchall()
-        to_invalidate = []
-        for row in rows:
-            raw = row["config_overrides"]
-            has_explicit_false = False
-            if raw is not None:
-                try:
-                    overrides = json.loads(raw) if isinstance(raw, str) else raw
-                except (json.JSONDecodeError, TypeError):
-                    overrides = None
-                if isinstance(overrides, dict):
-                    pipeline = overrides.get("pipeline")
-                    if isinstance(pipeline, dict) and pipeline.get("eye_detect_enabled") is False:
-                        has_explicit_false = True
-            if not has_explicit_false:
-                to_invalidate.append(row["id"])
-        if to_invalidate:
-            for chunk in _chunks(to_invalidate):
-                placeholders = ",".join("?" * len(chunk))
-                self.conn.execute(
-                    f"UPDATE workspaces SET last_group_fingerprint = NULL "
-                    f"WHERE id IN ({placeholders})",
-                    list(chunk),
-                )
-            self.conn.commit()
-        return len(to_invalidate)
+        repo = self._workspace_repository(scoped=False)
+        return repo.invalidate_group_fingerprints_without_explicit_eye_false()
 
     # ------ iNaturalist submissions ------
 

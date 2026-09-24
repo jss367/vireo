@@ -20,6 +20,8 @@ that information for interactive use.
   `ctx.start(job_type, work, ...)`; do not re-implement that prologue inline.
 - Repositories own SQL for one domain. `Database` remains a compatibility
   façade while photo, workspace, metadata, and job access is extracted.
+  Each moved method stays on `Database` as a one-line wrapper around its
+  repository, and a structural test keeps the moved methods off `self.conn`.
 - Schema changes are ordered migrations in `vireo/schema.py`. They execute once
   at startup, use a transaction, advance `PRAGMA user_version`, and validate
   before committing. Request connections must use the initialized schema.

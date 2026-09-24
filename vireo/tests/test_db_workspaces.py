@@ -1,15 +1,19 @@
 """Behavior pins for the workspace domain of ``Database``.
 
-These tests exercise the workspace methods only through the public
+The behavior tests exercise the workspace methods only through the public
 ``Database`` façade, so they hold regardless of whether the SQL lives in
-``db.py`` or in ``repositories/workspaces.py``. They cover workspace CRUD,
+``db.py`` or in ``repositories/workspaces.py``; the structural tests at the
+end keep it in the repository. They cover workspace CRUD,
 active-workspace restoration, config overrides and the legacy-config
 migrations, label-set selection, navigation tabs, new-images snapshots, and
 the new-images cache invalidation hooks.
 """
 
+import ast
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import config as cfg
 import pytest
@@ -584,3 +588,64 @@ def test_invalidate_group_fingerprints_without_explicit_eye_false(db):
         assert db.get_workspace(ws_id)["last_group_fingerprint"] is None
     assert db.get_workspace(never_grouped)["last_group_fingerprint"] is None
     assert db.invalidate_group_fingerprints_without_explicit_eye_false() == 0
+
+
+# -- structure: the workspace SQL lives in the repository ---------------------
+
+# Database methods whose SQL moved to repositories/workspaces.py. Each stays
+# on Database as a thin wrapper so existing call sites keep working; none may
+# reach the connection directly again.
+_DELEGATING_WORKSPACE_METHODS = (
+    "_restore_active_workspace",
+    "invalidate_new_images_cache_for_folders",
+    "create_workspace",
+    "get_workspace",
+    "get_workspaces",
+    "update_workspace",
+    "delete_workspace",
+    "ensure_default_workspace",
+    "set_workspace_group_state",
+    "forget_label_file",
+    "get_tabs",
+    "set_tabs",
+    "pin_tab",
+    "unpin_tab",
+    "create_new_images_snapshot",
+    "get_new_images_snapshot",
+    "rewrite_legacy_miss_thresholds_in_workspaces",
+    "rewrite_legacy_w_species_default_in_workspaces",
+    "rewrite_legacy_eye_detect_default_in_workspaces",
+    "invalidate_group_fingerprints_without_explicit_eye_false",
+)
+
+
+@pytest.mark.parametrize("name", _DELEGATING_WORKSPACE_METHODS)
+def test_workspace_method_delegates_to_repository(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    attrs = {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to WorkspaceRepository"
+    )
+    assert "_workspace_repository" in attrs, (
+        f"Database.{name} no longer delegates to WorkspaceRepository"
+    )
+
+
+def test_update_workspace_shares_the_unset_sentinel_with_the_repository():
+    import db as db_module
+    from repositories import UNSET
+    from repositories.workspaces import WorkspaceRepository
+
+    assert db_module._UNSET is UNSET
+    facade = inspect.signature(Database.update_workspace).parameters
+    repo = inspect.signature(WorkspaceRepository.update).parameters
+    for field in ("config_overrides", "ui_state", "pinned_at"):
+        assert facade[field].default is UNSET
+        assert repo[field].default is UNSET
