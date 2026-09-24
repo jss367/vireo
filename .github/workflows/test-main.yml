@@ -55,8 +55,9 @@ jobs:
       # trip the Linux OOM killer — which takes out the runner agent and
       # surfaces as an intermittent ``The runner has received a shutdown
       # signal`` cancellation rather than a test failure.
-      # Coverage is ratcheted to the measured 2026-09-22 baseline of production
-      # code (75.6%; test files are omitted in ``[tool.coverage.report]``).
+      # Coverage is ratcheted to the measured 2026-09-24 baseline of production
+      # code (86.2% on main's coverage map built 2026-09-23 22:36 UTC; test
+      # files are omitted in ``[tool.coverage.report]``).
       # Raise this number when coverage improves; do not replace it with a low
       # evergreen floor.
       #
@@ -71,7 +72,7 @@ jobs:
         run: |
           set +e
           python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread \
-            --cov=vireo --cov=tests --cov=scripts --cov-context=test --cov-report=term-missing --cov-fail-under=75 \
+            --cov=vireo --cov=tests --cov=scripts --cov-context=test --cov-report=term-missing --cov-fail-under=85 \
             --junitxml=pytest-report.xml
           code=$?
           echo "exit-code=$code" >> "$GITHUB_OUTPUT"
