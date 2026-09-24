@@ -16,8 +16,11 @@ active-workspace resolution, chunking, and that composition
 façade so monkeypatches take effect.
 """
 
+import ast
 import contextlib
+import inspect
 import sqlite3
+import textwrap
 
 import pytest
 from db import Database
@@ -1416,3 +1419,108 @@ def test_rename_species_highlights_no_source_rows(db, cur):
     db.conn.set_trace_callback(None)
     assert not any("MAX(rank)" in s for s in statements)
     assert db.rename_species_highlights_species("Missing", "New Name") == 0
+
+
+# -- structure ----------------------------------------------------------------------------
+
+
+_DELEGATING_SPECIES_CURATION_METHODS = (
+    "backfill_species_highlights_from_legacy_preferences",
+    "_next_species_representative_order",
+    "backfill_species_representatives_from_legacy_preferences",
+    "get_highlights_candidates",
+    "get_life_list_candidates",
+    "get_explorer_root",
+    "get_life_list_taxon_ids",
+    "get_life_list_uncounted_identifications",
+    "get_taxon_subtree",
+    "get_classes_for_taxa",
+    "get_class_ancestors_for_taxa",
+    "get_life_list_best_photo_by_taxon",
+    "get_taxon_by_id",
+    "get_photo_life_list_species",
+    "get_life_list_locations",
+    "get_photo_preferences",
+    "get_species_representative_lists",
+    "_set_global_species_representative",
+    "_restore_species_representative",
+    "set_photo_preference",
+    "clear_photo_preference",
+    "clear_species_representative",
+    "get_species_highlights",
+    "add_species_highlight",
+    "promote_species_highlight",
+    "remove_species_highlight",
+    "move_species_highlight",
+    "rename_photo_preferences_species",
+    "rename_species_representatives_species",
+    "rename_species_highlights_species",
+)
+
+
+def _self_attrs(fn):
+    source = textwrap.dedent(inspect.getsource(fn))
+    node = ast.parse(source).body[0]
+    return {
+        n.attr
+        for n in ast.walk(node)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_SPECIES_CURATION_METHODS)
+def test_species_curation_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to "
+        "SpeciesCurationRepository"
+    )
+    assert "_species_curation_repository" in attrs, (
+        f"Database.{name} no longer delegates to SpeciesCurationRepository"
+    )
+
+
+def test_species_curation_repository_never_touches_keyword_writers():
+    """Keyword provenance writers stay on the façade (see
+    ``test_keyword_provenance_contract``); curation must not reach them."""
+    import repositories.species_curation as module
+
+    source = inspect.getsource(module)
+    for writer in ("tag_photo", "untag_photo", "_merge_keyword_into",
+                   "link_keyword_to_place", "retire_builtin_wildlife_genre",
+                   "photo_keywords ("):
+        assert writer not in source
+
+
+def test_species_curation_facade_signatures_unchanged():
+    sig = {n: str(inspect.signature(getattr(Database, n)))
+           for n in _DELEGATING_SPECIES_CURATION_METHODS}
+    assert sig["get_highlights_candidates"] == (
+        "(self, folder_id, min_quality=0.0, photo_id=None)"
+    )
+    assert sig["set_photo_preference"] == (
+        "(self, purpose, species, photo_id, _commit=True)"
+    )
+    assert sig["move_species_highlight"] == (
+        "(self, species, photo_id, direction, _commit=True)"
+    )
+    assert sig["rename_photo_preferences_species"] == (
+        "(self, old_species, new_species, photo_workspace_pairs=None, "
+        "_commit=True)"
+    )
+    assert sig["rename_species_representatives_species"] == (
+        "(self, old_species, new_species, photo_ids=None, _commit=True)"
+    )
+    assert sig["_restore_species_representative"] == (
+        "(self, species, photo_id, selected_order=None)"
+    )
+    assert sig["get_taxon_subtree"] == "(self, root_id, max_depth=12)"
+    assert sig["get_explorer_root"] == "(self, name='Aves', rank='class')"
+    assert sig["get_species_representative_lists"] == (
+        "(self, eligible_only=False, species=None)"
+    )
+    assert sig["get_species_highlights"] == (
+        "(self, species=None, eligible_only=False)"
+    )
