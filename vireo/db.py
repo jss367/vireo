@@ -10,7 +10,6 @@ import unicodedata
 
 from keyword_identity import (
     free_sibling_name,
-    identity_sql,
     keywords_claim_different_taxa,
     resolve_import_alias,
 )
@@ -3005,31 +3004,7 @@ class Database:
         guard, already-identified photos would still be classified and would
         appear in 'Needs Identification' during that window.
         """
-        if not subject_types or not photo_ids:
-            return list(photo_ids)
-        types = [t for t in subject_types if t in KEYWORD_TYPES]
-        if not types:
-            return list(photo_ids)
-        type_placeholders = ",".join("?" * len(types))
-        type_clause = f"k.type IN ({type_placeholders})"
-        if "taxonomy" in types:
-            type_clause = f"({type_clause} OR k.is_species = 1)"
-        photo_ids_list = list(photo_ids)
-        excluded = set()
-        chunk_size = self._FILTER_SUBJECT_CHUNK
-        for i in range(0, len(photo_ids_list), chunk_size):
-            chunk = photo_ids_list[i:i + chunk_size]
-            pid_placeholders = ",".join("?" * len(chunk))
-            rows = self.conn.execute(
-                f"""SELECT DISTINCT pk.photo_id FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    WHERE {type_clause}
-                      AND pk.photo_id IN ({pid_placeholders})""",
-                types + chunk,
-            ).fetchall()
-            for r in rows:
-                excluded.add(r["photo_id"])
-        return [pid for pid in photo_ids_list if pid not in excluded]
+        return self._keyword_repository().filter_out_subject_tagged(photo_ids, subject_types)
 
     def filter_out_wildlife_excluded(self, photo_ids):
         """Return photo ids not explicitly excluded from wildlife classification."""
@@ -3502,48 +3477,7 @@ class Database:
         explicit user types (individual, location) are preserved — the user
         meant something specific.
         """
-        defaults = ("Landscape", "Sunset", "Architecture", "Abstract")
-        # Warm-path short-circuit: if any genre row already exists, the
-        # database has already been seeded — nothing to do. Cheap (single
-        # SELECT 1 LIMIT 1).
-        existing = self.conn.execute(
-            "SELECT 1 FROM keywords WHERE type = 'genre' LIMIT 1"
-        ).fetchone()
-        if existing:
-            return
-        # Cold / upgrade path: promote any same-name top-level 'general'
-        # rows to 'genre' first, so an upgraded DB with a hand-tagged default
-        # name ends up with a canonical genre row.
-        for name in defaults:
-            self.conn.execute(
-                """UPDATE keywords SET type = 'genre'
-                   WHERE name = ? COLLATE NOCASE
-                     AND parent_id IS NULL AND type = 'general'""",
-                (name,),
-            )
-        # Always guarantee a canonical genre row for each default. Skip
-        # only when a same-name + same-type ('genre') row already exists.
-        # If a user has previously tagged e.g. 'Landscape' as 'location'
-        # (a deliberate non-default type), we still create the genre
-        # 'Landscape' alongside it.
-        # This intentionally permits duplicates BY NAME across different
-        # types — disambiguation is handled by add_keyword's lookup,
-        # which prefers same-typed matches when kw_type is supplied.
-        for name in defaults:
-            existing_genre = self.conn.execute(
-                """SELECT id FROM keywords
-                   WHERE name = ? COLLATE NOCASE
-                     AND parent_id IS NULL AND type = 'genre'
-                   LIMIT 1""",
-                (name,),
-            ).fetchone()
-            if existing_genre:
-                continue
-            self.conn.execute(
-                "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
-                (name,),
-            )
-        self.conn.commit()
+        return self._keyword_repository().ensure_default_genres()
 
     _RETIRED_WILDLIFE_GENRE_KEY = "retired_builtin_wildlife_genre_v1"
 
@@ -4221,15 +4155,7 @@ class Database:
         This runs before default genre seeding so old rows settle onto the
         canonical enum before same-name defaults are reconciled.
         """
-        legacy = self.conn.execute(
-            "SELECT 1 FROM keywords WHERE type IN ('people', 'descriptive', 'event') LIMIT 1"
-        ).fetchone()
-        if not legacy:
-            return
-        self.conn.execute("UPDATE keywords SET type = 'individual' WHERE type = 'people'")
-        self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'descriptive'")
-        self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'event'")
-        self.conn.commit()
+        return self._keyword_repository().migrate_legacy_types()
 
     # -- Folders --
 
@@ -5616,15 +5542,7 @@ class Database:
         the unfiltered top_keywords chart in ``get_dashboard_stats``), use
         ``count_keywords_in_workspace`` instead.
         """
-        return self.conn.execute(
-            """SELECT COUNT(DISTINCT pk.keyword_id)
-               FROM photo_keywords pk
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ?""",
-            (self._ws_id(),),
-        ).fetchone()[0]
+        return self._keyword_repository().count()
 
     def count_keywords_in_workspace(self):
         """Return count of keywords used by photos in the active workspace,
@@ -5635,15 +5553,7 @@ class Database:
         disagree with the Top Species / Other Keywords charts when a drive
         is unmounted (e.g. headline says 0 while charts list keywords).
         """
-        return self.conn.execute(
-            f"""SELECT COUNT(DISTINCT ({identity_sql()}))
-               FROM photo_keywords pk
-               JOIN keywords k ON k.id = pk.keyword_id
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ?""",
-            (self._ws_id(),),
-        ).fetchone()[0]
+        return self._keyword_repository().count_in_workspace()
 
     def count_pending_changes(self):
         """Return pending changes count."""
@@ -6800,35 +6710,7 @@ class Database:
         placed via location-keyword coords would render on the map but their
         species would be missing from the filter.
         """
-        ws = self._ws_id()
-        return [
-            row[0]
-            for row in self.conn.execute(
-                """
-                SELECT DISTINCT k.name
-                FROM photos p
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-                JOIN photo_keywords pk ON pk.photo_id = p.id
-                JOIN keywords k ON k.id = pk.keyword_id AND k.is_species = 1
-                WHERE wf.workspace_id = ?
-                  AND (
-                    (p.latitude IS NOT NULL AND p.longitude IS NOT NULL)
-                    OR EXISTS (
-                      SELECT 1
-                      FROM photo_keywords pk_loc
-                      JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
-                      WHERE pk_loc.photo_id = p.id
-                        AND k_loc.type = 'location'
-                        AND k_loc.latitude IS NOT NULL
-                        AND k_loc.longitude IS NOT NULL
-                    )
-                  )
-                ORDER BY k.name ASC
-                """,
-                (ws,),
-            ).fetchall()
-        ]
+        return self._keyword_repository().get_accepted_species()
 
     def count_photos_without_gps(self):
         """Backward-compatible alias for :meth:`count_photos_without_coordinates`."""
@@ -7656,6 +7538,36 @@ class Database:
 
     # -- Keywords --
 
+    def _keyword_repository(self):
+        """Build the keyword repository on this connection.
+
+        The active workspace is resolved lazily (``Database._ws_id`` is
+        passed as a resolver), so methods keep raising at the point they
+        always did. Every façade method a moved body calls is handed over
+        bound, under its ``Database`` name, so monkeypatches keep reaching
+        the moved code; the class attributes and ``db`` module names the
+        bodies read (``_chunks``, ``log``, ``resolve_import_alias``, the
+        keyword-type and sentinel constants) are read here, at call time.
+        """
+        from repositories.keywords import KeywordRepository
+
+        return KeywordRepository(
+            self.conn,
+            self._ws_id,
+            chunks=_chunks,
+            log=log,
+            keyword_types=KEYWORD_TYPES,
+            auto_match_review_marker=AUTO_MATCH_REVIEW_MARKER,
+            detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
+            taxon_lookup_variants=_taxon_lookup_variants,
+            resolve_import_alias=resolve_import_alias,
+            filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
+            duplicate_photo_species_repair_key=(
+                self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY
+            ),
+            facade=self,
+        )
+
     def detect_keyword_case_convention(self):
         """Detect the casing convention used by existing species keywords.
 
@@ -7665,31 +7577,7 @@ class Database:
             'upper' if most are ALL CAPS
             None if not enough data to determine
         """
-        rows = self.conn.execute(
-            "SELECT name FROM keywords WHERE is_species = 1"
-        ).fetchall()
-        if len(rows) < 3:
-            return None
-
-        title_count = 0
-        lower_count = 0
-        for r in rows:
-            name = r["name"]
-            words = name.split()
-            if len(words) < 2:
-                continue
-            # Check the second word's casing
-            second = words[1]
-            if second[0].isupper():
-                title_count += 1
-            else:
-                lower_count += 1
-
-        if lower_count > title_count:
-            return "lower"
-        elif title_count > lower_count:
-            return "title"
-        return None
+        return self._keyword_repository().detect_case_convention()
 
     def _apply_case_convention(self, name, convention):
         """Apply a casing convention to a species name."""
@@ -7781,78 +7669,9 @@ class Database:
         predicting where add_keyword will land but wrong to show a user as
         though a model or the catalog had said it.
         """
-        name = normalize_keyword_display(name)
-        if not name:
-            return name
-        rows = self.conn.execute(
-            "SELECT name, type, is_species FROM keywords "
-            "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
-            "AND type IN ('taxonomy', 'general') "
-            "ORDER BY (type = 'taxonomy') DESC, id ASC",
-            (name,),
-        ).fetchall()
-        if rows:
-            species_rows = [
-                r for r in rows
-                if r["is_species"] or r["type"] == "taxonomy"
-            ]
-            if len(species_rows) == 1:
-                return species_rows[0]["name"]
-            if len(species_rows) > 1:
-                for r in species_rows:
-                    if r["name"] == name:
-                        return r["name"]
-                return name
-            return rows[0]["name"]
-        linked_taxa = self.conn.execute(
-            """SELECT DISTINCT taxon_id FROM keywords
-               WHERE name = ? COLLATE NOCASE
-                 AND parent_id IS NOT NULL
-                 AND (is_species = 1 OR type = 'taxonomy')
-                 AND taxon_id IS NOT NULL""",
-            (name,),
-        ).fetchall()
-        if len(linked_taxa) == 1:
-            root = self.conn.execute(
-                """SELECT name FROM keywords
-                   WHERE parent_id IS NULL
-                     AND taxon_id = ?
-                     AND (is_species = 1 OR type = 'taxonomy')
-                   ORDER BY id LIMIT 1""",
-                (linked_taxa[0]["taxon_id"],),
-            ).fetchone()
-            if root is not None:
-                return root["name"]
-            # No canonical root row exists for this linked taxon (for
-            # example a hierarchy-only accept whose top-level ``Verdin``
-            # never got created). Return the matched leaf's stored
-            # spelling so callers that gate on exact ``k.name``
-            # (highlight/preference/life-list eligibility for a
-            # hierarchy-only tag) still see a bucket the photo actually
-            # carries — the case-convention fallback below would mint a
-            # different spelling (``black phoebe`` -> ``Black Phoebe``)
-            # and the saved highlight would disappear on reload.
-            leaf = self.conn.execute(
-                """SELECT name FROM keywords
-                   WHERE name = ? COLLATE NOCASE
-                     AND parent_id IS NOT NULL
-                     AND (is_species = 1 OR type = 'taxonomy')
-                     AND taxon_id = ?
-                   ORDER BY id LIMIT 1""",
-                (name, linked_taxa[0]["taxon_id"]),
-            ).fetchone()
-            if leaf is not None and leaf["name"]:
-                return leaf["name"]
-        if not apply_case_convention:
-            return name
-        convention = (
-            self.species_case_convention()
-            if case_convention is _DETECT_CASE_CONVENTION
-            else case_convention
+        return self._keyword_repository().resolve_species_display(
+            name, apply_case_convention=apply_case_convention, case_convention=case_convention,
         )
-        if convention:
-            return self._apply_case_convention(name, convention)
-        return name
 
     def species_case_convention(self):
         """The casing ``add_keyword`` would apply to a brand-new species name.
@@ -7879,19 +7698,7 @@ class Database:
         ``Verdin``). Callers with the taxon id in hand can skip the
         name-based lookup and go straight to the root row.
         """
-        if taxon_id is None:
-            return None
-        row = self.conn.execute(
-            """SELECT name FROM keywords
-               WHERE parent_id IS NULL
-                 AND taxon_id = ?
-                 AND (is_species = 1 OR type = 'taxonomy')
-               ORDER BY id LIMIT 1""",
-            (taxon_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return row["name"] or None
+        return self._keyword_repository().species_root_name_for_taxon(taxon_id)
 
     def _lookup_taxon_id_for_keyword(
         self, name, prefer_species=False, species_only=False,
@@ -7936,124 +7743,19 @@ class Database:
         taxon), and ``is_keyword_species`` already filters those out via
         ``taxon_rank`` for species-specific readers.
         """
-        from species_identity import COMMON_NAME_CORRECTIONS
-        correction = COMMON_NAME_CORRECTIONS.get(keyword_match_key(name))
-        if correction:
-            target = self.conn.execute(
-                "SELECT id FROM taxa WHERE inat_id = ? AND name = ? AND rank = 'species'",
-                (correction["taxon_id"], correction["scientific_name"]),
-            ).fetchone()
-            return target["id"] if target else None
-        for variant in _taxon_lookup_variants(name):
-            if prefer_species or species_only:
-                direct = self.conn.execute(
-                    """SELECT t.id, t.rank FROM taxa t
-                       WHERE t.common_name = ? COLLATE NOCASE
-                          OR t.name = ? COLLATE NOCASE
-                       ORDER BY (t.rank = 'species') DESC, t.id ASC
-                       LIMIT 1""",
-                    (variant, variant),
-                ).fetchone()
-                if direct and direct["rank"] == "species":
-                    return direct["id"]
-                # Direct match (if any) is not species-rank. Consult the
-                # common-names index for a species-rank alternate before
-                # returning the higher-rank direct hit.
-                common = self.conn.execute(
-                    """SELECT tcn.taxon_id AS id, t.rank FROM taxa_common_names tcn
-                       JOIN taxa t ON t.id = tcn.taxon_id
-                       WHERE tcn.name = ? COLLATE NOCASE
-                       ORDER BY (t.rank = 'species') DESC, t.id ASC
-                       LIMIT 1""",
-                    (variant,),
-                ).fetchone()
-                if common and common["rank"] == "species":
-                    return common["id"]
-                if species_only:
-                    # Reject the higher-rank fallback: an explicit
-                    # species add would stamp is_species=1 on this row
-                    # and every rank reader would then hide the tag.
-                    continue
-                # No species-rank match on this variant; prefer the direct
-                # (higher-rank) hit, otherwise fall back to the common-name
-                # hit if one exists.
-                if direct:
-                    return direct["id"]
-                if common:
-                    return common["id"]
-            else:
-                taxon = self.conn.execute(
-                    """SELECT t.id FROM taxa t
-                       WHERE t.common_name = ? COLLATE NOCASE
-                          OR t.name = ? COLLATE NOCASE
-                       LIMIT 1""",
-                    (variant, variant),
-                ).fetchone()
-                if taxon:
-                    return taxon["id"]
-                taxon = self.conn.execute(
-                    """SELECT t.taxon_id AS id FROM taxa_common_names t
-                       WHERE t.name = ? COLLATE NOCASE
-                       LIMIT 1""",
-                    (variant,),
-                ).fetchone()
-                if taxon:
-                    return taxon["id"]
-        return None
+        return self._keyword_repository().lookup_taxon_id(
+            name, prefer_species=prefer_species, species_only=species_only,
+        )
 
     def _add_source_species_keyword(self, name, source_taxon_id, parent_id=None, _commit=True):
         """Bind accepted source evidence without reassigning same-name tags."""
-        if type(source_taxon_id) is not int or not 0 < source_taxon_id < (1 << 63):
-            raise ValueError("source_taxon_id must be a positive SQLite integer")
-        taxon = self.conn.execute("SELECT id FROM taxa WHERE inat_id = ?", (source_taxon_id,)).fetchone()
-        local_id = taxon["id"] if taxon else None
-        # Imported catalogs can have several keyword spellings linked to one
-        # taxon. Prefer the requested name among those matches, just as the
-        # legacy name-only accept does. This keeps the tagged name aligned
-        # with the prediction when possible, rather than choosing an older
-        # alias (e.g. "Red-eared slider" instead of "Pond slider").
-        # The identity predicate still excludes same-name, different taxa.
-        existing = self.conn.execute(
-            "SELECT id FROM keywords WHERE parent_id IS ? AND type IN ('taxonomy', 'general') "
-            "AND (source_taxon_id = ? OR (source_taxon_id IS NULL AND taxon_id = ?)) "
-            "ORDER BY (name = ? COLLATE NOCASE) DESC, (type = 'taxonomy') DESC, id LIMIT 1",
-            (parent_id, source_taxon_id, local_id, name),
-        ).fetchone()
-        if existing:
-            kid = existing["id"]
-            self.conn.execute(
-                "UPDATE keywords SET source_taxon_id = ?, taxon_id = ?, is_species = 1, type = 'taxonomy' WHERE id = ?",
-                (source_taxon_id, local_id, kid),
-            )
-        else:
-            from species_identity import SpeciesResolver
-            raw_name = name.removesuffix(f" (taxon {source_taxon_id})")
-            identity = SpeciesResolver(db=self).resolve(raw_name, source={"taxon_id": source_taxon_id})
-            display = self.resolve_species_display_name(identity.display_name)
-            candidate = display
-            suffix = 0
-            while self.conn.execute(
-                "SELECT 1 FROM keywords WHERE name = ? COLLATE NOCASE AND parent_id IS ? LIMIT 1",
-                (candidate, parent_id),
-            ).fetchone():
-                suffix += 1
-                candidate = f"{display} (taxon {source_taxon_id})" + (f" ({suffix})" if suffix > 1 else "")
-            kid = self.conn.execute(
-                "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id, source_taxon_id) "
-                "VALUES (?, ?, 1, 'taxonomy', ?, ?)",
-                (candidate, parent_id, local_id, source_taxon_id),
-            ).lastrowid
-        if _commit:
-            self.conn.commit()
-        return kid
+        return self._keyword_repository().add_source_species(
+            name, source_taxon_id, parent_id=parent_id, _commit=_commit,
+        )
 
     def relink_source_species_keywords(self):
         """Refresh local foreign keys after importing source taxa; caller commits."""
-        self.conn.execute(
-            "UPDATE keywords SET taxon_id = (SELECT id FROM taxa WHERE inat_id = keywords.source_taxon_id) "
-            "WHERE source_taxon_id IS NOT NULL AND EXISTS "
-            "(SELECT 1 FROM taxa WHERE inat_id = keywords.source_taxon_id)"
-        )
+        return self._keyword_repository().relink_source_species()
 
     def add_keyword(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True, source_taxon_id=None,
                     _resolve_alias=False):
@@ -8078,255 +7780,9 @@ class Database:
                      Manual additions must not inherit imported keyword aliases,
                      and a leaf alias must not relocate a new parent chain.
         """
-        if kw_type is not None and kw_type not in KEYWORD_TYPES:
-            raise ValueError(f"invalid keyword type: {kw_type!r}")
-        # Normalization choke point: every keywords.name write funnels
-        # through here (or update_keyword / _upsert_one_keyword), and the
-        # v5 migration normalized all pre-existing rows, so stored names
-        # are always in normalize_keyword_display() form and the plain
-        # COLLATE NOCASE dedupe below is sufficient.
-        name = normalize_keyword_display(name)
-        # Reject names that normalize to empty. Input like `"'"` is
-        # non-empty before normalization (so the API boundary's `if not
-        # name` guard passes), but the strip turns it into `""`. Without
-        # this check, we would insert an invisible keyword row that could
-        # still be tagged, synced to XMP, and reported in duplicate cleanup.
-        if not name:
-            raise ValueError("keyword name is empty after normalization")
-        if _resolve_alias and not is_species and source_taxon_id is None and kw_type in (None, 'location'):
-            resolved = resolve_import_alias(self, name, parent_id, kw_type=kw_type)
-            if resolved is not None:
-                return resolved
-        # Reconcile is_species and kw_type to keep the legacy column coherent
-        # with the type enum.
-        if is_species and kw_type is not None and kw_type != 'taxonomy':
-            raise ValueError(
-                f"is_species=True requires kw_type='taxonomy', got {kw_type!r}"
-            )
-        if kw_type == 'taxonomy':
-            is_species = True
-        # Symmetric reconciliation: callers like the prediction-accept and
-        # pipeline-apply flows pass is_species=True with no kw_type. Treat
-        # that as a typed taxonomy lookup so the candidate-filtering below
-        # correctly excludes a same-name 'individual'/'location'/'genre'
-        # row (e.g. a person tag named "Robin"). Without this, the
-        # untyped lookup would return the homonym row, the typed promotion
-        # would no-op (only 'general'/'taxonomy' get promoted), and the
-        # caller would get back a non-taxonomy id — silently mis-tagging
-        # the accepted species.
-        if is_species and kw_type is None:
-            kw_type = 'taxonomy'
-        if source_taxon_id is not None:
-            if not is_species:
-                raise ValueError("source_taxon_id requires a species keyword")
-            return self._add_source_species_keyword(name, source_taxon_id, parent_id, _commit)
-        # Case-insensitive lookup with type-aware matching:
-        #
-        # When kw_type is supplied, only same-type or 'general' rows are
-        # candidates. Same-type wins; 'general' is promotable to the
-        # requested type via the UPDATE below. Other deliberate types
-        # (location/individual/etc.) are intentionally NOT candidates —
-        # returning one and finding the upgrade no-op'd would leave the
-        # caller with a mismatched type. Falling through to INSERT
-        # creates a new row of the requested type alongside the
-        # deliberate one (duplicates by name across types are
-        # intentional in this PR).
-        #
-        # When kw_type is None, prefer the most "structured"
-        # interpretation in a fixed priority — taxonomy > genre >
-        # individual > location > general — so a type-agnostic caller
-        # (e.g. typing into a generic keyword input) doesn't silently
-        # bind to a hand-tagged 'general' duplicate when a canonical
-        # typed row exists. Tie-break by id for determinism.
-        # NB: SQL literals here are constants, not parameter bindings.
-        type_priority_case = (
-            "CASE type "
-            "WHEN 'taxonomy' THEN 0 "
-            "WHEN 'genre' THEN 1 "
-            "WHEN 'individual' THEN 2 "
-            "WHEN 'location' THEN 3 "
-            "ELSE 4 END"
+        return self._keyword_repository().add(
+            name, parent_id=parent_id, is_species=is_species, kw_type=kw_type, _commit=_commit, source_taxon_id=source_taxon_id, _resolve_alias=_resolve_alias,
         )
-        if parent_id is None:
-            if kw_type is None:
-                existing = self.conn.execute(
-                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    f"AND parent_id IS NULL "
-                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
-                    (name,),
-                ).fetchone()
-            else:
-                existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id IS NULL AND type IN (?, 'general') "
-                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
-                    (name, kw_type, kw_type),
-                ).fetchone()
-        else:
-            if kw_type is None:
-                existing = self.conn.execute(
-                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    f"AND parent_id = ? "
-                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
-                    (name, parent_id),
-                ).fetchone()
-            else:
-                existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id = ? AND type IN (?, 'general') "
-                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
-                    (name, parent_id, kw_type, kw_type),
-                ).fetchone()
-        if existing:
-            # Older confirmed-species rows can be correctly typed yet have a
-            # NULL taxon_id because the historic is_species=True insert path
-            # skipped taxonomy lookup. Backfill opportunistically whenever
-            # such a row is resolved so future identity checks use taxon_id.
-            # When the preferred lookup returns a species-rank taxon and the
-            # row is already bound to a non-species-rank homonym (e.g. an
-            # older catalog stamped ``Puma`` with the genus taxon before
-            # ``prefer_species`` existed), overwrite that binding. Without
-            # this rebind the row stays flagged is_species/taxonomy while
-            # its taxon_id points at a genus/family, so every downstream
-            # ``t.rank = 'species'`` filter (Life List, Compare, Explorer)
-            # silently drops photos carrying the accepted keyword.
-            if is_species or kw_type == 'taxonomy':
-                # species_only: this branch stamps the row is_species=1
-                # via the taxonomy promotion below, so binding to a
-                # higher-rank homonym would silently hide the accepted
-                # keyword behind every downstream rank='species' filter.
-                taxon_id = self._lookup_taxon_id_for_keyword(
-                    name, species_only=True,
-                )
-                if taxon_id:
-                    self.conn.execute(
-                        "UPDATE keywords SET taxon_id = ? "
-                        "WHERE id = ? AND type IN ('general', 'taxonomy') "
-                        "AND ("
-                        "  taxon_id IS NULL "
-                        "  OR ("
-                        "    (SELECT rank FROM taxa WHERE id = ?) = 'species' "
-                        "    AND COALESCE("
-                        "      (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
-                        "    ) != 'species'"
-                        "  )"
-                        ")",
-                        (taxon_id, existing["id"], taxon_id),
-                    )
-                # Preserve an existing higher-rank ``taxon_id`` when no
-                # species-rank replacement is available. Earlier revisions
-                # cleared the link so the row would fall under the old
-                # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
-                # Life List, Compare, and highlight/preference eligibility.
-                # Those readers now accept linked higher-rank identifications
-                # (see :meth:`get_life_list_candidates` and
-                # :meth:`get_life_list_locations`), so clearing here would
-                # strip the row's ``taxon_rank`` / ``scientific_name`` /
-                # ``taxonomic_class`` metadata and silently break the new
-                # genus / family / class Life List filters — mirroring the
-                # startup preservation in :meth:`mark_species_keywords`.
-            if kw_type is None and not is_species and existing["type"] == "general":
-                taxon_id = self._lookup_taxon_id_for_keyword(
-                    name, prefer_species=True,
-                )
-                if taxon_id:
-                    self.conn.execute(
-                        "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                        "taxon_id = CASE "
-                        "  WHEN taxon_id IS NULL THEN ? "
-                        "  WHEN (SELECT rank FROM taxa WHERE id = ?) = 'species' "
-                        "    AND COALESCE("
-                        "      (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
-                        "    ) != 'species' THEN ? "
-                        "  ELSE taxon_id END "
-                        "WHERE id = ? AND type = 'general'",
-                        (taxon_id, taxon_id, taxon_id, existing["id"]),
-                    )
-                    if _commit:
-                        self.conn.commit()
-            # Promote an unset row to taxonomy when this call indicates a
-            # species. Restrict to 'general' (the legacy default for unknown
-            # rows) so a deliberate user type — 'individual', 'location',
-            # 'genre' — is preserved instead of silently rewritten when a
-            # later caller passes is_species=True or kw_type='taxonomy'.
-            if is_species:
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy' "
-                    "WHERE id = ? AND is_species = 0 AND type IN ('general', 'taxonomy')",
-                    (existing["id"],),
-                )
-                if _commit:
-                    self.conn.commit()
-            # Upgrade an existing 'general' row to the explicitly requested type.
-            # Without this, explicitly typed callers would hit the
-            # case-insensitive fast path and silently get back a wrong-typed row.
-            if kw_type and kw_type != 'general':
-                self.conn.execute(
-                    "UPDATE keywords SET type = ? WHERE id = ? AND type = 'general'",
-                    (kw_type, existing["id"]),
-                )
-                if kw_type == 'taxonomy':
-                    # Gate on type='taxonomy' so a preserved deliberate type
-                    # (e.g. 'individual') doesn't get is_species=1 stamped on
-                    # it when the type update above was a no-op. Otherwise
-                    # Subject filters with `OR is_species=1` would otherwise
-                    # treat that non-taxonomy row as a species.
-                    self.conn.execute(
-                        "UPDATE keywords SET is_species = 1 "
-                        "WHERE id = ? AND type = 'taxonomy'",
-                        (existing["id"],),
-                    )
-                if _commit:
-                    self.conn.commit()
-            return existing["id"]
-
-        # Apply casing convention for new species keywords
-        if is_species:
-            import config as cfg
-
-            override = cfg.get("keyword_case")
-            if override and override != "auto":
-                name = self._apply_case_convention(name, override)
-            else:
-                convention = self.detect_keyword_case_convention()
-                if convention:
-                    name = self._apply_case_convention(name, convention)
-
-        # Explicit species/taxonomy inserts still need their taxonomy link.
-        # The earlier kw_type reconciliation turns is_species=True into
-        # kw_type='taxonomy'; limiting lookup to kw_type is None therefore
-        # created new confirmed-species rows with taxon_id=NULL, defeating
-        # taxon-aware dedupe against hierarchical XMP leaves. Require a
-        # species-rank taxon here (species_only=True) — the INSERT below
-        # stamps is_species=1 as soon as any taxon is found, and
-        # downstream rank filters would drop the just-linked keyword if
-        # we bound it to a genus/family homonym. Leaving ``taxon_id``
-        # NULL when no species-rank match exists keeps the tag visible
-        # to readers via the ``t.rank IS NULL`` branch.
-        taxon_id = (
-            self._lookup_taxon_id_for_keyword(name, species_only=True)
-            if kw_type == 'taxonomy'
-            else None
-        )
-        if kw_type is None:
-            # Auto-detect taxonomy type from taxa table
-            kw_type = 'general'
-            if is_species:
-                kw_type = 'taxonomy'
-            else:
-                taxon_id = self._lookup_taxon_id_for_keyword(
-                    name, prefer_species=True,
-                )
-                if taxon_id:
-                    kw_type = 'taxonomy'
-
-        cur = self.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
-            (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
-        )
-        if _commit:
-            self.conn.commit()
-        return cur.lastrowid
 
     def _upsert_one_keyword(
         self, name, parent_id, place_id=None, latitude=None, longitude=None,
@@ -9172,43 +8628,13 @@ class Database:
         connection for a later unrelated commit to persist.
         Returns count of merges performed.
         """
-        ws = self._ws_id()
-        total_merged = 0
-        try:
-            total_merged = self._merge_duplicate_keywords_pass(ws)
-        except Exception:
-            self.conn.rollback()
-            raise
-        if total_merged:
-            self.conn.commit()
-        return total_merged
+        return self._keyword_repository().merge_duplicates()
 
     def _merge_duplicate_keywords_pass(self, ws):
         """Convergence loop for merge_duplicate_keywords. Caller commits."""
         total_merged = 0
         while True:
-            rows = self.conn.execute(
-                """WITH RECURSIVE
-                   tagged AS (
-                       SELECT DISTINCT pk.keyword_id AS id
-                       FROM photo_keywords pk
-                       JOIN photos p ON p.id = pk.photo_id
-                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                       WHERE wf.workspace_id = ?
-                   ),
-                   in_scope AS (
-                       SELECT id FROM tagged
-                       UNION
-                       SELECT k.parent_id
-                       FROM keywords k
-                       JOIN in_scope s ON s.id = k.id
-                       WHERE k.parent_id IS NOT NULL
-                   )
-                   SELECT k.id, k.name, k.parent_id, k.type, k.is_species
-                   FROM keywords k
-                   JOIN in_scope s ON s.id = k.id""",
-                (ws,),
-            ).fetchall()
+            rows = self._keyword_repository().duplicate_scope_rows(ws)
             grouped = {}
             for row in rows:
                 key = keyword_match_key(row["name"])
@@ -9249,13 +8675,7 @@ class Database:
                 # re-queries and picks a fresh survivor) and drop dead
                 # remove_ids so we don't UPDATE photo_keywords toward a
                 # non-existent FK target.
-                placeholders = ",".join("?" * len(all_ids))
-                alive = {
-                    row["id"] for row in self.conn.execute(
-                        f"SELECT id FROM keywords WHERE id IN ({placeholders})",
-                        all_ids,
-                    )
-                }
+                alive = self._keyword_repository().live_ids(all_ids)
                 if keep_id not in alive:
                     continue
                 remove_ids = [x for x in all_ids if x != keep_id and x in alive]
@@ -9283,40 +8703,9 @@ class Database:
         stored variant" invariant; the runtime dedup path leaves this
         False and keeps the stored spelling in the collision case.
         """
-        row = self.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
-        ).fetchone()
-        if row is None:
-            return
-        old_name = row["name"]
-        cleaned = normalize_keyword_display(old_name)
-        if not cleaned or cleaned == old_name:
-            return
-        # A same-name row in a different dedupe boundary (another type at
-        # the same parent) can still occupy the table-level
-        # UNIQUE(name, parent_id) slot. The links still merge correctly;
-        # keep the stored spelling unchanged in that case, unless the
-        # caller opts into disambiguation (migration path).
-        try:
-            self.conn.execute(
-                "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
-            )
-        except sqlite3.IntegrityError:
-            if not disambiguate_on_conflict:
-                return
-            # Fallback: append an id suffix so the row's name is still in
-            # normalize_keyword_display() form (the parenthesized suffix is
-            # ASCII and idempotent under the strip) while sidestepping the
-            # UNIQUE(name, parent_id) slot the different-type peer holds.
-            # The retarget below runs against this disambiguated name so
-            # pending sidecar changes and species curation stay in lockstep
-            # with the row's stored spelling.
-            cleaned = f"{cleaned} (id-{keyword_id})"
-            self.conn.execute(
-                "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
-            )
-        # Keep every dependent name string in lockstep with the row.
-        self._rename_keyword_dependents(keyword_id, old_name, cleaned)
+        return self._keyword_repository().normalize_row_name(
+            keyword_id, disambiguate_on_conflict=disambiguate_on_conflict,
+        )
 
     def _rename_keyword_dependents(self, keyword_id, old_name, new_name):
         """Carry a keyword row's rename into every string that mirrors its name.
@@ -9334,70 +8723,7 @@ class Database:
         ``keywords`` UPDATE: only ``photo_keywords`` is read, and a name
         change does not touch it. Caller commits.
         """
-        if not old_name or not new_name or old_name == new_name:
-            return
-        tag_rows = self.conn.execute(
-            """SELECT DISTINCT pk.photo_id, wf.workspace_id
-               FROM photo_keywords pk
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE pk.keyword_id = ?""",
-            (keyword_id,),
-        ).fetchall()
-        photo_workspace_pairs = [
-            (r["photo_id"], r["workspace_id"]) for r in tag_rows
-        ]
-        affected_photo_ids = sorted({r["photo_id"] for r in tag_rows})
-        # Retarget pending keyword_add/keyword_remove rows queued under the
-        # pre-canonical spelling so a still-unsynced sidecar write can't
-        # leak the legacy variant after the DB row was rewritten. A pending
-        # row that would collide with an existing (photo_id, change_type,
-        # new_name) row is dropped rather than duplicated, matching
-        # queue_change's dedupe contract.
-        if affected_photo_ids:
-            for chunk in _chunks(affected_photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"""DELETE FROM pending_changes
-                        WHERE change_type IN ('keyword_add', 'keyword_remove')
-                          AND value = ?
-                          AND photo_id IN ({placeholders})
-                          AND EXISTS (
-                              SELECT 1 FROM pending_changes pc2
-                              WHERE pc2.photo_id = pending_changes.photo_id
-                                AND pc2.change_type = pending_changes.change_type
-                                AND pc2.value = ?
-                                AND COALESCE(pc2.workspace_id, -1)
-                                    = COALESCE(pending_changes.workspace_id, -1)
-                          )""",
-                    [old_name, *chunk, new_name],
-                )
-                self.conn.execute(
-                    f"""UPDATE pending_changes
-                        SET value = ?
-                        WHERE change_type IN ('keyword_add', 'keyword_remove')
-                          AND value = ?
-                          AND photo_id IN ({placeholders})""",
-                    [new_name, old_name, *chunk],
-                )
-        # Species curation tables key rows by the species name string, which
-        # is compared exact against ``keywords.name``. Now that the UPDATE
-        # above rewrote this row to the canonical spelling, rows still keyed
-        # on the legacy spelling would drop out of the highlight/life-list
-        # queries even though the tag was retained. Rename them for the same
-        # old→clean mapping, scoped to the tagged (photo, workspace) pairs.
-        # ``rename_photo_preferences_species`` also retargets
-        # ``species_representatives`` in its scoped branch, so a separate
-        # representatives rename isn't needed here.
-        if photo_workspace_pairs:
-            self.rename_species_highlights_species(
-                old_name, new_name,
-                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
-            )
-            self.rename_photo_preferences_species(
-                old_name, new_name,
-                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
-            )
+        return self._keyword_repository().rename_dependents(keyword_id, old_name, new_name)
 
     def normalize_keyword_data(self):
         """One-shot, db_meta-gated wrapper around the normalization backfill.
@@ -9407,69 +8733,7 @@ class Database:
         the marker — so a failed run retries on the next open instead of
         leaving a half-normalized keyword table.
         """
-        if self.get_meta("keyword_names_normalized") != "1":
-            try:
-                self._normalize_keyword_data_once()
-                self.set_meta("keyword_names_normalized", "1", _commit=False)
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                raise
-        # Second-generation curation case alignment. The v1 sweep above ran
-        # on databases before curation writes canonicalized their species
-        # input, so highlight/preference rows starred from prediction-cased
-        # bucket labels between the v1 run and that fix are still keyed with
-        # classifier casing (e.g. `Common Waxbill` vs the `Common waxbill`
-        # keyword). Re-run just the case-alignment pass once under its own
-        # marker; with the setters now canonicalizing on write, new
-        # mismatches cannot form afterwards.
-        if self.get_meta("curation_species_case_aligned_v2") != "1":
-            try:
-                aligned = self._align_curation_species_case()
-                # Edit-history snapshots created after v1 but before the
-                # setter canonicalization fix still carry prediction-cased
-                # species in hl_prev/pref_prev/rep_prev; without this a
-                # later undo would recreate the orphaned curation rows v2
-                # is meant to repair.
-                history_aligned = self._align_curation_history_species()
-                if aligned or history_aligned:
-                    log.info(
-                        "curation case alignment v2: moved %d row(s), "
-                        "rewrote %d history item(s)",
-                        aligned, history_aligned,
-                    )
-                self.set_meta(
-                    "curation_species_case_aligned_v2", "1", _commit=False
-                )
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                raise
-        # Third-generation sweep: typographic-apostrophe folding.
-        # normalize_keyword_display() previously kept an internal U+2019, so
-        # `Say’s phoebe` was stored as a row distinct from `Say's phoebe`
-        # under SQLite COLLATE NOCASE -- one bird, two keyword rows, two
-        # Life List cards, two lifer numbers. Now that the fold happens on
-        # write, re-run the whole normalization sweep under its own marker
-        # to merge the variants that already exist, and fold the same
-        # characters in predictions.species (joined to keywords.name with
-        # `COLLATE NOCASE`, so a curly prediction silently fails to match
-        # its accepted ASCII keyword).
-        if self.get_meta("keyword_apostrophes_folded_v1") != "1":
-            try:
-                self._normalize_keyword_data_once()
-                folded = self._fold_prediction_species_apostrophes()
-                if folded:
-                    log.info(
-                        "apostrophe fold: rewrote %d prediction species", folded
-                    )
-                self.set_meta(
-                    "keyword_apostrophes_folded_v1", "1", _commit=False
-                )
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                raise
+        return self._keyword_repository().normalize_data()
 
     def _fold_prediction_species_apostrophes(self):
         """Rewrite ``predictions.species`` into normalize_keyword_display form.
@@ -9503,98 +8767,7 @@ class Database:
         to the winner id so undo/redo can still find the prediction after
         the DELETE.
         """
-        folded = 0
-        processed_ids = set()
-        for row in self.conn.execute(
-            "SELECT id, detection_id, classifier_model, labels_fingerprint, "
-            "species, confidence FROM predictions WHERE species IS NOT NULL"
-        ).fetchall():
-            if row["id"] in processed_ids:
-                # Already merged (or deleted) as a peer of an earlier
-                # collision group; skip so we don't reprocess a stale row.
-                continue
-            clean = normalize_keyword_display(row["species"])
-            if clean == row["species"]:
-                continue
-            if not clean:
-                # A prediction whose label is pure stray punctuation has no
-                # canonical spelling to match; leave it rather than inventing
-                # an empty species that would join to nothing.
-                continue
-            # ``COLLATE NOCASE`` matches SQLite's ASCII case fold, which is
-            # the same equivalence downstream keyword joins already use. Without
-            # it, a DB carrying `Say's Phoebe` (ASCII, title-case) alongside a
-            # `Say’s phoebe` (curly, lowercase) misses the collision, folds only
-            # the curly row, and leaves two case-variant predictions on the same
-            # (detection, model, fingerprint) — preserving the split review state
-            # and duplicate rendering the fold was meant to erase.
-            #
-            # ``fetchall`` (not ``fetchone``) so a three-way collision such as
-            # ``Say's Phoebe`` + ``Say's phoebe`` + ``Say’s phoebe`` is merged
-            # in one pass: leaving even one NOCASE-equivalent ASCII peer would
-            # let the winner's final ``UPDATE ... SET species = clean`` collide
-            # with it and abort the migration under UNIQUE.
-            peers = self.conn.execute(
-                "SELECT id, confidence, species FROM predictions "
-                "WHERE detection_id = ? AND classifier_model = ? "
-                "AND labels_fingerprint = ? "
-                "AND species = ? COLLATE NOCASE AND id != ?",
-                (row["detection_id"], row["classifier_model"],
-                 row["labels_fingerprint"], clean, row["id"]),
-            ).fetchall()
-            if peers:
-                # Whole collision set: this row plus every NOCASE-equivalent
-                # peer. Pick the winner by highest confidence, tie-broken by
-                # (a) already-clean species (avoids a needless UPDATE and
-                # preserves the reviewer's chosen casing) then (b) lowest
-                # id for determinism.
-                candidates = [
-                    (row["id"], row["confidence"] or 0.0, row["species"]),
-                ]
-                for p in peers:
-                    candidates.append(
-                        (p["id"], p["confidence"] or 0.0, p["species"])
-                    )
-                winner_id, _, winner_species = max(
-                    candidates,
-                    key=lambda c: (
-                        c[1],
-                        normalize_keyword_display(c[2]) == c[2],
-                        -c[0],
-                    ),
-                )
-                for cid, _, _ in candidates:
-                    if cid == winner_id:
-                        continue
-                    self._merge_prediction_metadata_before_delete(
-                        loser_id=cid, winner_id=winner_id,
-                    )
-                    self._merge_prediction_review_before_delete(
-                        loser_id=cid, winner_id=winner_id,
-                    )
-                    self._retarget_prediction_edit_history(
-                        loser_id=cid, winner_id=winner_id,
-                    )
-                    self.conn.execute(
-                        "DELETE FROM predictions WHERE id = ?", (cid,)
-                    )
-                    processed_ids.add(cid)
-                # Only rewrite the survivor when it still carries curly
-                # punctuation; an already-clean winner keeps its casing.
-                if normalize_keyword_display(winner_species) != winner_species:
-                    self.conn.execute(
-                        "UPDATE predictions SET species = ? WHERE id = ?",
-                        (clean, winner_id),
-                    )
-                processed_ids.add(winner_id)
-            else:
-                self.conn.execute(
-                    "UPDATE predictions SET species = ? WHERE id = ?",
-                    (clean, row["id"]),
-                )
-                processed_ids.add(row["id"])
-            folded += 1
-        return folded
+        return self._keyword_repository().fold_prediction_species_apostrophes()
 
     def _merge_prediction_review_before_delete(self, loser_id, winner_id):
         """Move per-workspace review rows from ``loser_id`` onto ``winner_id``.
@@ -9650,125 +8823,9 @@ class Database:
         The loser's remaining rows are removed by the caller's DELETE via
         the ON DELETE CASCADE, so no explicit cleanup is needed here.
         """
-        loser_rows = self.conn.execute(
-            "SELECT workspace_id, status, reviewed_at, individual, group_id, "
-            "vote_count, total_votes FROM prediction_review "
-            "WHERE prediction_id = ?",
-            (loser_id,),
-        ).fetchall()
-        for lr in loser_rows:
-            ws = lr["workspace_id"]
-            winner = self.conn.execute(
-                "SELECT status, reviewed_at, individual, group_id, "
-                "vote_count, total_votes FROM prediction_review "
-                "WHERE prediction_id = ? AND workspace_id = ?",
-                (winner_id, ws),
-            ).fetchone()
-            loser_status = lr["status"] or "pending"
-            loser_decided = loser_status in ("accepted", "rejected")
-            # ``AUTO_MATCH_REVIEW_MARKER`` in ``individual`` is a
-            # taxonomy-match sentinel, not user-authored metadata worth
-            # preserving. Counting it here would let a bare
-            # ``status='alternative'`` loser row whose only "metadata" is
-            # the sentinel pass the guard below and flip the pending
-            # winner to ``alternative``.
-            loser_metadata = {
-                col: lr[col]
-                for col in ("group_id", "vote_count", "total_votes", "individual")
-                if lr[col] is not None
-                and not (
-                    col == "individual" and lr[col] == AUTO_MATCH_REVIEW_MARKER
-                )
-            }
-            if winner is None:
-                # Winner's absence == implicit pending. Overriding that
-                # with the loser's row makes sense only when the loser
-                # carries a real user decision or preserved metadata; a
-                # bare ``status='alternative'`` transfer would flip the
-                # higher-confidence pending primary into an alternative
-                # and hide the sole top-1 prediction from the pending
-                # queue.
-                if not loser_decided and not loser_metadata:
-                    continue
-                if loser_decided:
-                    # Move the row intact, ``individual`` included: the
-                    # loser IS the decision, not a competing manual row
-                    # the sentinel could pollute. Preserving
-                    # ``AUTO_MATCH_REVIEW_MARKER`` when it's set is what
-                    # lets ``reconcile_match_review_state`` recognize an
-                    # auto-accept later and clean it up if the XMP match
-                    # goes away; scrubbing it here would strand the
-                    # accept as an apparent manual decision no automation
-                    # can revisit.
-                    self.conn.execute(
-                        "UPDATE prediction_review SET prediction_id = ? "
-                        "WHERE prediction_id = ? AND workspace_id = ?",
-                        (winner_id, loser_id, ws),
-                    )
-                else:
-                    # Undecided loser with real burst metadata: keep the
-                    # metadata but leave the winner implicit-pending by
-                    # downgrading the transferred status. ``individual``
-                    # on a pending row can be the JSON vote breakdown
-                    # ``_store_grouped_predictions`` stores alongside
-                    # ``group_id`` / ``vote_count`` / ``total_votes``,
-                    # so preserve it verbatim; only the auto-match
-                    # sentinel gets scrubbed so future automation
-                    # doesn't misread provenance on a row the user has
-                    # never reviewed.
-                    scrubbed_individual = (
-                        None
-                        if lr["individual"] == AUTO_MATCH_REVIEW_MARKER
-                        else lr["individual"]
-                    )
-                    self.conn.execute(
-                        "UPDATE prediction_review "
-                        "SET prediction_id = ?, status = 'pending', "
-                        "    individual = ? "
-                        "WHERE prediction_id = ? AND workspace_id = ?",
-                        (winner_id, scrubbed_individual, loser_id, ws),
-                    )
-                continue
-            winner_status = winner["status"] or "pending"
-            winner_decided = winner_status in ("accepted", "rejected")
-            prefer_loser = loser_decided and (
-                not winner_decided
-                or (lr["reviewed_at"] or "") > (winner["reviewed_at"] or "")
-            )
-            chosen = lr if prefer_loser else winner
-            other = winner if prefer_loser else lr
-            # ``prefer_loser`` only reflects the accepted/rejected decision,
-            # so a pending winner whose row lacks ``group_id`` while a
-            # pending loser carries the current burst's grouping would lose
-            # it via CASCADE without this backfill. Symmetric across sides:
-            # whichever side supplied the decision, missing group metadata
-            # is filled from the other so the surviving prediction stays
-            # inside its burst group. ``individual`` intentionally skips
-            # the ``AUTO_MATCH_REVIEW_MARKER`` fill-in: the chosen row is
-            # the surviving decision (a manual accept/reject may store
-            # ``individual=NULL``), and copying the auto-match sentinel
-            # from a stale auto-accepted row would let later runs of
-            # ``reconcile_match_review_state`` delete the user's decision
-            # or let ``preserve_manual_review`` overwrite it.
-            other_individual = other["individual"]
-            if other_individual == AUTO_MATCH_REVIEW_MARKER:
-                other_individual = None
-            self.conn.execute(
-                """UPDATE prediction_review
-                   SET status = ?, reviewed_at = ?, individual = ?,
-                       group_id = ?, vote_count = ?, total_votes = ?
-                   WHERE prediction_id = ? AND workspace_id = ?""",
-                (chosen["status"], chosen["reviewed_at"],
-                 chosen["individual"] if chosen["individual"] is not None
-                 else other_individual,
-                 chosen["group_id"] if chosen["group_id"] is not None
-                 else other["group_id"],
-                 chosen["vote_count"] if chosen["vote_count"] is not None
-                 else other["vote_count"],
-                 chosen["total_votes"] if chosen["total_votes"] is not None
-                 else other["total_votes"],
-                 winner_id, ws),
-            )
+        return self._keyword_repository().merge_prediction_review_before_delete(
+            loser_id, winner_id,
+        )
 
     def _merge_prediction_metadata_before_delete(self, loser_id, winner_id):
         """Backfill non-null loser columns onto the winner before DELETE.
@@ -9791,53 +8848,9 @@ class Database:
         from ``_fold_prediction_species_apostrophes`` right before the
         CASCADEd DELETE removes the loser row.
         """
-        if loser_id == winner_id:
-            return
-        winner = self.conn.execute(
-            """SELECT category, scientific_name,
-                      taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                      taxonomy_order, taxonomy_family, taxonomy_genus
-               FROM predictions WHERE id = ?""",
-            (winner_id,),
-        ).fetchone()
-        loser = self.conn.execute(
-            """SELECT category, scientific_name,
-                      taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                      taxonomy_order, taxonomy_family, taxonomy_genus
-               FROM predictions WHERE id = ?""",
-            (loser_id,),
-        ).fetchone()
-        if winner is None or loser is None:
-            return
-        updates = []
-        values = []
-        winner_cat = winner["category"]
-        loser_cat = loser["category"]
-        if (
-            loser_cat
-            and loser_cat != "new"
-            and (winner_cat is None or winner_cat == "new")
-        ):
-            updates.append("category = ?")
-            values.append(loser_cat)
-        for field in (
-            "scientific_name",
-            "taxonomy_kingdom",
-            "taxonomy_phylum",
-            "taxonomy_class",
-            "taxonomy_order",
-            "taxonomy_family",
-            "taxonomy_genus",
-        ):
-            if winner[field] is None and loser[field] is not None:
-                updates.append(f"{field} = ?")
-                values.append(loser[field])
-        if updates:
-            values.append(winner_id)
-            self.conn.execute(
-                "UPDATE predictions SET " + ", ".join(updates) + " WHERE id = ?",
-                values,
-            )
+        return self._keyword_repository().merge_prediction_metadata_before_delete(
+            loser_id, winner_id,
+        )
 
     def _retarget_prediction_edit_history(self, loser_id, winner_id):
         """Rewrite prediction-id references in edit history from loser to winner.
@@ -9873,80 +8886,7 @@ class Database:
         in spelling, so any status flip captured on either applies to the
         same (detection, model, labels_fingerprint) scope after the merge.
         """
-        if loser_id == winner_id:
-            return
-        loser_str = str(loser_id)
-        winner_str = str(winner_id)
-        # (1) Bare-int old_value: rewrite in place.  Scoped strictly to
-        #     ``prediction_accept`` because ``keyword_add`` /
-        #     ``species_replace`` / ``keyword_remove`` store keyword ids
-        #     in these columns and a blanket UPDATE would corrupt any
-        #     keyword id that happened to equal loser_id.
-        self.conn.execute(
-            """UPDATE edit_history_items
-               SET old_value = ?
-               WHERE old_value = ?
-                 AND edit_id IN (
-                     SELECT id FROM edit_history
-                     WHERE action_type = 'prediction_accept'
-                 )""",
-            (winner_str, loser_str),
-        )
-        # (2) JSON old_value: parse, rewrite ``prediction_id`` and every
-        #     ``prediction_ids`` entry that matches the loser, re-serialize.
-        #     The ``LIKE '{%'`` prefix skips the bare-int rows handled above
-        #     without loading them into Python. Scoped to the three action
-        #     types that carry prediction ids in their JSON payload so a
-        #     ``keyword_remove`` JSON blob (which happens to also start with
-        #     ``{`` if it ever gains structured payloads) is unaffected.
-        json_rows = self.conn.execute(
-            """SELECT ehi.id, ehi.old_value
-               FROM edit_history_items ehi
-               JOIN edit_history eh ON eh.id = ehi.edit_id
-               WHERE eh.action_type IN (
-                       'prediction_accept', 'keyword_add', 'species_replace'
-                     )
-                 AND ehi.old_value IS NOT NULL
-                 AND ehi.old_value LIKE ?""",
-            ('{%',),
-        ).fetchall()
-        for row in json_rows:
-            try:
-                data = json.loads(row["old_value"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            changed = False
-            raw_pid = data.get("prediction_id")
-            if raw_pid is not None:
-                try:
-                    if int(raw_pid) == loser_id:
-                        data["prediction_id"] = winner_id
-                        changed = True
-                except (TypeError, ValueError):
-                    pass
-            raw_pids = data.get("prediction_ids")
-            if isinstance(raw_pids, list):
-                new_list = []
-                list_changed = False
-                for raw in raw_pids:
-                    try:
-                        if int(raw) == loser_id:
-                            new_list.append(winner_id)
-                            list_changed = True
-                            continue
-                    except (TypeError, ValueError):
-                        pass
-                    new_list.append(raw)
-                if list_changed:
-                    data["prediction_ids"] = new_list
-                    changed = True
-            if changed:
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(data), row["id"]),
-                )
+        return self._keyword_repository().retarget_prediction_edit_history(loser_id, winner_id)
 
     def _align_curation_species_case(self):
         """Re-key curation rows whose species differs from the canonical
@@ -9980,30 +8920,7 @@ class Database:
 
         Returns the number of rows moved; caller commits.
         """
-        moved = 0
-        unique_species_by_key, all_species_keys = self._species_keyword_maps()
-        for table, rename in (
-            ("photo_preferences", self.rename_photo_preferences_species),
-            ("species_representatives",
-             self.rename_species_representatives_species),
-            ("species_highlights", self.rename_species_highlights_species),
-        ):
-            names = [
-                r["species"] for r in self.conn.execute(
-                    f"SELECT DISTINCT species FROM {table}"
-                ).fetchall()
-            ]
-            for old in names:
-                stored = self._canonical_curation_species(
-                    old, unique_species_by_key, all_species_keys
-                )
-                if not stored or stored == old:
-                    continue
-                moved += rename(old, stored, _commit=False) or 0
-                self.conn.execute(
-                    f"DELETE FROM {table} WHERE species = ?", (old,)
-                )
-        return moved
+        return self._keyword_repository().align_curation_species_case()
 
     def _align_curation_history_species(self):
         """Rewrite curation species snapshots in edit_history_items.old_value.
@@ -10021,66 +8938,7 @@ class Database:
         the v2 gate after v1 has already normalized the punctuation.
         Returns the number of history rows rewritten; caller commits.
         """
-        rewritten = 0
-        unique_species_by_key, all_species_keys = self._species_keyword_maps()
-
-        def _normalized_curation_species(value):
-            return self._canonical_curation_species(
-                value, unique_species_by_key, all_species_keys
-            )
-
-        history_rows = self.conn.execute(
-            "SELECT id, old_value FROM edit_history_items "
-            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
-            ('{%curation%',),
-        ).fetchall()
-        for row in history_rows:
-            try:
-                payload = json.loads(row["old_value"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            curation = payload.get("curation")
-            if not isinstance(curation, dict):
-                continue
-            dirty = False
-            highlights = curation.get("hl_prev")
-            if isinstance(highlights, list):
-                for index, entry in enumerate(highlights):
-                    if isinstance(entry, str):
-                        normalized = _normalized_curation_species(entry)
-                        if normalized != entry:
-                            highlights[index] = normalized
-                            dirty = True
-                    elif isinstance(entry, dict):
-                        old = entry.get("species")
-                        if isinstance(old, str):
-                            normalized = _normalized_curation_species(old)
-                            if normalized != old:
-                                entry["species"] = normalized
-                                dirty = True
-            for key in ("pref_prev", "rep_prev"):
-                entries = curation.get(key)
-                if not isinstance(entries, list):
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    old = entry.get("species")
-                    if not isinstance(old, str):
-                        continue
-                    normalized = _normalized_curation_species(old)
-                    if normalized != old:
-                        entry["species"] = normalized
-                        dirty = True
-            if dirty:
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(payload, sort_keys=True), row["id"]),
-                )
-                rewritten += 1
-        return rewritten
+        return self._keyword_repository().align_curation_history_species()
 
     def _species_keyword_maps(self):
         """Return ``(unique_species_by_key, all_species_keys)`` for
@@ -10098,19 +8956,7 @@ class Database:
         detected case convention — from "ambiguous homonym", which
         must be left alone.
         """
-        species_by_key = {}
-        for row in self.conn.execute(
-            "SELECT name FROM keywords "
-            "WHERE parent_id IS NULL AND (is_species = 1 OR type = 'taxonomy')"
-        ).fetchall():
-            species_by_key.setdefault(keyword_match_key(row["name"]), []).append(
-                row["name"]
-            )
-        unique = {
-            key: names[0] for key, names in species_by_key.items()
-            if len(set(names)) == 1
-        }
-        return unique, set(species_by_key.keys())
+        return self._keyword_repository().species_maps()
 
     def _canonical_curation_species(
         self, name, unique_species_by_key, all_species_keys,
@@ -10175,372 +9021,7 @@ class Database:
         per-photo dedup keeps the flat entry from re-tagging in that case
         and a hierarchical remove would strip the surviving keyword.
         """
-        if self.get_meta(self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1":
-            return 0
-        if self.conn.execute(
-            "SELECT 1 FROM taxa WHERE rank = 'species' LIMIT 1"
-        ).fetchone() is None:
-            # Taxonomy JSON can exist before the download job has populated
-            # the local taxa table. Without species rows, differently-spelled
-            # aliases cannot yet be grouped; leave the marker unset to retry.
-            return 0
-        removed_count = 0
-        try:
-            rows = self.conn.execute(
-                """SELECT pk.photo_id, k.id AS keyword_id, k.name,
-                          k.parent_id, k.taxon_id, t.rank AS taxon_rank
-                   FROM photo_keywords pk
-                   JOIN keywords k ON k.id = pk.keyword_id
-                   LEFT JOIN taxa t ON t.id = k.taxon_id
-                   WHERE (k.is_species = 1 OR k.type = 'taxonomy')
-                     AND (t.rank = 'species' OR k.taxon_id IS NULL)
-                   ORDER BY pk.photo_id,
-                            CASE WHEN k.parent_id IS NULL THEN 1 ELSE 0 END,
-                            k.id"""
-            ).fetchall()
-            by_photo = {}
-            for row in rows:
-                by_photo.setdefault(row["photo_id"], []).append(row)
-
-            # A key with multiple linked taxa anywhere in the catalog is an
-            # ambiguous homonym (e.g. legacy ``Robin`` alongside taxonomy
-            # ``robin`` bound to different taxa). ``get_photos_with_equivalent_species``
-            # gates its NULL-taxon fallback the same way; without the guard
-            # here, a NULL-taxon leaf on a photo that also carries one linked
-            # root gets folded into that root's group, the root is treated
-            # as a redundant duplicate, and the accepted taxonomy species is
-            # detached from the photo.
-            homonym_keys = set()
-            key_taxa = {}
-            for row in self.conn.execute(
-                """SELECT DISTINCT k.name, k.taxon_id
-                   FROM keywords k
-                   WHERE (k.is_species = 1 OR k.type = 'taxonomy')
-                     AND k.taxon_id IS NOT NULL"""
-            ).fetchall():
-                key = keyword_match_key(row["name"])
-                taxa = key_taxa.setdefault(key, set())
-                taxa.add(row["taxon_id"])
-                if len(taxa) > 1:
-                    homonym_keys.add(key)
-
-            grouped = {}
-            for photo_id, photo_rows in by_photo.items():
-                linked = {}
-                unlinked = {}
-                for row in photo_rows:
-                    if row["taxon_id"] is not None:
-                        linked.setdefault(row["taxon_id"], []).append(row)
-                    else:
-                        unlinked.setdefault(
-                            keyword_match_key(row["name"]), []
-                        ).append(row)
-                # Fold a legacy NULL-taxon spelling into a unique linked
-                # species group on the same photo. If multiple linked taxa
-                # share that common name, or the same key is a known homonym
-                # bound to different taxa elsewhere, leave it alone rather
-                # than guessing.
-                for name_key, null_rows in unlinked.items():
-                    if name_key in homonym_keys:
-                        grouped[(photo_id, "name", name_key)] = null_rows
-                        continue
-                    candidates = [
-                        taxon_id for taxon_id, linked_rows in linked.items()
-                        if any(
-                            keyword_match_key(row["name"]) == name_key
-                            for row in linked_rows
-                        )
-                    ]
-                    if len(candidates) == 1:
-                        linked[candidates[0]].extend(null_rows)
-                    else:
-                        grouped[(photo_id, "name", name_key)] = null_rows
-                for taxon_id, linked_rows in linked.items():
-                    grouped[(photo_id, "taxon", taxon_id)] = linked_rows
-
-            for group_key, group in grouped.items():
-                photo_id = group_key[0]
-                if len(group) < 2:
-                    continue
-                nested = sorted(
-                    (row for row in group if row["parent_id"] is not None),
-                    key=lambda row: row["keyword_id"],
-                )
-                remove = [row for row in group if row["parent_id"] is None]
-                if not nested or not remove:
-                    continue
-                if group_key[1] == "name":
-                    # Unlinked (NULL-taxon) rows are grouped by
-                    # ``keyword_match_key`` only. Curation/eligibility for
-                    # unlinked species keys is compared with exact
-                    # ``k.name`` — there is no taxon fallback that maps a
-                    # differently-spelled leaf back to the root spelling.
-                    # Detaching root ``Foo`` while only leaf ``foo``
-                    # remains would strand highlights/representatives/
-                    # life-list preferences saved under ``Foo``. Restrict
-                    # removal to root rows whose exact spelling matches at
-                    # least one surviving leaf so exact-name eligibility
-                    # keeps applying; different-spelling unlinked
-                    # duplicates stay attached until a taxon link makes
-                    # canonicalization safe.
-                    nested_names = {row["name"] for row in nested}
-                    remove = [row for row in remove if row["name"] in nested_names]
-                    if not remove:
-                        continue
-                # Preserve every hierarchy placement; detach only root rows.
-                remove_ids = [row["keyword_id"] for row in remove]
-                placeholders = ",".join("?" for _ in remove_ids)
-                self.conn.execute(
-                    f"""DELETE FROM photo_keywords
-                        WHERE photo_id = ? AND keyword_id IN ({placeholders})""",
-                    [photo_id, *remove_ids],
-                )
-                removed_count += len(remove_ids)
-
-                # Drop this photo's undo/redo items that reference a root tag
-                # the repair detached. Keyword add/remove handlers read the
-                # shared parent edit_history.new_value, so merely retargeting
-                # edit_history_items would let redo attach the redundant root
-                # again. Prediction accepts record each actual tag per item.
-                # Deleting only the affected item preserves other photos in
-                # a batch; empty parent edits are
-                # removed below. Scope by action/column so an unrelated rating
-                # or prediction id with the same numeric value is untouched.
-                # ``no_tag`` prediction_accept items (JSON old_value carrying
-                # ``"no_tag": true``) already skip tag mutations on undo/redo
-                # because the photo carried the species via an equivalent
-                # row, so keeping them cannot reattach the detached root and
-                # dropping them would erase the only audit/undo record of
-                # the accepted prediction-status flip.
-                for removed in remove:
-                    removed_id = str(removed["keyword_id"])
-                    self.conn.execute(
-                        """DELETE FROM edit_history_items
-                           WHERE photo_id = ?
-                             AND edit_id IN (
-                                 SELECT id FROM edit_history
-                                 WHERE (
-                                     action_type = 'keyword_add'
-                                     AND edit_history_items.new_value = ?
-                                 ) OR (
-                                     action_type = 'prediction_accept'
-                                     AND edit_history_items.new_value = ?
-                                     AND (
-                                         edit_history_items.old_value IS NULL
-                                         OR edit_history_items.old_value
-                                             NOT LIKE '%"no_tag"%'
-                                     )
-                                 ) OR (
-                                     action_type = 'keyword_remove'
-                                     AND edit_history_items.old_value = ?
-                                 ) OR (
-                                     action_type = 'species_replace'
-                                     AND (
-                                         edit_history_items.old_value = ?
-                                         OR edit_history_items.new_value = ?
-                                     )
-                                 )
-                             )""",
-                        (photo_id, removed_id, removed_id, removed_id,
-                         removed_id, removed_id),
-                    )
-
-                # species_replace items can store ``old_value`` as a JSON
-                # payload carrying ``keyword_id``/``keyword_ids`` when the
-                # replace swapped out multiple old species rows for one
-                # photo. A bare-string equality misses those, so an undo/redo
-                # would parse the JSON and re-tag the detached root, undoing
-                # the repair. Scan JSON payloads on this photo and drop any
-                # species_replace item whose keyword_id(s) contains the
-                # detached root.
-                removed_id_ints = {int(row["keyword_id"]) for row in remove}
-                json_items = self.conn.execute(
-                    """SELECT ehi.id, ehi.old_value
-                       FROM edit_history_items ehi
-                       JOIN edit_history eh ON eh.id = ehi.edit_id
-                       WHERE ehi.photo_id = ?
-                         AND eh.action_type = 'species_replace'
-                         AND ehi.old_value IS NOT NULL
-                         AND ehi.old_value LIKE '{%'""",
-                    (photo_id,),
-                ).fetchall()
-                for item in json_items:
-                    try:
-                        payload = json.loads(item["old_value"])
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    references_removed = False
-                    raw_kid = payload.get("keyword_id")
-                    if raw_kid is not None:
-                        try:
-                            if int(raw_kid) in removed_id_ints:
-                                references_removed = True
-                        except (TypeError, ValueError):
-                            pass
-                    if not references_removed:
-                        for k in (payload.get("keyword_ids") or []):
-                            try:
-                                if int(k) in removed_id_ints:
-                                    references_removed = True
-                                    break
-                            except (TypeError, ValueError):
-                                continue
-                    if references_removed:
-                        self.conn.execute(
-                            "DELETE FROM edit_history_items WHERE id = ?",
-                            (item["id"],),
-                        )
-
-                self.conn.execute(
-                    """DELETE FROM edit_history
-                       WHERE id NOT IN (
-                           SELECT DISTINCT edit_id FROM edit_history_items
-                       )"""
-                )
-
-                # Only cancel pending changes for the root spellings actually
-                # being detached. Using every name in ``group`` here would
-                # also match preserved hierarchy leaves — e.g. a leaf
-                # ``Desert Verdin`` that a user tagged shortly before the
-                # repair runs. That pending ``keyword_add`` must still reach
-                # the sidecar, otherwise ``sync_to_xmp`` writes only the
-                # root cleanup and the preserved hierarchy never appears
-                # in XMP.
-                remove_keys = {
-                    keyword_match_key(row["name"]) for row in remove
-                }
-                pending = self.conn.execute(
-                    """SELECT id, change_type, value FROM pending_changes
-                       WHERE photo_id = ?
-                         AND change_type IN ('keyword_add', 'keyword_remove')""",
-                    (photo_id,),
-                ).fetchall()
-                pending_ids = []
-                cancelled_add_keys = set()
-                for row in pending:
-                    key = keyword_match_key(row["value"] or "")
-                    if key not in remove_keys:
-                        continue
-                    pending_ids.append(row["id"])
-                    if row["change_type"] == "keyword_add":
-                        cancelled_add_keys.add(key)
-                for chunk in _chunks(pending_ids):
-                    pending_placeholders = ",".join("?" for _ in chunk)
-                    self.conn.execute(
-                        f"DELETE FROM pending_changes WHERE id IN ({pending_placeholders})",
-                        chunk,
-                    )
-
-                # Split post-repair surviving names into two buckets:
-                #
-                # * attached-leaf keys — names of keywords still directly
-                #   tagged on the photo. The scanner's flat dedup during
-                #   a later XMP re-import already skips a matching
-                #   ``dc:subject`` entry, so no sidecar remove is needed.
-                # * ancestor-only keys — names that appear only in the
-                #   parent chain of a surviving hierarchical leaf. The
-                #   scanner does NOT count these when building its
-                #   per-photo ``existing_keys`` (it uses attached leaf
-                #   names only, see ``scanner._import_keywords_for_photo``),
-                #   so a stale ``dc:subject: Verdin`` next to a preserved
-                #   ``Verdin|Desert Verdin`` will be reimported and
-                #   reattach the flat root — recreating the very
-                #   duplicate this repair just removed. Queue a
-                #   flat-only sidecar remove for these; a plain
-                #   ``keyword_remove`` cannot be used because
-                #   ``sync_to_xmp`` applies it hierarchically and would
-                #   strip the preserved ``lr:hierarchicalSubject`` entry.
-                attached_leaf_keys = set()
-                ancestor_only_keys = set()
-                for row in self.conn.execute(
-                    """WITH RECURSIVE anc(id, name, parent_id, is_leaf) AS (
-                           SELECT k.id, k.name, k.parent_id, 1
-                             FROM photo_keywords pk
-                             JOIN keywords k ON k.id = pk.keyword_id
-                            WHERE pk.photo_id = ?
-                           UNION
-                           SELECT k.id, k.name, k.parent_id, 0
-                             FROM keywords k
-                             JOIN anc ON anc.parent_id = k.id
-                       )
-                       SELECT name, MAX(is_leaf) AS leaf
-                         FROM anc GROUP BY id""",
-                    (photo_id,),
-                ).fetchall():
-                    key = keyword_match_key(row["name"])
-                    if not key:
-                        continue
-                    if row["leaf"]:
-                        attached_leaf_keys.add(key)
-                    else:
-                        ancestor_only_keys.add(key)
-                # The repair scans photo_keywords globally, but
-                # pending_changes are filtered by workspace at read
-                # time (get_pending_changes uses the active workspace).
-                # A photo whose folder is not in the active workspace
-                # would otherwise get its sidecar remove queued under
-                # a workspace that will never sync it, leaving the
-                # stale root spelling in XMP for the real workspace(s)
-                # to re-import. Queue the remove for every workspace
-                # that actually contains this photo; fall back to the
-                # active workspace only when the photo has no
-                # workspace membership at all.
-                photo_workspaces = [
-                    row["workspace_id"]
-                    for row in self.conn.execute(
-                        """SELECT DISTINCT wf.workspace_id
-                           FROM photos p
-                           JOIN workspace_folders wf
-                             ON wf.folder_id = p.folder_id
-                           WHERE p.id = ?""",
-                        (photo_id,),
-                    ).fetchall()
-                ]
-                for removed in remove:
-                    key = keyword_match_key(removed["name"])
-                    if not key or key in attached_leaf_keys:
-                        continue
-                    if key in cancelled_add_keys:
-                        # The flat root add was still pending — cancelling
-                        # it above already prevents the sidecar from ever
-                        # receiving it, so no remove is required.
-                        continue
-                    # Ancestor-only survivors need flat-only cleanup:
-                    # strip the stale ``dc:subject`` entry without the
-                    # hierarchical sweep that would also drop the
-                    # preserved ``lr:hierarchicalSubject`` line.
-                    change_type = (
-                        "keyword_remove_flat"
-                        if key in ancestor_only_keys
-                        else "keyword_remove"
-                    )
-                    if photo_workspaces:
-                        for ws_id in photo_workspaces:
-                            self.queue_change(
-                                photo_id, change_type, removed["name"],
-                                workspace_id=ws_id, _commit=False,
-                            )
-                    else:
-                        self.queue_change(
-                            photo_id, change_type, removed["name"],
-                            _commit=False,
-                        )
-
-            self.set_meta(
-                self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY, "1", _commit=False
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        if removed_count:
-            log.info(
-                "repaired %d redundant same-photo species keyword association(s)",
-                removed_count,
-            )
-        return removed_count
+        return self._keyword_repository().repair_duplicate_photo_species()
 
     def _normalize_keyword_data_once(self):
         """One-shot backfill: normalize every stored keyword/species name.
@@ -10987,11 +9468,7 @@ class Database:
         writing the retired name into XMP and drops starred photos out of the
         highlight and life-list queries. Caller commits.
         """
-        self.conn.execute(
-            "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
-            (dst_id, new_name, child["id"]),
-        )
-        self._rename_keyword_dependents(child["id"], child["name"], new_name)
+        return self._keyword_repository().reparent_disambiguated(child, dst_id, new_name)
 
     def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
@@ -11711,29 +10188,7 @@ class Database:
 
     def get_keyword_tree(self):
         """Return keywords used by photos in the active workspace, plus ancestors."""
-        return self.conn.execute(
-            """WITH RECURSIVE
-               leaf_kw AS (
-                   SELECT DISTINCT pk.keyword_id AS id
-                   FROM photo_keywords pk
-                   JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                   WHERE wf.workspace_id = ?
-               ),
-               ancestors AS (
-                   SELECT id FROM leaf_kw
-                   UNION
-                   SELECT k.parent_id
-                   FROM keywords k
-                   JOIN ancestors a ON a.id = k.id
-                   WHERE k.parent_id IS NOT NULL
-               )
-               SELECT k.id, k.name, k.parent_id, k.type
-               FROM keywords k
-               JOIN ancestors a ON a.id = k.id
-               ORDER BY k.name""",
-            (self._ws_id(),),
-        ).fetchall()
+        return self._keyword_repository().get_tree()
 
     def tag_photo(
         self, photo_id, keyword_id, source=KEYWORD_SOURCE_MANUAL, _commit=True,
@@ -11790,47 +10245,15 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        self.conn.execute(
-            "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-            (photo_id, keyword_id),
-        )
-        if _commit:
-            self.conn.commit()
+        return self._keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photo_keywords(self, photo_id):
         """Return all keywords for a photo."""
-        return self.conn.execute(
-            """SELECT k.id, k.name, k.parent_id, k.type
-               FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               WHERE pk.photo_id = ?
-               ORDER BY k.name""",
-            (photo_id,),
-        ).fetchall()
+        return self._keyword_repository().get_for_photo(photo_id)
 
     def get_keywords_for_photos(self, photo_ids):
         """Return keywords for a batch of photos keyed by photo id."""
-        if not photo_ids:
-            return {}
-        # Dedup-preserving-order: chunking that re-queries the same id
-        # in a later chunk would double-append it under setdefault.
-        photo_ids = list(dict.fromkeys(photo_ids))
-        result = {}
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
-                           k.is_species, k.taxon_id, t.rank AS taxon_rank
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    LEFT JOIN taxa t ON t.id = k.taxon_id
-                    WHERE pk.photo_id IN ({placeholders})
-                    ORDER BY k.type, k.name""",
-                list(chunk),
-            ).fetchall()
-            for r in rows:
-                result.setdefault(r["photo_id"], []).append(dict(r))
-        return result
+        return self._keyword_repository().get_for_photos(photo_ids)
 
     def get_species_keywords_for_photos(self, photo_ids, include_identities=False):
         """Return deduplicated species-rank keyword names for photos.
@@ -11856,84 +10279,9 @@ class Database:
         row's own name when no root exists, and taxonomy-less legacy rows
         continue to use the normalized keyword name.
         """
-        if not photo_ids:
-            return {}
-        # Dedup-preserving-order: chunking that re-queries the same id
-        # in a later chunk would double-append it under setdefault.
-        photo_ids = list(dict.fromkeys(photo_ids))
-        chosen = {}
-        source_keys = {}
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id,
-                           k.taxon_id, k.source_taxon_id, t.inat_id, t.name AS scientific_name, t.rank AS taxon_rank
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    LEFT JOIN taxa t ON t.id = k.taxon_id
-                    WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                      AND (t.rank = 'species' OR t.rank IS NULL)
-                    ORDER BY pk.photo_id,
-                             CASE WHEN k.parent_id IS NULL THEN 1 ELSE 0 END,
-                             k.id""",
-                list(chunk),
-            ).fetchall()
-            for r in rows:
-                if r["taxon_id"] is not None:
-                    identity = ("taxon", r["taxon_id"])
-                else:
-                    # Preserve exact spelling for NULL-taxon rows: unlinked
-                    # curation compares by exact ``k.name``, so a root ``Foo``
-                    # and a hierarchy leaf ``foo`` on the same photo must
-                    # both appear here — folding by ``keyword_match_key``
-                    # would drop the root and strand its representative /
-                    # highlight lookups.
-                    identity = ("name", r["name"])
-                # Track whether the chosen row is itself a root: attached root
-                # rows must keep their own stored spelling (curation is keyed
-                # by the actually attached ``k.name``, so a same-taxon sibling
-                # root row must not rewrite it). Only hierarchy leaves need the
-                # root-name fallback.
-                is_root = r["parent_id"] is None
-                chosen.setdefault(r["photo_id"], {}).setdefault(
-                    identity, (r["name"], is_root)
-                )
-                source_id = r["source_taxon_id"] or r["inat_id"]
-                key = f"taxon:{source_id}" if source_id else (
-                    "scientific:" + r["scientific_name"].casefold() if r["scientific_name"]
-                    else "name:" + keyword_match_key(r["name"])
-                )
-                source_keys.setdefault((r["photo_id"], identity), key)
-        taxon_ids = {
-            identity[1]
-            for by_identity in chosen.values()
-            for identity in by_identity
-            if identity[0] == "taxon"
-        }
-        canonical_roots = {}
-        if taxon_ids:
-            for chunk in _chunks(list(taxon_ids)):
-                placeholders = ",".join("?" for _ in chunk)
-                root_rows = self.conn.execute(
-                    f"""SELECT taxon_id, name FROM keywords
-                        WHERE taxon_id IN ({placeholders})
-                          AND parent_id IS NULL
-                          AND (is_species = 1 OR type = 'taxonomy')
-                        ORDER BY id""",
-                    list(chunk),
-                ).fetchall()
-                for row in root_rows:
-                    canonical_roots.setdefault(row["taxon_id"], row["name"])
-        result = {}
-        for photo_id, by_identity in chosen.items():
-            names = []
-            for identity, (name, is_root) in by_identity.items():
-                if identity[0] == "taxon" and not is_root:
-                    name = canonical_roots.get(identity[1], name)
-                names.append({"name": name, "key": source_keys[(photo_id, identity)]} if include_identities else name)
-            result[photo_id] = sorted(names, key=lambda n: keyword_match_key(n["name"] if include_identities else n))
-        return result
+        return self._keyword_repository().get_species_for_photos(
+            photo_ids, include_identities=include_identities,
+        )
 
     def get_photos_with_equivalent_species(
         self, photo_ids, keyword_id, exclude_keyword_ids=None,
@@ -11951,129 +10299,9 @@ class Database:
         the "already carries this species" answer must reflect only the rows
         that will survive the mutation.
         """
-        if not photo_ids:
-            return set()
-        target = self.conn.execute(
-            "SELECT name, taxon_id FROM keywords WHERE id = ?", (keyword_id,)
-        ).fetchone()
-        if target is None:
-            return set()
-        result = set()
-        ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
-        target_key = keyword_match_key(target["name"])
-        excluded = tuple(dict.fromkeys(int(x) for x in (exclude_keyword_ids or ())))
-        excl_placeholders = ",".join("?" for _ in excluded)
-        excl_clause = f" AND k.id NOT IN ({excl_placeholders})" if excluded else ""
-        # When another taxonomy/species keyword row shares the target's
-        # match key but points at a different taxon (e.g. legacy
-        # ``Robin`` alongside taxonomy ``robin``), the taxon_id-is-NULL
-        # fallback below is ambiguous: an unlinked same-key row on the
-        # photo could be either species. Treating it as the target would
-        # let a confirm/accept skip ``tag_photo``/``queue_change`` and
-        # leave the intended species keyword absent. Detect the homonym
-        # conflict once and gate the fallback.
-        #
-        # The same guard applies when the *target* itself is unlinked:
-        # if any other same-key row IS linked to a taxon, that linked
-        # row is a distinct species that must not be folded into the
-        # unlinked target during accept/confirm. In that case the
-        # name-only fallback matches only the exact target row.
-        homonym_conflict = False
-        if target["taxon_id"] is not None:
-            for row in self.conn.execute(
-                """SELECT name FROM keywords
-                   WHERE (is_species = 1 OR type = 'taxonomy')
-                     AND taxon_id IS NOT NULL
-                     AND taxon_id != ?""",
-                (target["taxon_id"],),
-            ).fetchall():
-                if keyword_match_key(row["name"]) == target_key:
-                    homonym_conflict = True
-                    break
-        else:
-            for row in self.conn.execute(
-                """SELECT name FROM keywords
-                   WHERE (is_species = 1 OR type = 'taxonomy')
-                     AND taxon_id IS NOT NULL
-                     AND id != ?""",
-                (keyword_id,),
-            ).fetchall():
-                if keyword_match_key(row["name"]) == target_key:
-                    homonym_conflict = True
-                    break
-        for chunk in _chunks(ids):
-            placeholders = ",".join("?" for _ in chunk)
-            if target["taxon_id"] is not None:
-                # Match rows linked to the same taxon first — the fast,
-                # authoritative case that survives any display-name rename.
-                rows = self.conn.execute(
-                    f"""SELECT DISTINCT pk.photo_id
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND k.taxon_id = ?
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')
-                          {excl_clause}""",
-                    [*chunk, target["taxon_id"], *excluded],
-                ).fetchall()
-                result.update(row["photo_id"] for row in rows)
-                if homonym_conflict:
-                    continue
-                # Fallback: upgraded libraries can carry a hierarchical
-                # species leaf typed as taxonomy/is_species that
-                # mark_species_keywords hasn't yet linked to a taxon_id
-                # (see the explicit ``taxon_id IS NULL`` branch it
-                # handles). A strict taxon_id equality above would miss
-                # those legacy leaves, so a follow-up
-                # confirm/accept-species after add_keyword created a
-                # linked top-level root would not recognize the existing
-                # hierarchy and would queue a duplicate root tag plus
-                # sidecar add. Match unlinked rows by normalized display
-                # name to preserve the hierarchy. Guarded above so an
-                # ambiguous same-key homonym doesn't get folded in.
-                rows = self.conn.execute(
-                    f"""SELECT pk.photo_id, k.name
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND k.taxon_id IS NULL
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')
-                          {excl_clause}""",
-                    [*chunk, *excluded],
-                ).fetchall()
-                result.update(
-                    row["photo_id"] for row in rows
-                    if keyword_match_key(row["name"]) == target_key
-                )
-                continue
-            # Target is unlinked. When a distinct linked row shares this
-            # match key, any same-key row on the photo could be either
-            # species; only the exact target keyword row is safe to
-            # treat as equivalent.
-            if homonym_conflict:
-                rows = self.conn.execute(
-                    f"""SELECT pk.photo_id
-                        FROM photo_keywords pk
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND pk.keyword_id = ?""",
-                    [*chunk, keyword_id],
-                ).fetchall()
-                result.update(row["photo_id"] for row in rows)
-                continue
-            rows = self.conn.execute(
-                f"""SELECT pk.photo_id, k.name
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                      {excl_clause}""",
-                [*chunk, *excluded],
-            ).fetchall()
-            result.update(
-                row["photo_id"] for row in rows
-                if keyword_match_key(row["name"]) == target_key
-            )
-        return result
+        return self._keyword_repository().get_photos_with_equivalent_species(
+            photo_ids, keyword_id, exclude_keyword_ids=exclude_keyword_ids,
+        )
 
     def get_highlights_candidates(self, folder_id, min_quality=0.0, photo_id=None):
         """Return photos eligible for highlights selection.
@@ -12534,10 +10762,7 @@ class Database:
         # would otherwise leave two same-name taxonomy rows — NULL parents
         # bypass UNIQUE(name, parent_id).
         if 'name' in updates or 'type' in updates:
-            current = self.conn.execute(
-                "SELECT name, type, taxon_id, parent_id FROM keywords WHERE id = ?",
-                (keyword_id,),
-            ).fetchone()
+            current = self._keyword_repository().get_update_target(keyword_id)
             if current is not None:
                 parent_id = current["parent_id"]
                 cur_type = current["type"]
@@ -12585,26 +10810,15 @@ class Database:
                     # (name, parent_id, type), so a rename onto a
                     # different-type peer must NOT silently retag photos
                     # across types.
-                    if parent_id is None:
-                        peer = self.conn.execute(
-                            "SELECT id FROM keywords "
-                            "WHERE name = ? COLLATE NOCASE "
-                            "AND parent_id IS NULL AND type = ? AND id != ? LIMIT 1",
-                            (new_name, effective_type, keyword_id),
-                        ).fetchone()
-                    else:
-                        peer = self.conn.execute(
-                            "SELECT id FROM keywords "
-                            "WHERE name = ? COLLATE NOCASE "
-                            "AND parent_id = ? AND type = ? AND id != ? LIMIT 1",
-                            (new_name, parent_id, effective_type, keyword_id),
-                        ).fetchone()
+                    peer = self._keyword_repository().same_type_peer(
+                        new_name, parent_id, effective_type, keyword_id,
+                    )
                     if peer:
                         # Return the surviving id so callers
                         # (api_update_keyword) can retarget sidecar and
                         # preferences bookkeeping onto the surviving row.
                         self._merge_keyword_into(keyword_id, peer["id"])
-                        self.conn.commit()
+                        self._keyword_repository().commit()
                         return peer["id"]
                     # No same-type peer, but a DIFFERENT-type peer at the
                     # same (name, parent_id) would hit the table-level
@@ -12615,12 +10829,9 @@ class Database:
                     # 400. For NULL parents a cross-type peer is allowed to
                     # coexist (mirrors add_keyword).
                     if parent_id is not None:
-                        cross = self.conn.execute(
-                            "SELECT id, type FROM keywords "
-                            "WHERE name = ? COLLATE NOCASE "
-                            "AND parent_id = ? AND id != ? LIMIT 1",
-                            (new_name, parent_id, keyword_id),
-                        ).fetchone()
+                        cross = self._keyword_repository().cross_type_peer(
+                            new_name, parent_id, keyword_id,
+                        )
                         if cross is not None:
                             raise ValueError(
                                 f"cannot rename to {new_name!r}: a "
@@ -12659,54 +10870,12 @@ class Database:
                     # Other manual types ('location', 'people', etc.) are
                     # preserved — user intent wins.
 
-        set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [keyword_id]
-        self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
-        self.conn.commit()
+        self._keyword_repository().apply_update(keyword_id, updates)
         return keyword_id
 
     def get_all_keywords(self):
         """Return keywords used in the active workspace (plus ancestors) with photo counts, type, and taxon info."""
-        ws = self._ws_id()
-        return self.conn.execute(
-            """WITH RECURSIVE
-               ws_links AS (
-                   SELECT pk.keyword_id, pk.photo_id
-                   FROM photo_keywords pk
-                   JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                   WHERE wf.workspace_id = ?
-               ),
-               ws_kw AS (SELECT DISTINCT keyword_id AS id FROM ws_links),
-               ancestors AS (
-                   SELECT id FROM ws_kw
-                   UNION
-                   SELECT k.parent_id
-                   FROM keywords k
-                   JOIN ancestors a ON a.id = k.id
-                   WHERE k.parent_id IS NOT NULL
-               ),
-               descendants(ancestor_id, descendant_id, depth) AS (
-                   SELECT id, id, 0 FROM ancestors
-                   UNION ALL
-                   SELECT d.ancestor_id, k.id, d.depth + 1
-                   FROM descendants d
-                   JOIN keywords k ON k.parent_id = d.descendant_id
-                   WHERE d.depth < 20
-               )
-               SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
-                      k.latitude, k.longitude, k.place_id,
-                      t.name AS taxon_name, t.common_name AS taxon_common_name,
-                      (SELECT COUNT(DISTINCT wl.photo_id) FROM descendants d
-                       JOIN ws_links wl ON wl.keyword_id = d.descendant_id
-                       WHERE d.ancestor_id = k.id) AS photo_count,
-                      (SELECT COUNT(*) FROM ws_links wl WHERE wl.keyword_id = k.id) AS direct_photo_count
-               FROM keywords k
-               JOIN ancestors a ON a.id = k.id
-               LEFT JOIN taxa t ON t.id = k.taxon_id
-               ORDER BY k.name""",
-            (ws,),
-        ).fetchall()
+        return self._keyword_repository().list_all()
 
     # -- Predictions --
 
@@ -13546,16 +11715,7 @@ class Database:
         Preserve the legacy flag/type fallback when no taxonomy row can be
         resolved, but do not call a linked family/genus keyword a species.
         """
-        row = self.conn.execute(
-            """SELECT k.is_species, k.type, t.rank AS taxon_rank
-               FROM keywords k
-               LEFT JOIN taxa t ON t.id = k.taxon_id
-               WHERE k.id = ?""",
-            (keyword_id,),
-        ).fetchone()
-        if not row or not (row["is_species"] or row["type"] == "taxonomy"):
-            return False
-        return row["taxon_rank"] in (None, "species")
+        return self._keyword_repository().is_species(keyword_id)
 
     def accept_prediction(
         self,
@@ -16844,40 +15004,9 @@ class Database:
         zero matches, or multiple matches all return ``None`` rather than
         permanently crediting the wrong Life List species/class.
         """
-        candidates = self.conn.execute(
-            "SELECT id, rank, parent_id FROM taxa "
-            "WHERE name = ? AND rank = 'species'",
-            (species_name,),
-        ).fetchall()
-        if not candidates:
-            return None
-        expected = set(expected_ancestors)
-        if not expected:
-            # With no lineage context, even a sole local row may be the wrong
-            # side of a homonym whose intended row is absent from ``taxa``.
-            return None
-        matches = []
-        for candidate in candidates:
-            ancestors = set()
-            cursor = candidate["parent_id"]
-            # Depth cap mirrors ``get_class_ancestors_for_taxa`` and guards
-            # against pathological cyclic parent_id data.
-            for _ in range(12):
-                if cursor is None:
-                    break
-                row = self.conn.execute(
-                    "SELECT name, parent_id FROM taxa WHERE id = ?",
-                    (cursor,),
-                ).fetchone()
-                if row is None:
-                    break
-                ancestors.add(row["name"])
-                cursor = row["parent_id"]
-            if expected.issubset(ancestors):
-                matches.append(candidate)
-        if len(matches) == 1:
-            return matches[0]
-        return None
+        return self._keyword_repository().resolve_species_by_lineage(
+            species_name, expected_ancestors,
+        )
 
     def mark_species_keywords(self, taxonomy):
         """Mark keywords that are recognized species in the taxonomy.
@@ -16913,162 +15042,7 @@ class Database:
         Args:
             taxonomy: a Taxonomy instance with a lookup() method
         """
-        # Also include already-typed taxonomy keywords whose taxon_id is
-        # still NULL — those were created before the local taxa table was
-        # populated (e.g. via add_keyword(..., is_species=True) from the
-        # classifier), and still need their hierarchy link filled in. Also
-        # revisit already-typed taxonomy keywords whose taxon_id points at a
-        # non-species-rank taxon so we can rebind them to a species-rank
-        # taxon when one exists. Deliberate non-taxonomy types are excluded
-        # before lookup so a taxon homonym can never silently retype them.
-        keywords = self.conn.execute(
-            "SELECT k.id, k.name, k.type, k.taxon_id, k.is_species, "
-            "       t.rank AS taxon_rank "
-            "FROM keywords k "
-            "LEFT JOIN taxa t ON t.id = k.taxon_id "
-            "WHERE (k.type IS NULL OR k.type IN ('general', 'taxonomy')) "
-            "  AND ("
-            "    k.is_species = 0 OR k.type IS NULL OR k.type != 'taxonomy' "
-            "    OR k.taxon_id IS NULL "
-            "    OR (t.rank IS NOT NULL AND t.rank != 'species')"
-            "  )"
-        ).fetchall()
-        updated = 0
-        for kw in keywords:
-            taxon = taxonomy.lookup(kw["name"])
-            if not taxon:
-                continue
-            local_taxon_id = kw["taxon_id"]
-            lookup_local_id = None
-            lookup_rank = None
-            inat_id = taxon.get("taxon_id")
-            if inat_id is not None:
-                row = self.conn.execute(
-                    "SELECT id, rank FROM taxa WHERE inat_id = ?", (inat_id,)
-                ).fetchone()
-                if row:
-                    lookup_local_id = row["id"]
-                    lookup_rank = row["rank"]
-            # The structured taxa table intentionally keeps major ranks only
-            # (kingdom through species), while taxonomy.json can resolve a
-            # label to a subspecies or another infraspecific rank. Walk that
-            # result's scientific lineage back to its species ancestor rather
-            # than leaving a valid, more-precise identification unlinked and
-            # absent from Explorer completeness. Higher-rank lookups have no
-            # species member in their lineage and therefore remain unchanged.
-            if lookup_rank != "species":
-                lineage_names = taxon.get("lineage_names") or []
-                lineage_ranks = taxon.get("lineage_ranks") or []
-                species_index = next(
-                    (
-                        i for i, rank in enumerate(lineage_ranks)
-                        if rank == "species"
-                    ),
-                    None,
-                )
-                if species_index is not None:
-                    species_name = lineage_names[species_index]
-                    # Ancestor scientific names above the species rank, used
-                    # to disambiguate homonyms. Two taxa with the same
-                    # species-rank scientific name can legitimately coexist
-                    # in the local ``taxa`` table (see the taxonomy loader
-                    # around ``_build_lineage`` — the schema keys on
-                    # ``inat_id``, not on ``(name, rank)`` — and iNat itself
-                    # allows homonyms across kingdoms). A name-only
-                    # ``LIMIT 1`` binding an infraspecific label to an
-                    # arbitrary row could permanently credit the wrong Life
-                    # List species/class; verify each candidate's parent
-                    # chain matches the taxonomy lookup's lineage instead.
-                    expected_ancestors = [
-                        name for name, rank in zip(
-                            lineage_names[:species_index],
-                            lineage_ranks[:species_index],
-                            strict=False,
-                        )
-                        if rank in (
-                            "genus", "family", "order",
-                            "class", "phylum", "kingdom",
-                        )
-                    ]
-                    species_row = self._resolve_species_by_lineage(
-                        species_name, expected_ancestors
-                    )
-                    if species_row:
-                        lookup_local_id = species_row["id"]
-                        lookup_rank = species_row["rank"]
-            if local_taxon_id is None and lookup_rank == "species":
-                local_taxon_id = lookup_local_id
-            # Only bind ``taxon_id`` to a species-rank local taxon. Binding a
-            # species-marked keyword to a genus/family id would let the new
-            # rank filters (Life List, Compare, highlight/preference
-            # eligibility) silently drop every photo carrying that keyword,
-            # because those readers require ``t.rank = 'species' OR
-            # t.rank IS NULL``. Leaving ``taxon_id`` NULL for non-species
-            # matches mirrors ``add_keyword``'s species-add path (see
-            # ``test_add_species_leaves_taxon_null_when_only_higher_rank_matches``)
-            # so upgraded catalogs stay visible under the ``rank IS NULL``
-            # branch until a species-rank taxon becomes available.
-            #
-            # Rebind an existing higher-rank link when the taxonomy lookup
-            # resolves to a species-rank local taxon. Without this pass,
-            # mark_species_keywords skipped fully typed rows and legacy
-            # keywords bound by the old species-agnostic lookup to a
-            # genus/family stayed bound; the new ``t.rank = 'species'``
-            # filter (Life List, Compare) then silently dropped every
-            # photo carrying those keywords after upgrade.
-            rebind_taxon_id = None
-            if (
-                kw["taxon_id"] is not None
-                and kw["taxon_rank"] is not None
-                and kw["taxon_rank"] != "species"
-                and lookup_local_id is not None
-                and lookup_rank == "species"
-                and lookup_local_id != kw["taxon_id"]
-            ):
-                rebind_taxon_id = lookup_local_id
-            # Preserve an existing higher-rank ``taxon_id`` when no
-            # species-rank replacement is available. Earlier revisions
-            # cleared the link to keep the row visible under the old
-            # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
-            # Life List, Compare, and highlight/preference eligibility.
-            # Those readers now accept linked higher-rank identifications
-            # (see :meth:`get_life_list_candidates` and
-            # :meth:`get_life_list_locations`), so clearing on startup
-            # would strip the row's ``taxon_rank`` / ``scientific_name`` /
-            # ``taxonomic_class`` metadata and silently break the new
-            # genus / family / class Life List filters after the first
-            # restart.
-            # Skip no-op updates so the "updated" count reflects real
-            # changes. A matched row is fully consistent when type is
-            # 'taxonomy', is_species is 1, and (taxon_id is already set to
-            # a species-rank id OR we have no local id to link it to).
-            is_type_change = kw["type"] != "taxonomy"
-            is_species_fix = kw["is_species"] != 1
-            is_taxon_link = kw["taxon_id"] is None and local_taxon_id is not None
-            is_rebind = rebind_taxon_id is not None
-            if not (
-                is_type_change
-                or is_species_fix
-                or is_taxon_link
-                or is_rebind
-            ):
-                continue
-            if is_rebind:
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                    "taxon_id = ? WHERE id = ?",
-                    (rebind_taxon_id, kw["id"]),
-                )
-            else:
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                    "taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",
-                    (local_taxon_id, kw["id"]),
-                )
-            updated += 1
-        if updated:
-            self.conn.commit()
-        return updated
+        return self._keyword_repository().mark_species(taxonomy)
 
     def create_default_collections(self, workspace_id=None):
         """Create default smart collections, skipping any that already exist by name.
