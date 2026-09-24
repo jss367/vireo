@@ -9,9 +9,12 @@ rollback, cache-invalidation and pipeline-prune boundaries), and the
 sharpness/quality writers.
 """
 
+import ast
 import contextlib
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import config as cfg
 import pytest
@@ -989,3 +992,71 @@ def test_quality_writers_use_commit_with_retry(db, lib, monkeypatch):
     db.update_photo_sharpness(lib["a"], 1.0)
     db.update_photo_quality(lib["a"], sharpness=2.0)
     assert commits == [1, 1]
+
+
+# -- structure -----------------------------------------------------------------
+
+MOVED = [
+    "filter_out_wildlife_excluded", "add_photo", "get_photo",
+    "get_photo_filenames", "get_photos_by_ids", "get_photo_folder_statuses",
+    "count_photos", "count_photos_in_workspace", "photos_by_paths",
+    "get_calendar_data", "get_photos", "get_photo_ids", "get_photo_position",
+    "count_filtered_photos", "get_browse_summary",
+    "count_photos_with_companions", "resolve_photos_for_delete",
+    "delete_photos", "update_photo_sharpness", "update_photo_quality",
+]
+
+
+def _self_attrs(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    return {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", MOVED)
+def test_photo_method_delegates_to_repository(name):
+    attrs = _self_attrs(name)
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to PhotoRepository"
+    )
+    assert "_photos_repository" in attrs, (
+        f"Database.{name} no longer delegates to PhotoRepository"
+    )
+
+
+def test_composition_stays_on_the_facade():
+    """Cross-domain calls and side effects are made from the wrappers, so
+    monkeypatches of these Database methods keep applying."""
+    assert {
+        "resolve_photos_for_delete", "invalidate_new_images_cache_for_folders",
+        "prune_pipeline_cache_for_ids", "_ws_id",
+    } <= _self_attrs("delete_photos")
+    assert "check_and_resolve_duplicates_for_hash" in _self_attrs("add_photo")
+    assert "_FILTER_SUBJECT_CHUNK" in _self_attrs("filter_out_wildlife_excluded")
+    assert "get_effective_config" in _self_attrs("get_browse_summary")
+    for name in ("get_photos", "get_photo_ids", "count_filtered_photos"):
+        assert {
+            "get_folder_subtree_ids", "_build_collection_query",
+            "_append_location_status_filter",
+        } <= _self_attrs(name), name
+    for name in ("get_calendar_data", "get_browse_summary"):
+        assert "_build_query_from_rules" in _self_attrs(name), name
+
+
+def test_photo_repository_imports_no_db_code():
+    import repositories.photos as module
+
+    tree = ast.parse(inspect.getsource(module))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert not imported & {"db", "config"}
