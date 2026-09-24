@@ -3,16 +3,20 @@
 The behavior tests exercise undo/redo history only through ``Database``
 (public methods plus the private replay helpers, which stay on the façade),
 so they hold regardless of whether the SQL lives in ``db.py`` or in
-``repositories/edit_history.py``. They cover recording and listing history
-rows, the undo/redo cursor (non-undoable skipping, ordering, commit
-boundaries), stale cache-linked retirement, the prediction-status replay,
-the relabel-curation restore/re-apply, history pruning, and the pure
-old-value parsers.
+``repositories/edit_history.py``; the structural tests at the end keep it
+in the repository. They cover recording and listing history rows, the
+undo/redo cursor (non-undoable skipping, ordering, commit boundaries),
+stale cache-linked retirement, the prediction-status replay, the
+relabel-curation restore/re-apply, history pruning, and the pure old-value
+parsers.
 """
 
+import ast
 import contextlib
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import pytest
 from db import Database
@@ -1150,3 +1154,109 @@ def test_edit_old_value_meta_non_string_int(db):
 def test_edit_prediction_ids(db, meta, fallback, ids):
     assert db._edit_prediction_ids(meta, fallback) == ids
     assert db._edit_prediction_id(meta, fallback) == (ids[0] if ids else None)
+
+
+# -- structure ------------------------------------------------------------
+
+_DELEGATING = (
+    "record_edit", "get_edit_history", "undo_last_edit", "redo_last_undo",
+    "_retire_stale_grouping_entry", "_keyword_name", "_prediction_scope",
+    "_undo_keyword_add", "_undo_prediction_accept_statuses",
+    "_redo_prediction_accept_statuses", "_restore_relabel_curation",
+    "_reapply_relabel_curation", "_prune_edit_history",
+)
+
+_DOMAIN = _DELEGATING + (
+    "_apply_undo", "_apply_redo", "_apply_edit_items", "_edit_set_flag",
+    "_edit_set_wildlife_excluded", "_edit_set_color_label",
+    "_edit_set_edit_recipe", "_undo_rating", "_redo_rating",
+    "_flip_pending_keyword_change", "_retag_for_edit", "_untag_for_edit",
+    "_undo_keyword_remove", "_redo_keyword_remove", "_redo_keyword_add",
+    "_undo_species_replace", "_redo_species_replace", "_edit_old_value_meta",
+    "_edit_prediction_ids", "_edit_prediction_id",
+    "_restore_edit_prediction_status", "_reject_edit_prediction",
+)
+
+
+def _self_attrs(name):
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    fn = ast.parse(source).body[0]
+    return fn, {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+
+
+@pytest.mark.parametrize("name", _DELEGATING)
+def test_edit_history_method_delegates_to_repository(name):
+    _, attrs = _self_attrs(name)
+    assert "_edit_history_repository" in attrs, (
+        f"Database.{name} no longer delegates to EditHistoryRepository"
+    )
+
+
+@pytest.mark.parametrize("name", _DOMAIN)
+def test_edit_history_method_has_no_sql(name):
+    _, attrs = _self_attrs(name)
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to EditHistoryRepository"
+    )
+
+
+@pytest.mark.parametrize("name,callback", [
+    ("_undo_prediction_accept_statuses", "_prediction_scope"),
+    ("_restore_relabel_curation", "_restore_species_representative"),
+    ("_reapply_relabel_curation", "_restore_species_representative"),
+])
+def test_mid_statement_facade_calls_are_passed_as_bound_callbacks(name, callback):
+    """The repository calls these façade methods mid-loop; pass them bound."""
+    fn, _ = _self_attrs(name)
+    passed = {
+        arg.attr
+        for call in ast.walk(fn)
+        if isinstance(call, ast.Call)
+        for arg in [*call.args, *(kw.value for kw in call.keywords)]
+        if isinstance(arg, ast.Attribute)
+        and isinstance(arg.value, ast.Name)
+        and arg.value.id == "self"
+    }
+    assert callback in passed
+
+
+def test_undo_prediction_accept_scope_lookup_is_patchable(db, pids, monkeypatch):
+    p = _predictions(db, pids[0])
+    seen = []
+    real = db._prediction_scope
+    monkeypatch.setattr(
+        db, "_prediction_scope", lambda pid: seen.append(pid) or real(pid),
+    )
+    db._undo_prediction_accept_statuses({"prediction_ids": [p["a_mid"]]}, None)
+    assert seen == [p["a_mid"]]
+
+
+def test_edit_history_facade_signatures_are_unchanged():
+    def params(name):
+        return [
+            (p.name, p.default)
+            for p in inspect.signature(getattr(Database, name)).parameters.values()
+        ]
+
+    empty = inspect.Parameter.empty
+    assert params("record_edit") == [
+        ("self", empty), ("action_type", empty), ("description", empty),
+        ("new_value", empty), ("items", empty), ("is_batch", False),
+        ("_commit", True),
+    ]
+    assert params("get_edit_history") == [
+        ("self", empty), ("limit", 50), ("offset", 0),
+    ]
+    assert params("undo_last_edit") == [("self", empty)]
+    assert params("redo_last_undo") == [("self", empty)]
+    assert params("_restore_relabel_curation") == [
+        ("self", empty), ("workspace_id", empty), ("photo_id", empty),
+        ("new_species", empty), ("curation", empty),
+    ]
+    assert params("_prune_edit_history") == [("self", empty)]
