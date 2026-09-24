@@ -18,6 +18,9 @@ from __future__ import annotations
 import json
 
 from flask import request
+from services.missing_originals import (
+    resolve_folder_id as resolve_missing_originals_folder_id,
+)
 from services.visual_scope import (
     VISUAL_COLLECTION_MSG,
     collection_row,
@@ -95,6 +98,21 @@ def request_visual_arg():
     except ValueError as exc:
         raise ValueError("visual must be valid JSON") from exc
     return validate_visual_arg(parsed)
+
+
+def request_missing_originals_folder_id(db):
+    """Read the Missing Originals ``folder_id`` scope from the query or body.
+
+    A JSON body's ``folder_id`` wins over the query param. Returns ``None``
+    for the workspace-wide scope; raises ``ValueError`` for a non-integer and
+    ``LookupError`` when the folder is not in the active workspace.
+    """
+    folder_id = request.args.get("folder_id")
+    if request.is_json:
+        body = request.get_json(silent=True) or {}
+        if "folder_id" in body:
+            folder_id = body.get("folder_id")
+    return resolve_missing_originals_folder_id(db, folder_id)
 
 
 def dashboard_scope_args():

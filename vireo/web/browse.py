@@ -107,7 +107,7 @@ def create_browse_blueprint(
         # Snapshot the active workspace's missing-folder IDs so the client's
         # navbar can seed ``_missingFoldersLastIds`` from this init response.
         # Without a baseline, the first /api/folders/missing observation
-        # returns false when a background _folder_health_loop flip runs
+        # returns false when a background ``MissingOriginals.folder_health_loop`` flip runs
         # between init and the poll — later polls then see the same IDs and
         # never dispatch, leaving Browse stuck showing the pre-flip state
         # (Codex review r3686191141).

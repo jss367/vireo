@@ -11542,14 +11542,14 @@ def test_api_photos_missing_worker_db_open_failure_clears_inflight(
     app_and_db, monkeypatch,
 ):
     """A worker DB-open failure must not leave the scope permanently pending."""
-    import app as app_module
+    from services import missing_originals as missing_originals_module
 
     app, db = app_and_db
     client = app.test_client()
     key = (db._db_path, db._active_workspace_id, None)
     captured = {}
 
-    real_database = app_module.Database
+    real_database = missing_originals_module.Database
 
     class FailingDatabase:
         def __init__(self, path):
@@ -11557,13 +11557,13 @@ def test_api_photos_missing_worker_db_open_failure_clears_inflight(
 
     def run_with_broken_worker_db(job_type, work, **kwargs):
         job = {"id": "missing-originals-fail", "progress": {}}
-        app_module.Database = FailingDatabase
+        missing_originals_module.Database = FailingDatabase
         try:
             work(job)
         except RuntimeError as exc:
             captured["error"] = str(exc)
         finally:
-            app_module.Database = real_database
+            missing_originals_module.Database = real_database
         return job["id"]
 
     monkeypatch.setattr(app._job_runner, "start", run_with_broken_worker_db)
