@@ -920,6 +920,17 @@ def _self_attrs(fn_obj):
     }
 
 
+@pytest.mark.parametrize("name", _DELEGATING_MODEL_RUN_METHODS)
+def test_model_run_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to ModelRunsRepository"
+    )
+    assert "_model_runs_repository" in attrs, (
+        f"Database.{name} no longer delegates to ModelRunsRepository"
+    )
+
+
 def test_count_classifier_runs_composes_through_the_facade():
     attrs = _self_attrs(Database.count_classifier_runs)
     assert "conn" not in attrs
@@ -932,3 +943,18 @@ def test_count_classifier_runs_composes_through_the_facade():
 def test_preflight_reads_config_through_the_facade(name):
     """The workspace floor comes from ``Database.get_effective_config``."""
     assert "get_effective_config" in _self_attrs(getattr(Database, name))
+
+
+def test_repository_imports_no_db_code():
+    import repositories.model_runs as module
+
+    tree = ast.parse(inspect.getsource(module))
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".")[0]
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+    }
+    assert "db" not in imported
