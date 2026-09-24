@@ -185,6 +185,17 @@ def place_details_for_language(place_id: str, api_key: str, language: str | None
     return place_details(place_id, api_key, language=None)
 
 
+def reverse_geocode_for_language(lat: float, lng: float, api_key: str, language: str | None) -> dict | None:
+    """Reverse-geocode for ``language`` from :func:`result_language`.
+
+    ``"en"`` calls :func:`reverse_geocode` without the keyword so its
+    default-on English preference applies; anything else opts out.
+    """
+    if language == "en":
+        return reverse_geocode(lat, lng, api_key)
+    return reverse_geocode(lat, lng, api_key, language=None)
+
+
 class PlacesTransientError(Exception):
     """Raised by :func:`reverse_geocode` on transient Google API failures
     (rate limits, request denied, malformed response, network/JSON errors).
