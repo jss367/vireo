@@ -7,7 +7,6 @@ import os
 import sqlite3
 import time
 import unicodedata
-import uuid
 
 from keyword_identity import (
     free_sibling_name,
@@ -8004,10 +8003,7 @@ class Database:
 
     def count_pending_changes(self):
         """Return pending changes count."""
-        return self.conn.execute(
-            "SELECT COUNT(*) FROM pending_changes WHERE workspace_id = ?",
-            (self._ws_id(),),
-        ).fetchone()[0]
+        return self._sync_repository().count()
 
     def staged_sync_scope_by_photos(self, photo_ids):
         """Photo-id scoped variant of :meth:`staged_sync_scope`.
@@ -8020,29 +8016,7 @@ class Database:
         survive the reparent, so the caller captures them before the move
         and passes them here. Return shape matches ``staged_sync_scope``.
         """
-        here_photos, here_changes, other_photos = set(), [], set()
-        if not photo_ids:
-            return here_changes, 0, 0, 0
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" * len(chunk))
-            for row in self.conn.execute(
-                f"SELECT id, photo_id, workspace_id, change_token "
-                f"FROM pending_changes "
-                f"WHERE photo_id IN ({placeholders})",
-                tuple(chunk),
-            ):
-                if row["workspace_id"] == self._ws_id():
-                    identity = row["change_token"] or ("id", row["id"])
-                    here_changes.append((identity, row["id"], row["photo_id"]))
-                    here_photos.add(row["photo_id"])
-                else:
-                    other_photos.add(row["photo_id"])
-        return (
-            here_changes,
-            len(here_photos),
-            len(other_photos - here_photos),
-            len(other_photos & here_photos),
-        )
+        return self._sync_repository().staged_scope_by_photos(photo_ids)
 
     def staged_sync_scope(self, folder_ids):
         """Return ``(changes, photos_here, photos_elsewhere, photos_here_with_sibling_edits)``.
@@ -8076,30 +8050,7 @@ class Database:
         sync -- the sidecar is shared and only the active workspace's edits
         travel with it.
         """
-        here_photos, here_changes, other_photos = set(), [], set()
-        # The photo id rides along so a caller can tell which photos a pass
-        # actually wrote without a second query.
-        for chunk in _chunks(folder_ids):
-            placeholders = ",".join("?" * len(chunk))
-            for row in self.conn.execute(
-                f"SELECT pc.id, pc.photo_id, pc.workspace_id, pc.change_token "
-                f"FROM pending_changes pc "
-                f"JOIN photos p ON p.id = pc.photo_id "
-                f"WHERE p.folder_id IN ({placeholders})",
-                tuple(chunk),
-            ):
-                if row["workspace_id"] == self._ws_id():
-                    identity = row["change_token"] or ("id", row["id"])
-                    here_changes.append((identity, row["id"], row["photo_id"]))
-                    here_photos.add(row["photo_id"])
-                else:
-                    other_photos.add(row["photo_id"])
-        return (
-            here_changes,
-            len(here_photos),
-            len(other_photos - here_photos),
-            len(other_photos & here_photos),
-        )
+        return self._sync_repository().staged_scope(folder_ids)
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
@@ -22239,6 +22190,21 @@ class Database:
 
     # -- Pending Changes --
 
+    def _sync_repository(self):
+        """Build the pending-changes repository on this connection.
+
+        The repository gets ``self._ws_id`` as a resolver rather than an id,
+        so the active workspace is read exactly where these methods always
+        read it: a staged-scope read with no matching rows, or a claim whose
+        workspace lookup fails inside ``with conn:``, behaves as before.
+        Methods that accept ``workspace_id`` fall back to it the same way.
+        """
+        from repositories.sync import SyncRepository
+
+        return SyncRepository(
+            self.conn, self._ws_id, chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+        )
+
     def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
         """Add a change to the sync queue, skipping redundant intents.
 
@@ -22251,71 +22217,13 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        # Normalization choke point for sidecar-bound keyword names: the
-        # queued value is written verbatim into XMP by sync_to_xmp, so a
-        # stray-quote variant here would leak into sidecars even though
-        # add_keyword stores the clean spelling. Normalizing in one place
-        # also keeps the (photo_id, change_type, value) dedupe below and
-        # the add/remove cancellation in app.py working on one spelling.
-        if change_type in ("keyword_add", "keyword_remove", "keyword_remove_flat"):
-            value = normalize_keyword_display(value)
-            if not value:
-                return None
-        ws_id = workspace_id if workspace_id is not None else self._ws_id()
-        if change_type == "rating":
-            latest = self.conn.execute(
-                "SELECT id, value FROM pending_changes WHERE photo_id = ? "
-                "AND change_type = 'rating' AND workspace_id = ? ORDER BY id DESC LIMIT 1",
-                (photo_id, ws_id),
-            ).fetchone()
-            existing = latest is not None and latest["value"] == value
-            if existing:
-                existing = self.conn.execute(
-                    "SELECT 1 FROM pending_changes WHERE workspace_id = ? "
-                    "AND id > ? AND photo_id != ? AND change_type = 'rating' LIMIT 1",
-                    (ws_id, latest["id"], photo_id),
-                ).fetchone() is None
-        elif change_type in ("keyword_add", "keyword_remove", "keyword_remove_flat"):
-            latest = self.conn.execute(
-                "SELECT id, change_type, value FROM pending_changes WHERE photo_id = ? "
-                "AND workspace_id = ? AND value = ? COLLATE NOCASE AND change_type IN "
-                "('keyword_add', 'keyword_remove', 'keyword_remove_flat') "
-                "ORDER BY created_at DESC, id DESC LIMIT 1",
-                (photo_id, ws_id, value),
-            ).fetchone()
-            existing = (latest is not None and latest["change_type"] == change_type
-                        and latest["value"] == value)
-            if existing:
-                # Another photo can share this sidecar. Do not discard a
-                # repeated intent after an intervening edit on that photo.
-                existing = self.conn.execute(
-                    "SELECT 1 FROM pending_changes WHERE workspace_id = ? AND id > ? "
-                    "AND photo_id != ? AND value = ? COLLATE NOCASE AND change_type IN "
-                    "('keyword_add', 'keyword_remove', 'keyword_remove_flat') LIMIT 1",
-                    (ws_id, latest["id"], photo_id, value),
-                ).fetchone() is None
-        else:
-            existing = self.conn.execute(
-                "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
-                (photo_id, change_type, value, ws_id),
-            ).fetchone()
-        if existing:
-            return None
-        change_token = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) VALUES (?, ?, ?, ?, ?)",
-            (photo_id, change_type, value, change_token, ws_id),
+        return self._sync_repository().queue(
+            photo_id, change_type, value, workspace_id=workspace_id, _commit=_commit,
         )
-        if _commit:
-            self.conn.commit()
-        return change_token
 
     def get_pending_changes(self):
         """Return all pending changes ordered by creation time."""
-        return self.conn.execute(
-            "SELECT * FROM pending_changes WHERE workspace_id = ? ORDER BY created_at, id",
-            (self._ws_id(),),
-        ).fetchall()
+        return self._sync_repository().list_all()
 
     def claim_pending_changes_for_sync(self, changes):
         """Mark selected edits as possibly written and return surviving rows.
@@ -22328,21 +22236,7 @@ class Database:
         """
         if not changes:
             return []
-        claimed = {}
-        with self.conn:
-            for chunk in _chunks(changes, size=400):
-                placeholders = ",".join("(?, ?)" for _ in chunk)
-                params = [part for c in chunk for part in (c["id"], c["change_token"] or "")]
-                rows = self.conn.execute(
-                    f"""UPDATE pending_changes SET sync_started = 1
-                        WHERE workspace_id = ?
-                          AND (id, COALESCE(change_token, '')) IN (VALUES {placeholders})
-                        RETURNING *""",
-                    [self._ws_id(), *params],
-                ).fetchall()
-                claimed.update({(c["id"], c["change_token"]): c for c in rows})
-        return [claimed[key] for c in changes
-                if (key := (c["id"], c["change_token"])) in claimed]
+        return self._sync_repository().claim_for_sync(changes)
 
     def get_pending_keyword_removal_keys(self, photo_id, hierarchical=False):
         """Return normalized keyword keys awaiting removal for a photo.
@@ -22352,62 +22246,15 @@ class Database:
         suppresses flat XMP re-imports only; callers processing hierarchical
         entries request ``hierarchical=True`` and receive full removals only.
         """
-        change_types = (
-            ("keyword_remove",)
-            if hierarchical
-            else ("keyword_remove", "keyword_remove_flat")
+        return self._sync_repository().keyword_removal_keys(
+            photo_id, hierarchical=hierarchical,
         )
-        placeholders = ",".join("?" for _ in change_types)
-        rows = self.conn.execute(
-            f"""SELECT value FROM pending_changes
-                WHERE photo_id = ?
-                  AND change_type IN ({placeholders})""",
-            [photo_id, *change_types],
-        ).fetchall()
-        return {
-            key
-            for row in rows
-            if (key := keyword_match_key(row["value"]))
-        }
 
     def _pending_keyword_sidecar_alias(self, photo_id, workspace_id, value):
         """Return whether another queued keyword edit reaches this sidecar."""
-        needs_inverse = False
-        # Resolve all candidate sidecars, as sync does: differing
-        # basenames or folder spellings may still alias one file.
-        # Do not conservatively treat unrelated homonyms as shared;
-        # that would turn a cancelled add into a destructive removal.
-        candidates = self.conn.execute(
-            "SELECT DISTINCT f.path, p.filename FROM photos p "
-            "JOIN folders f ON f.id = p.folder_id "
-            "JOIN pending_changes pc ON pc.photo_id = p.id "
-            "WHERE p.id != ? AND pc.workspace_id = ? AND pc.value = ? COLLATE NOCASE "
-            "AND pc.change_type IN ('keyword_add', 'keyword_remove', 'keyword_remove_flat')",
-            (photo_id, workspace_id, value),
-        ).fetchall()
-        if candidates:
-            own = self.conn.execute(
-                "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id = p.folder_id "
-                "WHERE p.id = ?", (photo_id,),
-            ).fetchone()
-            if own is not None:
-                def sidecar_path(row):
-                    return os.path.join(row["path"], os.path.splitext(row["filename"])[0] + ".xmp")
-
-                own_path = os.path.normcase(os.path.realpath(sidecar_path(own)))
-                for path in {sidecar_path(row) for row in candidates}:
-                    other_path = os.path.normcase(os.path.realpath(path))
-                    if own_path == other_path:
-                        needs_inverse = True
-                        break
-                    if own_path.casefold() == other_path.casefold():
-                        # Scheduling may over-group case variants;
-                        # cancellation must confirm they are aliases.
-                        with contextlib.suppress(OSError):
-                            needs_inverse = os.path.samefile(own_path, other_path)
-                        if needs_inverse:
-                            break
-        return needs_inverse
+        return self._sync_repository().keyword_sidecar_alias(
+            photo_id, workspace_id, value,
+        )
 
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
         """Delete matching pending changes, preserving captured keyword intents.
@@ -22424,19 +22271,10 @@ class Database:
                      for committing the transaction).
         """
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
-        clauses = ["photo_id = ?", "workspace_id = ?"]
-        params = [photo_id, ws_id]
-        if change_type is not None:
-            clauses.append("change_type = ?")
-            params.append(change_type)
-        if value is not None:
-            clauses.append("value = ?")
-            params.append(value)
-
-        removed = self.conn.execute(
-            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)} RETURNING *",
-            params,
-        ).fetchall()
+        repo = self._sync_repository()
+        removed = repo.delete_matching(
+            photo_id, ws_id, change_type=change_type, value=value,
+        )
         inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
         for row in removed:
             if row["change_type"] in inverse and (
@@ -22444,25 +22282,16 @@ class Database:
             ):
                 kind = inverse[row["change_type"]]
                 self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id, _commit=False)
-                self.conn.execute(
-                    "UPDATE pending_changes SET sync_started = 1 "
-                    "WHERE photo_id = ? AND workspace_id = ? AND change_type = ? AND value = ?",
-                    (photo_id, ws_id, kind, row["value"]),
-                )
+                repo.mark_sync_started(photo_id, ws_id, kind, row["value"])
         if _commit:
-            self.conn.commit()
+            repo.commit()
         return len(removed)
 
     def remove_pending_change_token(self, change_token):
         """Delete a single pending change by immutable token. Returns rows removed."""
         if not change_token:
             return 0
-        cur = self.conn.execute(
-            "DELETE FROM pending_changes WHERE change_token = ? AND workspace_id = ?",
-            (change_token, self._ws_id()),
-        )
-        self.conn.commit()
-        return cur.rowcount
+        return self._sync_repository().remove_token(change_token)
 
     def clear_pending(
         self, change_ids, *, clear_equivalent_flat_removals=False,
@@ -22493,75 +22322,15 @@ class Database:
         """
         if not change_ids:
             return
-        workspace_id = self._ws_id()
-        synced_changes = []
-        if expected_tokens is None:
-            for chunk in _chunks(change_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                if clear_equivalent_flat_removals:
-                    rows = self.conn.execute(
-                        f"""SELECT photo_id, change_type, value
-                            FROM pending_changes
-                            WHERE id IN ({placeholders}) AND workspace_id = ?
-                              AND change_type = 'keyword_remove_flat'""",
-                        [*chunk, workspace_id],
-                    ).fetchall()
-                    synced_changes.extend(rows)
-                self.conn.execute(
-                    f"DELETE FROM pending_changes WHERE id IN ({placeholders}) AND workspace_id = ?",
-                    [*chunk, workspace_id],
-                )
-        else:
-            if len(expected_tokens) != len(change_ids):
-                raise ValueError(
-                    "expected_tokens must be the same length as change_ids"
-                )
-            tokened = [tok for tok in expected_tokens if tok is not None]
-            legacy_ids = [
-                cid for cid, tok in zip(change_ids, expected_tokens, strict=True)
-                if tok is None
-            ]
-            for chunk in _chunks(tokened):
-                placeholders = ",".join("?" for _ in chunk)
-                if clear_equivalent_flat_removals:
-                    rows = self.conn.execute(
-                        f"""SELECT photo_id, change_type, value
-                            FROM pending_changes
-                            WHERE change_token IN ({placeholders})
-                              AND workspace_id = ?
-                              AND change_type = 'keyword_remove_flat'""",
-                        [*chunk, workspace_id],
-                    ).fetchall()
-                    synced_changes.extend(rows)
-                self.conn.execute(
-                    f"DELETE FROM pending_changes "
-                    f"WHERE change_token IN ({placeholders}) "
-                    f"AND workspace_id = ?",
-                    [*chunk, workspace_id],
-                )
-            for chunk in _chunks(legacy_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                if clear_equivalent_flat_removals:
-                    rows = self.conn.execute(
-                        f"""SELECT photo_id, change_type, value
-                            FROM pending_changes
-                            WHERE id IN ({placeholders})
-                              AND workspace_id = ?
-                              AND change_token IS NULL
-                              AND change_type = 'keyword_remove_flat'""",
-                        [*chunk, workspace_id],
-                    ).fetchall()
-                    synced_changes.extend(rows)
-                self.conn.execute(
-                    f"DELETE FROM pending_changes "
-                    f"WHERE id IN ({placeholders}) "
-                    f"AND workspace_id = ? "
-                    f"AND change_token IS NULL",
-                    [*chunk, workspace_id],
-                )
+        repo = self._sync_repository()
+        synced_changes = repo.delete_by_ids(
+            change_ids,
+            clear_equivalent_flat_removals=clear_equivalent_flat_removals,
+            expected_tokens=expected_tokens,
+        )
         if synced_changes:
             self.clear_equivalent_flat_removals(synced_changes, _commit=False)
-        self.conn.commit()
+        repo.commit()
 
     def clear_pending_by_token(
         self, change_tokens, *, clear_equivalent_flat_removals=False,
@@ -22581,44 +22350,18 @@ class Database:
         """
         if not change_tokens:
             return
-        workspace_id = self._ws_id()
-        synced_changes = []
-        for chunk in _chunks(change_tokens):
-            placeholders = ",".join("?" for _ in chunk)
-            if clear_equivalent_flat_removals:
-                synced_changes.extend(self.conn.execute(
-                    f"""SELECT photo_id, change_type, value
-                        FROM pending_changes
-                        WHERE change_token IN ({placeholders}) AND workspace_id = ?
-                          AND change_type = 'keyword_remove_flat'""",
-                    [*chunk, workspace_id],
-                ).fetchall())
-            self.conn.execute(
-                f"DELETE FROM pending_changes WHERE change_token IN ({placeholders}) "
-                f"AND workspace_id = ?",
-                [*chunk, workspace_id],
-            )
+        repo = self._sync_repository()
+        synced_changes = repo.delete_by_tokens(
+            change_tokens,
+            clear_equivalent_flat_removals=clear_equivalent_flat_removals,
+        )
         if synced_changes:
             self.clear_equivalent_flat_removals(synced_changes, _commit=False)
-        self.conn.commit()
+        repo.commit()
 
     def clear_equivalent_flat_removals(self, changes, _commit=True):
         """Clear shared-sidecar flat removals represented by ``changes``."""
-        shared_flat_removals = {
-            (change["photo_id"], change["value"])
-            for change in changes
-            if change["change_type"] == "keyword_remove_flat"
-        }
-        if shared_flat_removals:
-            self.conn.executemany(
-                """DELETE FROM pending_changes
-                   WHERE photo_id = ?
-                     AND change_type = 'keyword_remove_flat'
-                     AND value = ? COLLATE NOCASE""",
-                shared_flat_removals,
-            )
-        if _commit:
-            self.conn.commit()
+        self._sync_repository().clear_equivalent_flat_removals(changes, _commit=_commit)
 
     def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
         """Queue a flag write when the active config opts into XMP flag sync."""
@@ -22628,7 +22371,7 @@ class Database:
         if flag not in {"none", "flagged", "rejected"}:
             log.warning("Not queueing invalid XMP flag value for photo %s: %r", photo_id, flag)
             if _commit:
-                self.conn.commit()
+                self._sync_repository().commit()
             return None
         try:
             import config as cfg
@@ -22641,14 +22384,14 @@ class Database:
             enabled = False
         if not enabled:
             if _commit:
-                self.conn.commit()
+                self._sync_repository().commit()
             return None
 
         token = self.queue_change(
             photo_id, "flag", flag, workspace_id=ws_id, _commit=False
         )
         if _commit:
-            self.conn.commit()
+            self._sync_repository().commit()
         return token
 
     # -- Edit History --
