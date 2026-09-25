@@ -100,6 +100,7 @@ def _promote_by_placeholder(tmp, dst):
     claim_fd = os.open(
         dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_BINARY, 0o644,
     )
+    fd_open = True
     try:
         claim_ino = os.fstat(claim_fd).st_ino
         try:
@@ -132,6 +133,16 @@ def _promote_by_placeholder(tmp, dst):
                 src_stat.st_mode,
             )
         except BaseException:
+            # Release the O_EXCL claim BEFORE running the rollback. On
+            # Windows a handle opened without delete-sharing blocks
+            # ``os.rename`` on the same path, so ``_rollback_placeholder``
+            # would fail its atomic detach, swallow the ``OSError``, and
+            # leave the partially written final ``dst`` behind for the
+            # next scan to catalog as a corrupt photo. POSIX doesn't
+            # need the early close, but doing it here keeps the two
+            # platforms on one code path.
+            os.close(claim_fd)
+            fd_open = False
             # Roll back only when the entry at ``dst`` still points to
             # the inode we claimed. A concurrent writer's replacement
             # has a different inode and must stay.
@@ -152,7 +163,8 @@ def _promote_by_placeholder(tmp, dst):
             _rollback_placeholder(dst, claim_ino)
             raise
     finally:
-        os.close(claim_fd)
+        if fd_open:
+            os.close(claim_fd)
 
 
 def _rollback_placeholder(dst, claim_ino):

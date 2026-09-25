@@ -232,6 +232,76 @@ def test_copy_via_temp_no_hardlink_fallback_windows_metadata(
     assert _no_partials(dst.parent) == []
 
 
+def test_promote_by_placeholder_closes_claim_fd_before_rollback(
+    tmp_path, monkeypatch,
+):
+    """On Windows a handle opened without delete-sharing blocks
+    ``os.rename`` on the same path, so ``_rollback_placeholder`` would
+    fail its atomic detach, swallow the OSError, and leave the
+    partially-written final ``dst`` behind for the next scan to catalog
+    as a corrupt photo. The claim fd MUST close before rollback runs."""
+    import errno
+
+    src = _jpeg(tmp_path / "a.jpg", "red")
+    dst = tmp_path / "out" / "a.jpg"
+    dst.parent.mkdir()
+
+    def no_hardlinks(*_a, **_kw):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(staged_copy.os, "link", no_hardlinks)
+
+    # Force the promote to raise after opening the claim fd but before
+    # cleanup — an ``OSError`` from ``os.write`` triggers the rollback
+    # branch. Track that the fd is closed BEFORE the rollback fires.
+    original_write = staged_copy.os.write
+    original_close = staged_copy.os.close
+    original_rollback = staged_copy._rollback_placeholder
+    events = []
+    closed_fds = []
+    claim_fds = set()
+    original_open = staged_copy.os.open
+
+    def tracking_open(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == str(dst) and (flags & os.O_EXCL):
+            claim_fds.add(fd)
+        return fd
+
+    def exploding_write(fd, data):
+        if fd in claim_fds:
+            raise OSError(errno.EIO, "simulated write failure")
+        return original_write(fd, data)
+
+    def tracking_close(fd):
+        if fd in claim_fds:
+            events.append(("close", fd))
+            closed_fds.append(fd)
+        return original_close(fd)
+
+    def tracking_rollback(dst_arg, claim_ino):
+        events.append(("rollback", dst_arg))
+        # Ensure any surviving claim fds have been closed by now.
+        assert claim_fds.issubset(set(closed_fds)), (
+            "rollback ran before the O_EXCL claim fd was closed; "
+            "on Windows os.rename would fail against the open handle."
+        )
+        return original_rollback(dst_arg, claim_ino)
+
+    monkeypatch.setattr(staged_copy.os, "open", tracking_open)
+    monkeypatch.setattr(staged_copy.os, "write", exploding_write)
+    monkeypatch.setattr(staged_copy.os, "close", tracking_close)
+    monkeypatch.setattr(staged_copy, "_rollback_placeholder", tracking_rollback)
+
+    with pytest.raises(OSError):
+        staged_copy.copy_via_temp(str(src), str(dst))
+
+    kinds = [k for (k, _) in events]
+    assert kinds == ["close", "rollback"], events
+    assert not dst.exists(), "rollback should have removed our placeholder"
+    assert _no_partials(dst.parent) == []
+
+
 # -- ingest: a failed copy leaves nothing behind ------------------------------
 
 
@@ -738,6 +808,76 @@ def test_duplicate_scan_all_missing_ignores_offline_flag_when_files_gone(
     [prop] = result["proposals"]
     assert prop["all_missing"] is True
     assert prop["all_offline"] is False
+
+
+def test_resolution_plan_probes_reachability_before_stat(
+    tmp_path, monkeypatch,
+):
+    """A stale SMB/NFS mount can wedge ``os.path.exists`` for minutes.
+    ``DuplicatesRepository.resolution_plan`` runs inside ``add_photo``
+    and ``check_and_resolve_duplicates_for_hash``, so it must consult
+    the bounded ``_volume_offline`` probe BEFORE touching the path —
+    otherwise the auto-resolver deadlocks the way ``duplicate_scan._row_to_info``
+    used to before it was fixed."""
+    from repositories import duplicates as duplicates_repo
+
+    db = Database(str(tmp_path / "t.db"))
+    nas = tmp_path / "nas"
+    laptop = tmp_path / "laptop"
+    nas.mkdir()
+    laptop.mkdir()
+    (laptop / "owl.jpg").write_bytes(b"x")
+    nas_fid = db.add_folder(str(nas))
+    laptop_fid = db.add_folder(str(laptop))
+    for fid, name in ((nas_fid, "owl-nas.jpg"), (laptop_fid, "owl.jpg")):
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, extension, file_size,"
+            " file_mtime, file_hash, flag) VALUES (?, ?, '.jpg', 1, 100.0, 'H', 'none')",
+            (fid, name),
+        )
+    db.conn.commit()
+
+    call_order = []
+
+    def stub_offline(path):
+        call_order.append(("offline", path))
+        return os.path.dirname(path) == str(nas)
+
+    real_exists = os.path.exists
+
+    def stub_exists(path):
+        call_order.append(("exists", path))
+        # Any ``exists`` call for a path we said was offline would be the
+        # wedge-triggering stat the fix removes. Fail loudly if that
+        # ordering regresses.
+        if os.path.dirname(path) == str(nas):
+            raise AssertionError(
+                "resolution_plan stat'd an offline-volume path: "
+                + path
+            )
+        return real_exists(path)
+
+    monkeypatch.setattr(duplicates_repo, "_volume_offline", stub_offline)
+    monkeypatch.setattr(duplicates_repo.os.path, "exists", stub_exists)
+
+    photo_ids = [r["id"] for r in db.conn.execute("SELECT id FROM photos")]
+    repo = duplicates_repo.DuplicatesRepository(db.conn)
+    winner_id, loser_ids = repo.resolution_plan(photo_ids)
+
+    # Every offline candidate had its reachability probe run BEFORE any
+    # exists probe for that same path (they never should have gotten
+    # one, but ordering across paths is enough here).
+    nas_probes = [k for (k, p) in call_order if os.path.dirname(p) == str(nas)]
+    assert nas_probes and all(k == "offline" for k in nas_probes), call_order
+
+    # The NAS candidate stays a valid winner even though its file isn't
+    # on disk right now — offline is "state unknown", not "missing".
+    assert winner_id is not None
+    assert loser_ids == [
+        r["id"] for r in db.conn.execute(
+            "SELECT id FROM photos WHERE id != ?", (winner_id,),
+        )
+    ]
 
 
 def test_duplicate_scan_reopen_keeps_hand_rejected_rows_rejected(resolved_pair):
