@@ -188,6 +188,36 @@ def test_copy_via_temp_no_hardlink_fallback_never_overwrites_replacement(
     assert _no_partials(dst_dir) == []
 
 
+def test_copy_via_temp_no_hardlink_fallback_windows_metadata(
+    tmp_path, monkeypatch,
+):
+    """On Windows ``os.fchmod`` doesn't exist and ``os.utime`` doesn't
+    accept an fd, so the fallback promote used to raise
+    ``AttributeError``/``TypeError`` after copying the bytes, roll back
+    the destination and (in ``move_photos``) bypass the ``except OSError``
+    handler and abort the batch. With path-based fallbacks it now
+    completes; the copied bytes and metadata land at ``dst`` and no
+    partial is left behind."""
+    import errno
+
+    src = _jpeg(tmp_path / "a.jpg", "red")
+    dst = tmp_path / "out" / "a.jpg"
+    dst.parent.mkdir()
+
+    def no_hardlinks(*_a, **_kw):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(staged_copy.os, "link", no_hardlinks)
+    # Simulate Windows: neither fd-based utime nor fchmod is available.
+    monkeypatch.setattr(staged_copy, "_UTIME_SUPPORTS_FD", False)
+    monkeypatch.setattr(staged_copy, "_HAS_FCHMOD", False)
+
+    staged_copy.copy_via_temp(str(src), str(dst))
+
+    assert dst.read_bytes() == src.read_bytes()
+    assert _no_partials(dst.parent) == []
+
+
 # -- ingest: a failed copy leaves nothing behind ------------------------------
 
 

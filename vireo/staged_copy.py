@@ -14,6 +14,17 @@ import tempfile
 
 _COPY_CHUNK = 1 << 20  # 1 MiB per read; small enough for slow NAS transfers
 
+# fd-based metadata ops aren't universal: ``os.fchmod`` is Unix-only, and
+# ``os.utime`` accepts an fd only on platforms that list it in
+# ``os.supports_fd``. On Windows the fallback promote path used to raise
+# ``AttributeError``/``TypeError`` after copying the bytes, which the
+# rollback in ``_promote_by_placeholder`` treated as a failure and, in
+# ``move_photos``, bypassed the ``except OSError`` handler and aborted
+# the batch. Path-based fallbacks guarded by an inode re-check keep the
+# same "don't leak metadata onto a racer's file" guarantee.
+_UTIME_SUPPORTS_FD = os.utime in getattr(os, "supports_fd", set())
+_HAS_FCHMOD = hasattr(os, "fchmod")
+
 
 def copy_via_temp(src, dst):
     """Copy ``src`` to ``dst`` through a hidden sibling temp file.
@@ -100,13 +111,17 @@ def _promote_by_placeholder(tmp, dst):
                 raise FileExistsError(
                     f"{dst}: placeholder was replaced during promote"
                 )
-            # Match ``copy2``'s metadata transfer. Do it on the fd so a
-            # concurrent unlink+recreate between the nlink check and
+            # Match ``copy2``'s metadata transfer. Prefer fd-based ops so
+            # a concurrent unlink+recreate between the nlink check and
             # these calls cannot leak our metadata onto the other
-            # writer's file.
+            # writer's file. On Windows those ops aren't available, so
+            # fall back to path-based ops guarded by an inode re-check.
             src_stat = os.stat(tmp)
-            os.utime(claim_fd, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
-            os.fchmod(claim_fd, src_stat.st_mode)
+            _apply_metadata(
+                claim_fd, dst, claim_ino,
+                (src_stat.st_atime_ns, src_stat.st_mtime_ns),
+                src_stat.st_mode,
+            )
         except BaseException:
             # Roll back only when the entry at ``dst`` still points to
             # the inode we claimed. A concurrent writer's replacement
@@ -119,3 +134,53 @@ def _promote_by_placeholder(tmp, dst):
             raise
     finally:
         os.close(claim_fd)
+
+
+def _apply_metadata(fd, dst, claim_ino, times_ns, mode):
+    """Copy atime/mtime/mode from the temp onto the claimed destination.
+
+    Uses fd-based ops where the platform supports them (Unix). On
+    platforms where they aren't available (Windows), falls back to
+    path-based ops guarded by an inode re-check both before and after
+    so a concurrent unlink+recreate cannot leak our metadata onto
+    another writer's file.
+    """
+    if _UTIME_SUPPORTS_FD:
+        os.utime(fd, ns=times_ns)
+    else:
+        _guarded_path_op(dst, claim_ino, lambda: os.utime(dst, ns=times_ns))
+    if _HAS_FCHMOD:
+        os.fchmod(fd, mode)
+    else:
+        _guarded_path_op(dst, claim_ino, lambda: os.chmod(dst, mode))
+
+
+def _guarded_path_op(dst, claim_ino, op):
+    """Run ``op`` only while ``dst`` still points to ``claim_ino``.
+
+    Re-checks the inode before and after ``op`` so an interposed
+    unlink+recreate raises ``FileExistsError`` instead of applying
+    metadata to another writer's file. Any ``OSError`` from ``op``
+    propagates so the surrounding rollback can drop our placeholder.
+    """
+    try:
+        current_ino = os.stat(dst).st_ino
+    except FileNotFoundError as exc:
+        raise FileExistsError(
+            f"{dst}: placeholder was replaced during promote"
+        ) from exc
+    if current_ino != claim_ino:
+        raise FileExistsError(
+            f"{dst}: placeholder was replaced during promote"
+        )
+    op()
+    try:
+        after_ino = os.stat(dst).st_ino
+    except FileNotFoundError as exc:
+        raise FileExistsError(
+            f"{dst}: placeholder was replaced during promote"
+        ) from exc
+    if after_ino != claim_ino:
+        raise FileExistsError(
+            f"{dst}: placeholder was replaced during promote"
+        )
