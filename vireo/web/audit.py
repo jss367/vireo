@@ -37,6 +37,17 @@ def create_audit_blueprint(
     """
     blueprint = Blueprint("audit", __name__)
 
+    def _path_within(path, root):
+        """True if ``path`` is strictly below ``root`` (separator-aware)."""
+        try:
+            return (
+                path != root
+                and os.path.commonpath([path, root]) == root
+            )
+        except ValueError:
+            # Different drives on Windows, or mixed absolute/relative.
+            return False
+
     @blueprint.route("/api/audit/drift")
     def api_audit_drift():
         db = get_db()
@@ -141,6 +152,11 @@ def create_audit_blueprint(
             return json_error("direction must be 'use_db' or 'use_xmp'")
         if isinstance(photo_id, bool) or not isinstance(photo_id, int):
             return json_error("photo_id must be an integer")
+        # Photos are global; resolving queues sidecar writes (or rewrites
+        # keywords from the XMP) under the active workspace, so it may only
+        # touch a photo that workspace can see -- the same set drift lists.
+        if photo_id not in db.filter_photo_ids_in_workspace([photo_id]):
+            return json_error("photo not found", 404)
         from audit import resolve_drift
 
         resolve_drift(db, photo_id, direction)
@@ -197,7 +213,33 @@ def create_audit_blueprint(
     def api_audit_import_untracked():
         db = get_db()
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         paths = body.get("paths", [])
+        if not isinstance(paths, list) or any(
+            not isinstance(p, str) or not p for p in paths
+        ):
+            return json_error("paths must be a list of file paths")
+        # The scan behind this creates a folder row for each file's parent
+        # and links it into the active workspace, so a path outside the
+        # workspace's roots would graft an arbitrary directory onto it.
+        # Accept only what /api/audit/untracked can report: files under a
+        # workspace root, outside app-managed libraries.
+        from image_loader import is_excluded_scan_path
+
+        roots = [os.path.normpath(r) for r in _audit_workspace_roots(db)]
+        rejected = []
+        for path in paths:
+            if not os.path.isabs(path) or is_excluded_scan_path(path):
+                rejected.append(path)
+                continue
+            norm = os.path.normpath(path)
+            if not any(_path_within(norm, root) for root in roots):
+                rejected.append(path)
+        if rejected:
+            return json_error(
+                f"paths outside the active workspace's folders: {rejected}"
+            )
         from audit import import_untracked
 
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])

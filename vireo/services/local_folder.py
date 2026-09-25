@@ -302,6 +302,65 @@ def local_root_under_folder(db, folder_id: int) -> int | None:
     return roots[0] if roots else None
 
 
+def local_root_overlapping_path(
+    db, path: str, *, include_descendants: bool = True,
+) -> int | None:
+    """Return a local-session root whose original source overlaps ``path``.
+
+    Staging rebases the session's ``folders.path`` rows under
+    ``local-folders/`` while the originals stay at
+    ``local_folder_mappings.source_path``. A scan that walks any part of
+    that source tree -- the source itself, a directory inside it, or an
+    ancestor that contains it -- therefore finds files the catalog only
+    knows by their local path and adds a second row for each. Callers that
+    are about to scan (or copy into) ``path`` use this to refuse instead.
+
+    ``include_descendants=False`` ignores sessions that sit strictly below
+    ``path`` -- for callers that only write into a subtree they choose
+    later (an import's dated destination folders), where refusing every
+    import into an archive because one old day folder is staged would be
+    too broad.
+    """
+    if not path:
+        return None
+    for entry in db.conn.execute(
+        "SELECT root_folder_id, source_path FROM local_folder_mappings "
+        "WHERE is_root=1 ORDER BY root_folder_id"
+    ).fetchall():
+        source = entry["source_path"]
+        if not source:
+            continue
+        if _is_within(path, source) or (
+            include_descendants and _is_within(source, path)
+        ):
+            return int(entry["root_folder_id"])
+    return None
+
+
+def local_copy_scan_conflict(
+    db, paths, *, include_descendants: bool = True,
+) -> str | None:
+    """User-facing refusal when scanning ``paths`` would re-add staged photos."""
+    for path in paths:
+        root_id = local_root_overlapping_path(
+            db, path, include_descendants=include_descendants,
+        )
+        if root_id is None:
+            continue
+        row = db.conn.execute(
+            "SELECT source_path FROM local_folder_mappings "
+            "WHERE root_folder_id=? AND is_root=1",
+            (root_id,),
+        ).fetchone()
+        source = row["source_path"] if row else path
+        return (
+            f"Cannot scan {path} while {source} has a local copy: the scan "
+            "would catalog its originals a second time. Sync or discard the "
+            "local copy first."
+        )
+    return None
+
+
 def folder_has_local_copy(db, folder_id: int) -> bool:
     return local_root_for_folder(db, folder_id) is not None
 

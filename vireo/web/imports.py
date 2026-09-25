@@ -38,6 +38,8 @@ from flask import Blueprint, Response, abort, jsonify, make_response, request
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
+from services.local_folder import local_copy_scan_conflict
+from services.local_workspace import stage_boundary_lock
 from services.pipeline_launch import resolve_remote_archive_target
 from services.startup_tasks import metadata_repair_count
 from web.background_jobs import make_background_job
@@ -1819,6 +1821,18 @@ def create_imports_blueprint(
             from ingest import _is_unsafe_path
             if folder_template and _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
+        # The scan below walks the destination (or, in place, the source); a
+        # folder-level local copy of any part of that tree would be
+        # catalogued a second time at its original path.
+        with stage_boundary_lock():
+            conflict = local_copy_scan_conflict(
+                get_db(), [destination if copy else source],
+                # A copy only scans the dated folders it wrote into, so a
+                # staged folder elsewhere under the archive is not walked.
+                include_descendants=not copy,
+            )
+        if conflict:
+            return json_error(conflict, 409)
 
         def work(job):
             from scanner import scan as do_scan
@@ -2958,6 +2972,10 @@ def create_imports_blueprint(
                     )
                 if not os.path.isdir(s):
                     return json_error(f"source directory not found: {s}")
+            with stage_boundary_lock():
+                conflict = local_copy_scan_conflict(get_db(), sources)
+            if conflict:
+                return json_error(conflict, 409)
 
         recursive = bool(body.get("recursive", True))
         import_tags, location_from_gps, tag_options_err = (
@@ -4188,6 +4206,16 @@ def create_imports_blueprint(
                     f"(destination={destination!r}, source={s!r}); "
                     f"formatting the card would erase the archive copy"
                 )
+        # The copied files are catalogued under the destination; if a local
+        # copy covers it, they would land beside rows the catalog only knows
+        # by their local path. Only the dated folders the import writes are
+        # scanned, so a staged folder elsewhere under the archive is fine.
+        with stage_boundary_lock():
+            conflict = local_copy_scan_conflict(
+                get_db(), [destination], include_descendants=False,
+            )
+        if conflict:
+            return json_error(conflict, 409)
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         if folder_template and _is_unsafe_path(folder_template):

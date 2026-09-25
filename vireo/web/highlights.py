@@ -1087,8 +1087,20 @@ def create_highlights_blueprint(get_db, json_error):
         photo_ids = body.get("photo_ids", [])
         name = body.get("name", "").strip()
 
-        if not photo_ids:
+        if not isinstance(photo_ids, list) or not photo_ids:
             return json_error("photo_ids required")
+        # A nested or non-int entry is stored verbatim and later makes the
+        # collection's rules unresolvable (every read 400s), so validate the
+        # shape here, and keep ids to the photos this workspace can see.
+        if any(isinstance(pid, bool) or not isinstance(pid, int) for pid in photo_ids):
+            return json_error("photo_ids must be a list of integers")
+        photo_ids = list(dict.fromkeys(photo_ids))
+        visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
+        foreign = [pid for pid in photo_ids if pid not in visible_ids]
+        if foreign:
+            return json_error(
+                f"photo_ids not in the active workspace: {foreign}", 403
+            )
         if not name:
             return json_error("name required")
 

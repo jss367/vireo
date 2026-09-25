@@ -902,8 +902,8 @@ def create_media_blueprint(
         a timestamp check it can't be fooled by a stale file that happens
         to be newer than the new photo's source.
 
-        Files whose name doesn't start with a photo id aren't id-keyed and
-        are served as before.
+        Callers only reach this with an id-keyed filename; ``serve_mask``
+        refuses the rest because it cannot scope them to a workspace.
         """
         m = re.match(r"^(\d+)[._]", filename)
         if not m:
@@ -953,13 +953,16 @@ def create_media_blueprint(
         mask_path = os.path.join(masks_dir, filename)
         id_match = re.match(r"^(\d+)[._]", filename)
         if not id_match:
-            if os.path.exists(mask_path) and _mask_file_is_db_backed(
-                filename, mask_path,
-            ):
-                return send_from_directory(masks_dir, filename)
+            # Every mask writer names files ``<photo_id>[.<variant>].png``.
+            # A file without that prefix can't be tied to a photo, so it
+            # can't be scoped to the active workspace -- refuse it.
             return "", 404
 
         pid = int(id_match.group(1))
+        # Same boundary as /api/masks/<pid>/<variant>.png: a mask is only
+        # served for a photo the active workspace can see.
+        if get_db().get_photo(pid, verify_workspace=True) is None:
+            return "", 404
         if os.path.exists(mask_path) and _mask_file_is_db_backed(
             filename, mask_path,
         ):

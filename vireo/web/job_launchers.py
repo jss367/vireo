@@ -31,6 +31,7 @@ from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
 )
+from services.local_folder import local_copy_scan_conflict
 from services.local_workspace import (
     has_local_workspace,
     stage_boundary_lock,
@@ -38,7 +39,11 @@ from services.local_workspace import (
 from services.startup_tasks import metadata_repair_count
 from sql_chunks import chunked
 from web.background_jobs import make_background_job
-from web.request_args import coerce_collection_id, reject_visual_collection
+from web.request_args import (
+    coerce_collection_id,
+    parse_selection_photo_ids,
+    reject_visual_collection,
+)
 
 log = logging.getLogger(__name__)
 
@@ -504,6 +509,13 @@ def create_job_launchers_blueprint(
                         "manifest doesn't cover.",
                         409,
                     )
+        # A folder-level local copy (shared across workspaces) rebases its
+        # catalog rows onto the managed copy, so walking its original source
+        # tree would catalog every one of those photos a second time.
+        with stage_boundary_lock():
+            conflict = local_copy_scan_conflict(get_db(), roots_list)
+        if conflict:
+            return json_error(conflict, 409)
 
         work = build_scan_work(roots_list, incremental, ctx.workspace_id)
 
@@ -541,6 +553,13 @@ def create_job_launchers_blueprint(
             if roots:
                 return json_error("no workspace folders are currently on disk")
             return json_error("this workspace has no folders to rescan")
+        # A staged root is scanned at its local path, which is safe; a root
+        # that contains another workspace's staged folder would walk that
+        # folder's original source and duplicate its catalog rows.
+        with stage_boundary_lock():
+            conflict = local_copy_scan_conflict(db, existing)
+        if conflict:
+            return json_error(conflict, 409)
 
         work = build_scan_work(existing, incremental, ctx.workspace_id)
         job_config = {"roots": existing, "incremental": incremental}
@@ -858,12 +877,20 @@ def create_job_launchers_blueprint(
     def api_job_move_photos(ctx):
         """Move selected photos to a destination directory."""
         body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         destination = body.get("destination", "")
         rule_id = body.get("rule_id")
 
-        if not photo_ids:
-            return json_error("photo_ids required")
+        # Photos are global but visibility is per workspace: a move rewrites
+        # the photo's folder and links the destination only to the active
+        # workspace, so an id from another workspace must be refused here,
+        # not silently moved out from under that workspace.
+        photo_ids, err = parse_selection_photo_ids(
+            get_db(), body, json_error=json_error, limit=None,
+        )
+        if err is not None:
+            return err
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):

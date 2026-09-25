@@ -16,6 +16,7 @@ import config as cfg
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
 from services.visual_scope import (
+    collection_row,
     collection_rules_state,
     inject_active_visual_model,
     validate_visual_arg,
@@ -308,6 +309,15 @@ def create_collections_blueprint(get_db, json_error):
         for pid in photo_ids:
             if isinstance(pid, bool) or not isinstance(pid, int):
                 return json_error("photo_ids must be integers")
+        # A static collection only ever shows photos its workspace can see,
+        # so storing another workspace's (or a nonexistent) id inflates
+        # ``total`` and silently adopts whatever photo later reuses that id.
+        visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
+        foreign = [pid for pid in dict.fromkeys(photo_ids) if pid not in visible_ids]
+        if foreign:
+            return json_error(
+                f"photo_ids not in the active workspace: {foreign}", 403
+            )
 
         row = db.conn.execute(
             "SELECT rules, visual_json FROM collections WHERE id = ? AND workspace_id = ?",
@@ -392,6 +402,10 @@ def create_collections_blueprint(get_db, json_error):
         # visual collections up front so the pipeline/review/etc. consumers
         # that hit it don't silently scope to every metadata-matching
         # photo instead of the visually-matched subset.
+        # An unknown or other-workspace id would otherwise evaluate to an
+        # empty page with a 200, which reads as "this collection is empty".
+        if collection_row(db, collection_id) is None:
+            return json_error("collection not found", 404)
         err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
@@ -514,6 +528,8 @@ def create_collections_blueprint(get_db, json_error):
         P2 on PR #1561).
         """
         db = get_db()
+        if collection_row(db, collection_id) is None:
+            return json_error("collection not found", 404)
         err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err

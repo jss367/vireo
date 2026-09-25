@@ -14,7 +14,11 @@ import sys
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
-from services.local_folder import local_root_for_folder, local_root_under_folder
+from services.local_folder import (
+    local_copy_scan_conflict,
+    local_root_for_folder,
+    local_root_under_folder,
+)
 from services.local_workspace import folder_has_local_workspace, stage_boundary_lock
 from web.background_jobs import make_background_job
 
@@ -182,10 +186,25 @@ def create_folders_blueprint(
     @blueprint.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
     def api_folder_relocate(folder_id):
         db = get_db()
+        # Folders are global; relocating rewrites the path for every
+        # workspace, so only a workspace that can see the folder may do it.
+        if not any(
+            workspace["id"] == db._active_workspace_id
+            for workspace in db.get_folder_workspaces(folder_id)
+        ):
+            return json_error("folder not found", 404)
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         new_path = body.get("path", "")
-        if not new_path:
+        if not new_path or not isinstance(new_path, str):
             return json_error("path is required")
+        # A relative path would pass isdir against the server's working
+        # directory and then be stored literally, breaking every photo in
+        # the folder. Store the normalized absolute spelling.
+        if not os.path.isabs(new_path):
+            return json_error("path must be an absolute path")
+        new_path = os.path.normpath(new_path)
         if not os.path.isdir(new_path):
             return json_error("path does not exist or is not a directory")
 
@@ -348,6 +367,10 @@ def create_folders_blueprint(
             )
         if not os.path.isdir(root):
             return json_error(f"folder path no longer exists: {root}")
+        with stage_boundary_lock():
+            conflict = local_copy_scan_conflict(db, [root])
+        if conflict:
+            return json_error(conflict, 409)
 
         work = build_scan_work(root, incremental, ctx.workspace_id)
 
