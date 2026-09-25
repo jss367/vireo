@@ -273,6 +273,32 @@ def _inside_models_dir(path):
         return False
 
 
+def _model_is_managed(entry):
+    """True if Vireo downloaded these weights and owns their lifecycle.
+
+    ``remove_model`` deletes files only for managed entries: a custom
+    model the user registered with weights in their own folder is
+    unregistered, its files preserved, regardless of where the folder
+    lives. The confirmation dialog promises this even when the user
+    happens to keep their own weights beneath ``~/.vireo/models``.
+
+    Backward compatibility: entries written before the ``managed`` field
+    existed have neither key. Ids issued by ``/api/models/custom`` start
+    with ``custom-`` (see ``api_add_custom_model``) so they are treated
+    as unmanaged; anything else that still resolves strictly inside
+    ``DEFAULT_MODELS_DIR`` is treated as a Vireo download.
+    """
+    if not isinstance(entry, dict):
+        return False
+    managed = entry.get("managed")
+    if isinstance(managed, bool):
+        return managed
+    if str(entry.get("id", "")).startswith("custom-"):
+        return False
+    weights_path = entry.get("weights_path") or ""
+    return bool(weights_path) and _inside_models_dir(weights_path)
+
+
 def _check_onnx_downloaded(model_dir, files):
     """Check if all required model files exist and look usable.
 
@@ -510,10 +536,12 @@ def set_active_model(model_id):
 def remove_model(model_id):
     """Remove a model's weights from disk and unregister it.
 
-    Files are deleted only when they live inside ``DEFAULT_MODELS_DIR``,
-    where downloads land. A custom model registered with weights elsewhere
-    (the user's own folder) is only unregistered; its files are left in
-    place and reported back as ``kept_path``.
+    Files are deleted only for entries Vireo downloaded and manages
+    (see ``_model_is_managed``). A custom model — registered through
+    ``/api/models/custom`` or without the ``managed`` flag — is only
+    unregistered, and its files are left in place and reported back as
+    ``kept_path``, even when the user parked those weights inside
+    ``~/.vireo/models``.
 
     Returns ``None`` if the model is unknown, otherwise a dict with
     ``files_deleted`` (bool) and ``kept_path`` (str or ``None``).
@@ -541,11 +569,14 @@ def remove_model(model_id):
         files_deleted = False
         kept_path = None
         weights_path = found.get("weights_path") or ""
+        managed = _model_is_managed(found)
         if weights_path and os.path.lexists(weights_path):
-            if not _inside_models_dir(weights_path):
+            if not managed or not _inside_models_dir(weights_path):
                 log.info(
-                    "Unregistering model %s without deleting %s: it is "
-                    "outside %s", model_id, weights_path, DEFAULT_MODELS_DIR,
+                    "Unregistering model %s without deleting %s "
+                    "(managed=%s, inside_models_dir=%s)",
+                    model_id, weights_path, managed,
+                    _inside_models_dir(weights_path),
                 )
                 kept_path = weights_path
             elif os.path.isdir(weights_path) and not os.path.islink(weights_path):
@@ -571,8 +602,16 @@ def remove_model(model_id):
     return {"files_deleted": files_deleted, "kept_path": kept_path}
 
 
-def register_model(model_id, name, model_str, weights_path, description=""):
-    """Register a model (custom or after download)."""
+def register_model(model_id, name, model_str, weights_path, description="",
+                   managed=False):
+    """Register a model (custom or after download).
+
+    ``managed=True`` marks the entry as owned by Vireo — used by the
+    internal download helpers so ``remove_model`` may delete the files.
+    A custom registration (via ``/api/models/custom``) leaves it at the
+    default ``False`` so ``remove_model`` unregisters without touching
+    the user's files, regardless of where they live.
+    """
     with _CONFIG_LOCK:
         config = _load_config()
         models = config.get("models", [])
@@ -585,6 +624,7 @@ def register_model(model_id, name, model_str, weights_path, description=""):
                 m["model_str"] = model_str
                 m["weights_path"] = weights_path
                 m["description"] = description
+                m["managed"] = bool(managed)
                 found = True
                 break
         if not found:
@@ -595,6 +635,7 @@ def register_model(model_id, name, model_str, weights_path, description=""):
                     "model_str": model_str,
                     "weights_path": weights_path,
                     "description": description,
+                    "managed": bool(managed),
                 }
             )
 
@@ -1072,7 +1113,7 @@ def download_model(model_id, progress_callback=None):
     log.info("Model downloaded to: %s", model_dir)
     register_model(
         model_id, km["name"], km.get("model_str", model_id),
-        model_dir, km["description"],
+        model_dir, km["description"], managed=True,
     )
     # The on-disk bytes just changed, so drop any cached "verified" marker
     # for this model_id — the next pipeline run will re-verify.
@@ -1690,7 +1731,7 @@ def download_hf_model(repo_id, progress_callback=None):
     name = slug.replace("-", " ").title()
     register_model(
         model_id, name, model_str, local_dir,
-        f"Downloaded from HuggingFace: {repo_id}",
+        f"Downloaded from HuggingFace: {repo_id}", managed=True,
     )
 
     log.info("Model registered: %s (%s)", name, local_dir)

@@ -427,6 +427,39 @@ def test_stray_sidecars_ignore_sidecars_of_unsupported_formats(tmp_path):
         assert os.path.exists(p), f"{p} belongs to a real file"
 
 
+def test_delete_stray_sidecars_ignores_directory_with_matching_stem(tmp_path):
+    """A stray sidecar ``ghost.xmp`` next to a directory named ``ghost``
+    (no image extension, so ``check_stray_sidecars`` reports it via the
+    ``os.path.isfile`` filter) must still be deletable: the recheck must
+    apply the same filter, or the entry becomes permanently undeletable."""
+    from audit import check_stray_sidecars, delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    stray = os.path.join(root, "ghost.xmp")
+    write_sidecar(stray, flat_keywords={"X"}, hierarchical_keywords=set())
+    # A sibling directory whose bare name matches the sidecar stem.
+    os.makedirs(os.path.join(root, "ghost"))
+
+    strays = check_stray_sidecars([root])
+    assert [s["path"] for s in strays] == [stray]
+
+    trashed = []
+
+    def fake_trash(targets):
+        trashed.extend(targets)
+        for t in targets:
+            os.remove(t)
+        return len(targets), set(targets), []
+
+    deleted = delete_stray_sidecars([stray], [root], trash_paths=fake_trash)
+    assert deleted == 1
+    assert trashed == [stray]
+    assert os.path.isdir(os.path.join(root, "ghost")), \
+        "the sibling directory must not be touched"
+
+
 def test_audit_delete_sidecars_route_uses_trash(app_and_db, tmp_path, monkeypatch):
     """The route moves strays to the Trash instead of unlinking them."""
     import app as app_module

@@ -244,7 +244,12 @@ def _sidecar_has_image(xmp_path):
     Mirrors ``check_stray_sidecars``: any extension counts, so a sidecar
     beside a format Vireo does not import is never treated as a stray. A
     directory that cannot be listed counts as matched, so an unreadable
-    folder never makes a sidecar look deletable.
+    folder never makes a sidecar look deletable. Directory entries whose
+    name matches the sidecar's stem do *not* count: ``check_stray_sidecars``
+    excludes them via ``os.path.isfile`` (a sibling directory named
+    ``ghost`` beside ``ghost.xmp`` reports the sidecar as stray), so the
+    delete-time recheck must apply the same rule or that stray becomes
+    permanently undeletable.
     """
     dirpath = os.path.dirname(xmp_path)
     base = os.path.splitext(os.path.basename(xmp_path))[0].lower()
@@ -258,8 +263,11 @@ def _sidecar_has_image(xmp_path):
         stem, ext = os.path.splitext(name)
         if ext.lower() == ".xmp":
             continue
-        if name.lower() == base or stem.lower() == base:
-            return True
+        if name.lower() != base and stem.lower() != base:
+            continue
+        if not os.path.isfile(os.path.join(dirpath, name)):
+            continue
+        return True
     return False
 
 

@@ -523,6 +523,45 @@ def test_remove_custom_model_never_deletes_outside_models_dir(tmp_path, monkeypa
     assert models._load_config()["models"] == []
 
 
+def test_remove_custom_model_keeps_weights_nested_under_models_dir(
+    tmp_path, monkeypatch,
+):
+    """The confirmation dialog promises a custom model's weights are kept
+    wherever they live. Location inside ``~/.vireo/models`` alone is not
+    proof that Vireo downloaded them: a user is allowed to park their own
+    weights there. Only the ``managed`` flag decides deletion."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    nested = tmp_path / "models" / "user-owned"
+    nested.mkdir()
+    (nested / "weights.onnx").write_bytes(b"w")
+    (nested / "notes.txt").write_text("keep me")
+
+    models.register_model(
+        "custom-nested", "Nested", "ViT-B-16", str(nested),
+    )
+    result = models.remove_model("custom-nested")
+    assert result == {"files_deleted": False, "kept_path": str(nested)}
+    assert (nested / "weights.onnx").exists()
+    assert (nested / "notes.txt").exists()
+
+    # A managed download nested at the same kind of path still deletes.
+    downloaded = tmp_path / "models" / "vireo-owned"
+    downloaded.mkdir()
+    (downloaded / "weights.onnx").write_bytes(b"w")
+    models.register_model(
+        "vireo-download", "Vireo", "ViT-B-16", str(downloaded), managed=True,
+    )
+    assert models.remove_model("vireo-download") == {
+        "files_deleted": True, "kept_path": None,
+    }
+    assert not downloaded.exists()
+
+
 def test_api_remove_custom_model_keeps_user_folder(app_and_db, tmp_path):
     app, _db = app_and_db
     client = app.test_client()
