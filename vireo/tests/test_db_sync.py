@@ -489,68 +489,66 @@ def test_sidecar_alias_missing_sidecars_on_case_sensitive_windows(
     assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
 
 
-def test_sidecar_alias_same_dir_case_variant_stems_on_case_insensitive_volume(
-    db, tmp_path, monkeypatch
-):
-    """Same-dir case-fold aliased stems queue inverse on case-insensitive fs.
-
-    Two photos in one directory whose stems differ only by case (``A.raw``
-    vs ``a.jpg``) share one sidecar file on a case-insensitive volume
-    (``A.xmp`` == ``a.xmp``). Sync's ``_sidecar_target_identities`` groups
-    the missing case-fold aliases as one target, so a cancellation must
-    queue its inverse or the sibling's write will resurrect the cancelled
-    keyword on the shared sidecar. Simulates the volume by making the
-    parent directory samefile-alias its own case-swapped spelling.
-    """
+def _same_dir_case_variant_stems(db, tmp_path):
+    """Two photos in one folder whose stems differ only by case, on disk."""
     parent = tmp_path / "photos"
     parent.mkdir()
+    (parent / "A.raw").write_bytes(b"raw")
     ws = db._active_workspace_id
     folder = db.add_folder(str(parent), name="photos")
     pu = db.add_photo(folder, "A.raw", ".raw", 1, 1.0)
     pl = db.add_photo(folder, "a.jpg", ".jpg", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
+    return parent, pu, ws
 
-    parent_str = os.path.normpath(str(parent))
-    swapped_parent = os.path.join(os.path.dirname(parent_str), "PHOTOS")
+
+def test_sidecar_alias_same_dir_case_variant_stems_follow_the_folder(db, tmp_path):
+    """``A.xmp`` and ``a.xmp`` in one folder are one sidecar exactly when that
+    folder folds case, so a cancellation queues its inverse only then."""
+    parent, pu, ws = _same_dir_case_variant_stems(db, tmp_path)
+    folds = (parent / "a.RAW").exists()
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is folds
+
+
+def test_sidecar_alias_same_dir_case_variant_stems_on_case_insensitive_folder(
+    db, tmp_path, monkeypatch
+):
+    """Simulated case-insensitive folder: the entry's swapped spelling is
+    the same file, so the stems alias and the inverse is queued."""
+    parent, pu, ws = _same_dir_case_variant_stems(db, tmp_path)
+    entry, swapped = str(parent / "A.raw"), str(parent / "a.RAW")
     real_samefile = os.path.samefile
 
-    def fake_samefile(a, b):
-        if {a, b} == {parent_str, swapped_parent}:
+    def folding_samefile(a, b):
+        if {str(a), str(b)} == {entry, swapped}:
             return True
         return real_samefile(a, b)
 
-    monkeypatch.setattr(
-        "vireo.repositories.sync.os.path.samefile", fake_samefile
-    )
-    monkeypatch.setattr(
-        "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
-    )
+    monkeypatch.setattr(os.path, "samefile", folding_samefile)
     assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is True
 
 
-def test_sidecar_alias_same_dir_case_variant_stems_case_sensitive(
+def test_sidecar_alias_case_sensitive_folder_inside_case_insensitive_parent(
     db, tmp_path, monkeypatch
 ):
-    """Case-sensitive fs: same-dir case-fold stems stay distinct.
+    """Windows per-directory case sensitivity: the folder's own name folds
+    in its parent, but names inside it do not. The probe must ask the
+    folder, not its parent, or it would queue a destructive inverse
+    against a distinct sidecar."""
+    parent, pu, ws = _same_dir_case_variant_stems(db, tmp_path)
+    folder_spellings = {str(parent), str(tmp_path / "PHOTOS")}
+    entry, swapped = str(parent / "A.raw"), str(parent / "a.RAW")
+    real_samefile = os.path.samefile
 
-    Two photos in one directory whose stems differ only by case name
-    distinct sidecars on a case-sensitive volume. The alias check must
-    stay False so a cancellation does not queue a destructive inverse
-    removal against the unrelated sidecar.
-    """
-    parent = tmp_path / "photos"
-    parent.mkdir()
-    swapped_parent = tmp_path / "PHOTOS"
-    if swapped_parent.exists():
-        pytest.skip("tmp_path is on a case-insensitive filesystem")
-    ws = db._active_workspace_id
-    folder = db.add_folder(str(parent), name="photos")
-    pu = db.add_photo(folder, "A.raw", ".raw", 1, 1.0)
-    pl = db.add_photo(folder, "a.jpg", ".jpg", 1, 1.0)
-    _insert(db, pl, "keyword_add", "Robin", ws)
-    monkeypatch.setattr(
-        "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
-    )
+    def per_directory_samefile(a, b):
+        pair = {str(a), str(b)}
+        if pair == folder_spellings:
+            return True
+        if pair == {entry, swapped}:
+            raise FileNotFoundError(swapped)
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "samefile", per_directory_samefile)
     assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
 
 

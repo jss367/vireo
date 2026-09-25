@@ -60,28 +60,28 @@ def _parents_case_alias(own_raw, raw):
 
 
 def _dir_folds_case(dir_path):
-    """Whether ``dir_path``'s filesystem folds case for its own basename.
+    """Whether lookups inside ``dir_path`` fold case.
 
-    Constructs a case-swapped spelling of ``dir_path``'s final component
-    and asks the filesystem, via ``samefile``, whether that spelling
-    resolves to the same inode. A case-insensitive volume (macOS's default
-    HFS+/APFS, a normal Windows drive) folds the two spellings; a
-    case-sensitive one raises ``FileNotFoundError`` or returns False. When
-    the basename has no case-swappable letters we cannot probe and stay
-    conservative (False), so a cancellation does not queue a destructive
-    inverse against an unrelated file.
+    Case sensitivity belongs to the directory holding the names (Windows
+    sets it per directory), so probe one of ``dir_path``'s own entries: ask
+    ``samefile`` whether the entry's case-swapped spelling resolves to the
+    same file. The photos live here, so an entry exists in production. A
+    case-insensitive directory folds the spellings; a case-sensitive one
+    raises ``FileNotFoundError`` (or finds a distinct file). With no entry to
+    probe we stay conservative (False), so a cancellation does not queue a
+    destructive inverse against an unrelated file.
     """
-    dir_path = os.path.normpath(dir_path)
-    parent, basename = os.path.split(dir_path)
-    if not basename or not parent:
-        return False
-    swapped = basename.swapcase()
-    if swapped == basename:
-        return False
     try:
-        return os.path.samefile(dir_path, os.path.join(parent, swapped))
+        with os.scandir(dir_path) as entries:
+            for entry in entries:
+                swapped = entry.name.swapcase()
+                if swapped != entry.name:
+                    return os.path.samefile(
+                        entry.path, os.path.join(dir_path, swapped),
+                    )
     except OSError:
         return False
+    return False
 
 
 class SyncRepository:
