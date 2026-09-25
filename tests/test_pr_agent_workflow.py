@@ -474,8 +474,9 @@ def test_red_main_is_tracked_and_routed_to_a_bounded_fix():
     # No second fix while one is open, and a hard cap per issue.
     assert '--label "$FIX_LABEL" --state open' in workflow
     assert "attempts >= MAX_FIX_ATTEMPTS" in workflow
-    # The attempt is counted only once the routine accepted it.
-    assert "if: steps.fire.outputs.fired == 'true'" in workflow
+    # An attempt that failed at the routine POST releases its reservation
+    # so it does not consume one of the ``MAX_FIX_ATTEMPTS`` slots.
+    assert "steps.fire.outputs.fired != 'true'" in workflow
     assert "Task: fix-main" in workflow
     # Event data reaches the shell only through env vars, never interpolated.
     steps = yaml.safe_load(workflow)["jobs"]["report"]["steps"]
@@ -489,10 +490,15 @@ def test_superseded_full_tests_runs_are_skipped():
 
     # A rerun of an older Full tests run, or a completed event delivered out
     # of order, must not overwrite the tracking issue with a stale result.
-    # The job compares this run to the newest completed run for main and
-    # stops when we are not it.
+    # The job compares this run to the newest run for main by ``createdAt``
+    # (immutable to reruns) and stops when we are not it. Sorting by
+    # ``createdAt`` matters — the default ``gh run list`` order can be moved
+    # by a rerun's completion time and would let an old rerun impersonate
+    # the latest run.
     assert 'gh run list --repo "$REPO" --workflow "$WORKFLOW_ID"' in workflow
-    assert "--branch main --status completed --limit 1" in workflow
+    assert "--branch main --status completed" in workflow
+    assert "--json databaseId,createdAt" in workflow
+    assert "sort_by(.createdAt) | reverse" in workflow
     assert '"$latest_id" != "$RUN_ID"' in workflow
     assert "superseded by run" in workflow
 
@@ -510,3 +516,87 @@ def test_open_fix_guard_is_scoped_to_the_active_incident():
     # And the prompt must actually pipe the PR body into the check, not
     # the raw count that was there before.
     assert "--json body" in prompt
+
+
+def test_fix_main_reservation_is_recorded_before_the_routine_fire():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # The concurrency group serialises main-health runs, but the routine
+    # itself takes minutes to diagnose and open its PR. Without a
+    # pre-fire reservation, a second red run finishing while the first
+    # routine is still diagnosing sees no open ``fix-main`` PR and asks
+    # for another routine session — a duplicate fix. Post the
+    # ``FIRED_MARKER`` comment BEFORE the routine POST so the next
+    # queued run's ``attempts`` count includes the in-flight reservation
+    # (and the ``pending > 0`` guard below catches it). Release the
+    # reservation only if the routine provider rejects the request, so a
+    # network-level failure does not burn an attempt.
+    reserve_idx = workflow.index("- name: Reserve the fix attempt")
+    fire_idx = workflow.index("- name: Ask the PR agent for a fix")
+    release_idx = workflow.index(
+        "- name: Release the reservation if the routine rejected the request"
+    )
+    assert reserve_idx < fire_idx < release_idx
+    assert "$FIRED_MARKER" in workflow
+    # Reservation posts the marker and captures the comment id so the
+    # release step can delete exactly the one it wrote.
+    assert 'gh api "repos/$REPO/issues/$ISSUE/comments"' in workflow
+    assert "--method POST" in workflow
+    assert "--jq '.id'" in workflow
+    assert "comment_id=$comment_id" in workflow
+    # Release deletes the exact reservation only when the routine rejects
+    # the POST (``fired != 'true'``).
+    assert 'gh api --method DELETE "repos/$REPO/issues/comments/$COMMENT_ID"' in workflow
+    assert "steps.reserve.outputs.comment_id != ''" in workflow
+
+
+def test_pending_reservation_gate_blocks_a_second_concurrent_fix_main_fire():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # Even with the concurrency group, two red runs finishing back to back
+    # can each fire the routine unless the ``attempts`` count includes the
+    # first run's reservation and a second gate detects an in-flight
+    # reservation whose fix-main PR has not yet been published. The
+    # ``pending = attempts - fix_prs`` check is that gate.
+    assert "--label \"$FIX_LABEL\" --state all" in workflow
+    assert "fix_prs=$(gh pr list" in workflow
+    assert "pending=$(( attempts - fix_prs ))" in workflow
+    assert "(( pending > 0 ))" in workflow
+    assert "already in flight" in workflow
+
+
+def test_fix_attempt_marker_counts_only_workflow_authored_comments():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # This is a public repo: any commenter can post a comment on the
+    # ``main-red`` tracking issue. Counting ``FIRED_MARKER`` comments by
+    # body alone lets an outside commenter post the marker three times and
+    # exhaust ``MAX_FIX_ATTEMPTS``, permanently blocking automated repair.
+    # The attempts count must filter by author (github-actions[bot]).
+    assert 'select(.user.login == \\"github-actions[bot]\\"' in workflow
+
+
+def test_fix_main_dispatch_is_gated_until_stored_routine_prompt_is_synced():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # The stored routine prompt at claude.ai/code/routines is pasted in by
+    # hand. Until it has been updated to recognise ``fix-main``, a POST
+    # returns 2xx from the routine provider (counted as ``fired=true``)
+    # but never produces a PR — burning one of the three attempts. Gate
+    # the dispatch on a repository variable the maintainer flips only
+    # after syncing the prompt.
+    assert "vars.MAIN_HEALTH_ENABLE_FIX_MAIN == 'true'" in workflow
+    assert "vars.MAIN_HEALTH_ENABLE_FIX_MAIN != 'true'" in workflow
+    # The Reserve/Fire/Release steps and the checkout of the routine action
+    # all sit behind the gate, so a POST is neither sent nor charged as an
+    # attempt until the maintainer opts in.
+    for step_name in (
+        "- name: Reserve the fix attempt",
+        "- name: Ask the PR agent for a fix",
+        "- uses: actions/checkout@v5",
+    ):
+        idx = workflow.index(step_name)
+        block_end = workflow.index("\n\n", idx)
+        assert (
+            "vars.MAIN_HEALTH_ENABLE_FIX_MAIN == 'true'" in workflow[idx:block_end]
+        ), f"{step_name!r} must be gated on MAIN_HEALTH_ENABLE_FIX_MAIN"

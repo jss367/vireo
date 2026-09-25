@@ -7,10 +7,19 @@ name: Main health
 # up first. Nothing used to react to it: the PR agent's fix-ci only handles
 # failures on PRs. This workflow keeps one open issue labelled ``main-red``
 # while main is failing (a new failing run comments on it), closes it on the
-# next green run, and asks the PR agent routine for a fix PR (``Task:
-# fix-main``). The routine labels that PR ``fix-main``; while one is open, or
-# after three attempts on the same issue, later failures only update the
-# issue so a stuck fix can't loop.
+# next green run, and — when the ``MAIN_HEALTH_ENABLE_FIX_MAIN`` repository
+# variable is ``true`` — asks the PR agent routine for a fix PR (``Task:
+# fix-main``). The routine labels that PR ``fix-main``; while one is open,
+# after three attempts on the same issue, or while an earlier attempt is
+# still in flight (marker posted but no matching PR yet), later failures
+# only update the issue so a stuck fix can't loop.
+#
+# The routine dispatch is gated on ``MAIN_HEALTH_ENABLE_FIX_MAIN`` because
+# the stored routine prompt at claude.ai/code/routines is pasted in by
+# hand: an unrecognised ``fix-main`` task returns 2xx from the routine
+# provider (burning one of the three attempts) but never opens a PR.
+# The maintainer flips the variable once ``docs/pr-agent-routine-prompt.md``
+# has been pasted into the routine.
 
 on:
   workflow_run:
@@ -64,11 +73,15 @@ jobs:
           # order, must not overwrite the tracking issue with a stale result:
           # rerunning an old failure after a newer green would reopen the
           # incident, and a stale success arriving after a newer failure would
-          # close it. Skip when this run is not the newest completed run for
-          # main; that run's own workflow_run event drives the issue state.
+          # close it. Skip when this run is not the newest run for main by
+          # createdAt (immutable to reruns — a rerun keeps the original run's
+          # id and creation time), so a rerun of an old run cannot masquerade
+          # as the latest completed run; that newest run's own workflow_run
+          # event drives the issue state.
           latest_id=$(gh run list --repo "$REPO" --workflow "$WORKFLOW_ID" \
-            --branch main --status completed --limit 1 \
-            --json databaseId --jq '.[0].databaseId // empty')
+            --branch main --status completed --limit 20 \
+            --json databaseId,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[0].databaseId // empty')
           if [[ -n "$latest_id" && "$latest_id" != "$RUN_ID" ]]; then
             echo "Run $RUN_ID is superseded by run $latest_id; skipping."
             exit 0
@@ -123,10 +136,30 @@ jobs:
           open_fixes=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state open \
             --json body \
             --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\"))] | length")
+          # Every fix-main PR (open, merged, or closed) that has ever been
+          # opened for this incident. Compared against attempts below to detect
+          # a routine that has been asked but not yet published its PR.
+          fix_prs=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state all \
+            --json body \
+            --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\"))] | length")
+          # Only count marker comments authored by this workflow's bot
+          # identity. Otherwise, since this is a public repo, any commenter
+          # could post $FIRED_MARKER three times to force ``attempts`` past
+          # MAX_FIX_ATTEMPTS and permanently block automated repair.
           attempts=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
-            --jq "[.[] | select(.body | contains(\"$FIRED_MARKER\"))] | length" \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$FIRED_MARKER\")))] | length" \
             | awk '{s += $1} END {print s + 0}')
-          if [[ "$open_fixes" != "0" ]]; then
+          # A prior attempt whose fix-main PR has not yet been opened is
+          # still in flight in the routine. Skip until that attempt either
+          # produces a PR or the reservation is released, so a second
+          # concurrent red run cannot fire a duplicate routine session for
+          # the same incident. The reserve-before-fire step below posts the
+          # marker atomically before the routine POST, so this count
+          # includes any reservation held by an earlier serialized run.
+          pending=$(( attempts - fix_prs ))
+          if (( pending > 0 )); then
+            echo "A fix-main routine for #${issue} is already in flight (attempts=${attempts}, PRs=${fix_prs}); not asking for another."
+          elif [[ "$open_fixes" != "0" ]]; then
             echo "A fix-main PR for #${issue} is already open; not asking for another."
           elif (( attempts >= MAX_FIX_ATTEMPTS )); then
             echo "Already asked for ${attempts} fixes on #${issue}; leaving it to a human."
@@ -135,15 +168,44 @@ jobs:
             echo "fire=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Note that fix-main dispatch is gated
+        if: steps.issue.outputs.fire == 'true' && vars.MAIN_HEALTH_ENABLE_FIX_MAIN != 'true'
+        run: |
+          echo "The repository variable MAIN_HEALTH_ENABLE_FIX_MAIN is not 'true'; the fix-main routine dispatch is gated."
+          echo "The routine prompt at claude.ai/code/routines is edited by hand and is not synced from the repo. A fix-main POST that returns 2xx while the stored prompt does not yet recognise the task would still burn one of the ${MAX_FIX_ATTEMPTS} attempts without producing a PR, and the workflow cannot verify the stored prompt from here."
+          echo "Set MAIN_HEALTH_ENABLE_FIX_MAIN=true once docs/pr-agent-routine-prompt.md has been pasted into the routine."
+
       - uses: actions/checkout@v5
-        if: steps.issue.outputs.fire == 'true'
+        if: steps.issue.outputs.fire == 'true' && vars.MAIN_HEALTH_ENABLE_FIX_MAIN == 'true'
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
+      - name: Reserve the fix attempt
+        id: reserve
+        if: steps.issue.outputs.fire == 'true' && vars.MAIN_HEALTH_ENABLE_FIX_MAIN == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ steps.issue.outputs.issue }}
+          ATTEMPT: ${{ steps.issue.outputs.attempt }}
+        run: |
+          set -euo pipefail
+          # Reserve BEFORE the fire so the FIRED_MARKER is already visible to
+          # any concurrently queued run before the routine POST is sent. With
+          # the ``main-health`` concurrency group serialising runs and the
+          # pre-check's ``pending > 0`` gate above, this posts an atomic
+          # reservation the next queued run must observe. The release step
+          # below deletes the reservation if the routine rejects the POST.
+          comment_id=$(gh api "repos/$REPO/issues/$ISSUE/comments" \
+            --method POST \
+            --field "body=Asked the PR agent for a fix PR (attempt ${ATTEMPT} of ${MAX_FIX_ATTEMPTS}). ${FIRED_MARKER}" \
+            --jq '.id')
+          echo "comment_id=$comment_id" >> "$GITHUB_OUTPUT"
+
       - name: Ask the PR agent for a fix
         id: fire
-        if: steps.issue.outputs.fire == 'true'
+        if: steps.issue.outputs.fire == 'true' && vars.MAIN_HEALTH_ENABLE_FIX_MAIN == 'true'
         uses: ./.github/actions/fire-routine
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
@@ -155,13 +217,15 @@ jobs:
             Workflow run: ${{ github.event.workflow_run.id }}
             Head SHA: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Record the fix attempt
-        if: steps.fire.outputs.fired == 'true'
+      - name: Release the reservation if the routine rejected the request
+        if: always() && steps.reserve.outputs.comment_id != '' && steps.fire.outputs.fired != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          ISSUE: ${{ steps.issue.outputs.issue }}
-          ATTEMPT: ${{ steps.issue.outputs.attempt }}
+          COMMENT_ID: ${{ steps.reserve.outputs.comment_id }}
         run: |
-          gh issue comment "$ISSUE" --repo "$REPO" \
-            --body "Asked the PR agent for a fix PR (attempt ${ATTEMPT} of ${MAX_FIX_ATTEMPTS}). ${FIRED_MARKER}"
+          # An accepted POST records the reservation as this attempt. When the
+          # routine provider rejects the POST (or the credentials are missing),
+          # delete the reservation so the next run can retry without burning an
+          # attempt for a routine session that never began.
+          gh api --method DELETE "repos/$REPO/issues/comments/$COMMENT_ID"
