@@ -33,14 +33,23 @@ runs:
         gh workflow run test-main.yml --repo "$REPO" --ref main
         echo "Dispatched Full tests on main after merging #${PR}."
         # deploy-website.yml deploys on pushes that touch website/**. The
-        # files endpoint is paginated so a large PR can't hide the change;
-        # the list is captured first because grep -q exiting early would
-        # SIGPIPE gh and fail the pipeline under pipefail. Renames put the
-        # new path in .filename and the old path in .previous_filename, so
-        # both are scanned: a file renamed OUT of website/ still removed
-        # content from the site and needs the deploy.
-        files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate \
-          --jq '.[] | (.filename, .previous_filename) | select(. != null)')
+        # list-pull-request-files REST endpoint caps at 3,000 files even
+        # with --paginate, so a mega-PR could hide a website/ change past
+        # that boundary. Read the squash-merge commit from git instead,
+        # which has no such cap; the workflow's checkout is shallow, so
+        # deepen it to make the merge commit and its parent available
+        # (GitHub's uploadpack.allowReachableSHA1InWant is on by default).
+        # --no-renames expands a rename to delete+add so a file renamed
+        # OUT of website/ still surfaces its old path.
+        merge_sha=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha')
+        if [[ -z "$merge_sha" || "$merge_sha" == "null" ]]; then
+          echo "PR #${PR} has no merge_commit_sha; skipping the website-deploy check."
+          exit 0
+        fi
+        if ! git cat-file -e "${merge_sha}^{commit}" 2>/dev/null; then
+          git fetch --depth=2 origin "$merge_sha"
+        fi
+        files=$(git show --no-renames --name-only --format='' "$merge_sha")
         if grep -q '^website/' <<< "$files"; then
           gh workflow run deploy-website.yml --repo "$REPO" --ref main
           echo "Dispatched the website deploy: #${PR} changed website/."

@@ -739,8 +739,12 @@ def test_every_bot_merge_starts_the_post_merge_suite():
     action = _read(POST_MERGE_ACTION)
     assert 'gh workflow run test-main.yml --repo "$REPO" --ref main' in action
     assert "deploy-website.yml" in action
-    # A rename OUT of website/ (new path elsewhere, old path only in
-    # .previous_filename) still removed content from the site, so both
-    # fields must feed the website-deploy check.
-    assert ".previous_filename" in action
+    # The list-pull-request-files REST endpoint caps at 3,000 files even
+    # with --paginate, so a mega-PR could hide a website/ change past that
+    # boundary. Read the squash-merge commit from git instead, which has
+    # no such cap. --no-renames expands a rename to delete+add so a file
+    # renamed OUT of website/ still surfaces its old path.
+    assert "merge_commit_sha" in action
+    assert "git show --no-renames --name-only" in action
+    assert "gh api \"repos/$REPO/pulls/$PR/files\"" not in action
     assert "workflow_dispatch" in _read(FULL_TEST_WORKFLOW)
