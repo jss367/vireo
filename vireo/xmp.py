@@ -362,6 +362,21 @@ def _parse_xmp(xmp_path):
     return tree.getroot(), tree
 
 
+def _all_top_descriptions(root):
+    """Return every top-level ``rdf:Description``, ignoring photo scoping.
+
+    Nested Descriptions (struct values inside a property) are not included --
+    their attributes belong to that struct, not to any top-level subject.
+    """
+    if root.tag == f"{{{NS_RDF}}}RDF":
+        rdfs = [root]
+    else:
+        rdfs = root.findall(f"{{{NS_RDF}}}RDF")
+    return [
+        desc for rdf in rdfs for desc in rdf.findall(f"{{{NS_RDF}}}Description")
+    ]
+
+
 def _description_subject(desc):
     """Return the ``(rdf:about, rdf:nodeID)`` tuple identifying a Description.
 
@@ -390,21 +405,6 @@ def _photo_subject(root):
     if any(_description_subject(d) == empty for d in descriptions):
         return empty
     return _description_subject(descriptions[0])
-
-
-def _all_top_descriptions(root):
-    """Return every top-level ``rdf:Description``, ignoring photo scoping.
-
-    Nested Descriptions (struct values inside a property) are not included --
-    their attributes belong to that struct, not to any top-level subject.
-    """
-    if root.tag == f"{{{NS_RDF}}}RDF":
-        rdfs = [root]
-    else:
-        rdfs = root.findall(f"{{{NS_RDF}}}RDF")
-    return [
-        desc for rdf in rdfs for desc in rdf.findall(f"{{{NS_RDF}}}Description")
-    ]
 
 
 def _top_descriptions(root):
