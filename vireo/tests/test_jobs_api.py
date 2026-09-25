@@ -4324,6 +4324,90 @@ def test_jobs_regroup_cancel_breaks_workspace_regroup_lock_wait(
     assert saved == [], "regroup should not have run its save after cancel"
 
 
+def test_jobs_regroup_rechecks_cancel_after_acquiring_regroup_lock(
+    app_and_db, monkeypatch,
+):
+    """A Cancel that lands while ``acquire()`` succeeds (uncontended, or as
+    the previous holder releases) never reaches the polling loop's check, so
+    the job must recheck right after acquiring — before the feature load."""
+    import pipeline
+    import pipeline_locks
+
+    app, db = app_and_db
+    runner = app._job_runner
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": 1}], saved)
+    loaded = []
+    monkeypatch.setattr(
+        pipeline, "load_photo_features",
+        lambda *a, **k: loaded.append(1) or [{"id": 1}],
+    )
+    job_ids = []
+
+    class _CancelOnAcquire:
+        def acquire(self, timeout=-1):
+            while not job_ids:
+                time.sleep(0.01)
+            runner.cancel_job(job_ids[0])
+            return True
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(
+        pipeline_locks, "acquire_workspace_regroup",
+        lambda ws_id: _CancelOnAcquire(),
+    )
+    with app.test_client() as client:
+        job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+        job_ids.append(job_id)
+        job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "cancelled"
+    assert loaded == [], "feature load ran after a cancel observed at acquire"
+    assert saved == []
+
+
+def test_jobs_regroup_pause_does_not_hold_workspace_regroup_lock(
+    app_and_db, monkeypatch,
+):
+    """A Pause requested while the job holds the workspace regroup lock must
+    not park the worker inside the lock: ``is_cancelled`` sleeps through a
+    pause, which kept every same-workspace pipeline and grouping edit out of
+    its regroup critical section until the user resumed."""
+    import threading
+
+    import pipeline
+    from pipeline_locks import acquire_workspace_regroup
+
+    app, db = app_and_db
+    runner = app._job_runner
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": 1}], saved)
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    def _blocking_load(*a, **k):
+        entered.set()
+        assert proceed.wait(10)
+        return [{"id": 1}]
+
+    monkeypatch.setattr(pipeline, "load_photo_features", _blocking_load)
+    lock = acquire_workspace_regroup(db._active_workspace_id)
+    with app.test_client() as client:
+        job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+        assert entered.wait(10), "regroup never reached the feature load"
+        assert runner.pause_job(job_id) is True
+        proceed.set()
+        # The job must finish its locked section and release the lock
+        # despite the pending pause.
+        assert lock.acquire(timeout=10), "paused regroup kept the regroup lock"
+        lock.release()
+        assert saved == [db._active_workspace_id]
+        assert runner.resume_job(job_id) is True
+        job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "completed"
+
+
 def test_jobs_regroup_coverage_uses_photo_snapshot(app_and_db, monkeypatch):
     """The regroup job stamps the workspace fingerprint from the loaded
     photo snapshot, not by re-resolving collection membership. If a smart

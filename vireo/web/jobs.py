@@ -843,12 +843,29 @@ def create_jobs_blueprint(
             # pipeline's regroup + misses stages even after the user
             # cancelled it. Short-timeout polling lets ``JobRunner.cancel``
             # reach this job promptly, and ``is_cancelled`` honours the
-            # cooperative pause between attempts.
+            # cooperative pause between attempts — only while the lock is
+            # NOT held.
+            #
+            # Inside the lock, cancellation is probed with the non-waiting
+            # ``cancellation_requested``: ``is_cancelled`` sleeps through a
+            # Pause, and pausing here would keep every same-workspace
+            # pipeline and grouping edit out of its regroup critical
+            # section until the user resumed. The locked section is seconds
+            # of in-memory math, so a Pause that arrives there is honoured
+            # by ``JobRunner`` after the worker returns, with the lock
+            # already released.
+            if ctx.runner.is_cancelled(job["id"]):
+                return {}
             workspace_regroup_lock = acquire_workspace_regroup(ctx.workspace_id)
             while not workspace_regroup_lock.acquire(timeout=0.2):
                 if ctx.runner.is_cancelled(job["id"]):
                     return {}
             try:
+                # A Cancel that landed just before an uncontended acquire (or
+                # while the previous holder was releasing) never reached the
+                # polling loop's check; recheck before the feature load.
+                if ctx.runner.cancellation_requested(job["id"]):
+                    return {}
                 photos = load_photo_features(
                     thread_db, collection_id=collection_id, config=effective_cfg,
                 )
@@ -876,7 +893,7 @@ def create_jobs_blueprint(
                 # panel can show per-cut-point details for each encounter on the
                 # very first load (not only after the user drags a live-tuning
                 # slider). Cost is negligible (~300B per adjacent pair).
-                if ctx.runner.is_cancelled(job["id"]):
+                if ctx.runner.cancellation_requested(job["id"]):
                     return {}
                 results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
                 summary = results.get("summary", {})
@@ -890,7 +907,7 @@ def create_jobs_blueprint(
                     {"phase": "Saving results", "current": 2, "total": 3},
                 )
 
-                if ctx.runner.is_cancelled(job["id"]):
+                if ctx.runner.cancellation_requested(job["id"]):
                     return {}
                 cache_dir = os.path.dirname(db_path)
                 save_results(results, cache_dir, ctx.workspace_id)
