@@ -494,18 +494,22 @@ def test_superseded_and_inconclusive_runs_do_not_drive_the_issue():
     assert '"$latest_id" != "$RUN_ID"' in workflow
 
 
-def test_only_a_new_incident_asks_for_a_fix():
+def test_each_incident_gets_one_accepted_fix_request():
     workflow = _read(MAIN_HEALTH_WORKFLOW)
     prompt = _read(ROOT / "docs/pr-agent-routine-prompt.md")
+    steps = _main_health_steps()
 
-    # One automatic attempt per incident: ``fire=true`` is set only in the
-    # branch that creates the issue, so later red runs never fire again and
-    # there is no reservation or retry state to get wrong.
-    run = next(step["run"] for step in _main_health_steps() if step.get("id") == "issue")
-    assert run.count('echo "fire=true"') == 1
-    create_branch = run.split('if [[ -z "$issue" ]]; then', 1)[1].split("else", 1)[0]
-    assert "gh issue create" in create_branch
-    assert 'echo "fire=true"' in create_branch
+    # Fire unless the issue already records an accepted request, counting
+    # only this workflow's own comments (anyone can comment on the issue).
+    run = next(step["run"] for step in steps if step.get("id") == "issue")
+    assert 'github-actions[bot]' in run
+    assert "$REQUESTED_MARKER" in run
+    assert "if (( requested == 0 )); then" in run
+    # The record is written only after the routine accepted the fire, so a
+    # gated-off or rejected dispatch is retried on the next red run.
+    record = next(step for step in steps if step.get("name") == "Record the fix request on the issue")
+    assert record["if"] == "steps.fire.outputs.fired == 'true'"
+    assert "${REQUESTED_MARKER}" in record["run"]
     assert "Task: fix-main" in workflow
     assert "## Task: `fix-main`" in prompt
     assert "| `fix-main`" in prompt

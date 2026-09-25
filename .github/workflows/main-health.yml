@@ -9,12 +9,12 @@ name: Main health
 # while main is failing (each newer failing run comments on it) and closes it
 # on the next green run.
 #
-# When a failing run opens a new ``main-red`` issue, and only then, it also
-# asks the PR agent routine for a fix PR (``Task: fix-main``, labelled
-# ``fix-main``). One automatic attempt per incident keeps this free of
-# reservation and retry bookkeeping; later failures only update the issue,
-# and closing the issue while main is still red makes the next red run open
-# a fresh incident and try again.
+# It also asks the PR agent routine for a fix PR (``Task: fix-main``,
+# labelled ``fix-main``) once per incident: a failing run fires unless the
+# issue already records an accepted request, so a first dispatch that was
+# gated off or rejected is retried on the next red run, and nothing else is.
+# Closing the issue while main is still red makes the next red run open a
+# fresh incident and ask again.
 #
 # The dispatch is gated on the ``MAIN_HEALTH_ENABLE_FIX_MAIN`` repository
 # variable because the routine prompt at claude.ai/code/routines is pasted in
@@ -42,6 +42,7 @@ concurrency:
 env:
   RED_LABEL: main-red
   FIX_LABEL: fix-main
+  REQUESTED_MARKER: "<!-- main-health-fix-requested -->"
 
 jobs:
   report:
@@ -127,12 +128,25 @@ jobs:
             url=$(gh issue create --repo "$REPO" --label "$RED_LABEL" \
               --title "Full tests failing on main" --body-file "$body")
             issue=${url##*/}
-            # A new incident gets one automatic fix attempt.
-            echo "fire=true" >> "$GITHUB_OUTPUT"
           else
             gh issue comment "$issue" --repo "$REPO" --body-file "$body"
           fi
           echo "issue=$issue" >> "$GITHUB_OUTPUT"
+
+          # One accepted fix request per incident. The record comment below is
+          # written only after the routine accepts the fire, so an incident
+          # whose first dispatch was gated off or rejected asks again on its
+          # next red run. Runs are serialized, so the comment is always visible
+          # to the next one. Only this workflow's own comments count: anyone
+          # can comment on a public issue.
+          requested=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$REQUESTED_MARKER\")))] | length" \
+            | awk '{s += $1} END {print s + 0}')
+          if (( requested == 0 )); then
+            echo "fire=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "A fix was already requested for #${issue}; close the issue to start a new incident."
+          fi
 
       - name: Note that fix-main dispatch is gated
         if: steps.issue.outputs.fire == 'true' && vars.MAIN_HEALTH_ENABLE_FIX_MAIN != 'true'
@@ -169,4 +183,4 @@ jobs:
           ISSUE: ${{ steps.issue.outputs.issue }}
         run: |
           gh issue comment "$ISSUE" --repo "$REPO" \
-            --body "Asked the PR agent for a fix PR (label \`fix-main\`). To try again later, close this issue; the next red run opens a new one."
+            --body "Asked the PR agent for a fix PR (label \`fix-main\`). To try again later, close this issue; the next red run opens a new one. ${REQUESTED_MARKER}"
