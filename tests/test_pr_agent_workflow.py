@@ -585,6 +585,36 @@ def test_stale_fix_main_reservations_expire_so_subsequent_attempts_are_allowed()
     assert 'select(($now - (. | fromdate)) < $ttl)' in workflow
 
 
+def test_fix_prs_pending_pairing_uses_the_same_ttl_window_as_reservations():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # ``pending = recent_attempts - fix_prs`` must compare like with like.
+    # If ``fix_prs`` counts every fix-main PR ever opened for this incident
+    # while ``recent_attempts`` only counts reservations posted within
+    # ``RESERVATION_TTL_SECS``, an old closed/merged fix PR from an
+    # expired reservation masks a fresh reservation whose routine has not
+    # yet published its PR: ``recent_attempts = 1`` for the new marker,
+    # ``fix_prs = 1`` for the stale PR, ``pending = 0`` -> the gate lets
+    # a second concurrent red run fire a duplicate routine session.
+    # ``fix_prs`` must therefore also be TTL-scoped by ``createdAt``.
+    # ``open_fixes`` stays untimed on purpose: an open PR blocks firing
+    # regardless of when it was created.
+    assert "fix_prs=$(gh pr list" in workflow
+    reservation_section = workflow.split("recent_attempts=$(gh api", 1)[1]
+    fix_prs_section = reservation_section.split("fix_prs=$(gh pr list", 1)[1].split(
+        "pending=$(( recent_attempts - fix_prs ))", 1
+    )[0]
+    assert "--json body,createdAt" in fix_prs_section
+    assert ".createdAt" in fix_prs_section
+    assert '--argjson ttl "$RESERVATION_TTL_SECS"' in fix_prs_section
+    assert 'select(($now - (. | fromdate)) < $ttl)' in fix_prs_section
+    open_fixes_section = workflow.split("open_fixes=$(gh pr list", 1)[1].split(
+        "attempts=$(gh api", 1
+    )[0]
+    assert "createdAt" not in open_fixes_section
+    assert "fromdate" not in open_fixes_section
+
+
 def test_fix_attempt_marker_counts_only_workflow_authored_comments():
     workflow = _read(MAIN_HEALTH_WORKFLOW)
 

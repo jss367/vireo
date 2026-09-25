@@ -145,12 +145,6 @@ jobs:
           open_fixes=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state open \
             --json body \
             --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\"))] | length")
-          # Every fix-main PR (open, merged, or closed) that has ever been
-          # opened for this incident. Compared against attempts below to detect
-          # a routine that has been asked but not yet published its PR.
-          fix_prs=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state all \
-            --json body \
-            --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\"))] | length")
           # Only count marker comments authored by this workflow's bot
           # identity. Otherwise, since this is a public repo, any commenter
           # could post $FIRED_MARKER three times to force ``attempts`` past
@@ -179,16 +173,30 @@ jobs:
           # (the routine's own diagnose-and-publish takes minutes, not
           # hours). Stale reservations still count in ``attempts`` above
           # so they still charge against MAX_FIX_ATTEMPTS.
+          #
+          # ``fix_prs`` is scoped to the same TTL window so ``pending``
+          # compares like with like: an old fix-main PR whose reservation
+          # has already expired would otherwise mask a fresh reservation
+          # whose routine has not yet published its PR (``recent_attempts
+          # = 1`` for the new marker, ``fix_prs = 1`` for the stale PR,
+          # ``pending = 0``), letting a second concurrent red run fire a
+          # duplicate session. ``open_fixes`` above stays untimed because
+          # an open PR blocks firing regardless of when it was created.
           RESERVATION_TTL_SECS=7200
           now_epoch=$(date -u +%s)
           recent_attempts=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
             --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$FIRED_MARKER\"))) | .created_at]" \
             | jq -s --argjson now "$now_epoch" --argjson ttl "$RESERVATION_TTL_SECS" \
               '[.[][] | select(($now - (. | fromdate)) < $ttl)] | length')
+          fix_prs=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state all \
+            --json body,createdAt \
+            --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\")) | .createdAt]" \
+            | jq -s --argjson now "$now_epoch" --argjson ttl "$RESERVATION_TTL_SECS" \
+              '[.[][] | select(($now - (. | fromdate)) < $ttl)] | length')
           pending=$(( recent_attempts - fix_prs ))
           if (( pending < 0 )); then pending=0; fi
           if (( pending > 0 )); then
-            echo "A fix-main routine for #${issue} is already in flight (attempts=${attempts}, PRs=${fix_prs}); not asking for another."
+            echo "A fix-main routine for #${issue} is already in flight (attempts=${attempts}, recent PRs=${fix_prs}); not asking for another."
           elif [[ "$open_fixes" != "0" ]]; then
             echo "A fix-main PR for #${issue} is already open; not asking for another."
           elif (( attempts >= MAX_FIX_ATTEMPTS )); then
