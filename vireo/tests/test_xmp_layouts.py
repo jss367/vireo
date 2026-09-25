@@ -397,6 +397,54 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_absolute_uri_fragment_does_not_hide_photo_subject(tmp_path):
+    """A ``uuid:photo#thumbnail`` sibling doesn't ambiguate ``uuid:photo``.
+
+    RFC 3986 fragments can appear anywhere in a URI, not only as a
+    leading ``#``: ``uuid:photo#thumbnail`` names a resource *inside*
+    the packet, distinct from the enclosing photo. The photo-subject
+    filter must reject any URI carrying a ``#``, so the packet's
+    ``uuid:photo`` Description is the sole photo candidate. Otherwise
+    the preview hides the valid rating and writes create a conflicting
+    empty-subject copy.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='uuid:photo#thumbnail'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='1'/>"
+        f"<rdf:Description rdf:about='uuid:photo'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path = str(path)
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["rating"] == "4"
+
+    write_rating(path, 5)
+
+    root = ET.parse(path).getroot()
+    thumb = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "uuid:photo#thumbnail"
+    ]
+    photo_uuid = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "uuid:photo"
+    ]
+    assert thumb[0].get(RATING) == "1"
+    stored = photo_uuid[0].get(RATING) or photo_uuid[0].findtext(RATING)
+    assert stored == "5"
+
+    fresh = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if (d.get(f"{{{NS_RDF}}}about") or "") == ""
+    ]
+    assert fresh == []
+
+
 def test_multiple_non_fragment_subjects_stay_ambiguous(tmp_path):
     """Two non-fragment ``rdf:about`` values still refuse to guess a photo.
 
@@ -2855,6 +2903,68 @@ def test_remove_location_preserves_qualified_exact_duplicate(tmp_path):
     assert len(remaining) == 1
     assert (remaining[0].find(f"{{{NS_RDF}}}value").text or "") == "Paris"
     assert remaining[0].findtext(f"{{{foo_ns}}}source") == "user"
+
+
+def test_remove_location_falls_back_past_qualified_exact_duplicate(tmp_path):
+    """A qualified exact duplicate must not block the normalized-owned fallback.
+
+    Vireo's ownership marker records the exact leaf spelling. If a
+    later tool rewrote Vireo's plain entry (say ``Paris`` → ``paris``)
+    AND then a user added a qualified exact ``Paris`` next to it, the
+    old ``any_exact`` check saw the qualified match, suppressed the
+    normalized fallback, and did nothing -- so cleanup cleared the
+    ownership markers while Vireo's ``paris`` sat there permanently.
+    The fallback now runs whenever no *plain* exact match exists,
+    which removes the owned spelling variant and leaves the qualified
+    duplicate untouched.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}' xmlns:vireo='{NS_VIREO}'"
+        f" xmlns:foo='{foo_ns}'"
+        f" vireo:locationKeywords='Places|Paris'"
+        f" vireo:locationKeywordsOwned='flat,hier'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>paris</rdf:li>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>Paris</rdf:value>"
+        f"<foo:source>user</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject><rdf:Bag>"
+        f"<rdf:li>Places|paris</rdf:li>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>Places|Paris</rdf:value>"
+        f"<foo:source>user</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.remove_vireo_location_keywords()
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # Vireo's owned ``paris`` / ``Places|paris`` are gone; the qualified
+    # user duplicates survive with their ``foo:source`` intact.
+    flat_bag = next(iter(root.iter(SUBJECT))).find(f"{{{NS_RDF}}}Bag")
+    flat_items = list(flat_bag.findall(f"{{{NS_RDF}}}li"))
+    assert len(flat_items) == 1
+    assert (flat_items[0].find(f"{{{NS_RDF}}}value").text or "") == "Paris"
+    assert flat_items[0].findtext(f"{{{foo_ns}}}source") == "user"
+
+    hier_bag = next(iter(root.iter(HIERARCHICAL_SUBJECT))).find(f"{{{NS_RDF}}}Bag")
+    hier_items = list(hier_bag.findall(f"{{{NS_RDF}}}li"))
+    assert len(hier_items) == 1
+    assert (hier_items[0].find(f"{{{NS_RDF}}}value").text or "") == "Places|Paris"
+    assert hier_items[0].findtext(f"{{{foo_ns}}}source") == "user"
 
 
 def test_remove_location_removes_only_one_plain_owned_duplicate(tmp_path):

@@ -483,15 +483,17 @@ def _photo_subject(root):
     "the enclosing resource" -- the photo. When no top-level Description
     carries the empty subject but exactly one non-fragment, non-blank-node,
     non-``rdf:ID`` ``rdf:about`` remains after filtering out clearly
-    auxiliary side-resources (a ``#thumbnail`` fragment, a blank-node
-    ``rdf:nodeID``, a locally-scoped ``rdf:ID``), treat that
+    auxiliary side-resources (any URI carrying a ``#fragment`` component,
+    a blank-node ``rdf:nodeID``, a locally-scoped ``rdf:ID``), treat that
     ``rdf:about`` as the photo's. So a sidecar that pins its Description
-    to ``uuid:photo`` alongside an auxiliary ``#thumbnail`` Description
-    is still handled coherently. When more than one photo-candidate
-    subject remains, refuse to guess from document order and fall back
-    to the empty subject: reads then return nothing rather than an
-    auxiliary resource's rating or GPS, and writes land on a fresh
-    Description that is unambiguously the photo's.
+    to ``uuid:photo`` alongside an auxiliary ``#thumbnail`` or
+    ``uuid:photo#thumbnail`` Description is still handled coherently: a
+    URI with any ``#`` in it names a resource *inside* the packet per
+    RFC 3986, never the enclosing photo. When more than one
+    photo-candidate subject remains, refuse to guess from document order
+    and fall back to the empty subject: reads then return nothing rather
+    than an auxiliary resource's rating or GPS, and writes land on a
+    fresh Description that is unambiguously the photo's.
     """
     empty = ("", "", "")
     descriptions = _all_top_descriptions(root)
@@ -504,7 +506,7 @@ def _photo_subject(root):
         (about, node, rid)
         for (about, node, rid) in subjects
         if about
-        and not about.startswith("#")
+        and "#" not in about
         and not node
         and not rid
     }
@@ -2110,20 +2112,23 @@ class SidecarEditor:
         path_keys = [keyword_match_key(part) for part in path.split("|")]
         removed = []
 
-        # Collect exact matches across every photo-scoped bag first.
-        # If Vireo's own canonical entry lives in one bag and a user
-        # variant lives in another, per-bag fallback would delete both:
-        # the variant as the first bag's fallback (no exact there) and
-        # the canonical from the second. Fall back to a normalized
-        # match only when NO exact match survives anywhere.
-        # Vireo's own writes create plain-text ``<rdf:li>Value</rdf:li>``
-        # entries, never qualified ones. A qualified exact match is
-        # therefore a user- or tool-added duplicate carrying its own
-        # metadata (a ``foo:source``, an ``xml:lang``, etc.), and
-        # removing it would silently discard that data. Prefer plain
-        # exact occurrences; preserve qualified duplicates; only fall
-        # back to a normalized match when no exact match exists
-        # anywhere at all.
+        # Collect PLAIN exact matches across every photo-scoped bag
+        # first. If Vireo's own canonical entry lives in one bag and a
+        # user variant lives in another, per-bag fallback would delete
+        # both: the variant as the first bag's fallback (no exact
+        # there) and the canonical from the second. Fall back to a
+        # normalized match only when no plain exact match survives
+        # anywhere. Vireo's own writes create plain-text
+        # ``<rdf:li>Value</rdf:li>`` entries, never qualified ones. A
+        # qualified exact match is therefore a user- or tool-added
+        # duplicate carrying its own metadata (a ``foo:source``, an
+        # ``xml:lang``, etc.), and removing it would silently discard
+        # that data. Prefer plain exact occurrences; preserve
+        # qualified duplicates; a qualified exact-match duplicate must
+        # NOT suppress the normalized fallback that removes Vireo's
+        # owned spelling variant (say Vireo has plain ``paris`` and a
+        # user added qualified ``Paris``): otherwise the ownership
+        # marker clears while Vireo's ``paris`` stays behind forever.
         if owns_flat and leaf_key:
             flat_bags = list(_photo_scoped_bags(
                 self._root, f"{{{NS_DC}}}subject",
@@ -2144,29 +2149,29 @@ class SidecarEditor:
                 removed.append(_li_value(li))
                 bag.remove(li)
             else:
-                any_exact = any(
-                    _li_value(li) == leaf
-                    for bag in flat_bags
-                    for li in bag.findall(f"{{{NS_RDF}}}li")
-                )
-                if not any_exact:
-                    fallback = None
-                    for bag in flat_bags:
-                        fallback = next(
-                            (
-                                (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
-                                if _li_value(li)
-                                and keyword_match_key(_li_value(li)) == leaf_key
-                                and not _simple_prop_carries_qualifier(li)
-                            ),
-                            None,
-                        )
-                        if fallback is not None:
-                            break
+                # No plain exact match, so Vireo's owned entry (if it
+                # still exists) is a spelling variant that normalizes
+                # to ``leaf_key``. A qualified exact-match duplicate
+                # from another tool must NOT suppress that fallback:
+                # doing so would clear the ownership marker while
+                # leaving Vireo's owned variant behind forever.
+                fallback = None
+                for bag in flat_bags:
+                    fallback = next(
+                        (
+                            (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
+                            if _li_value(li)
+                            and keyword_match_key(_li_value(li)) == leaf_key
+                            and not _simple_prop_carries_qualifier(li)
+                        ),
+                        None,
+                    )
                     if fallback is not None:
-                        bag, li = fallback
-                        removed.append(_li_value(li))
-                        bag.remove(li)
+                        break
+                if fallback is not None:
+                    bag, li = fallback
+                    removed.append(_li_value(li))
+                    bag.remove(li)
 
         if owns_hier:
             hier_bags = list(_photo_scoped_bags(
@@ -2186,33 +2191,30 @@ class SidecarEditor:
                 removed.append(_li_value(li))
                 bag.remove(li)
             else:
-                any_exact = any(
-                    _li_value(li) == path
-                    for bag in hier_bags
-                    for li in bag.findall(f"{{{NS_RDF}}}li")
-                )
-                if not any_exact:
-                    fallback = None
-                    for bag in hier_bags:
-                        fallback = next(
-                            (
-                                (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
-                                if _li_value(li)
-                                and [
-                                    keyword_match_key(s)
-                                    for s in _li_value(li).split("|")
-                                ]
-                                == path_keys
-                                and not _simple_prop_carries_qualifier(li)
-                            ),
-                            None,
-                        )
-                        if fallback is not None:
-                            break
+                # See the flat branch above: a qualified exact
+                # duplicate must not suppress the normalized fallback
+                # that removes Vireo's owned spelling variant.
+                fallback = None
+                for bag in hier_bags:
+                    fallback = next(
+                        (
+                            (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
+                            if _li_value(li)
+                            and [
+                                keyword_match_key(s)
+                                for s in _li_value(li).split("|")
+                            ]
+                            == path_keys
+                            and not _simple_prop_carries_qualifier(li)
+                        ),
+                        None,
+                    )
                     if fallback is not None:
-                        bag, li = fallback
-                        removed.append(_li_value(li))
-                        bag.remove(li)
+                        break
+                if fallback is not None:
+                    bag, li = fallback
+                    removed.append(_li_value(li))
+                    bag.remove(li)
 
         if removed:
             self._dirty = True
