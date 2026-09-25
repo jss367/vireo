@@ -621,6 +621,160 @@ def test_sync_preview_marks_rating_writable_on_ambiguous_subjects(tmp_path):
     assert metadata["rating_writable"] is True
 
 
+def test_updating_qualified_simple_property_preserves_qualifiers(tmp_path):
+    """A qualified ``xmp:Rating`` keeps ``rdf:parseType`` and qualifier siblings.
+
+    When the sidecar spells the rating as
+    ``<xmp:Rating rdf:parseType="Resource"><rdf:value>3</rdf:value>...
+    </xmp:Rating>``, an update must land on the nested ``rdf:value`` while
+    preserving the container's ``parseType`` attribute and every qualifier
+    child. Blowing the children away would strip the qualifiers and leave
+    ``rdf:parseType="Resource"`` on a text-only element -- invalid RDF that
+    a downstream reader may refuse to parse.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>3</rdf:value>"
+        f"<xmp:someQualifier>foo</xmp:someQualifier>"
+        f"</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    assert len(ratings) == 1
+    assert ratings[0].get(f"{{{NS_RDF}}}parseType") == "Resource"
+    rdf_value = ratings[0].find(f"{{{NS_RDF}}}value")
+    assert rdf_value is not None
+    assert rdf_value.text == "5"
+    qualifier = ratings[0].find(f"{{{NS_XMP}}}someQualifier")
+    assert qualifier is not None
+    assert qualifier.text == "foo"
+
+
+def test_rewriting_qualified_simple_property_with_same_value_is_a_noop(tmp_path):
+    """Rewriting a qualified property with its current value changes nothing.
+
+    Before this fix the update path unconditionally wiped the qualifier
+    children even when the caller wrote the value the sidecar already
+    carried, so an idle sync silently corrupted every qualified rating.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>3</rdf:value>"
+        f"<xmp:someQualifier>foo</xmp:someQualifier>"
+        f"</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+    before = path.read_bytes()
+
+    write_rating(path_str, 3)
+
+    assert path.read_bytes() == before
+
+
+def test_collapsing_duplicate_bags_preserves_container_level_qualifiers(tmp_path):
+    """A duplicate ``dc:subject`` carrying ``xml:lang`` survives keyword merges.
+
+    Container-level qualifiers on a property (``xml:lang`` on the
+    ``dc:subject`` element itself, or any other attribute) apply to every
+    ``rdf:li`` inside; folding those items into an unqualified target bag
+    would silently drop the qualifier when the duplicate is removed. Leave
+    the qualified duplicate in place so its meaning survives an ordinary
+    keyword addition; plain duplicates left by earlier writes still
+    collapse into one.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    body = EXIFTOOL_XMP.replace(
+        "</rdf:Description>\n <rdf:Description rdf:about='' xmlns:exif",
+        "</rdf:Description>\n"
+        f" <rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:xml='http://www.w3.org/XML/1998/namespace'>\n"
+        "  <dc:subject xml:lang='en'>"
+        "<rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag>"
+        "</dc:subject>\n"
+        " </rdf:Description>\n"
+        " <rdf:Description rdf:about='' xmlns:exif",
+        1,
+    )
+    path.write_text(body)
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    qualified = [s for s in subjects if s.get(f"{{{xml_ns}}}lang") == "en"]
+    unqualified = [s for s in subjects if s.get(f"{{{xml_ns}}}lang") is None]
+
+    assert len(qualified) == 1
+    q_items = sorted(
+        li.text for li in qualified[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert q_items == ["Sparrow"]
+
+    assert len(unqualified) == 1
+    u_items = sorted(
+        li.text for li in unqualified[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert u_items == ["Heron", "Kiwi"]
+
+
+def test_collapsing_duplicate_bags_preserves_bag_level_qualifiers(tmp_path):
+    """A duplicate whose ``rdf:Bag`` carries an attribute survives keyword merges.
+
+    A qualifier on the bag element applies to every item inside it, so
+    dropping the container when merging its items into an unqualified
+    target would silently discard the qualifier from every value.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    body = EXIFTOOL_XMP.replace(
+        "</rdf:Description>\n <rdf:Description rdf:about='' xmlns:exif",
+        "</rdf:Description>\n"
+        f" <rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:xml='http://www.w3.org/XML/1998/namespace'>\n"
+        "  <dc:subject>"
+        "<rdf:Bag xml:lang='en'><rdf:li>Sparrow</rdf:li></rdf:Bag>"
+        "</dc:subject>\n"
+        " </rdf:Description>\n"
+        " <rdf:Description rdf:about='' xmlns:exif",
+        1,
+    )
+    path.write_text(body)
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    qualified_bags = [
+        bag for bag in root.iter(f"{{{NS_RDF}}}Bag")
+        if bag.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    assert len(qualified_bags) == 1
+    items = sorted(li.text for li in qualified_bags[0].findall(f"{{{NS_RDF}}}li"))
+    assert items == ["Sparrow"]
+
+
 def test_sync_preview_marks_missing_sidecar_rating_unwritable(tmp_path):
     """Missing and unreadable sidecars still report rating_writable=False.
 

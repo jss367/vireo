@@ -865,6 +865,16 @@ class SidecarEditor:
         seen = {_li_signature(li) for li in bag.findall(f"{{{NS_RDF}}}li")}
         for owner, extra in found[1:]:
             extra_bag = extra.find(f"{{{NS_RDF}}}Bag")
+            # Container-level qualifiers (an ``xml:lang`` or any other
+            # attribute on the property element or its ``rdf:Bag``) apply
+            # to every item inside the container; folding the items into
+            # the target bag would silently drop the qualifier when this
+            # duplicate is removed. Leave a qualified container in place
+            # so its meaning survives. Plain duplicates left by earlier
+            # writes still collapse into one, so ExifTool no longer picks
+            # up a stale copy sitting beside the one Vireo wrote.
+            if extra.attrib or (extra_bag is not None and extra_bag.attrib):
+                continue
             if extra_bag is not None:
                 # Copy every item, not just ones with direct text: a
                 # structured value (rdf:parseType="Resource" with an
@@ -905,9 +915,25 @@ class SidecarEditor:
                 if owner.get(name) != value:
                     owner.set(name, value)
                     changed = True
-            elif (child.text or "").strip() != value or len(child):
-                for grandchild in list(child):
-                    child.remove(grandchild)
+            elif len(child):
+                # Qualified property, e.g.
+                #   <xmp:Rating rdf:parseType="Resource">
+                #     <rdf:value>3</rdf:value><...qualifiers.../>
+                #   </xmp:Rating>.
+                # Update the nested ``rdf:value`` instead of blowing away
+                # the children and writing plain text into the container:
+                # that would strip every qualifier and leave
+                # ``rdf:parseType="Resource"`` on a text-only element,
+                # which is invalid RDF.
+                rdf_value = child.find(f"{{{NS_RDF}}}value")
+                if rdf_value is None:
+                    rdf_value = ET.SubElement(child, f"{{{NS_RDF}}}value")
+                    rdf_value.text = value
+                    changed = True
+                elif (rdf_value.text or "") != value:
+                    rdf_value.text = value
+                    changed = True
+            elif (child.text or "").strip() != value:
                 child.text = value
                 changed = True
             for owner, child in found[1:]:
