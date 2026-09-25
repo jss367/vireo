@@ -976,6 +976,66 @@ def test_added_keywords_do_not_inherit_first_bag_qualifier(tmp_path):
     assert u_items == ["Heron", "Kiwi"]
 
 
+def test_description_level_xml_lang_counts_as_a_container_qualifier(tmp_path):
+    """A ``xml:lang`` on the owning Description still qualifies the array.
+
+    ``xml:lang`` (and other ``xml:*`` attributes such as ``xml:base``) are
+    inherited by every descendant, so a language declared on
+    ``rdf:Description`` applies to every ``rdf:li`` inside its
+    ``dc:subject`` bag just as if it were on the property or the bag
+    itself. If merging or target selection ignored that inherited
+    qualifier, a Description-qualified duplicate would be picked as the
+    unqualified target, its language would silently attach to newly
+    added keywords, and an actually unqualified duplicate's items would
+    be moved into the qualified Description and their original property
+    removed.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+
+    qualified_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    assert len(qualified_descs) == 1
+    q_items = sorted(
+        li.text for li in qualified_descs[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert q_items == ["Sparrow"]
+
+    unqualified_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") is None
+    ]
+    u_items = sorted(
+        li.text
+        for d in unqualified_descs
+        for li in d.iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert u_items == ["Heron", "Kiwi"]
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

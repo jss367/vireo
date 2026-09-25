@@ -28,6 +28,7 @@ NS_XMP = "http://ns.adobe.com/xap/1.0/"
 NS_XMPDM = "http://ns.adobe.com/xmp/1.0/DynamicMedia/"
 NS_EXIF = "http://ns.adobe.com/exif/1.0/"
 NS_VIREO = "https://vireo.app/ns/1.0/"
+NS_XML = "http://www.w3.org/XML/1998/namespace"
 
 # Register namespaces so ET preserves prefixes on output
 ET.register_namespace("x", NS_X)
@@ -874,22 +875,35 @@ class SidecarEditor:
             for child in owner.findall(tag)
         ]
 
-        def _prop_is_qualified(prop):
+        def _owner_inherits_qualifier(owner):
+            # ``xml:lang``, ``xml:base`` and ``xml:space`` are inherited by
+            # every descendant. When one is set on the owning Description
+            # (rather than on the property or its ``rdf:Bag``) it still
+            # applies to the items inside, so a Description-level
+            # qualifier must count the property as qualified.
+            return any(name.startswith(f"{{{NS_XML}}}") for name in owner.attrib)
+
+        def _prop_is_qualified(owner, prop):
             bag_el = prop.find(f"{{{NS_RDF}}}Bag")
-            return bool(prop.attrib) or (bag_el is not None and bool(bag_el.attrib))
+            return (
+                _owner_inherits_qualifier(owner)
+                or bool(prop.attrib)
+                or (bag_el is not None and bool(bag_el.attrib))
+            )
 
         if found:
             # Pick an unqualified target so newly added items don't
             # inherit a container-level qualifier (an ``xml:lang`` on the
-            # property element or its ``rdf:Bag``, or any other RDF
-            # attribute) that applies to every ``rdf:li`` under it. If
-            # every existing occurrence is qualified, create a fresh
-            # unqualified property under ``desc`` so new items land
-            # somewhere they carry no inherited qualifier; the qualified
-            # copies are left alone in the loop below.
+            # owning Description, on the property element, or on its
+            # ``rdf:Bag``, or any other RDF attribute) that applies to
+            # every ``rdf:li`` under it. If every existing occurrence is
+            # qualified, create a fresh unqualified property under
+            # ``desc`` so new items land somewhere they carry no
+            # inherited qualifier; the qualified copies are left alone
+            # in the loop below.
             unqualified_idx = next(
-                (i for i, (_, child) in enumerate(found)
-                 if not _prop_is_qualified(child)),
+                (i for i, (owner, child) in enumerate(found)
+                 if not _prop_is_qualified(owner, child)),
                 None,
             )
             if unqualified_idx is None:
@@ -910,14 +924,19 @@ class SidecarEditor:
                 continue
             extra_bag = extra.find(f"{{{NS_RDF}}}Bag")
             # Container-level qualifiers (an ``xml:lang`` or any other
-            # attribute on the property element or its ``rdf:Bag``) apply
-            # to every item inside the container; folding the items into
-            # the target bag would silently drop the qualifier when this
-            # duplicate is removed. Leave a qualified container in place
-            # so its meaning survives. Plain duplicates left by earlier
-            # writes still collapse into one, so ExifTool no longer picks
-            # up a stale copy sitting beside the one Vireo wrote.
-            if extra.attrib or (extra_bag is not None and extra_bag.attrib):
+            # attribute on the owning Description, the property element,
+            # or its ``rdf:Bag``) apply to every item inside the
+            # container; folding the items into the target bag would
+            # silently drop the qualifier when this duplicate is
+            # removed. Leave a qualified container in place so its
+            # meaning survives. Plain duplicates left by earlier writes
+            # still collapse into one, so ExifTool no longer picks up a
+            # stale copy sitting beside the one Vireo wrote.
+            if (
+                _owner_inherits_qualifier(owner)
+                or extra.attrib
+                or (extra_bag is not None and extra_bag.attrib)
+            ):
                 continue
             if extra_bag is not None:
                 # Copy every item, not just ones with direct text: a
