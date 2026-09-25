@@ -2403,6 +2403,92 @@ def test_ancestor_xml_space_does_not_block_bag_reuse(tmp_path):
             assert d.get(f"{{{xml_ns}}}space") != ""
 
 
+def test_qualified_rdf_li_can_be_removed_and_replaced(tmp_path):
+    """Removal and hierarchy replacement match on the resolved ``rdf:li`` value.
+
+    A qualified ``rdf:li`` stores its value in a nested ``rdf:value``
+    (or attribute). Matching on ``li.text`` misses it, so removal
+    and hierarchy replacement silently leave the qualified item in
+    place. Use ``_li_value`` for matching and update the existing
+    value spelling for replacements.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>Heron</rdf:value>"
+        f"</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject><rdf:Bag>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>Birds|Heron</rdf:value>"
+        f"</rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # Hierarchy replacement: qualified rdf:li's nested value is updated
+    # in place; li.text was whitespace so before the fix nothing happened.
+    editor = SidecarEditor(path_str)
+    editor.replace_keyword_hierarchies({"Birds|Heron": "Waterbirds|Heron"})
+    editor.commit()
+    assert read_hierarchical_keywords(path_str) == ["Waterbirds|Heron"]
+
+    # Removal: qualified rdf:li is matched via _li_value and removed.
+    editor = SidecarEditor(path_str)
+    editor.remove_keywords({"Heron"})
+    editor.commit()
+    assert read_keywords(path_str) == set()
+    assert read_hierarchical_keywords(path_str) == []
+
+
+def test_ancestor_xml_base_does_not_block_bag_reuse(tmp_path):
+    """``xml:base`` inheritance no longer forces a fresh photo Description.
+
+    ``xml:base`` affects URI resolution, not the semantics of a
+    literal keyword or numeric value. Treating it as a qualifier
+    made ``_unqualified_photo_description`` create a fresh
+    Description on every sync of an XMP that declared
+    ``xml:base`` on ``rdf:RDF``, silently accumulating duplicate
+    bags. It's no longer tracked; only ``xml:lang`` blocks reuse.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:base='https://example.com/'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    for keyword in ("Kiwi", "Owl", "Sparrow"):
+        editor = SidecarEditor(path_str)
+        editor.add_keywords({keyword}, set())
+        editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    assert len(subjects) == 1
+    items = sorted(
+        li.text for li in subjects[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert items == ["Heron", "Kiwi", "Owl", "Sparrow"]
+
+    # The inherited ``xml:base`` on ``rdf:RDF`` survives; no reset was written.
+    xml_base = f"{{{xml_ns}}}base"
+    for d in root.iter(f"{{{NS_RDF}}}Description"):
+        assert xml_base not in d.attrib
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

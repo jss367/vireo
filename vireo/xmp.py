@@ -598,20 +598,20 @@ def _walk_ancestors(elem, parent_map):
 def _ancestor_carries_xml_qualifier(elem, parent_map):
     """True if elem or any ancestor carries an *effective* value-qualifying ``xml:*``.
 
-    Only attributes that change a value's meaning are checked:
-    ``xml:lang`` (language tag) and ``xml:base`` (base URI). Those
-    are the ones that would silently alter a numeric rating, GPS
-    coordinate or keyword when they get inherited. ``xml:space`` is
-    a serialization/whitespace directive, not a value qualifier, so
-    a Description carrying an inherited ``xml:space`` is still
-    perfectly good to reuse as an unqualified target.
+    Only ``xml:lang`` is checked: it's the one ``xml:*`` attribute
+    that changes the meaning of a literal value (a rating, a GPS
+    coordinate, a keyword). ``xml:space`` is a whitespace directive
+    and ``xml:base`` affects URI resolution -- neither would silently
+    alter a literal keyword or numeric value. A Description that
+    only inherits ``xml:space`` or ``xml:base`` is still a perfectly
+    good target for keyword and simple-property writes.
 
     A closer element with an empty value (``xml:lang=""``) cancels
     an outer inherited value, so the check computes the *effective*
     setting for each attribute name and only returns True when at
     least one effective value is non-empty.
     """
-    tracked = {f"{{{NS_XML}}}lang", f"{{{NS_XML}}}base"}
+    tracked = {f"{{{NS_XML}}}lang"}
     effective = {}
     for ancestor in _walk_ancestors(elem, parent_map):
         for name, value in ancestor.attrib.items():
@@ -1584,15 +1584,14 @@ class SidecarEditor:
         for bag in _photo_scoped_bags(self._root, f"{{{NS_LR}}}hierarchicalSubject"):
             seen = set()
             for li in list(bag.findall(f"{{{NS_RDF}}}li")):
-                old = li.text or ''
+                old = _li_value(li) or ''
                 value = by_key.get(key(old), old)
                 if value is None or value in seen:
                     bag.remove(li)
                     self._dirty = True
                     continue
                 seen.add(value)
-                if value != old:
-                    li.text = value
+                if value != old and _update_simple_property_value(li, value):
                     self._dirty = True
 
     def remove_keywords(self, keywords_to_remove, *, hierarchical=True,
@@ -1629,10 +1628,11 @@ class SidecarEditor:
 
         for bag in _photo_scoped_bags(self._root, f"{{{NS_DC}}}subject"):
             for li in bag.findall(f"{{{NS_RDF}}}li"):
-                if not li.text or li.text in exact:
+                value = _li_value(li)
+                if not value or value in exact:
                     continue
-                if keyword_match_key(li.text) in remove_keys:
-                    removed.append(li.text)
+                if keyword_match_key(value) in remove_keys:
+                    removed.append(value)
                     bag.remove(li)
 
         # Hierarchical entries match if any pipe-delimited segment matches.
@@ -1645,12 +1645,13 @@ class SidecarEditor:
                 self._root, f"{{{NS_LR}}}hierarchicalSubject"
             ):
                 for li in bag.findall(f"{{{NS_RDF}}}li"):
-                    if not li.text or li.text in exact:
+                    value = _li_value(li)
+                    if not value or value in exact:
                         continue
-                    segments = {keyword_match_key(s) for s in li.text.split("|")}
+                    segments = {keyword_match_key(s) for s in value.split("|")}
                     segments.discard("")
                     if segments & remove_keys:
-                        removed.append(li.text)
+                        removed.append(value)
                         bag.remove(li)
 
         if removed:
@@ -2035,7 +2036,7 @@ class SidecarEditor:
             for bag in _photo_scoped_bags(self._root, f"{{{NS_DC}}}subject"):
                 exact = [
                     li for li in bag.findall(f"{{{NS_RDF}}}li")
-                    if li.text == leaf
+                    if _li_value(li) == leaf
                 ]
                 if exact:
                     targets = exact
@@ -2043,13 +2044,14 @@ class SidecarEditor:
                     fallback = next(
                         (
                             li for li in bag.findall(f"{{{NS_RDF}}}li")
-                            if li.text and keyword_match_key(li.text) == leaf_key
+                            if _li_value(li)
+                            and keyword_match_key(_li_value(li)) == leaf_key
                         ),
                         None,
                     )
                     targets = [fallback] if fallback is not None else []
                 for li in targets:
-                    removed.append(li.text)
+                    removed.append(_li_value(li))
                     bag.remove(li)
 
         if owns_hier:
@@ -2058,7 +2060,7 @@ class SidecarEditor:
             ):
                 exact = [
                     li for li in bag.findall(f"{{{NS_RDF}}}li")
-                    if li.text == path
+                    if _li_value(li) == path
                 ]
                 if exact:
                     targets = exact
@@ -2066,15 +2068,18 @@ class SidecarEditor:
                     fallback = next(
                         (
                             li for li in bag.findall(f"{{{NS_RDF}}}li")
-                            if li.text
-                            and [keyword_match_key(s) for s in li.text.split("|")]
+                            if _li_value(li)
+                            and [
+                                keyword_match_key(s)
+                                for s in _li_value(li).split("|")
+                            ]
                             == path_keys
                         ),
                         None,
                     )
                     targets = [fallback] if fallback is not None else []
                 for li in targets:
-                    removed.append(li.text)
+                    removed.append(_li_value(li))
                     bag.remove(li)
 
         if removed:
