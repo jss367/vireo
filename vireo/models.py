@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 
 import model_verify
 
@@ -199,18 +200,71 @@ KNOWN_MODELS = [
 ]
 
 
-def _load_config():
-    """Load the model config, creating defaults if missing."""
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
+# Serializes every read-modify-write of models.json in this process, so a
+# download's ``register_model`` and a concurrent ``set_active_model`` cannot
+# each load the old file and save over the other's change.
+_CONFIG_LOCK = threading.RLock()
+
+
+def _default_config():
     return {"models": [], "active_model": None}
 
 
+def _load_config():
+    """Load the model config, creating defaults if missing.
+
+    An unreadable or corrupt file is kept as ``models.json.corrupt`` and
+    treated as empty, rather than failing every models, readiness and
+    pipeline request until the file is fixed by hand.
+    """
+    try:
+        with open(CONFIG_PATH) as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        return _default_config()
+    except (OSError, ValueError):
+        log.warning("Could not read %s; treating it as empty", CONFIG_PATH,
+                    exc_info=True)
+        with contextlib.suppress(OSError):
+            shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
+        return _default_config()
+    if not isinstance(config, dict):
+        log.warning("%s is not a JSON object; treating it as empty", CONFIG_PATH)
+        return _default_config()
+    if not isinstance(config.get("models"), list):
+        config["models"] = []
+    return config
+
+
 def _save_config(config):
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2)
+    """Write models.json atomically (temp file in the same dir + replace)."""
+    config_dir = os.path.dirname(CONFIG_PATH)
+    os.makedirs(config_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=config_dir, prefix=".models.", suffix=".json.tmp",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, CONFIG_PATH)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _inside_models_dir(path):
+    """True if ``path`` resolves strictly inside ``DEFAULT_MODELS_DIR``."""
+    root = os.path.realpath(DEFAULT_MODELS_DIR)
+    target = os.path.realpath(path)
+    if target == root:
+        return False
+    try:
+        return os.path.commonpath([root, target]) == root
+    except ValueError:  # different drives on Windows
+        return False
 
 
 def _check_onnx_downloaded(model_dir, files):
@@ -441,87 +495,105 @@ def get_active_model():
 
 def set_active_model(model_id):
     """Set the active model."""
-    config = _load_config()
-    config["active_model"] = model_id
-    _save_config(config)
+    with _CONFIG_LOCK:
+        config = _load_config()
+        config["active_model"] = model_id
+        _save_config(config)
 
 
 def remove_model(model_id):
     """Remove a model's weights from disk and unregister it.
 
-    Deletes local ONNX model files and removes it from models.json.
-    Returns True if found.
+    Files are deleted only when they live inside ``DEFAULT_MODELS_DIR``,
+    where downloads land. A custom model registered with weights elsewhere
+    (the user's own folder) is only unregistered; its files are left in
+    place and reported back as ``kept_path``.
+
+    Returns ``None`` if the model is unknown, otherwise a dict with
+    ``files_deleted`` (bool) and ``kept_path`` (str or ``None``).
     """
-    config = _load_config()
-    models = config.get("models", [])
+    with _CONFIG_LOCK:
+        config = _load_config()
+        models = config.get("models", [])
 
-    found = None
-    for m in models:
-        if m["id"] == model_id:
-            found = m
-            break
+        found = None
+        for m in models:
+            if m["id"] == model_id:
+                found = m
+                break
 
-    if not found:
-        # Check if it's a known model with a default path
-        known = {km["id"]: km for km in KNOWN_MODELS}
-        if model_id in known:
-            path = os.path.join(DEFAULT_MODELS_DIR, model_id)
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-                return True
-        return False
+        if not found:
+            # Check if it's a known model with a default path
+            known = {km["id"]: km for km in KNOWN_MODELS}
+            if model_id in known:
+                path = os.path.join(DEFAULT_MODELS_DIR, model_id)
+                if os.path.isdir(path) and _inside_models_dir(path):
+                    shutil.rmtree(path)
+                    return {"files_deleted": True, "kept_path": None}
+            return None
 
-    # Delete local model directory
-    weights_path = found.get("weights_path", "")
-    if weights_path and os.path.exists(weights_path):
-        if os.path.isdir(weights_path):
-            shutil.rmtree(weights_path)
-        else:
-            os.unlink(weights_path)
-            parent = os.path.dirname(weights_path)
-            if parent.startswith(DEFAULT_MODELS_DIR) and os.path.isdir(parent):
-                remaining = os.listdir(parent)
-                if not remaining:
+        files_deleted = False
+        kept_path = None
+        weights_path = found.get("weights_path") or ""
+        if weights_path and os.path.lexists(weights_path):
+            if not _inside_models_dir(weights_path):
+                log.info(
+                    "Unregistering model %s without deleting %s: it is "
+                    "outside %s", model_id, weights_path, DEFAULT_MODELS_DIR,
+                )
+                kept_path = weights_path
+            elif os.path.isdir(weights_path) and not os.path.islink(weights_path):
+                shutil.rmtree(weights_path)
+                files_deleted = True
+            else:
+                os.unlink(weights_path)
+                files_deleted = True
+                parent = os.path.dirname(weights_path)
+                if (
+                    _inside_models_dir(parent) and os.path.isdir(parent)
+                    and not os.listdir(parent)
+                ):
                     os.rmdir(parent)
 
-    # Remove from config
-    config["models"] = [m for m in models if m["id"] != model_id]
-    if config.get("active_model") == model_id:
-        config["active_model"] = None
-    _save_config(config)
+        config["models"] = [m for m in models if m["id"] != model_id]
+        if config.get("active_model") == model_id:
+            config["active_model"] = None
+        _save_config(config)
 
-    log.info("Removed model %s (weights: %s)", model_id, weights_path)
-    return True
+    log.info("Removed model %s (weights: %s, deleted: %s)",
+             model_id, weights_path, files_deleted)
+    return {"files_deleted": files_deleted, "kept_path": kept_path}
 
 
 def register_model(model_id, name, model_str, weights_path, description=""):
     """Register a model (custom or after download)."""
-    config = _load_config()
-    models = config.get("models", [])
+    with _CONFIG_LOCK:
+        config = _load_config()
+        models = config.get("models", [])
 
-    # Update if exists, add if not
-    found = False
-    for m in models:
-        if m["id"] == model_id:
-            m["name"] = name
-            m["model_str"] = model_str
-            m["weights_path"] = weights_path
-            m["description"] = description
-            found = True
-            break
-    if not found:
-        models.append(
-            {
-                "id": model_id,
-                "name": name,
-                "model_str": model_str,
-                "weights_path": weights_path,
-                "description": description,
-            }
-        )
+        # Update if exists, add if not
+        found = False
+        for m in models:
+            if m["id"] == model_id:
+                m["name"] = name
+                m["model_str"] = model_str
+                m["weights_path"] = weights_path
+                m["description"] = description
+                found = True
+                break
+        if not found:
+            models.append(
+                {
+                    "id": model_id,
+                    "name": name,
+                    "model_str": model_str,
+                    "weights_path": weights_path,
+                    "description": description,
+                }
+            )
 
-    config["models"] = models
-    _save_config(config)
+        config["models"] = models
+        _save_config(config)
 
 
 def _needs_atomic_publish(filename):

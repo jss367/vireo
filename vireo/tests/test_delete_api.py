@@ -1369,61 +1369,120 @@ def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
     assert cache_after["summary"]["total_photos"] == 1
 
 
-def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
-    """disk_permanent retry works with paths after DB rows are already gone.
+def test_api_batch_delete_ignores_raw_paths(app_and_db, tmp_path):
+    """A client-supplied ``paths`` list never deletes anything.
 
-    The photo rows are deleted by the initial call, but their folder rows
-    survive — the retry validates paths against those.
+    Any file directly inside a catalogued folder used to be removable by
+    naming it in ``paths`` with ``mode: disk_permanent``, whether or not it
+    was still catalogued or belonged to the active workspace. Failed Trash
+    operations keep their catalog rows, so retries go by photo id.
     """
     app, db = app_and_db
     client = app.test_client()
 
-    # Create files to delete, inside a Vireo-managed folder
     db.add_folder(str(tmp_path), name=tmp_path.name)
-    file1 = str(tmp_path / "photo1.jpg")
-    file2 = str(tmp_path / "photo2.jpg")
-    Image.new("RGB", (10, 10)).save(file1)
-    Image.new("RGB", (10, 10)).save(file2)
-    assert os.path.exists(file1)
-    assert os.path.exists(file2)
+    victim = str(tmp_path / "photo1.jpg")
+    Image.new("RGB", (10, 10)).save(victim)
 
-    # Retry with paths (no photo_ids needed)
     resp = client.post("/api/batch/delete", json={
         "mode": "disk_permanent",
-        "paths": [file1, file2],
+        "paths": [victim],
     })
+    assert resp.status_code == 400
+    assert os.path.exists(victim)
 
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["ok"] is True
-    assert data["trashed"] == 2
-    assert not os.path.exists(file1)
-    assert not os.path.exists(file2)
+    resp = client.post("/api/jobs/batch-delete", json={
+        "mode": "disk_permanent",
+        "paths": [victim],
+    })
+    assert resp.status_code == 400
+    assert os.path.exists(victim)
 
 
-def test_api_batch_delete_retry_refuses_paths_outside_vireo_folders(app_and_db, tmp_path):
-    """The disk_permanent retry must not delete arbitrary client-supplied
-    paths — only files directly inside a known Vireo folder."""
+def _photo_only_in_other_workspace(db, tmp_path):
+    """Create a photo whose folder is linked only to a second workspace.
+
+    Leaves the original workspace active (and most recently opened, so the
+    app's per-request Database restores it).
+    """
+    home_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    folder = tmp_path / "other"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="other")
+    path = folder / "theirs.jpg"
+    Image.new("RGB", (10, 10)).save(str(path))
+    pid = db.add_photo(
+        folder_id=fid, filename="theirs.jpg", extension=".jpg",
+        file_size=os.path.getsize(path), file_mtime=1.0,
+    )
+    db.set_active_workspace(home_ws)
+    return pid, str(path)
+
+
+def test_api_batch_delete_skips_photos_outside_active_workspace(app_and_db, tmp_path):
+    """Photos are global, so an id from another workspace must not be
+    deleted (or its file trashed) from the active one."""
     app, db = app_and_db
     client = app.test_client()
+    pid, path = _photo_only_in_other_workspace(db, tmp_path)
+    assert client.get(f"/api/photos/{pid}").status_code == 404
 
-    outside = str(tmp_path / "secrets.txt")
-    with open(outside, "w") as f:
-        f.write("not a vireo photo")
+    for mode in ("vireo", "disk_permanent"):
+        resp = client.post("/api/batch/delete", json={
+            "photo_ids": [pid], "mode": mode,
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["deleted"] == 0
+        assert data["trashed"] == 0
 
-    resp = client.post("/api/batch/delete", json={
-        "mode": "disk_permanent",
-        "paths": [outside],
+    assert db.get_photo(pid) is not None
+    assert os.path.exists(path)
+
+
+def test_job_batch_delete_skips_photos_outside_active_workspace(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    pid, path = _photo_only_in_other_workspace(db, tmp_path)
+    visible = db.get_photos()[0]["id"]
+
+    resp = client.post("/api/jobs/batch-delete", json={
+        "photo_ids": [pid, visible], "mode": "vireo",
     })
-
     assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["trashed"] == 0
-    assert os.path.exists(outside)  # file untouched
-    assert any(
-        t["path"] == outside and "not in a Vireo folder" in t.get("error", "")
-        for t in data["trash_failed"]
-    )
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["deleted"] == 1
+
+    assert db.get_photo(pid) is not None
+    assert db.get_photo(visible) is None
+    assert os.path.exists(path)
+
+
+def test_api_batch_delete_rejects_non_integer_ids(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": ["abc"], "mode": "vireo",
+    })
+    assert resp.status_code == 400
+
+
+def test_batch_delete_with_null_photo_ids_reports_route_result(app_and_db):
+    """The request-logging hook runs after the view; a null ``photo_ids``
+    must not turn the view's response into a bare 500."""
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": None, "mode": "vireo",
+    })
+    assert resp.status_code == 400
+    resp = client.post("/api/jobs/batch-delete", json={
+        "photo_ids": 7, "mode": "vireo",
+    })
+    assert resp.status_code == 400
 
 
 def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):

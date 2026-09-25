@@ -389,6 +389,72 @@ def test_delete_stray_sidecars_refuses_paths_outside_roots(tmp_path):
     assert os.path.exists(outside), "path outside roots was not refused"
 
 
+def test_stray_sidecars_ignore_sidecars_of_unsupported_formats(tmp_path):
+    """A sidecar beside any file with its name is not a stray, even when
+    Vireo can't import that format (PEF, CRW, HEIC, MP4...). Deleting it
+    would destroy the user's Lightroom/darktable edits."""
+    from audit import check_stray_sidecars, delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    owners = ["IMGP0001.PEF", "IMG_1234.HEIC", "CRW_0042.CRW", "clip.MP4"]
+    sidecars = ["IMGP0001.xmp", "IMG_1234.HEIC.xmp", "CRW_0042.xmp", "clip.xmp"]
+    for name in owners:
+        with open(os.path.join(root, name), "wb") as f:
+            f.write(b"x")
+    paths = [os.path.join(root, name) for name in sidecars]
+    for p in paths:
+        write_sidecar(p, flat_keywords={"Edit"}, hierarchical_keywords=set())
+    ghost = os.path.join(root, "ghost.xmp")
+    write_sidecar(ghost, flat_keywords={"Gone"}, hierarchical_keywords=set())
+
+    strays = check_stray_sidecars([root])
+    assert [s["path"] for s in strays] == [ghost]
+
+    trashed = []
+
+    def fake_trash(targets):
+        trashed.extend(targets)
+        for t in targets:
+            os.remove(t)
+        return len(targets), set(targets), []
+
+    deleted = delete_stray_sidecars(paths + [ghost], [root], trash_paths=fake_trash)
+    assert deleted == 1
+    assert trashed == [ghost]
+    for p in paths:
+        assert os.path.exists(p), f"{p} belongs to a real file"
+
+
+def test_audit_delete_sidecars_route_uses_trash(app_and_db, tmp_path, monkeypatch):
+    """The route moves strays to the Trash instead of unlinking them."""
+    import app as app_module
+    from xmp import write_sidecar
+
+    app, db = app_and_db
+    root = tmp_path / "lib"
+    root.mkdir()
+    db.add_folder(str(root), name="lib")
+    stray = str(root / "ghost.xmp")
+    write_sidecar(stray, flat_keywords={"G"}, hierarchical_keywords=set())
+
+    calls = []
+
+    def fake_trash(targets, **_kwargs):
+        calls.append(list(targets))
+        return len(targets), set(targets), []
+
+    monkeypatch.setattr(app_module, "_trash_paths", fake_trash)
+    client = app.test_client()
+    resp = client.post("/api/audit/delete-sidecars", json={"paths": [stray]})
+    assert resp.status_code == 200
+    assert resp.get_json()["deleted"] == 1
+    assert calls == [[stray]]
+    # The fake Trash leaves the file alone; an unlink would have removed it.
+    assert os.path.exists(stray)
+
+
 def test_verify_hashes_ok_and_baseline(tmp_path):
     """Untouched files verify as ok; photos without a stored hash get
     baselined; the integrity run is recorded for the summary."""

@@ -1869,6 +1869,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
             invalidate_missing_originals=missing_originals.invalidate,
+            # Late-bound so a patched ``app._trash_paths`` reaches the
+            # stray-sidecar delete, as it does the duplicates routes.
+            trash_paths=lambda *args, **kwargs: _trash_paths(*args, **kwargs),
         )
     )
     app.register_blueprint(

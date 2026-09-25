@@ -225,10 +225,10 @@ def create_models_blueprint(
         from models import remove_model
 
         removed = remove_model(model_id)
-        if removed:
-            log.info("Removed model: %s", model_id)
-            return jsonify({"ok": True})
-        return json_error("Model not found", 404)
+        if removed is None:
+            return json_error("Model not found", 404)
+        log.info("Removed model: %s", model_id)
+        return jsonify({"ok": True, **removed})
 
     @blueprint.route("/api/models/active", methods=["POST"])
     def api_set_active_model():

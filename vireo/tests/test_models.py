@@ -419,7 +419,7 @@ def test_remove_model_deletes_weights_file(tmp_path, monkeypatch):
     })
 
     result = models.remove_model("test-model")
-    assert result is True
+    assert result == {"files_deleted": True, "kept_path": None}
     assert not weights.exists()
 
     config = models._load_config()
@@ -433,9 +433,10 @@ def test_remove_model_deletes_weights_directory(tmp_path, monkeypatch):
 
     cfg_path = str(tmp_path / "models.json")
     monkeypatch.setattr(models, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
-    weights_dir = tmp_path / "model_cache"
-    weights_dir.mkdir()
+    weights_dir = tmp_path / "models" / "model_cache"
+    weights_dir.mkdir(parents=True)
     (weights_dir / "config.json").write_text("{}")
 
     models._save_config({
@@ -448,12 +449,12 @@ def test_remove_model_deletes_weights_directory(tmp_path, monkeypatch):
     })
 
     result = models.remove_model("dir-model")
-    assert result is True
+    assert result == {"files_deleted": True, "kept_path": None}
     assert not weights_dir.exists()
 
 
 def test_remove_model_not_found(tmp_path, monkeypatch):
-    """Removing a nonexistent model returns False."""
+    """Removing a nonexistent model returns None."""
     import models
 
     cfg_path = str(tmp_path / "models.json")
@@ -461,7 +462,7 @@ def test_remove_model_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
     result = models.remove_model("nonexistent")
-    assert result is False
+    assert result is None
 
 
 def test_remove_known_model_by_default_path(tmp_path, monkeypatch):
@@ -478,8 +479,152 @@ def test_remove_known_model_by_default_path(tmp_path, monkeypatch):
     (model_dir / "weights.bin").write_bytes(b"fake")
 
     result = models.remove_model("bioclip-vit-b-16")
-    assert result is True
+    assert result == {"files_deleted": True, "kept_path": None}
     assert not model_dir.exists()
+
+
+def test_remove_custom_model_never_deletes_outside_models_dir(tmp_path, monkeypatch):
+    """A custom model registered with weights in the user's own folder is
+    only unregistered: ``rmtree`` on that path would delete the folder."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    user_dir = tmp_path / "Documents" / "stuff"
+    user_dir.mkdir(parents=True)
+    (user_dir / "model.onnx").write_bytes(b"w")
+    (user_dir / "thesis.docx").write_bytes(b"precious")
+    user_file = tmp_path / "Documents" / "single.onnx"
+    user_file.write_bytes(b"w")
+    # A sibling whose name shares the models dir as a string prefix.
+    prefix_trap = tmp_path / "models-evil"
+    prefix_trap.mkdir()
+    (prefix_trap / "keep.txt").write_text("x")
+
+    models.register_model("custom-dir", "Dir", "ViT-B-16", str(user_dir))
+    models.register_model("custom-file", "File", "ViT-B-16", str(user_file))
+    models.register_model("custom-trap", "Trap", "ViT-B-16", str(prefix_trap))
+    models.register_model("custom-root", "Root", "ViT-B-16", str(tmp_path / "models"))
+
+    assert models.remove_model("custom-dir") == {
+        "files_deleted": False, "kept_path": str(user_dir),
+    }
+    assert models.remove_model("custom-file")["files_deleted"] is False
+    assert models.remove_model("custom-trap")["files_deleted"] is False
+    assert models.remove_model("custom-root")["files_deleted"] is False
+
+    assert (user_dir / "thesis.docx").exists()
+    assert user_file.exists()
+    assert (prefix_trap / "keep.txt").exists()
+    assert (tmp_path / "models").is_dir()
+    assert models._load_config()["models"] == []
+
+
+def test_api_remove_custom_model_keeps_user_folder(app_and_db, tmp_path):
+    app, _db = app_and_db
+    client = app.test_client()
+    user_dir = tmp_path / "Documents" / "stuff"
+    user_dir.mkdir(parents=True)
+    (user_dir / "thesis.docx").write_bytes(b"precious")
+
+    resp = client.post("/api/models/custom", json={
+        "name": "Mine", "weights_path": str(user_dir),
+    })
+    model_id = resp.get_json()["model_id"]
+    resp = client.delete(f"/api/models/{model_id}")
+    assert resp.status_code == 200
+    assert resp.get_json()["kept_path"] == str(user_dir)
+    assert (user_dir / "thesis.docx").exists()
+    assert client.delete(f"/api/models/{model_id}").status_code == 404
+
+
+def test_load_config_tolerates_corrupt_file(tmp_path, monkeypatch):
+    """A truncated models.json reads as empty and is kept as .corrupt."""
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    cfg_path.write_text('{"models": [{"id": "m1"')
+
+    assert models._load_config() == {"models": [], "active_model": None}
+    assert (tmp_path / "models.json.corrupt").read_text().startswith('{"models"')
+
+    cfg_path.write_text("[1, 2]")
+    assert models._load_config() == {"models": [], "active_model": None}
+
+
+def test_save_config_is_atomic_and_leaves_no_temp_files(tmp_path, monkeypatch):
+    """Readers never see a partially written file, and a failed write
+    leaves the previous contents in place."""
+    import json as _json
+
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    models._save_config({"models": [], "active_model": "old"})
+
+    class Boom(Exception):
+        pass
+
+    def exploding_dump(*_args, **_kwargs):
+        raise Boom()
+
+    with monkeypatch.context() as m:
+        m.setattr(models.json, "dump", exploding_dump)
+        try:
+            models._save_config({"models": [], "active_model": "new"})
+        except Boom:
+            pass
+
+    assert _json.loads(cfg_path.read_text())["active_model"] == "old"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["models.json"]
+
+
+def test_concurrent_config_updates_do_not_lose_writes(tmp_path, monkeypatch):
+    """``register_model`` racing ``set_active_model`` keeps both changes, and
+    concurrent readers never hit a JSON decode error."""
+    import threading
+
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    errors = []
+
+    def register(i):
+        try:
+            models.register_model(f"m{i}", f"M{i}", "ViT-B-16", f"/w/{i}")
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    def activate(i):
+        try:
+            models.set_active_model(f"m{i}")
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    def read():
+        try:
+            for _ in range(50):
+                models._load_config()
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = []
+    for i in range(20):
+        threads.append(threading.Thread(target=register, args=(i,)))
+        threads.append(threading.Thread(target=activate, args=(i,)))
+        threads.append(threading.Thread(target=read))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    ids = {m["id"] for m in models._load_config()["models"]}
+    assert ids == {f"m{i}" for i in range(20)}
 
 
 # ---------------------------------------------------------------------------

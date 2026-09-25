@@ -62,11 +62,21 @@ class PhotoDeletion:
             log.exception("Failed to clean cached files after delete")
 
     def run_batch_delete(
-        self, db, photo_ids, mode="vireo", include_companions=False, paths=None,
+        self, db, photo_ids, mode="vireo", include_companions=False,
         progress_callback=None,
     ):
-        """Delete photos using the same phases for sync and job endpoints."""
-        paths = paths or []
+        """Delete photos using the same phases for sync and job endpoints.
+
+        Only photos visible in ``db``'s active workspace are acted on: photos
+        are global, so an id from another workspace would otherwise let one
+        workspace delete (or trash) another's originals. Ids that are not
+        visible are dropped before anything is resolved.
+
+        Disk modes keep a photo's catalog row until its files reach the
+        requested end state, so a failed Trash is retried by photo id. There
+        is deliberately no retry by raw path: the catalog row is what vouches
+        for a file, and a client-supplied path has nothing to vouch for it.
+        """
 
         def emit(
             phase, current=0, total=0, current_file="", detail="", failed=0,
@@ -91,52 +101,30 @@ class PhotoDeletion:
                     payload["stage_failures"] = dict(stage_failures)
                 progress_callback(payload)
 
-        if mode == "disk_permanent" and paths:
-            # Retry path: DB rows were already deleted by the initial
-            # disk-mode call, so the photos table can't vouch for these
-            # paths — but their parent directories still have folders rows.
-            # Only delete files that live directly in a Vireo-managed
-            # folder; anything else (a crafted request naming arbitrary
-            # files) is refused, not removed.
-            trashed = 0
-            trash_failed = []
-            total_paths = len(paths)
-            emit("Deleting files permanently", 0, total_paths)
-            for idx, p in enumerate(paths, start=1):
-                if not isinstance(p, str) or not p:
-                    emit("Deleting files permanently", idx, total_paths)
-                    continue
-                candidates = {os.path.dirname(p), os.path.dirname(os.path.realpath(p))}
-                known = db.conn.execute(
-                    f"SELECT 1 FROM folders WHERE path IN ({','.join('?' for _ in candidates)})",
-                    list(candidates),
-                ).fetchone()
-                if not known:
-                    log.warning(
-                        "Refusing disk_permanent retry for path outside Vireo folders: %s", p
-                    )
-                    trash_failed.append({"path": p, "error": "not in a Vireo folder"})
-                    emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
-                    continue
-                if not os.path.isfile(p):
-                    emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
-                    continue
-                try:
-                    os.remove(p)
-                    trashed += 1
-                except OSError:
-                    log.warning("Permanent delete failed for %s", p, exc_info=True)
-                    trash_failed.append({"path": p})
-                emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
-            return {
-                "ok": True, "deleted": 0, "trashed": trashed,
-                "trash_failed": trash_failed,
-            }
-
         if not photo_ids:
             raise ValueError("photo_ids required")
+        if not isinstance(photo_ids, (list, tuple)):
+            raise ValueError("photo_ids must be a list")
         if mode not in ("vireo", "disk", "disk_permanent"):
             raise ValueError("mode must be 'vireo', 'disk', or 'disk_permanent'")
+        requested_ids = []
+        for raw_id in photo_ids:
+            if isinstance(raw_id, bool):
+                raise ValueError("photo_ids must be integers")
+            try:
+                requested_ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                raise ValueError("photo_ids must be integers") from None
+        photo_ids = db.filter_photo_ids_in_workspace(requested_ids)
+        if not photo_ids:
+            emit("Finishing", 1, 1)
+            return {
+                "ok": True,
+                "deleted": 0,
+                "trashed": 0,
+                "trash_failed": [],
+                "failed_photo_ids": [],
+            }
 
         def remove_catalog_rows(ids, *, expand_companions, revalidate_identity=None):
             """Atomically remove resolved catalog rows, then clean caches.

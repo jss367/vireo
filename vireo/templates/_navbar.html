@@ -7347,32 +7347,28 @@ async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanio
 
   hideDeleteModal();
 
-  if (data.trash_failed && data.trash_failed.length > 0) {
+  var failedIds = (data.failed_photo_ids || []).filter(function(id, idx, all) {
+    return all.indexOf(id) === idx;
+  });
+  if (data.trash_failed && data.trash_failed.length > 0 && failedIds.length) {
     var paths = data.trash_failed.map(function(f) { return f.path; });
-    var failedIds = (data.failed_photo_ids || []).filter(function(id, idx, all) {
-      return all.indexOf(id) === idx;
-    });
     if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
         paths.slice(0, 5).join('\n') +
         (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
         '\n\nPermanently delete instead?')) {
       try {
-        // Newer servers retain catalog rows whose Trash operation failed, so
-        // retry by photo id and let the server remove each row only after its
-        // permanent file deletion succeeds. ``paths`` remains the compatibility
-        // path for an in-flight job started by an older build that already
-        // removed its rows.
-        var retryBody = failedIds.length
-          ? {
-              photo_ids: failedIds,
-              mode: 'disk_permanent',
-              include_companions: !!includeCompanions,
-            }
-          : {paths: paths, mode: 'disk_permanent'};
+        // The server retains catalog rows whose Trash operation failed, so
+        // retry by photo id and let it remove each row only after its
+        // permanent file deletion succeeds. There is no retry by raw path:
+        // the catalog row is what vouches for a file.
         var retry = await safeFetch('/api/batch/delete', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(retryBody),
+          body: JSON.stringify({
+            photo_ids: failedIds,
+            mode: 'disk_permanent',
+            include_companions: !!includeCompanions,
+          }),
         });
         data.deleted += Number(retry.deleted || 0);
         data.trashed += Number(retry.trashed || 0);

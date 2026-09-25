@@ -105,12 +105,13 @@ def create_job_launchers_blueprint(
         photo_ids = body.get("photo_ids", [])
         mode = body.get("mode", "vireo")
         include_companions = body.get("include_companions", False)
-        paths = body.get("paths", [])
 
         if mode not in ("vireo", "disk", "disk_permanent"):
             return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
-        if not photo_ids and not (mode == "disk_permanent" and paths):
+        if not photo_ids:
             return json_error("photo_ids required")
+        if not isinstance(photo_ids, list):
+            return json_error("photo_ids must be a list")
 
         def work(job):
             thread_db = ctx.thread_db()
@@ -134,7 +135,6 @@ def create_job_launchers_blueprint(
                     photo_ids,
                     mode,
                     include_companions,
-                    paths=paths,
                     progress_callback=progress,
                 )
                 if result.get("deleted"):
@@ -150,7 +150,6 @@ def create_job_launchers_blueprint(
                 "photo_count": len(photo_ids or []),
                 "mode": mode,
                 "include_companions": bool(include_companions),
-                "path_count": len(paths or []),
             },
         )
 
