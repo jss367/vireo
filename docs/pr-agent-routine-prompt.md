@@ -312,7 +312,7 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    ```bash
    test "$(gh issue view "$ISSUE" --json state -q .state)" = OPEN || exit 0
    test "$(gh pr list --label fix-main --state open --json body \
-     -q "[.[] | select((.body // \"\") | contains(\"Refs #$ISSUE\"))] | length")" = 0 || exit 0
+     -q "[.[] | select((.body // \"\") | test(\"Refs #$ISSUE([^0-9]|$)\"))] | length")" = 0 || exit 0
    ```
 2. Read the failure. The run covers Linux, macOS and Windows; a test that
    fails on one OS only is usually a platform assumption in the test or the
@@ -345,7 +345,7 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    ```bash
    test "$(gh issue view "$ISSUE" --json state -q .state)" = OPEN || exit 0
    test "$(gh pr list --label fix-main --state open --json body \
-     -q "[.[] | select((.body // \"\") | contains(\"Refs #$ISSUE\"))] | length")" = 0 || exit 0
+     -q "[.[] | select((.body // \"\") | test(\"Refs #$ISSUE([^0-9]|$)\"))] | length")" = 0 || exit 0
    ```
 7. Commit, push, and open a ready-for-review PR against `main` with the
    `fix-main` label. The body names the failing run, lists each failure with

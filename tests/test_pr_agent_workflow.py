@@ -515,6 +515,9 @@ def test_each_incident_gets_one_accepted_fix_request():
     assert "| `fix-main`" in prompt
     # The routine itself stops if the incident closed or a fix PR is open.
     assert "Refs #$ISSUE" in prompt
+    # Match the exact issue: a substring test would let #12 match "Refs #123".
+    assert 'test(\\"Refs #$ISSUE([^0-9]|$)\\")' in prompt
+    assert 'contains(\\"Refs #$ISSUE\\")' not in prompt
 
 
 def test_fix_main_dispatch_is_gated_until_stored_routine_prompt_is_synced():
