@@ -320,11 +320,16 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    concluded a different `Full tests` run since `main-health.yml` fired
    this session. Only `success` and `failure` count: GitHub can cancel a
    pending run when a newer one queues, and that cancelled run's later
-   `createdAt` must not make the current diagnosis look superseded. If a
-   newer failure has concluded, switch `WORKFLOW_RUN` to it (its failing
-   tests are what actually need fixing, and `main-health.yml` will not fire
-   a second time for this incident). If a newer success has concluded, stop
-   silently — `main` is now green and the issue will close on its own:
+   `createdAt` must not make the current diagnosis look superseded. Also
+   check the conclusion, not just the `databaseId`: GitHub retains the ID
+   across reruns, so a manual rerun of `WORKFLOW_RUN` that now succeeds
+   still reports `latest_id == WORKFLOW_RUN` — an ID-only check would keep
+   diagnosing the obsolete failure. If any newer conclusive run went green
+   (whether a same-ID rerun or a different run entirely), stop silently —
+   `main` is now green and the issue will close on its own. If a newer
+   failure has concluded on a different run, switch `WORKFLOW_RUN` to it
+   (its failing tests are what actually need fixing, and `main-health.yml`
+   will not fire a second time for this incident):
    ```bash
    latest=$(gh run list --workflow "Full tests" --branch main \
      --status completed --limit 100 \
@@ -333,9 +338,9 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
            | sort_by(.createdAt) | reverse | .[0]')
    latest_id=$(printf %s "$latest" | jq -r '.databaseId // empty')
    latest_conclusion=$(printf %s "$latest" | jq -r '.conclusion // empty')
-   if [ -n "$latest_id" ] && [ "$latest_id" != "$WORKFLOW_RUN" ]; then
+   if [ -n "$latest_id" ]; then
      [ "$latest_conclusion" = "failure" ] || exit 0
-     WORKFLOW_RUN="$latest_id"
+     [ "$latest_id" = "$WORKFLOW_RUN" ] || WORKFLOW_RUN="$latest_id"
    fi
    ```
 3. Read the failure. The run covers Linux, macOS and Windows; a test that
@@ -361,24 +366,32 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    post-merge run are the check.
 7. Immediately before pushing, repeat both checks from step 1 AND the
    supersession check from step 2. Diagnosis and validation take real
-   wall-clock, and in that window a newer `Full tests` run may have gone
-   green (closing the issue), another accepted routine invocation may have
-   opened its own `fix-main` PR for this issue, or a newer failure may have
-   completed with different failing tests that the current fix does not
-   address. Publishing on top of stale checks produces an unnecessary or
-   duplicate fix, or one that leaves main red for a different reason; stop
-   silently instead. This mirrors the reconciliation flow's revalidation
-   of live state right before publication:
+   wall-clock, and in that window the incident may have gone green
+   (closing the issue) or another accepted routine invocation may have
+   opened its own `fix-main` PR for this issue. Publishing on top of stale
+   checks produces an unnecessary or duplicate fix; stop silently instead.
+   A newer failure that concluded during this window is a different
+   situation: the accepted-request marker prevents another dispatch, so
+   abandoning here strands the incident. Publish the fix anyway — it
+   addresses a real failure of `main`, its checks in the fix PR's own CI
+   are the guard against regressions in a different area, and if the newer
+   failure still stands after this merges, the next red run opens a new
+   incident. The check therefore keys on `conclusion == "success"` (not
+   the `databaseId`), which also handles a same-ID rerun of `WORKFLOW_RUN`
+   that succeeded in this window. This mirrors the reconciliation flow's
+   revalidation of live state right before publication:
    ```bash
    test "$(gh issue view "$ISSUE" --json state -q .state)" = OPEN || exit 0
    test "$(gh pr list --label fix-main --state open --json body \
      -q "[.[] | select((.body // \"\") | test(\"Refs #$ISSUE([^0-9]|$)\"))] | length")" = 0 || exit 0
-   latest_id=$(gh run list --workflow "Full tests" --branch main \
+   latest=$(gh run list --workflow "Full tests" --branch main \
      --status completed --limit 100 \
      --json databaseId,createdAt,conclusion \
      --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]
-           | sort_by(.createdAt) | reverse | .[0].databaseId // empty')
-   [ -z "$latest_id" ] || [ "$latest_id" = "$WORKFLOW_RUN" ] || exit 0
+           | sort_by(.createdAt) | reverse | .[0]')
+   latest_id=$(printf %s "$latest" | jq -r '.databaseId // empty')
+   latest_conclusion=$(printf %s "$latest" | jq -r '.conclusion // empty')
+   [ -z "$latest_id" ] || [ "$latest_conclusion" = "failure" ] || exit 0
    ```
 8. Commit, push, and open a ready-for-review PR against `main` with the
    `fix-main` label. The body names the failing run, lists each failure with

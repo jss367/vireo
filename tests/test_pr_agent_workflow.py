@@ -564,8 +564,39 @@ def test_fix_main_revalidates_workflow_run_before_diagnosing_and_publishing():
     assert '[ "$latest_conclusion" = "failure" ] || exit 0' in section
     assert 'WORKFLOW_RUN="$latest_id"' in section
 
-    # Pre-publication: any newer conclusive run makes this fix stale.
-    assert '[ -z "$latest_id" ] || [ "$latest_id" = "$WORKFLOW_RUN" ] || exit 0' in section
+    # Pre-publication: exit silently only when the incident is resolved
+    # (a newer success closed main). A newer failure that concluded during
+    # diagnosis is a different situation: the accepted-request marker
+    # prevents another dispatch, so abandoning here strands the incident;
+    # publish the fix and let the fix PR's own CI catch regressions.
+    assert '[ -z "$latest_id" ] || [ "$latest_conclusion" = "failure" ] || exit 0' in section
+
+
+def test_fix_main_revalidation_keys_on_conclusion_not_run_id():
+    prompt = _read(ROUTINE_PROMPT)
+
+    # GitHub retains ``databaseId`` when a run is rerun, so an ID-only check
+    # cannot tell a same-ID success rerun (main is now green) from the
+    # original failure that fired this session. Both revalidations therefore
+    # key on ``conclusion``: pre-diagnosis exits on any newer success and
+    # only switches ``WORKFLOW_RUN`` when the newest conclusive run is a
+    # different run in failure; pre-publication exits on any newer success
+    # and continues on any newer failure so the accepted request is not
+    # stranded when a different failing run supersedes it.
+    fix_main_start = prompt.index("## Task: `fix-main`")
+    fix_main_end = prompt.index("## Absolute Rules", fix_main_start)
+    section = prompt[fix_main_start:fix_main_end]
+
+    # Neither snippet drops out of revalidation when the newest conclusive
+    # run's databaseId happens to match WORKFLOW_RUN — those checks are
+    # unconditional (a same-ID rerun's new conclusion is what matters).
+    assert '[ "$latest_id" != "$WORKFLOW_RUN" ]' not in section
+    assert '[ "$latest_id" = "$WORKFLOW_RUN" ] || exit 0' not in section
+
+    # Pre-diagnosis: the switch to a newer run is guarded by an inequality
+    # check, so a same-ID failure (a rerun of WORKFLOW_RUN that failed
+    # again) keeps WORKFLOW_RUN pointing at itself rather than reassigning.
+    assert '[ "$latest_id" = "$WORKFLOW_RUN" ] || WORKFLOW_RUN="$latest_id"' in section
 
 
 def test_fix_main_dispatch_is_gated_until_stored_routine_prompt_is_synced():
