@@ -792,6 +792,136 @@ def test_sync_preview_marks_missing_sidecar_rating_unwritable(tmp_path):
     assert metadata["rating_writable"] is False
 
 
+def test_reading_qualified_simple_property_returns_rdf_value(tmp_path):
+    """A qualified rating/GPS is read from the nested ``rdf:value``.
+
+    When a property is stored as
+    ``<xmp:Rating rdf:parseType="Resource"><rdf:value>3</rdf:value>...
+    </xmp:Rating>``, the container's own ``text`` is whitespace between
+    its children. Returning it would hide the rating from every reader
+    and let ``set_gps_location`` back up an empty string that later
+    restores empty coordinates instead of the original.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}'>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>3</rdf:value>"
+        f"<xmp:someQualifier>foo</xmp:someQualifier>"
+        f"</xmp:Rating>"
+        f"<exif:GPSLatitude rdf:parseType='Resource'>"
+        f"<rdf:value>10,30.0N</rdf:value>"
+        f"</exif:GPSLatitude>"
+        f"<exif:GPSLongitude rdf:parseType='Resource'>"
+        f"<rdf:value>20,15.0E</rdf:value>"
+        f"</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+
+    metadata = read_sync_preview_metadata(str(path))
+    assert metadata["rating"] == "3"
+    assert metadata["location"]["latitude"] == pytest.approx(10.5)
+    assert metadata["location"]["longitude"] == pytest.approx(20.25)
+
+
+def test_backup_of_qualified_gps_restores_original_on_removal(tmp_path):
+    """A qualified prior GPS survives a Vireo write-then-remove round trip.
+
+    ``set_gps_location`` snapshots any existing GPS to
+    ``vireo:previousGPS*`` on the first Vireo write so
+    ``remove_vireo_gps_location`` can restore it. If the existing
+    coordinates are stored in the qualified form, reading the container's
+    whitespace instead of the nested ``rdf:value`` silently backs up
+    empty strings and later restores empty coordinates -- the original
+    location is gone.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:exif='{NS_EXIF}'>"
+        f"<exif:GPSLatitude rdf:parseType='Resource'>"
+        f"<rdf:value>10,30.0N</rdf:value>"
+        f"</exif:GPSLatitude>"
+        f"<exif:GPSLongitude rdf:parseType='Resource'>"
+        f"<rdf:value>20,15.0E</rdf:value>"
+        f"</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_gps_location(path_str, -33.5, -70.25)
+
+    intermediate = read_sync_preview_metadata(path_str)
+    assert intermediate["location"]["latitude"] == pytest.approx(-33.5)
+    assert intermediate["location"]["longitude"] == pytest.approx(-70.25)
+
+    remove_vireo_gps_location(path_str)
+
+    restored = read_sync_preview_metadata(path_str)
+    assert restored["location"]["latitude"] == pytest.approx(10.5)
+    assert restored["location"]["longitude"] == pytest.approx(20.25)
+
+
+def test_added_keywords_do_not_inherit_first_bag_qualifier(tmp_path):
+    """New items don't inherit ``xml:lang`` from a qualified first bag.
+
+    When the first ``dc:subject`` occurrence carries an ``xml:lang``
+    qualifier (on the property or its ``rdf:Bag``) and a later
+    occurrence is unqualified, merging into the qualified target would
+    silently drop the qualifier from the later items and, worse, cause
+    newly added keywords to inherit the language qualifier they never
+    asked for. Instead, an unqualified target should be selected (or
+    a fresh unqualified property created) so the qualified container
+    survives untouched with its original items.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<dc:subject xml:lang='en'>"
+        f"<rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag>"
+        f"</dc:subject>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    qualified = [s for s in subjects if s.get(f"{{{xml_ns}}}lang") == "en"]
+    unqualified = [s for s in subjects if s.get(f"{{{xml_ns}}}lang") is None]
+
+    assert len(qualified) == 1
+    q_items = sorted(
+        li.text for li in qualified[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert q_items == ["Sparrow"]
+
+    assert len(unqualified) >= 1
+    u_items = sorted(
+        li.text
+        for prop in unqualified
+        for li in prop.iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert u_items == ["Heron", "Kiwi"]
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

@@ -499,6 +499,20 @@ def _get_property(root, name):
     for desc, child in _property_occurrences(root, name):
         if child is None:
             return desc.get(name)
+        if len(child):
+            # Qualified property, e.g.
+            #   <xmp:Rating rdf:parseType="Resource">
+            #     <rdf:value>3</rdf:value><...qualifiers.../>
+            #   </xmp:Rating>.
+            # The actual value lives in the nested ``rdf:value``; the
+            # container's own ``text`` is whitespace between its children,
+            # so returning it would hide the rating/GPS from every reader
+            # and let ``set_gps_location`` back up an empty string that
+            # later restores empty coordinates instead of the original.
+            rdf_value = child.find(f"{{{NS_RDF}}}value")
+            if rdf_value is not None:
+                return (rdf_value.text or "").strip()
+            return None
         return (child.text or "").strip()
     return None
 
@@ -853,8 +867,30 @@ class SidecarEditor:
             for owner in _top_descriptions(self._root)
             for child in owner.findall(tag)
         ]
+
+        def _prop_is_qualified(prop):
+            bag_el = prop.find(f"{{{NS_RDF}}}Bag")
+            return bool(prop.attrib) or (bag_el is not None and bool(bag_el.attrib))
+
         if found:
-            elem = found[0][1]
+            # Pick an unqualified target so newly added items don't
+            # inherit a container-level qualifier (an ``xml:lang`` on the
+            # property element or its ``rdf:Bag``, or any other RDF
+            # attribute) that applies to every ``rdf:li`` under it. If
+            # every existing occurrence is qualified, create a fresh
+            # unqualified property under ``desc`` so new items land
+            # somewhere they carry no inherited qualifier; the qualified
+            # copies are left alone in the loop below.
+            unqualified_idx = next(
+                (i for i, (_, child) in enumerate(found)
+                 if not _prop_is_qualified(child)),
+                None,
+            )
+            if unqualified_idx is None:
+                elem = ET.SubElement(desc, tag)
+                self._dirty = True
+            else:
+                elem = found[unqualified_idx][1]
         else:
             elem = ET.SubElement(desc, tag)
             self._dirty = True
@@ -863,7 +899,9 @@ class SidecarEditor:
             bag = ET.SubElement(elem, f"{{{NS_RDF}}}Bag")
             self._dirty = True
         seen = {_li_signature(li) for li in bag.findall(f"{{{NS_RDF}}}li")}
-        for owner, extra in found[1:]:
+        for owner, extra in found:
+            if extra is elem:
+                continue
             extra_bag = extra.find(f"{{{NS_RDF}}}Bag")
             # Container-level qualifiers (an ``xml:lang`` or any other
             # attribute on the property element or its ``rdf:Bag``) apply
