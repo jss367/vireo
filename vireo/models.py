@@ -213,23 +213,29 @@ def _default_config():
 def _load_config():
     """Load the model config, creating defaults if missing.
 
-    An unreadable or corrupt file is kept as ``models.json.corrupt`` and
-    treated as empty, rather than failing every models, readiness and
-    pipeline request until the file is fixed by hand.
+    A parse- or schema-corrupt file is kept as ``models.json.corrupt``
+    and treated as empty, rather than failing every models, readiness
+    and pipeline request until the file is fixed by hand. A read-side
+    ``OSError`` (permission denied, transient I/O) propagates instead:
+    otherwise the next ``register_model`` / ``set_active_model`` /
+    ``remove_model`` would save the empty default over an existing
+    registry it never actually managed to read.
     """
     try:
         with open(CONFIG_PATH) as f:
             config = json.load(f)
     except FileNotFoundError:
         return _default_config()
-    except (OSError, ValueError):
-        log.warning("Could not read %s; treating it as empty", CONFIG_PATH,
+    except ValueError:
+        log.warning("Could not parse %s; treating it as empty", CONFIG_PATH,
                     exc_info=True)
         with contextlib.suppress(OSError):
             shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
         return _default_config()
     if not isinstance(config, dict):
         log.warning("%s is not a JSON object; treating it as empty", CONFIG_PATH)
+        with contextlib.suppress(OSError):
+            shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
         return _default_config()
     if not isinstance(config.get("models"), list):
         config["models"] = []

@@ -556,6 +556,50 @@ def test_load_config_tolerates_corrupt_file(tmp_path, monkeypatch):
     assert models._load_config() == {"models": [], "active_model": None}
 
 
+def test_load_config_propagates_read_oserror(tmp_path, monkeypatch):
+    """A transient read-side OSError must not silently discard the registry.
+
+    The previous behaviour swallowed OSError and returned the empty default.
+    A follow-up ``register_model`` / ``set_active_model`` / ``remove_model``
+    would then successfully save the empty config, wiping every registered
+    model even though the original file was never actually read.
+    """
+    import builtins
+
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    cfg_path.write_text(json.dumps(
+        {"models": [{"id": "keep-me", "name": "K",
+                     "model_str": "x", "weights_path": "/w"}],
+         "active_model": "keep-me"}
+    ))
+
+    real_open = builtins.open
+
+    def flaky_open(path, *args, **kwargs):
+        if str(path) == str(cfg_path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "open", flaky_open)
+        with pytest.raises(OSError):
+            models._load_config()
+        with pytest.raises(OSError):
+            models.register_model("new", "N", "s", "/w", "d")
+        with pytest.raises(OSError):
+            models.set_active_model("new")
+        with pytest.raises(OSError):
+            models.remove_model("keep-me")
+
+    on_disk = json.loads(cfg_path.read_text())
+    assert on_disk["active_model"] == "keep-me"
+    assert [m["id"] for m in on_disk["models"]] == ["keep-me"]
+    assert not (tmp_path / "models.json.corrupt").exists()
+
+
 def test_save_config_is_atomic_and_leaves_no_temp_files(tmp_path, monkeypatch):
     """Readers never see a partially written file, and a failed write
     leaves the previous contents in place."""
