@@ -2045,6 +2045,41 @@ def test_empty_xml_lang_reset_lets_next_write_reuse_the_description(tmp_path):
     assert reset_items == ["Kiwi", "Owl"]
 
 
+def test_attribute_form_ranks_qualified_under_owner_inherited_xml_lang(tmp_path):
+    """An owner-``xml:lang'' attribute-form GPS beats a plain-child duplicate.
+
+    Attribute-form GPS values live directly on the owning
+    ``rdf:Description``, so an ``xml:lang="en"'' on that Description
+    language-tags the attribute the same way it would tag a bare-text
+    child. Before this fix ``_property_occurrence_score'' ignored the
+    owner and returned 0 for any attribute-form occurrence; a stale
+    plain-child ``<exif:GPSLatitude>10,0N</exif:GPSLatitude>'' in a
+    sibling Description therefore outranked the language-qualified
+    attribute and ``_get_property`` handed the stale value to
+    ``set_gps_location'', which backed it up for the later restore
+    to write over the qualified coordinate.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:exif='{NS_EXIF}'>"
+        f"<exif:GPSLatitude>10,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude>20,0.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about='' xml:lang='en'"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='40,0.0N' exif:GPSLongitude='50,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["location"]["latitude"] == pytest.approx(40.0)
+    assert metadata["location"]["longitude"] == pytest.approx(50.0)
+
+
 def test_gps_write_honors_owner_inherited_xml_lang_for_authority(tmp_path):
     """Owner-inherited ``xml:lang`` promotes a plain child to the qualified rank.
 
@@ -2082,6 +2117,95 @@ def test_gps_write_honors_owner_inherited_xml_lang_for_authority(tmp_path):
     metadata = read_sync_preview_metadata(path_str)
     assert metadata["location"]["latitude"] == pytest.approx(40.0)
     assert metadata["location"]["longitude"] == pytest.approx(50.0)
+
+
+def test_add_keywords_skips_merge_bag_when_no_new_keywords(tmp_path):
+    """Re-adding an already-present keyword doesn't publish an empty bag.
+
+    ``_bag`` picks an unqualified target and, when every existing bag
+    is qualified, creates a fresh empty one. ``add_keywords`` used to
+    call it unconditionally: re-adding a keyword that already sits in
+    a qualified sibling bag committed an empty ``dc:subject`` beside
+    the populated one, and a reader that resolves to a single
+    occurrence would then report the photo as having no keywords at
+    all. Create the merge target only when there's something to add.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:lang='en'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Heron</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Heron"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    # Exactly one ``dc:subject`` survives: the pre-existing one, still
+    # holding ``Heron``. No empty ``dc:subject`` sits next to it under
+    # a fresh reset Description.
+    assert len(subjects) == 1
+    items = sorted(
+        li.text
+        for li in subjects[0].iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert items == ["Heron"]
+    # And reads land on the same populated bag.
+    assert read_keywords(path_str) == {"Heron"}
+    _ = xml_ns  # namespace binding used inside the sidecar XML
+
+
+def test_replace_keyword_hierarchies_preserves_container_qualified_collision(tmp_path):
+    """A bare-text sibling under a bag ``xml:lang'' isn't dropped as plain.
+
+    Under ``<rdf:Bag xml:lang="fr">``, a bare-text ``<rdf:li>Birds|Legacy
+    </rdf:li>`` is a French-tagged statement and an ``<rdf:li xml:lang=""
+    >Birds|Legacy</rdf:li>`` is an effective "no known language"
+    statement. Both should survive a collision when their target
+    values match, since neither is plain in the qualifier-preserving
+    sense. Before this fix ``replace_keyword_hierarchies`` looked only
+    at each item's own attributes: the bare-text item was seen as
+    plain and dropped, silently losing its ``fr`` language tag.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:lr='{NS_LR}'>"
+        f"<lr:hierarchicalSubject><rdf:Bag xml:lang='fr'>"
+        f"<rdf:li>Birds|Legacy</rdf:li>"
+        f"<rdf:li xml:lang=''>Birds|Legacy</rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.replace_keyword_hierarchies({})
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    bag = next(iter(root.iter(HIERARCHICAL_SUBJECT))).find(f"{{{NS_RDF}}}Bag")
+    items = list(bag.findall(f"{{{NS_RDF}}}li"))
+    # Both items survive: the bag itself is French-tagged and each
+    # ``rdf:li`` carries a distinct effective language.
+    assert len(items) == 2
+    langs = [li.get(f"{{{xml_ns}}}lang") for li in items]
+    assert set(langs) == {None, ""}
 
 
 def test_bag_xml_lang_reset_cancels_owner_language_for_reuse(tmp_path):

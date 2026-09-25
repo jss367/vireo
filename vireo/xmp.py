@@ -915,19 +915,25 @@ def _property_occurrence_score(entry, parent_map=None):
     child's ancestor chain and honoring any ``xml:lang=""`` reset)
     resolves to a non-empty language ranks the same, since that
     language qualifies the child's literal value just as an attribute
-    on the child would. An unqualified child element ranks next; a
-    plain attribute is the least authoritative. Readers and writers
-    both use this so they agree on which copy holds the truth, and
-    the write path leaves that copy in place while removing the
-    others -- ``set_gps_location`` would otherwise back up the
-    attribute's stale value and later restore that instead of the
-    qualified coordinate the write kept.
+    on the child would. An attribute-form occurrence whose owning
+    Description has non-empty effective ``xml:lang'' is language-tagged
+    as well, so it also ranks with the qualified forms; an unqualified
+    attribute stays at the bottom. An unqualified child element ranks
+    between the two. Readers and writers both use this so they agree
+    on which copy holds the truth, and the write path leaves that
+    copy in place while removing the others -- ``set_gps_location``
+    would otherwise back up the attribute's stale value and later
+    restore that instead of the qualified coordinate the write kept.
 
     ``parent_map`` is optional so legacy callers still work; without
     it the owner-inherited language qualification is not considered.
     """
-    _, child = entry
+    owner, child = entry
     if child is None:
+        if parent_map is not None and _ancestor_carries_xml_qualifier(
+            owner, parent_map,
+        ):
+            return 2
         return 0
     if (
         len(child)
@@ -1658,24 +1664,34 @@ class SidecarEditor:
         target ``_bag`` picks. When every existing bag is qualified,
         ``_bag`` returns a fresh empty unqualified bag; reading only
         that target would let a keyword already present in a
-        qualified sibling bag land as a plain-text duplicate.
+        qualified sibling bag land as a plain-text duplicate. Only
+        create that merge target when there's something to add:
+        otherwise re-adding a keyword that already sits in a
+        qualified sibling bag would commit an empty ``dc:subject`` /
+        ``lr:hierarchicalSubject`` next to the populated one, and a
+        reader that resolves to a single occurrence would then see
+        the photo as having no keywords at all.
         """
         desc = self._description()
-        dc_bag = self._bag(desc, NS_DC, "subject")
         existing_flat = _all_photo_scoped_values(
             self._root, f"{{{NS_DC}}}subject",
         )
-        for kw in sorted(set(flat_keywords) - existing_flat):
-            ET.SubElement(dc_bag, f"{{{NS_RDF}}}li").text = kw
-            self._dirty = True
+        to_add_flat = sorted(set(flat_keywords) - existing_flat)
+        if to_add_flat:
+            dc_bag = self._bag(desc, NS_DC, "subject")
+            for kw in to_add_flat:
+                ET.SubElement(dc_bag, f"{{{NS_RDF}}}li").text = kw
+                self._dirty = True
 
-        lr_bag = self._bag(desc, NS_LR, "hierarchicalSubject")
         existing_hier = _all_photo_scoped_values(
             self._root, f"{{{NS_LR}}}hierarchicalSubject",
         )
-        for kw in sorted(set(hierarchical_keywords) - existing_hier):
-            ET.SubElement(lr_bag, f"{{{NS_RDF}}}li").text = kw
-            self._dirty = True
+        to_add_hier = sorted(set(hierarchical_keywords) - existing_hier)
+        if to_add_hier:
+            lr_bag = self._bag(desc, NS_LR, "hierarchicalSubject")
+            for kw in to_add_hier:
+                ET.SubElement(lr_bag, f"{{{NS_RDF}}}li").text = kw
+                self._dirty = True
 
     def replace_keyword_hierarchies(self, replacements):
         """Replace exact reviewed paths; a None replacement removes that path."""
@@ -1684,6 +1700,7 @@ class SidecarEditor:
         def key(path):
             return tuple(keyword_match_key(part) for part in path.split('|'))
         by_key = {key(source): target for source, target in replacements.items()}
+        parent_map = _build_parent_map(self._root)
         for bag in _photo_scoped_bags(self._root, f"{{{NS_LR}}}hierarchicalSubject"):
             keeper = {}
             for li in list(bag.findall(f"{{{NS_RDF}}}li")):
@@ -1702,12 +1719,18 @@ class SidecarEditor:
                 if value in keeper:
                     # Duplicate of a value we already kept. Prefer the
                     # qualified item as the keeper so its ``foo:source``,
-                    # ``xml:lang``, ``rdf:ID`` etc. survive. If the
-                    # existing keeper is plain-text and this new item is
+                    # ``xml:lang``, ``rdf:ID`` etc. survive. Qualification
+                    # includes container-inherited effective ``xml:lang``:
+                    # under an ``rdf:Bag xml:lang="fr"`` a bare-text item
+                    # is a French-tagged statement whose language a plain
+                    # drop would silently lose. If the existing keeper is
+                    # plain (effectively unqualified) and this new item is
                     # qualified, swap them.
                     existing = keeper[value]
-                    this_qualified = _simple_prop_carries_qualifier(li)
-                    existing_qualified = _simple_prop_carries_qualifier(existing)
+                    this_qualified = _li_carries_qualifier(li, parent_map)
+                    existing_qualified = _li_carries_qualifier(
+                        existing, parent_map,
+                    )
                     if this_qualified and not existing_qualified:
                         bag.remove(existing)
                         keeper[value] = li
