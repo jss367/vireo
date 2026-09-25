@@ -126,6 +126,8 @@ class PhotoDeletion:
                 "trashed": 0,
                 "trash_failed": [],
                 "failed_photo_ids": [],
+                "retryable_photo_ids": [],
+                "catalog_skipped": [],
             }
 
         def remove_catalog_rows(ids, *, expand_companions, revalidate_identity=None):
@@ -262,6 +264,8 @@ class PhotoDeletion:
                 "trashed": 0,
                 "trash_failed": [],
                 "failed_photo_ids": [],
+                "retryable_photo_ids": [],
+                "catalog_skipped": [],
             }
 
         # Disk modes resolve paths without changing SQLite. A photo's catalog
@@ -471,14 +475,18 @@ class PhotoDeletion:
             revalidate_identity=resolved_identity,
         )
         # Rows whose identity changed between resolve and catalog-removal
-        # weren't deleted — surface them alongside filesystem failures so
-        # the client keeps them visible and doesn't report them as trashed.
+        # weren't deleted. Surface them in a *separate* list so the client
+        # can keep them visible without treating them as file-op failures:
+        # retrying a catalog-identity skip with ``disk_permanent`` would
+        # resolve the photo at its NEW path and permanently delete a file
+        # the user never targeted, after a misleading "trash failed" prompt.
         skipped_ids = result.get("skipped_ids", []) or []
         catalog_failed_photos = len(skipped_ids)
+        catalog_skipped = []
         if skipped_ids:
             already_failed = set(failed_ids)
             for photo_id in skipped_ids:
-                trash_failed.append({
+                catalog_skipped.append({
                     "photo_id": photo_id,
                     "path": primary_paths.get(photo_id, ""),
                     "error": (
@@ -519,4 +527,11 @@ class PhotoDeletion:
             "trashed": trashed,
             "trash_failed": trash_failed,
             "failed_photo_ids": failed_ids,
+            # File-op failures that a permanent-delete retry can address.
+            # Catalog-identity skips are excluded — see ``catalog_skipped``.
+            "retryable_photo_ids": [
+                photo_id for photo_id in failed_ids
+                if photo_id not in {s["photo_id"] for s in catalog_skipped}
+            ],
+            "catalog_skipped": catalog_skipped,
         }

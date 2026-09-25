@@ -627,6 +627,11 @@ def test_api_batch_delete_disk_failure_retains_catalog_row(
     assert data["trashed"] == 0
     assert data["failed_photo_ids"] == [photo["id"]]
     assert data["trash_failed"][0]["photo_id"] == photo["id"]
+    # A real file-op failure IS retryable with disk_permanent — it comes
+    # back in ``retryable_photo_ids`` so the UI's Trash-failed prompt only
+    # offers ids the retry can actually address.
+    assert data["retryable_photo_ids"] == [photo["id"]]
+    assert data["catalog_skipped"] == []
     assert os.path.exists(real_file)
     assert db.get_photo(photo["id"]) is not None
 
@@ -735,9 +740,18 @@ def test_api_batch_delete_skips_row_whose_identity_changed_mid_delete(
     data = resp.get_json()
     assert data["deleted"] == 0
     assert data["failed_photo_ids"] == [pid]
+    # A catalog-identity race is reported in ``catalog_skipped``, NOT in
+    # ``trash_failed`` (retrying it with ``disk_permanent`` would resolve
+    # the photo at its new folder and permanently delete a file the user
+    # never targeted). It is also excluded from ``retryable_photo_ids``
+    # for the same reason.
     assert any(
-        entry.get("photo_id") == pid for entry in data["trash_failed"]
+        entry.get("photo_id") == pid for entry in data["catalog_skipped"]
     )
+    assert all(
+        entry.get("photo_id") != pid for entry in data["trash_failed"]
+    )
+    assert data["retryable_photo_ids"] == []
     row = db.get_photo(pid)
     assert row is not None, "moved row must survive a racing disk delete"
     assert row["folder_id"] == dst_fid
@@ -911,8 +925,12 @@ def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
     assert data["deleted"] == 0
     assert data["failed_photo_ids"] == [pid]
     assert any(
-        entry.get("photo_id") == pid for entry in data["trash_failed"]
+        entry.get("photo_id") == pid for entry in data["catalog_skipped"]
     )
+    assert all(
+        entry.get("photo_id") != pid for entry in data["trash_failed"]
+    )
+    assert data["retryable_photo_ids"] == []
     row = db.get_photo(pid)
     assert row is not None, "renamed-folder row must survive a racing disk delete"
     assert os.path.exists(moved_file), "moved file must not be orphaned"
@@ -973,8 +991,12 @@ def test_api_batch_delete_disk_revalidates_companion_pairing_before_delete(
     assert data["deleted"] == 0
     assert data["failed_photo_ids"] == [raw_id]
     assert any(
-        entry.get("photo_id") == raw_id for entry in data["trash_failed"]
+        entry.get("photo_id") == raw_id for entry in data["catalog_skipped"]
     )
+    assert all(
+        entry.get("photo_id") != raw_id for entry in data["trash_failed"]
+    )
+    assert data["retryable_photo_ids"] == []
     row = db.get_photo(raw_id)
     assert row is not None, (
         "newly-paired row must survive a racing disk delete"

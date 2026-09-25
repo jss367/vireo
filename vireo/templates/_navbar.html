@@ -7347,10 +7347,28 @@ async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanio
 
   hideDeleteModal();
 
-  var failedIds = (data.failed_photo_ids || []).filter(function(id, idx, all) {
+  // Only file-operation failures are safe to retry with a permanent
+  // delete. Catalog-identity skips (a concurrent move committed a new
+  // folder/filename between the resolve and the delete) come back in
+  // ``catalog_skipped`` because retrying them by id would resolve the
+  // photo at its NEW path and permanently delete a file the user never
+  // targeted. Fall back to ``failed_photo_ids`` minus the catalog-skipped
+  // set if an older server response didn't include ``retryable_photo_ids``.
+  var retryableIds = data.retryable_photo_ids;
+  if (!Array.isArray(retryableIds)) {
+    var skipSet = {};
+    (data.catalog_skipped || []).forEach(function(s) {
+      if (s && s.photo_id != null) skipSet[s.photo_id] = true;
+    });
+    retryableIds = (data.failed_photo_ids || []).filter(function(id) {
+      return !skipSet[id];
+    });
+  }
+  retryableIds = retryableIds.filter(function(id, idx, all) {
     return all.indexOf(id) === idx;
   });
-  if (data.trash_failed && data.trash_failed.length > 0 && failedIds.length) {
+  var permanentlyDeleted = 0;
+  if (data.trash_failed && data.trash_failed.length > 0 && retryableIds.length) {
     var paths = data.trash_failed.map(function(f) { return f.path; });
     if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
         paths.slice(0, 5).join('\n') +
@@ -7365,24 +7383,52 @@ async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanio
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
-            photo_ids: failedIds,
+            photo_ids: retryableIds,
             mode: 'disk_permanent',
             include_companions: !!includeCompanions,
           }),
         });
-        data.deleted += Number(retry.deleted || 0);
+        // Track the retry's own deletions so the toast can name them as
+        // permanent, not "moved to Trash" like the initial disk-mode pass.
+        permanentlyDeleted = Number(retry.deleted || 0);
+        data.deleted += permanentlyDeleted;
         data.trashed += Number(retry.trashed || 0);
         data.trash_failed = retry.trash_failed || [];
-        data.failed_photo_ids = retry.failed_photo_ids || [];
+        // Preserve any catalog-identity skips from the initial pass; the
+        // retry response's failed_photo_ids only tracks its own inputs.
+        var initialSkipped = (data.catalog_skipped || []).map(function(s) {
+          return s.photo_id;
+        });
+        data.failed_photo_ids = (retry.failed_photo_ids || []).concat(
+          initialSkipped.filter(function(id) {
+            return (retry.failed_photo_ids || []).indexOf(id) === -1;
+          })
+        );
+        data.catalog_skipped = (data.catalog_skipped || []).concat(
+          retry.catalog_skipped || []
+        );
       } catch (e) {
         // safeFetch already surfaced the actionable error.
       }
     }
   }
 
-  var msg = mode === 'vireo'
-    ? data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' removed'
-    : data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' moved to Trash';
+  var msg;
+  if (mode === 'vireo') {
+    msg = data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' removed';
+  } else if (permanentlyDeleted > 0) {
+    // Some of ``data.deleted`` came from the permanent retry, the rest
+    // from the initial Trash pass; name both accurately.
+    var trashed = data.deleted - permanentlyDeleted;
+    var parts = [];
+    if (trashed > 0) {
+      parts.push(trashed + ' photo' + (trashed === 1 ? '' : 's') + ' moved to Trash');
+    }
+    parts.push(permanentlyDeleted + ' photo' + (permanentlyDeleted === 1 ? '' : 's') + ' permanently deleted');
+    msg = parts.join('; ');
+  } else {
+    msg = data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' moved to Trash';
+  }
   if (data.failed_photo_ids && data.failed_photo_ids.length) {
     msg += '; ' + data.failed_photo_ids.length + ' retained after file errors';
   }

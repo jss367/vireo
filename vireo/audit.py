@@ -294,7 +294,13 @@ def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
     Each path must end in .xmp and must still have no matching file
     beside it at deletion time — the list the client holds may be
     stale (the user could have restored the photo since the check ran),
-    and a sidecar with a living image is data, not litter.
+    and a sidecar with a living image is data, not litter. Each sidecar
+    is moved to the Trash immediately after its own owner recheck so a
+    concurrent import that starts copying an owner into an audited
+    destination cannot land its ``shutil.copy2`` in the check-to-move
+    window of a *later* target in the same batch. The recheck and the
+    move are still not atomic, so the smaller per-target window remains,
+    but the batch-wide race window shrinks to a single file's I/O.
 
     ``allowed_roots`` confines deletions to the audited folders: the
     client-supplied list is untrusted input, so any path that does not
@@ -310,10 +316,14 @@ def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
     Returns the number of files actually removed.
     """
     real_roots = [os.path.realpath(r) for r in allowed_roots]
-    targets = []
+    seen = set()
+    deleted = 0
     for p in paths:
         if not isinstance(p, str) or os.path.splitext(p)[1].lower() != ".xmp":
             continue
+        if p in seen:
+            continue
+        seen.add(p)
         if not _is_under_roots(p, real_roots):
             log.warning(
                 "Refusing to delete sidecar outside library roots: %s", p
@@ -323,27 +333,23 @@ def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
             continue
         if _sidecar_has_image(p):
             continue
-        targets.append(p)
-    targets = list(dict.fromkeys(targets))
-    if trash_paths is not None:
-        if not targets:
-            deleted = 0
-        else:
-            deleted, _successful, failures = trash_paths(targets)
+        if trash_paths is not None:
+            moved, _successful, failures = trash_paths([p])
+            deleted += moved
             for failure in failures:
                 log.warning(
                     "Failed to move stray sidecar to Trash: %s", failure,
                 )
+        else:
+            try:
+                os.unlink(p)
+                deleted += 1
+            except OSError:
+                log.exception("Failed to delete stray sidecar %s", p)
+    if trash_paths is not None:
         log.info("Moved %d stray sidecars to Trash", deleted)
-        return deleted
-    deleted = 0
-    for p in targets:
-        try:
-            os.unlink(p)
-            deleted += 1
-        except OSError:
-            log.exception("Failed to delete stray sidecar %s", p)
-    log.info("Deleted %d stray sidecars", deleted)
+    else:
+        log.info("Deleted %d stray sidecars", deleted)
     return deleted
 
 
