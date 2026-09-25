@@ -338,6 +338,59 @@ def test_new_description_matches_existing_photo_subject(tmp_path):
     assert read_sync_preview_metadata(path)["rating"] == "5"
 
 
+def test_ambiguous_non_empty_subjects_do_not_designate_a_photo(tmp_path):
+    """Distinct non-empty rdf:about values never elect a photo by document order.
+
+    A sidecar carrying an auxiliary ``#thumbnail`` Description before a
+    ``uuid:photo`` Description must not silently treat the first one as
+    the photo. Reads return nothing, and a write that creates its own
+    Description scopes it to the empty (enclosing-resource) subject so
+    the auxiliary and photo Descriptions are left alone.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='#thumbnail'"
+        f" xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}'"
+        f" xmp:Rating='1' exif:GPSLatitude='40,0.0N' exif:GPSLongitude='40,0.0E'/>"
+        f"<rdf:Description rdf:about='uuid:photo'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path = str(path)
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["rating"] is None
+    assert metadata["location"] is None
+    assert read_keywords(path) == set()
+
+    write_gps_location(path, -33.5, -70.25)
+
+    root = ET.parse(path).getroot()
+    thumb = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "#thumbnail"
+    ]
+    photo_uuid = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "uuid:photo"
+    ]
+    assert thumb[0].get(RATING) == "1"
+    assert thumb[0].get(GPS_LATITUDE) == "40,0.0N"
+    assert photo_uuid[0].get(RATING) == "4"
+
+    fresh = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if (d.get(f"{{{NS_RDF}}}about") or "") == ""
+        and d.get(f"{{{NS_VIREO}}}gpsSource") == "assigned"
+    ]
+    assert len(fresh) == 1
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["location"]["latitude"] == pytest.approx(-33.5)
+    assert metadata["location"]["longitude"] == pytest.approx(-70.25)
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

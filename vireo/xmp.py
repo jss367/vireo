@@ -394,17 +394,23 @@ def _photo_subject(root):
 
     ``rdf:about=""`` (or a missing attribute) is the sidecar convention for
     "the enclosing resource" -- the photo. When no top-level Description
-    carries the empty subject, fall back to the first one's subject, so a
-    sidecar whose entries all share some non-empty ``rdf:about`` is still
-    treated as one coherent photo.
+    carries the empty subject but every Description shares a single
+    non-empty subject, treat that as the photo's, so a sidecar written by
+    a tool that pins its Descriptions is still handled coherently. When
+    the sidecar carries several distinct non-empty subjects, refuse to
+    guess from document order: fall back to the empty subject, which
+    leaves reads returning nothing rather than an auxiliary resource's
+    rating or GPS, and lets writes land on a fresh Description that is
+    unambiguously the photo's.
     """
     descriptions = _all_top_descriptions(root)
     if not descriptions:
         return ("", "")
     empty = ("", "")
-    if any(_description_subject(d) == empty for d in descriptions):
+    subjects = {_description_subject(d) for d in descriptions}
+    if empty in subjects or len(subjects) > 1:
         return empty
-    return _description_subject(descriptions[0])
+    return next(iter(subjects))
 
 
 def _top_descriptions(root):
