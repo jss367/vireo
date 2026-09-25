@@ -848,9 +848,11 @@ class SidecarEditor:
         for owner, extra in found[1:]:
             extra_bag = extra.find(f"{{{NS_RDF}}}Bag")
             if extra_bag is not None:
+                # Copy every item, not just ones with direct text: a
+                # structured value (rdf:parseType="Resource" with an
+                # rdf:value child) has no text of its own, and skipping it
+                # here would drop it when ``extra`` is removed below.
                 for li in extra_bag.findall(f"{{{NS_RDF}}}li"):
-                    if not li.text:
-                        continue
                     sig = _li_signature(li)
                     if sig in seen:
                         continue

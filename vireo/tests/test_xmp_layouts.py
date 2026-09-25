@@ -460,6 +460,38 @@ def test_merging_duplicate_bags_keeps_shared_text_with_distinct_qualifiers(tmp_p
     assert langs == ["en", "fr"]
 
 
+def test_merging_duplicate_bags_keeps_child_only_items(tmp_path):
+    """A structured rdf:li with no direct text survives the bag merge."""
+    path = tmp_path / "photo.xmp"
+    body = EXIFTOOL_XMP.replace(
+        "<rdf:li>Heron</rdf:li>",
+        "<rdf:li rdf:parseType='Resource'><rdf:value>Heron</rdf:value></rdf:li>",
+    ).replace(
+        "<rdf:Description rdf:about='' xmlns:dc",
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>\n"
+        "  <dc:subject><rdf:Bag><rdf:li>Egret</rdf:li></rdf:Bag></dc:subject>\n"
+        " </rdf:Description>\n <rdf:Description rdf:about='' xmlns:dc",
+        1,
+    )
+    path.write_text(body)
+    path = str(path)
+
+    editor = SidecarEditor(path)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    assert _copies(path, SUBJECT) == 1
+    root = ET.parse(path).getroot()
+    structured = [
+        li for li in root.iter(f"{{{NS_RDF}}}li")
+        if li.get(f"{{{NS_RDF}}}parseType") == "Resource"
+    ]
+    assert len(structured) == 1
+    assert structured[0].findtext(f"{{{NS_RDF}}}value") == "Heron"
+    texts = sorted(li.text for li in root.iter(f"{{{NS_RDF}}}li") if li.text)
+    assert "Egret" in texts and "Kiwi" in texts
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
