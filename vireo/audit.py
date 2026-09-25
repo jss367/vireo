@@ -250,6 +250,13 @@ def _sidecar_has_image(xmp_path):
     ``ghost`` beside ``ghost.xmp`` reports the sidecar as stray), so the
     delete-time recheck must apply the same rule or that stray becomes
     permanently undeletable.
+
+    Hidden names (leading ``.``) are *not* skipped here even though
+    ``check_stray_sidecars`` ignores them: the delete route accepts
+    client-supplied paths, so ``.bird.jpg.xmp`` beside its hidden owner
+    ``.bird.jpg`` would otherwise slip past the recheck and land in Trash.
+    The recheck's job is a conservative safety gate, so a hidden owner
+    still counts.
     """
     dirpath = os.path.dirname(xmp_path)
     base = os.path.splitext(os.path.basename(xmp_path))[0].lower()
@@ -258,8 +265,6 @@ def _sidecar_has_image(xmp_path):
     except OSError:
         return True
     for name in names:
-        if name.startswith("."):
-            continue
         stem, ext = os.path.splitext(name)
         if ext.lower() == ".xmp":
             continue

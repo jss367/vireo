@@ -460,6 +460,39 @@ def test_delete_stray_sidecars_ignores_directory_with_matching_stem(tmp_path):
         "the sibling directory must not be touched"
 
 
+def test_delete_stray_sidecars_preserves_hidden_owner(tmp_path):
+    """A hidden sidecar beside its hidden owner is not stray. The scan
+    hides these entries, but the delete route accepts client-supplied
+    paths — the recheck must still see the hidden owner and keep the
+    sidecar, or ``.bird.jpg.xmp`` beside ``.bird.jpg`` slips into Trash."""
+    from audit import delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    hidden_owner = os.path.join(root, ".bird.jpg")
+    hidden_sidecar = os.path.join(root, ".bird.jpg.xmp")
+    Image.new("RGB", (50, 50)).save(hidden_owner)
+    write_sidecar(hidden_sidecar, flat_keywords={"Hidden"},
+                  hierarchical_keywords=set())
+
+    trashed = []
+
+    def fake_trash(targets):
+        trashed.extend(targets)
+        for t in targets:
+            os.remove(t)
+        return len(targets), set(targets), []
+
+    deleted = delete_stray_sidecars([hidden_sidecar], [root],
+                                    trash_paths=fake_trash)
+
+    assert deleted == 0, "recheck must preserve a sidecar with a hidden owner"
+    assert trashed == []
+    assert os.path.exists(hidden_sidecar)
+    assert os.path.exists(hidden_owner)
+
+
 def test_audit_delete_sidecars_route_uses_trash(app_and_db, tmp_path, monkeypatch):
     """The route moves strays to the Trash instead of unlinking them."""
     import app as app_module
