@@ -30,6 +30,18 @@ NS_EXIF = "http://ns.adobe.com/exif/1.0/"
 NS_VIREO = "https://vireo.app/ns/1.0/"
 NS_XML = "http://www.w3.org/XML/1998/namespace"
 
+# RDF attributes that describe serialization form or resource identity
+# rather than the value's qualifiers. Anything else on a property, one
+# of its wrappers, or its ``rdf:Bag`` is a qualifier that would be
+# silently dropped if we removed the element as a duplicate.
+_STRUCTURAL_RDF_ATTRIBUTES = frozenset({
+    f"{{{NS_RDF}}}about",
+    f"{{{NS_RDF}}}nodeID",
+    f"{{{NS_RDF}}}ID",
+    f"{{{NS_RDF}}}parseType",
+    f"{{{NS_RDF}}}datatype",
+})
+
 # Register namespaces so ET preserves prefixes on output
 ET.register_namespace("x", NS_X)
 ET.register_namespace("rdf", NS_RDF)
@@ -1061,23 +1073,40 @@ class SidecarEditor:
 
         _owner_inherits_qualifier = _has_inherited_qualifier
 
+        def _has_own_qualifier(elem):
+            # Every non-structural attribute on the property, one of its
+            # wrappers, or the ``rdf:Bag`` itself counts as a qualifier
+            # that removing the element would silently drop. Includes
+            # ``xml:*`` and RDF's attribute abbreviation for nested
+            # properties (a namespaced attribute like ``foo:source``,
+            # equivalent to a nested ``<foo:source>...`` sibling of
+            # ``rdf:value``). Excludes only structural RDF attributes
+            # that describe serialization form or resource identity
+            # (``rdf:about``, ``rdf:nodeID``, ``rdf:ID``,
+            # ``rdf:parseType``, ``rdf:datatype``).
+            return any(
+                name not in _STRUCTURAL_RDF_ATTRIBUTES for name in elem.attrib
+            )
+
         def _prop_is_qualified(owner, prop):
             bag_el, wrappers = _property_bag_and_wrappers(prop)
-            # Every wrapper (an ``rdf:value``, an ``rdf:Description``,
-            # or both) between the property and the bag is also an
-            # ancestor of the ``rdf:li`` items, so an ``xml:lang`` or
-            # other inherited qualifier on any of them attaches to
-            # every item just as if it were on the bag itself. And a
-            # sibling qualifier element inside the qualified property
-            # (``<dc:subject rdf:parseType='Resource'><rdf:value>...
-            # </rdf:value><foo:source>...</foo:source></dc:subject>``)
-            # also counts: it is not an attribute anywhere, but the
-            # duplicate cannot be removed without silently dropping it.
+            # The owner Description is not itself being removed here,
+            # so only inherited qualifiers on it matter (``xml:*`` on
+            # a Description reaches its descendants). Every wrapper
+            # (an ``rdf:value``, an ``rdf:Description``, or both) and
+            # the bag itself would be dropped if this occurrence
+            # merged into the target, so any non-structural attribute
+            # they carry counts -- including RDF's attribute
+            # abbreviation for a nested property, like
+            # ``<rdf:Description foo:source="camera">``, which is
+            # equivalent to a sibling ``<foo:source>...</foo:source>``
+            # of ``rdf:value``. Sibling qualifier ELEMENTS inside the
+            # qualified property carry their own meaning too.
             return (
                 _has_inherited_qualifier(owner)
-                or _has_inherited_qualifier(prop)
-                or any(_has_inherited_qualifier(w) for w in wrappers)
-                or (bag_el is not None and _has_inherited_qualifier(bag_el))
+                or _has_own_qualifier(prop)
+                or any(_has_own_qualifier(w) for w in wrappers)
+                or (bag_el is not None and _has_own_qualifier(bag_el))
                 or _wrappers_carry_qualifier(prop)
             )
 
@@ -1122,25 +1151,25 @@ class SidecarEditor:
             if extra is elem:
                 continue
             extra_bag, extra_wrappers = _property_bag_and_wrappers(extra)
-            # Container-level qualifiers -- an ``xml:lang`` on the
-            # owning Description, the property element, an
+            # Owner-inherited qualifiers (``xml:*`` on the source's
+            # Description) would follow the items into a target that
+            # doesn't share them, so treat them as blockers. Every
+            # other element that would be removed -- the property, an
             # ``rdf:value`` / ``rdf:Description`` wrapper, or the
-            # ``rdf:Bag`` itself, and any sibling qualifier element
-            # alongside the value inside the qualified property --
-            # apply to every item inside the container; folding the
-            # items into the target bag would silently drop the
-            # qualifier when this duplicate is removed. Leave a
-            # qualified container in place so its meaning survives.
-            # Plain duplicates left by earlier writes still collapse
-            # into one, so ExifTool no longer picks up a stale copy
-            # sitting beside the one Vireo wrote.
+            # ``rdf:Bag`` itself -- carries its own meaning if it has
+            # any non-structural attribute (including RDF's attribute
+            # abbreviation, e.g. ``<rdf:Description foo:source=...>``,
+            # equivalent to a nested qualifier property). Sibling
+            # qualifier ELEMENTS alongside the value do too. Any of
+            # these leaves the qualified container in place; plain
+            # duplicates left by earlier writes still collapse.
             if (
                 _has_inherited_qualifier(owner)
-                or _has_inherited_qualifier(extra)
-                or any(_has_inherited_qualifier(w) for w in extra_wrappers)
+                or _has_own_qualifier(extra)
+                or any(_has_own_qualifier(w) for w in extra_wrappers)
                 or (
                     extra_bag is not None
-                    and _has_inherited_qualifier(extra_bag)
+                    and _has_own_qualifier(extra_bag)
                 )
                 or _wrappers_carry_qualifier(extra)
             ):

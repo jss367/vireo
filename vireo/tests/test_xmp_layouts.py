@@ -1624,6 +1624,71 @@ def test_element_qualifiers_on_qualified_keyword_bag_survive_merge(tmp_path):
     assert u_items == {"Heron", "Kiwi"}
 
 
+def test_attribute_form_qualifier_on_wrapper_survives_merge(tmp_path):
+    """A ``foo:source='camera'`` attribute on the ``rdf:Description``
+    wrapper is left alone during a keyword addition.
+
+    RDF/XML permits the attribute abbreviation form: a namespaced
+    attribute on a resource node (like ``rdf:Description foo:source=
+    'camera'``) is equivalent to a nested ``<foo:source>camera
+    </foo:source>`` child of that resource. It is a qualifier for
+    the value, but it doesn't appear as an ``xml:*`` attribute
+    anywhere and it isn't a child element, so an attribute-only
+    check that only tests ``xml:*`` misses it. Recognize any
+    non-structural RDF attribute on the wrapper (or the property /
+    bag) so an ordinary ``add_keywords`` does not silently drop it.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:foo='{foo_ns}'>"
+        f"<dc:subject>"
+        f"<rdf:Description foo:source='camera'>"
+        f"<rdf:value>"
+        f"<rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag>"
+        f"</rdf:value>"
+        f"</rdf:Description>"
+        f"</dc:subject>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+
+    # The wrapper Description still holds Sparrow and its foo:source.
+    qualified_wrappers = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{foo_ns}}}source") == "camera"
+    ]
+    assert len(qualified_wrappers) == 1
+    q_items = sorted(
+        li.text for li in qualified_wrappers[0].iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert q_items == ["Sparrow"]
+
+    # The unqualified dc:subject picked up the new keyword next to Heron.
+    unqualified_subjects = [
+        s for s in root.iter(SUBJECT)
+        if s.find(f"{{{NS_RDF}}}Description") is None
+    ]
+    u_items = set()
+    for s in unqualified_subjects:
+        for li in s.iter(f"{{{NS_RDF}}}li"):
+            if li.text:
+                u_items.add(li.text)
+    assert u_items == {"Heron", "Kiwi"}
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
