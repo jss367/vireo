@@ -95,6 +95,8 @@ def _promote_by_placeholder(tmp, dst):
     # O_EXCL is the atomic no-overwrite gate. A concurrent writer that
     # already created ``dst`` gets us FileExistsError here, before we
     # touch any bytes; raise so ``copy_via_temp`` cleans up ``tmp``.
+    # ``O_BINARY`` keeps the fd in binary mode on Windows so ``os.write``
+    # cannot LF→CRLF-translate photo bytes; on POSIX it is 0.
     claim_fd = os.open(
         dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_BINARY, 0o644,
     )
@@ -137,13 +139,16 @@ def _promote_by_placeholder(tmp, dst):
             # A ``stat`` + ``unlink`` on ``dst`` looks like it does this
             # but has a TOCTOU window: an interposed ``unlink`` +
             # ``create`` between the two calls hands us a matching inode
-            # check followed by an ``unlink`` of the racer's file.
-            # ``rename`` on POSIX is atomic — it moves whatever entry is
-            # at ``dst`` right now to a unique scratch path we chose, so
-            # nothing can be interposed. Only then do we compare inodes:
-            # if the scratch is our placeholder, we unlink that scratch
-            # (our own name — safe); if it isn't, we rename it back and
-            # leave the writer's file in place.
+            # check followed by an ``unlink`` of the racer's file. Even
+            # gated by ``fstat(claim_fd).st_nlink == 1`` the ``unlink``
+            # is still a separate syscall on the same path — the racer
+            # can slip in between. ``rename`` on POSIX is atomic — it
+            # moves whatever entry is at ``dst`` right now to a unique
+            # scratch path we chose, so nothing can be interposed.
+            # Only then do we compare inodes: if the scratch is our
+            # placeholder, we unlink that scratch (our own name — safe);
+            # if it isn't, we rename it back and leave the writer's
+            # file in place.
             _rollback_placeholder(dst, claim_ino)
             raise
     finally:

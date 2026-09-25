@@ -3698,6 +3698,20 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
             if adopt is None:
                 counter += 1
                 continue
+            # A byte-identical file already at this slot is only a valid
+            # adopt if the whole companion group can settle here — same
+            # gate as ``_WALK_PLACED`` below. Without this, adopting the
+            # RAW at slot 0 sets the anchor, and a same-stem sibling
+            # (JPEG) that collides with an unrelated file at slot 0
+            # advances to ``_1``, splitting the pair. The scanner can
+            # then merge the RAW with the unrelated JPEG when their
+            # capture metadata is missing or compatible.
+            if anchor is None and _sibling_blocks_slot(
+                batch_st, source_file, stem, slot,
+                checker=checker, stop_requested=stop_requested,
+            ):
+                counter += 1
+                continue
             dest_path, verified_hash, record_hash = adopt
             if claims is not None:
                 # Claim with the RAW hash (``None`` for a checker'd

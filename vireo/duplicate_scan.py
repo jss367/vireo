@@ -55,18 +55,16 @@ def _row_to_info(row, folder_path):
     ``volume_offline`` marks a missing file whose volume is unreachable: its
     state is unknown, so it must not count as missing.
 
-    The reachability probe runs BEFORE ``os.path.exists``: a stale SMB/NFS
-    mount can block that stat for minutes, and the bounded reachability
-    check exists precisely to short-circuit before that. Probing first
-    keeps the duplicate-scan worker from wedging on an unreachable share.
+    Checks volume reachability BEFORE ``os.path.exists``. On a stale SMB/NFS
+    mount a plain ``os.path.exists`` can block for minutes while the kernel
+    waits for the transport, so the bounded reachability gate has to run
+    first — otherwise the duplicate-scan worker can wedge on one row and
+    never reach the fall-back.
     """
     filename = row["filename"] or ""
     full_path = os.path.join(folder_path or "", filename)
     offline = _volume_offline(full_path)
-    if offline:
-        exists = False
-    else:
-        exists = os.path.exists(full_path)
+    exists = False if offline else os.path.exists(full_path)
     return {
         "id": row["id"],
         "filename": filename,

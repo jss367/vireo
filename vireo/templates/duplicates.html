@@ -669,7 +669,8 @@
     keptProposals.forEach(function(p) {
       var cands = [p.winner].concat(p.losers || []);
       cands.forEach(function(c) {
-        if (!c || c.exists === false) return;
+        // Offline copies are unknown, not gone: still count their folder.
+        if (!c || (c.exists === false && !c.volume_offline)) return;
         var path = c.path || '';
         var sep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
         if (sep <= 0) return;
@@ -1362,7 +1363,8 @@
     // When the kept-file is missing, any surviving loser file is the only
     // remaining copy. Drop trash affordances for that group entirely so the
     // bulk and per-card paths stay consistent — both check ``data-protected``.
-    var winnerMissing = winner.exists === false;
+    // A copy on an offline volume has unknown state, so don't protect on it.
+    var winnerMissing = winner.exists === false && !winner.volume_offline;
 
     var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '"' +
                (winnerMissing ? ' data-protected="winner-missing"' : '') + '>';
@@ -1390,7 +1392,9 @@
 
   function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect) {
     var cls = isWinner ? 'winner' : 'loser';
-    var missing = photo.exists === false;
+    // A copy on an offline volume is unknown, not missing — don't apply
+    // the ``missing`` styling that renders it as gone.
+    var missing = photo.exists === false && !photo.volume_offline;
     if (missing) cls += ' missing';
     var badge = isWinner ? 'KEEP' : (isResolvedLoser ? 'REJECTED' : 'WILL REJECT');
     var thumbUrl = photo.id != null
@@ -1488,7 +1492,8 @@
   // bulk action share this predicate so the count never advertises files
   // ``trashAllLoserFiles`` would skip.
   function isBulkTrashProtected(p) {
-    return !!(p && p.winner && p.winner.exists === false);
+    // Offline-volume state is unknown, not missing — don't protect on it.
+    return !!(p && p.winner && p.winner.exists === false && !p.winner.volume_offline);
   }
 
   // Keep each request small enough that the UI can report real progress even
