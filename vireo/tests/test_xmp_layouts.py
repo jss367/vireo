@@ -472,6 +472,42 @@ def test_divergent_empty_origin_subjects_fall_back_to_ambiguous(tmp_path):
     assert metadata["rating_writable"] is True
 
 
+def test_ambiguous_write_stays_visible_under_inherited_xml_base(tmp_path):
+    """A rating write on an ambiguous packet is selectable on re-read.
+
+    When multiple empty-origin Descriptions carry distinct local
+    ``xml:base'' values (so ``_photo_subject'' returns the empty
+    ambiguous fallback) AND an ancestor also defines ``xml:base'',
+    a bare ``rdf:about=""'' write would silently inherit that
+    ancestor base and fingerprint to a NON-empty subject, so
+    ``_top_descriptions'' (filtering by ``("", "", "")'') never
+    selects it. The write becomes invisible on re-read and the
+    queued change could be cleared without any observable file
+    change. ``_description'' now emits ``xml:base=""'' on the fresh
+    Description in this fallback path so its resolved subject stays
+    empty; ``_effective_xml_base'' honors the reset.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:base='http://outer/'>"
+        f"<rdf:Description rdf:about='' xml:base='a/'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='' xml:base='b/'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='2'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+
+    write_rating(str(path), 3)
+
+    metadata = read_sync_preview_metadata(str(path))
+    # The write is selectable now that the new Description carries
+    # a reset ``xml:base'' -- its fingerprint stays empty and
+    # matches ``_photo_subject''s ambiguous fallback.
+    assert metadata["rating"] == "3"
+
+
 def test_empty_rdf_about_priority_survives_explicit_xml_base(tmp_path):
     """The empty-``rdf:about'' priority still fires under an explicit ``xml:base''.
 
@@ -3134,6 +3170,65 @@ def test_qualified_gps_duplicates_keep_their_original_values(tmp_path):
         if d.get(f"{{{NS_VIREO}}}gpsSource")
     ]
     assert "assigned" in [v for v in all_marker_values if v]
+
+
+def test_remove_vireo_gps_recreates_target_when_plain_occurrence_gone(tmp_path):
+    """The backed-up GPS survives an external tool removing the plain occurrence.
+
+    Vireo's plain-only write and its ``vireo:previousGPS*'' backup
+    together assume the plain occurrence is still there at removal
+    time. If an external tool deletes it (or rewrites it as a
+    qualified occurrence Vireo won't touch) between the write and
+    the ``remove_vireo_gps_location'' call, ``_restore_plain_property_value''
+    has nowhere to land -- and dropping the backup afterwards
+    would permanently lose the pre-write coordinate. ``remove_vireo_gps_location''
+    now recreates a plain occurrence from the backup when the
+    restore is a no-op, so the original coordinate survives the
+    round trip.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_gps_location(path_str, -33.5, -70.25, source="assigned")
+
+    # Simulate an external tool removing every plain ``exif:GPS*''
+    # occurrence Vireo just wrote (attribute AND child spellings)
+    # while leaving Vireo's marker and backup in place.
+    root = ET.parse(path_str).getroot()
+    for gps_name in ("GPSLatitude", "GPSLongitude", "GPSMapDatum", "GPSVersionID"):
+        gps_attr = f"{{{NS_EXIF}}}{gps_name}"
+        for desc in root.iter(f"{{{NS_RDF}}}Description"):
+            desc.attrib.pop(gps_attr, None)
+            for child in list(desc.findall(gps_attr)):
+                desc.remove(child)
+    ET.ElementTree(root).write(path_str, encoding="utf-8", xml_declaration=True)
+
+    remove_vireo_gps_location(path_str)
+
+    # Backup is dropped, but its value was rescued into a fresh
+    # plain occurrence before the drop -- so the pre-write
+    # coordinate is still readable.
+    metadata = read_sync_preview_metadata(path_str)
+    location = metadata["location"]
+    assert location["latitude"] == pytest.approx(10.0)
+    assert location["longitude"] == pytest.approx(20.0)
+    # No ``vireo:previous*'' or ``vireo:gpsSource'' remnants.
+    root_after = ET.parse(path_str).getroot()
+    remnants = [
+        el.tag
+        for el in root_after.iter()
+        if el.tag.startswith(f"{{{NS_VIREO}}}previous")
+        or el.tag == f"{{{NS_VIREO}}}gpsSource"
+    ]
+    assert remnants == []
 
 
 def test_bag_xml_lang_reset_cancels_owner_language_for_reuse(tmp_path):

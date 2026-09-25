@@ -543,6 +543,16 @@ def _effective_xml_base(elem, parent_map):
     handles the non-empty relative case separately, using the
     document URI as an implicit resolver only when the reference
     itself isn't empty.
+
+    An explicit ``xml:base=""'' on an ancestor is treated as a
+    RESET to the empty base rather than as RFC 3986's same-document
+    reference (Codex finding: the ambiguous-fallback write in
+    ``_description()'' emits this reset so its own subject stays
+    empty even under an inherited ancestor base; without the
+    reset the fresh Description's fingerprint would drift into
+    the ancestor's base and ``_top_descriptions'' would fail to
+    select it on re-read). A subsequent non-empty ``xml:base'' on
+    a deeper ancestor overrides the reset per normal composition.
     """
     xml_base = f"{{{NS_XML}}}base"
     chain = []
@@ -553,12 +563,21 @@ def _effective_xml_base(elem, parent_map):
     chain.reverse()
     base = ""
     declared = False
+    reset = False
     for anc in chain:
         b = anc.get(xml_base)
-        if b is not None:
-            declared = True
-            base = urllib.parse.urljoin(base, b) if base else b
+        if b is None:
+            continue
+        declared = True
+        if b == "":
+            base = ""
+            reset = True
+            continue
+        reset = False
+        base = urllib.parse.urljoin(base, b) if base else b
     if not declared:
+        return ""
+    if reset:
         return ""
     if not urllib.parse.urlparse(base).scheme:
         doc_uri = _document_uri_for(elem, parent_map)
@@ -1625,6 +1644,22 @@ class SidecarEditor:
         about, node, rid = self._photo_write_subject()
         if about:
             desc.set(f"{{{NS_RDF}}}about", about)
+        elif not node and not rid:
+            # An empty resolved subject (either the naive
+            # ``rdf:about=""'' or the ambiguous fallback from
+            # ``_photo_subject'') leaves the new Description
+            # invisible when an ancestor ``xml:base'' leaks through:
+            # ``_description_subject'' would resolve the missing
+            # ``rdf:about'' against that base, producing a non-empty
+            # subject that ``_top_descriptions'' -- filtering by
+            # ``("", "", "")'' -- never selects. Emit ``xml:base=""''
+            # as a reset so the new Description fingerprints empty
+            # on re-read; ``_effective_xml_base'' honors the reset,
+            # and a sidecar without any ancestor ``xml:base'' stays
+            # untouched.
+            parent_map = _build_parent_map(self._root)
+            if _effective_xml_base(rdf, parent_map):
+                desc.set(f"{{{NS_XML}}}base", "")
         if node:
             desc.set(f"{{{NS_RDF}}}nodeID", node)
         if rid:
@@ -2497,7 +2532,15 @@ class SidecarEditor:
                 # to touch: we didn't overwrite it and we can't
                 # back it up per-occurrence, so leave its metadata
                 # AND its value alone.
-                self._restore_plain_property_value(gps_attr, previous)
+                restored = self._restore_plain_property_value(gps_attr, previous)
+                if not restored:
+                    # An external tool deleted or rewrote-as-qualified
+                    # our plain occurrence between the initial write and
+                    # now, so the restore had nowhere to land. Recreate
+                    # a plain target from the backup before dropping
+                    # ``vireo:previous*'' -- otherwise the original
+                    # coordinate is lost entirely.
+                    self._set_plain_property_value(desc, gps_attr, previous)
                 self._delete_property(previous_attr)
                 removed = True
             elif self._delete_plain_property_copies(gps_attr):
