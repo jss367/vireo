@@ -119,9 +119,16 @@ def test_publish_site_job_writes_life_list_highlights_and_images(tmp_path, monke
         "Northern Cardinal",
         "House Sparrow",
     ]
-    assert "mask_path" not in highlights["buckets"][0]["photos"][0]
+    published_photos = [p for b in highlights["buckets"] for p in b["photos"]]
+    published_photos += highlights["unidentified"]["photos"]
+    for photo in published_photos:
+        for private in ("mask_path", "folder_path", "folder_name"):
+            assert private not in photo
+    assert str(_meta["photos_dir"]) not in (dest / "data" / "highlights.json").read_text()
+    cardinal_photo = highlights["buckets"][0]["photos"][0]
+    # Location keywords stay private unless include_locations is set.
+    assert cardinal_photo["keyword_names"] == "Northern Cardinal"
     unidentified = highlights["unidentified"]["photos"][0]
-    assert "mask_path" not in unidentified
     assert unidentified["image"].startswith("images/photos/unidentified-")
     assert (dest / unidentified["image"]).exists()
 
@@ -238,6 +245,7 @@ def test_publish_site_job_can_include_locations(tmp_path, monkeypatch):
     resp = client.post("/api/jobs/publish-site", json={
         "destination": str(dest),
         "include_locations": True,
+        "include_highlights": True,
     })
     assert resp.status_code == 200
     wait_for_job_via_client(client, resp.get_json()["job_id"])
@@ -245,6 +253,11 @@ def test_publish_site_job_can_include_locations(tmp_path, monkeypatch):
     life = json.loads((dest / "data" / "life-list.json").read_text())
     cardinal = next(e for e in life["species"] if e["species"] == "Northern Cardinal")
     assert cardinal["locations"] == ["Backyard"]
+    highlights = json.loads((dest / "data" / "highlights.json").read_text())
+    cardinal_photo = highlights["buckets"][0]["photos"][0]
+    assert set(cardinal_photo["keyword_names"].split(",")) == {"Northern Cardinal", "Backyard"}
+    # Folder paths stay private even when locations are published.
+    assert "folder_path" not in cardinal_photo
 
     db.close()
 

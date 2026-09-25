@@ -505,3 +505,45 @@ def test_label_caches_survive_concurrent_readers(tmp_path):
     for t in threads:
         t.join()
     assert not errors, errors[:3]
+
+
+def test_set_active_labels_writes_atomically(tmp_path, monkeypatch):
+    """A failed write leaves the previous labels_active.json intact instead of
+    a truncated file that get_active_labels would read back as []."""
+    config_path = str(tmp_path / "labels_active.json")
+    monkeypatch.setattr("labels.os.path.expanduser", lambda p: config_path)
+    set_active_labels(["/a.txt"])
+
+    import labels as labels_mod
+
+    # Fail the write mid-stream whichever way it is made: json.dump into an
+    # open file, or a partial write through the temp file's handle.
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(labels_mod.json, "dump", boom)
+    real_fdopen = os.fdopen
+
+    class _FailingFile:
+        def __init__(self, f):
+            self._f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._f.close()
+            return False
+
+        def write(self, text):
+            self._f.write(text[:5])
+            raise OSError("disk full")
+
+    monkeypatch.setattr(labels_mod.os, "fdopen", lambda *a, **k: _FailingFile(real_fdopen(*a, **k)))
+    try:
+        set_active_labels(["/b.txt"])
+    except OSError:
+        pass
+    with open(config_path) as f:
+        assert json.load(f) == {"active_labels": ["/a.txt"]}
+    assert os.listdir(tmp_path) == ["labels_active.json"]

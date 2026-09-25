@@ -2076,3 +2076,140 @@ def test_tree_of_life_models_share_sentinel_without_label_collision(tmp_path):
     assert result["classifier_runs_applied"] == 2
     assert {r[0] for r in db.conn.execute("SELECT classifier_model FROM classifier_runs")} == {"model-a", "model-b"}
     db.close()
+
+
+def _materialized_classifier_runtime(db):
+    rows = db.conn.execute(
+        "SELECT runtime_fingerprint FROM classifier_runs"
+    ).fetchall()
+    return [r["runtime_fingerprint"] for r in rows]
+
+
+def test_materialize_prefers_installed_classifier_runtime(tmp_path):
+    """Two trusted classifier runtimes for one logical run must not churn:
+    the runtime already installed stays, and re-applying the store is a no-op
+    instead of replacing the predictions on every call."""
+    from computation_cache import materialize_artifacts
+
+    db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    r_old = runtime_fingerprint({"rev": "old-taxonomy"})
+    r_new = runtime_fingerprint({"rev": "new-taxonomy"})
+    a_old = classification_artifact(
+        classifier_runtime=r_old, candidates=[{"species": "Robin", "confidence": 0.9}],
+    )
+    a_new = classification_artifact(
+        classifier_runtime=r_new,
+        candidates=[{"species": "American Robin", "confidence": 0.9}],
+    )
+    trusted = {r_old, r_new}
+    # The catalog holds a local r_new run, whichever runtime sorts first.
+    materialize_artifacts(
+        db, [detection_artifact(), a_new],
+        known_runtimes={RUNTIME}, known_classifier_runtimes=trusted,
+    )
+    for _ in range(2):
+        result = materialize_artifacts(
+            db, [detection_artifact(), a_old, a_new],
+            known_runtimes={RUNTIME}, known_classifier_runtimes=trusted,
+        )
+        assert result["classifier_runs_applied"] == 0
+        assert _materialized_classifier_runtime(db) == [r_new]
+        species = [r["species"] for r in db.conn.execute("SELECT species FROM predictions")]
+        assert species == ["American Robin"]
+
+
+def test_materialize_competing_classifier_runtimes_settle_on_one(tmp_path):
+    """With nothing installed, one runtime is chosen and later calls leave it."""
+    from computation_cache import materialize_artifacts
+
+    db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    r_a = runtime_fingerprint({"rev": "a"})
+    r_b = runtime_fingerprint({"rev": "b"})
+    artifacts = [
+        detection_artifact(),
+        classification_artifact(classifier_runtime=r_a),
+        classification_artifact(classifier_runtime=r_b),
+    ]
+    first = materialize_artifacts(
+        db, artifacts, known_runtimes={RUNTIME}, known_classifier_runtimes={r_a, r_b},
+    )
+    assert first["classifier_runs_applied"] == 1
+    installed = _materialized_classifier_runtime(db)
+    again = materialize_artifacts(
+        db, artifacts, known_runtimes={RUNTIME}, known_classifier_runtimes={r_a, r_b},
+    )
+    assert again["classifier_runs_applied"] == 0
+    assert _materialized_classifier_runtime(db) == installed
+
+
+def test_exported_classification_keeps_input_recipe(tmp_path):
+    """A raw-subject classification run keeps its input_recipe through
+    export and import instead of arriving as NULL (a standard crops run)."""
+    from computation_cache import exportable_artifacts, materialize_artifacts
+
+    source, _folder_id, photo_id = _database_with_photo(tmp_path / "s.db", "a.jpg")
+    box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
+    _block, detector_fp = source_input(PHOTO_HASH, "vireo-detector-source-v1")
+    detection_id = source.write_detection_batch(
+        photo_id, "megadetector-v6",
+        [{"box": box, "confidence": 0.9, "category": "animal"}],
+        runtime_fingerprint=RUNTIME, input_fingerprint=detector_fp,
+    )[0]
+    _block, classifier_fp = classification_input(
+        PHOTO_HASH, RUNTIME,
+        [{"key": "d0", "kind": "box", "box": box, "category": "animal"}],
+    )
+    full = "3" * 64
+    source.add_prediction(
+        detection_id, "Robin", 0.9, "bioclip-2.5",
+        labels_fingerprint=full[:12], labels_fingerprint_full=full,
+    )
+    source.record_classifier_run(
+        detection_id, "bioclip-2.5", full[:12], prediction_count=1,
+        labels_fingerprint_full=full, runtime_fingerprint=CLASSIFIER_RUNTIME,
+        input_fingerprint=classifier_fp, input_recipe="raw-subject-v1",
+    )
+    artifacts, _summary = exportable_artifacts(source)
+    classification = [a for a in artifacts if a["type"] == "classification"]
+    assert [a["input_recipe"] for a in classification] == ["raw-subject-v1"]
+
+    dest, _folder_id, _photo_id = _database_with_photo(tmp_path / "d.db", "a.jpg")
+    materialize_artifacts(
+        dest, artifacts, known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    recipes = [r[0] for r in dest.conn.execute("SELECT input_recipe FROM classifier_runs")]
+    assert recipes == ["raw-subject-v1"]
+
+
+def test_concurrent_trust_records_keep_every_runtime(tmp_path, monkeypatch):
+    """Two bundle imports recording trust at once must both survive: the
+    read-merge-replace of trust.json is serialized."""
+    import threading
+    import time
+
+    root = tmp_path / "cache"
+    real_read = ArtifactStore.trusted_runtimes
+
+    def slow_read(self):
+        result = real_read(self)
+        time.sleep(0.05)  # widen the read-then-write window
+        return result
+
+    monkeypatch.setattr(ArtifactStore, "trusted_runtimes", slow_read)
+    runtimes = [runtime_fingerprint({"rev": str(i)}) for i in range(4)]
+    threads = [
+        threading.Thread(
+            target=ArtifactStore(root).record_trusted_runtimes,
+            kwargs={"detector_runtimes": {value}},
+        )
+        for value in runtimes
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    detector, _classifier = real_read(ArtifactStore(root))
+    assert detector == set(runtimes)

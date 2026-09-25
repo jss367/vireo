@@ -15,6 +15,7 @@ import os
 import shutil
 import stat
 import tempfile
+import threading
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -34,6 +35,9 @@ _SQLITE_INT64_MAX = (1 << 63) - 1
 _HEX64 = frozenset("0123456789abcdef")
 _ARTIFACT_TYPES = frozenset({"detection", "classification"})
 _FILE_DIGEST_CACHE = {}
+# Serializes the read-merge-replace of trust.json: two bundle imports that
+# merge concurrently would otherwise each write back only their own runtimes.
+_TRUST_WRITE_LOCK = threading.Lock()
 
 
 class CacheFormatError(ValueError):
@@ -1244,6 +1248,10 @@ class ArtifactStore:
         }
         if not detector and not classifier:
             return
+        with _TRUST_WRITE_LOCK:
+            self._merge_trusted_runtimes(detector, classifier)
+
+    def _merge_trusted_runtimes(self, detector, classifier):
         existing_det, existing_clf = self.trusted_runtimes()
         merged_det = sorted(existing_det | detector)
         merged_clf = sorted(existing_clf | classifier)
@@ -1607,7 +1615,7 @@ def exportable_artifacts(db, artifact_types=None):
                       d.detector_model, d.runtime_fingerprint AS detector_runtime,
                       cr.classifier_model, cr.labels_fingerprint,
                       cr.labels_fingerprint_full, cr.runtime_fingerprint,
-                      cr.input_fingerprint
+                      cr.input_fingerprint, cr.input_recipe
                FROM classifier_runs cr
                JOIN detections d ON d.id = cr.detection_id
                JOIN photos p ON p.id = d.photo_id
@@ -1716,6 +1724,9 @@ def exportable_artifacts(db, artifact_types=None):
                 "artifact_schema": ARTIFACT_SCHEMA,
                 "type": "classification",
                 "classifier_model": row["classifier_model"],
+                # Without it the importer records NULL, which reads as a
+                # standard crops run even for raw-rendition predictions.
+                "input_recipe": row["input_recipe"],
                 "detector_model": row["detector_model"],
                 "photo_sha256": row["file_hash"],
                 "runtime_fingerprint": row["runtime_fingerprint"],
@@ -2126,12 +2137,78 @@ def materialize_artifacts(
                 key=lambda a: (a["runtime_fingerprint"], artifact_digest(a)),
             )
         )
+    # Classification artifacts churn the same way: every artifact for one
+    # (photo, classifier, detector, labels, detector runtime) run lands on
+    # the same ``classifier_runs`` row, so two trusted runtimes would each
+    # replace the other's unreviewed predictions on every call, settling on
+    # whichever sorts last. Collapse to one per logical run, preferring the
+    # runtime (then input) the catalog already has installed; otherwise the
+    # lowest (runtime_fingerprint, digest) among runtimes this install
+    # recognizes, so the choice is stable and not a quarantined artifact.
+    identity_cache = {}
+    classification_by_key = {}
+    for artifact in classification_items:
+        key = (
+            artifact["photo_sha256"], artifact["classifier_model"],
+            artifact["detector_model"], artifact["labels"]["fingerprint"],
+            artifact["detector_runtime_fingerprint"],
+        )
+        classification_by_key.setdefault(key, []).append(artifact)
+    chosen_classifications = []
+    for key, candidates in classification_by_key.items():
+        if len(candidates) == 1:
+            chosen_classifications.append(candidates[0])
+            continue
+        photo_sha256, classifier_model, detector_model, _labels, _det_rt = key
+        existing = db.conn.execute(
+            """SELECT cr.runtime_fingerprint, cr.input_fingerprint
+               FROM classifier_runs cr
+               JOIN detections d ON d.id = cr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               WHERE p.file_hash = ? AND cr.classifier_model = ?
+                 AND cr.labels_fingerprint = ?
+                 AND d.detector_model IN (?, 'full-image')
+                 AND p.companion_path IS NULL
+                 AND p.working_copy_path IS NULL
+                 AND (p.flag IS NULL OR p.flag != 'rejected')
+               LIMIT 1""",
+            (
+                photo_sha256, classifier_model,
+                candidates[0]["labels"]["short_fingerprint"], detector_model,
+            ),
+        ).fetchone()
+        match = None
+        if existing is not None:
+            match = next(
+                (c for c in candidates
+                 if c["runtime_fingerprint"] == existing["runtime_fingerprint"]
+                 and c["input_fingerprint"] == existing["input_fingerprint"]),
+                None,
+            ) or next(
+                (c for c in candidates
+                 if c["runtime_fingerprint"] == existing["runtime_fingerprint"]),
+                None,
+            )
+        if match is None:
+            recognized = [
+                c for c in candidates
+                if _is_recognized_classifier_runtime(
+                    c["classifier_model"], c["labels"]["fingerprint"],
+                    c["detector_runtime_fingerprint"], c["runtime_fingerprint"],
+                    identity_cache, extra=known_classifier_runtimes,
+                )
+            ]
+            match = min(
+                recognized or candidates,
+                key=lambda a: (a["runtime_fingerprint"], artifact_digest(a)),
+            )
+        chosen_classifications.append(match)
+    classification_items = chosen_classifications
     # Sort each group by digest so classification order is also
     # content-defined instead of manifest-defined.
     chosen_detections.sort(key=artifact_digest)
     classification_items.sort(key=artifact_digest)
     normalized = chosen_detections + classification_items
-    identity_cache = {}
     result = {
         "matched_photos": 0,
         "detector_runs_applied": 0,
