@@ -157,13 +157,23 @@ class DuplicatesRepository:
             # doesn't reject the archive original just because the NAS is
             # unplugged (which would then get frozen into the group by
             # the ``duplicate_rejections`` row ``reject`` writes).
-            present = os.path.exists(path)
+            #
+            # Probe volume reachability BEFORE ``os.path.exists``. This
+            # auto-resolver runs from ``add_photo`` and
+            # ``check_and_resolve_duplicates_for_hash`` on every import
+            # and scan; on a stale SMB/NFS mount an unqualified stat can
+            # block for minutes while the kernel waits for the transport,
+            # wedging the import/scan worker before the bounded volume
+            # gate ever runs. ``duplicate_scan._row_to_info`` uses the
+            # same ordering.
+            offline = _volume_offline(path)
+            present = False if offline else os.path.exists(path)
             candidates.append(
                 DupCandidate(
                     id=r["id"],
                     path=path,
                     mtime=r["file_mtime"] or 0.0,
-                    exists=present or _volume_offline(path),
+                    exists=present or offline,
                 )
             )
         winner_id, losers_with_reasons = resolve_duplicates(candidates)

@@ -1363,11 +1363,22 @@
     // When the kept-file is missing, any surviving loser file is the only
     // remaining copy. Drop trash affordances for that group entirely so the
     // bulk and per-card paths stay consistent — both check ``data-protected``.
-    // A copy on an offline volume has unknown state, so don't protect on it.
-    var winnerMissing = winner.exists === false && !winner.volume_offline;
+    // A winner on an offline volume has unknown state: it may or may not be
+    // there, so we can't tell whether the reachable loser is the last copy
+    // either. Treat the group as protected until the winner's presence can
+    // be confirmed — the ``winner-offline`` label lets ``renderCard`` swap
+    // in the reconnect-first messaging instead of the "kept file missing"
+    // wording. ``isBulkTrashProtected`` mirrors this so the bulk button
+    // never advertises files we've disabled the per-card action for.
+    var winnerAbsent = winner.exists === false;
+    var winnerOffline = winner.volume_offline === true;
+    var winnerMissing = winnerAbsent && !winnerOffline;
+    var winnerProtected = winnerAbsent;
 
     var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '"' +
-               (winnerMissing ? ' data-protected="winner-missing"' : '') + '>';
+               (winnerProtected
+                 ? ' data-protected="' + (winnerMissing ? 'winner-missing' : 'winner-offline') + '"'
+                 : '') + '>';
     html += '<div class="dup-group-header">';
     if (group.empty_file_group) {
       html += '<label style="cursor:default;">' +
@@ -1384,13 +1395,13 @@
     html += '<div class="dup-row">';
     html += renderCard(winner, true, null, false);
     losers.forEach(function(loser) {
-      html += renderCard(loser, false, loser.reason, true, winnerMissing);
+      html += renderCard(loser, false, loser.reason, true, winnerProtected, winnerOffline);
     });
     html += '</div></div>';
     return html;
   }
 
-  function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect) {
+  function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect, winnerOfflineProtect) {
     var cls = isWinner ? 'winner' : 'loser';
     // A copy on an offline volume is unknown, not missing — don't apply
     // the ``missing`` styling that renders it as gone.
@@ -1426,11 +1437,13 @@
               photo.id + ')">Move file to Trash</button>';
       html += '<div class="trash-status" data-trash-status></div>';
     } else if (isResolvedLoser && !missing && winnerMissingProtect) {
-      // The kept-file is gone, so this loser file may be the only remaining
-      // copy. Suppress the trash button and explain why.
-      html += '<div class="trash-status" data-trash-status>' +
-              'Trash disabled \u2014 kept file is missing, this may be the only copy.' +
-              '</div>';
+      // The kept-file is gone (or its volume is unreachable and we can't
+      // tell), so this loser file may be the only remaining copy. Suppress
+      // the trash button and explain why.
+      var msg = winnerOfflineProtect
+        ? 'Trash disabled \u2014 kept file is on an unreachable volume; reconnect it before removing copies.'
+        : 'Trash disabled \u2014 kept file is missing, this may be the only copy.';
+      html += '<div class="trash-status" data-trash-status>' + msg + '</div>';
     }
     html += '</div>';
     return html;
@@ -1487,13 +1500,14 @@
     }
   }
 
-  // Protected: kept-file is missing on disk for this group, so any surviving
-  // loser file may be the only remaining copy. The bulk-button label and the
-  // bulk action share this predicate so the count never advertises files
-  // ``trashAllLoserFiles`` would skip.
+  // Protected: kept-file is either missing on disk, or its volume is
+  // unreachable so we can't tell whether it's still there. In both cases
+  // a surviving loser file may be the only remaining copy, so this
+  // predicate matches ``winnerProtected`` in ``renderGroup``. The
+  // bulk-button label and the bulk action share it so the count never
+  // advertises files ``trashAllLoserFiles`` would skip.
   function isBulkTrashProtected(p) {
-    // Offline-volume state is unknown, not missing — don't protect on it.
-    return !!(p && p.winner && p.winner.exists === false && !p.winner.volume_offline);
+    return !!(p && p.winner && p.winner.exists === false);
   }
 
   // Keep each request small enough that the UI can report real progress even
