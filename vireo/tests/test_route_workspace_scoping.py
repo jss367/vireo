@@ -442,3 +442,27 @@ def test_folder_rescan_refuses_folder_containing_local_copy(staged):
     resp = staged["client"].post(f"/api/folders/{archive_fid}/rescan", json={})
 
     assert resp.status_code == 409
+
+
+def test_snapshot_import_refuses_paths_inside_staged_source(staged):
+    """``import-in-place`` with a ``source_snapshot_id`` restricts the scan to
+    the frozen file paths, but the scanner canonicalizes their parent folders.
+    A snapshot captured before a descendant was staged would still catalog
+    those originals a second time. The route must refuse when any snapshot
+    path falls within a staged source, mirroring the explicit-``sources``
+    guard.
+    """
+    db = staged["db"]
+    # Register the archive so the snapshot's frozen path resolves to a
+    # workspace root, exactly like the "captured before staging" case.
+    db.add_folder(staged["archive"], name="archive")
+    frozen = os.path.join(staged["source"], "a.jpg")
+    snap_id = db.create_new_images_snapshot([frozen])
+
+    resp = staged["client"].post(
+        "/api/jobs/import-in-place",
+        json={"source_snapshot_id": snap_id, "after_import": None},
+    )
+
+    assert resp.status_code == 409
+    assert "local copy" in resp.get_json()["error"]

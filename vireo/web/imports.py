@@ -3048,6 +3048,20 @@ def create_imports_blueprint(
                     )
                 snapshot_paths_by_root.setdefault(root, []).append(path)
             sources = sorted(snapshot_paths_by_root)
+            # A snapshot can have been captured before a descendant of one of
+            # its roots was staged as a local copy by another workspace. The
+            # worker restricts the scan to snapshot_paths but the scanner
+            # canonicalizes folder paths via realpath, so a frozen file inside
+            # a staged source would still be catalogued a second time at its
+            # original path. Refuse the whole import if any snapshot path
+            # falls within (or is aliased to) a staged source; the user syncs
+            # or discards the local copy first.
+            with stage_boundary_lock():
+                conflict = local_copy_scan_conflict(
+                    get_db(), snapshot_paths,
+                )
+            if conflict:
+                return json_error(conflict, 409)
         else:
             snapshot_paths_by_root = None
         # Preflight an explicit after_import before creating a workspace so
