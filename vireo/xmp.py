@@ -1039,6 +1039,25 @@ class SidecarEditor:
         receives properties that are new. Any further copies of the property
         are removed so no reader can pick up a stale value.
         """
+
+        def _qualified_score(entry):
+            # Prefer a qualified child element (one with children of its
+            # own, like the ``rdf:parseType='Resource'`` structure holding
+            # ``rdf:value`` and its qualifier siblings) as the occurrence
+            # we keep and update: otherwise a same-named unqualified
+            # attribute earlier in ``found`` would win and we'd strip
+            # every qualifier when we removed the qualified sibling as a
+            # duplicate. An unqualified child element is preferred over a
+            # bare attribute for the same reason (its form is closer to
+            # the qualified one), but that order has no observable
+            # effect today.
+            _, child = entry
+            if child is None:
+                return 0
+            if len(child):
+                return 2
+            return 1
+
         changed = False
         for name, value in values.items():
             found = _property_occurrences(self._root, name)
@@ -1046,7 +1065,14 @@ class SidecarEditor:
                 desc.set(name, value)
                 changed = True
                 continue
-            owner, child = found[0]
+            best_idx = max(
+                range(len(found)), key=lambda i: _qualified_score(found[i])
+            )
+            keeper = found[best_idx]
+            rest = [
+                entry for i, entry in enumerate(found) if i != best_idx
+            ]
+            owner, child = keeper
             if child is None:
                 if owner.get(name) != value:
                     owner.set(name, value)
@@ -1091,7 +1117,7 @@ class SidecarEditor:
             elif (child.text or "").strip() != value:
                 child.text = value
                 changed = True
-            for owner, child in found[1:]:
+            for owner, child in rest:
                 if child is None:
                     del owner.attrib[name]
                 else:

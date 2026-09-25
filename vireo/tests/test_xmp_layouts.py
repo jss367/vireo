@@ -1208,6 +1208,55 @@ def test_fallback_description_inherits_photo_subject_when_all_qualified(tmp_path
     assert read_keywords(path_str) == {"Sparrow", "Kiwi"}
 
 
+def test_collapsing_duplicate_simple_property_keeps_qualified_copy(tmp_path):
+    """When merging duplicates of a simple property, the qualified one wins.
+
+    Earlier writers left both an unqualified attribute
+    (``xmp:Rating='1'``) and a qualified child element with its own
+    ``rdf:value`` and ``xmp:someQualifier``. A rating update must keep
+    the qualified structure (updating its nested ``rdf:value`` in
+    place) and only remove the plain attribute, so the qualifier
+    siblings survive. Preferring the attribute here would delete the
+    qualified element wholesale and silently drop
+    ``xmp:someQualifier``.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'"
+        f" xmp:Rating='1'>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>3</rdf:value>"
+        f"<xmp:someQualifier>preserve-me</xmp:someQualifier>"
+        f"</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+
+    # The unqualified attribute duplicate has been removed.
+    desc = root.find(f".//{{{NS_RDF}}}Description")
+    assert desc.get(RATING) is None
+
+    ratings = list(root.iter(RATING))
+    assert len(ratings) == 1
+    rating_el = ratings[0]
+
+    # The qualified structure is intact: the nested ``rdf:value`` was
+    # updated in place, and ``xmp:someQualifier`` survived.
+    values = rating_el.findall(f"{{{NS_RDF}}}value")
+    assert len(values) == 1 and values[0].text == "5"
+    qualifiers = rating_el.findall(f"{{{NS_XMP}}}someQualifier")
+    assert len(qualifiers) == 1 and qualifiers[0].text == "preserve-me"
+
+    assert read_sync_preview_metadata(path_str)["rating"] == "5"
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
