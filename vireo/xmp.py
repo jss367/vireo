@@ -11,6 +11,7 @@ import math
 import os
 import stat
 import sys
+import urllib.parse
 import uuid
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -461,7 +462,32 @@ def _all_top_descriptions(root):
     ]
 
 
-def _description_subject(desc):
+def _effective_xml_base(elem, parent_map):
+    """Return the effective ``xml:base`` URI for ``elem``.
+
+    Per the XML Base recommendation, an element's base URI for resolving
+    a relative URI reference in one of its own attributes is the
+    composition of every ancestor's ``xml:base'', starting from the
+    outermost and resolving each against the previous. Missing bases
+    contribute nothing; a bare ``xml:base'' on ``rdf:RDF'' or higher is
+    honored just as one directly on the Description would be.
+    """
+    xml_base = f"{{{NS_XML}}}base"
+    chain = []
+    current = elem
+    while current is not None:
+        chain.append(current)
+        current = parent_map.get(current)
+    chain.reverse()
+    base = ""
+    for anc in chain:
+        b = anc.get(xml_base)
+        if b is not None:
+            base = urllib.parse.urljoin(base, b) if base else b
+    return base
+
+
+def _description_subject(desc, parent_map=None):
     """Return the ``(rdf:about, rdf:nodeID, rdf:ID)`` tuple identifying a Description.
 
     An empty or missing ``rdf:about`` means "the enclosing resource", which
@@ -469,10 +495,23 @@ def _description_subject(desc):
     ``rdf:ID`` both name distinct resources; they are never the enclosing
     photo and each must fingerprint separately, so a Description carrying
     one cannot alias into the empty-subject bucket.
+
+    ``rdf:about`` is a URI reference that must be resolved against the
+    Description's effective ``xml:base'' before it can be compared with
+    other subjects. When a caller passes ``parent_map`` the resolution
+    happens here, so ``rdf:about="photo.jpg"'' under
+    ``xml:base="file:///photos/"'' fingerprints the same as
+    ``rdf:about="file:///photos/photo.jpg"''; without it the raw text
+    is used, matching the pre-xml:base callers that resolve subjects
+    against one another only when they were spelled identically.
     """
     about = desc.get(f"{{{NS_RDF}}}about")
     node = desc.get(f"{{{NS_RDF}}}nodeID")
     rid = desc.get(f"{{{NS_RDF}}}ID")
+    if about and parent_map is not None:
+        base = _effective_xml_base(desc, parent_map)
+        if base:
+            about = urllib.parse.urljoin(base, about)
     return (about or "", node or "", rid or "")
 
 
@@ -499,7 +538,8 @@ def _photo_subject(root):
     descriptions = _all_top_descriptions(root)
     if not descriptions:
         return empty
-    subjects = {_description_subject(d) for d in descriptions}
+    parent_map = _build_parent_map(root)
+    subjects = {_description_subject(d, parent_map) for d in descriptions}
     if empty in subjects:
         return empty
     photo_candidates = {
@@ -527,9 +567,10 @@ def _top_descriptions(root):
     or pick up -- someone else's rating, GPS or keywords.
     """
     subject = _photo_subject(root)
+    parent_map = _build_parent_map(root)
     return [
         desc for desc in _all_top_descriptions(root)
-        if _description_subject(desc) == subject
+        if _description_subject(desc, parent_map) == subject
     ]
 
 

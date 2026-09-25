@@ -397,6 +397,53 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_xml_base_resolution_unifies_equivalent_photo_subjects(tmp_path):
+    """``xml:base'' resolves a relative ``rdf:about'' to its absolute form.
+
+    A sidecar can carry two equivalent photo subjects spelled
+    differently: an ``rdf:about="photo.jpg"'' under
+    ``xml:base="file:///photos/"'' resolves to the same URI as a
+    literal ``rdf:about="file:///photos/photo.jpg"''. Before this
+    fix ``_description_subject'' compared the raw text, so the two
+    Descriptions were treated as distinct subjects; ``_photo_subject''
+    then judged the sidecar ambiguous and reads returned nothing while
+    writes minted a stray empty-``rdf:about'' Description. The
+    resolver walks each Description's effective ``xml:base'' before
+    building the subject key, so the two Descriptions collapse to a
+    single photo candidate.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:base='file:///photos/'>"
+        f"<rdf:Description rdf:about='photo.jpg'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='file:///photos/photo.jpg'"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["rating"] == "4"
+    assert metadata["location"]["latitude"] == pytest.approx(10.0)
+    assert metadata["location"]["longitude"] == pytest.approx(20.0)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    # No fresh empty-subject Description was minted; the write landed
+    # in one of the two existing photo Descriptions.
+    fresh = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if (d.get(f"{{{NS_RDF}}}about") or "") == ""
+    ]
+    assert fresh == []
+    assert read_sync_preview_metadata(path_str)["rating"] == "5"
+
+
 def test_absolute_uri_fragment_does_not_hide_photo_subject(tmp_path):
     """A ``uuid:photo#thumbnail`` sibling doesn't ambiguate ``uuid:photo``.
 
