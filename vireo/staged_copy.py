@@ -7,6 +7,7 @@ real bytes to ``name_1.ext``. ``copy_via_temp`` writes to a hidden sibling
 temp file and only promotes it once the copy finished.
 """
 
+import binascii
 import contextlib
 import os
 import shutil
@@ -131,15 +132,77 @@ def _promote_by_placeholder(tmp, dst):
         except BaseException:
             # Roll back only when the entry at ``dst`` still points to
             # the inode we claimed. A concurrent writer's replacement
-            # has a different inode and stays.
-            try:
-                if os.stat(dst).st_ino == claim_ino:
-                    os.unlink(dst)
-            except FileNotFoundError:
-                pass
+            # has a different inode and must stay.
+            #
+            # A ``stat`` + ``unlink`` on ``dst`` looks like it does this
+            # but has a TOCTOU window: an interposed ``unlink`` +
+            # ``create`` between the two calls hands us a matching inode
+            # check followed by an ``unlink`` of the racer's file.
+            # ``rename`` on POSIX is atomic — it moves whatever entry is
+            # at ``dst`` right now to a unique scratch path we chose, so
+            # nothing can be interposed. Only then do we compare inodes:
+            # if the scratch is our placeholder, we unlink that scratch
+            # (our own name — safe); if it isn't, we rename it back and
+            # leave the writer's file in place.
+            _rollback_placeholder(dst, claim_ino)
             raise
     finally:
         os.close(claim_fd)
+
+
+def _rollback_placeholder(dst, claim_ino):
+    """Detach ``dst`` atomically and unlink it only if it is our placeholder.
+
+    See the rollback block in ``_promote_by_placeholder`` for why.
+    """
+    dst_dir = os.path.dirname(dst) or "."
+    dst_name = os.path.basename(dst)
+    # A unique sibling name so ``os.rename`` can never overwrite an
+    # unrelated file. urandom keeps it collision-free across processes;
+    # the leading dot keeps a stray leftover invisible to gallery scans.
+    scratch = os.path.join(
+        dst_dir,
+        "." + dst_name + "." + binascii.hexlify(os.urandom(8)).decode() +
+        ".rollback",
+    )
+    try:
+        os.rename(dst, scratch)
+    except FileNotFoundError:
+        return
+    except OSError:
+        # A rename failure (e.g. cross-device, unusual filesystem) means
+        # we can't safely detach; leave ``dst`` alone rather than risk a
+        # racer's file.
+        return
+    try:
+        if os.stat(scratch).st_ino == claim_ino:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(scratch)
+            return
+    except FileNotFoundError:
+        return
+    # Not ours: the entry at ``dst`` at rollback time was a concurrent
+    # writer's replacement, and ``scratch`` now holds their bytes. Try
+    # to put them back. Prefer ``os.link`` on the odd chance hard links
+    # work here (we entered this fallback because they didn't for the
+    # promote, but detach paths can differ on some shares); otherwise
+    # fall back to a ``lexists``-gated ``os.rename`` — a narrow race
+    # since we own ``scratch``'s unique name. If ``dst`` is taken
+    # again in that window, leave the ``scratch`` in place with its
+    # ``.rollback`` marker so nothing of theirs is overwritten.
+    try:
+        os.link(scratch, dst)
+    except FileExistsError:
+        return
+    except OSError:
+        try:
+            if not os.path.lexists(dst):
+                os.rename(scratch, dst)
+        except OSError:
+            return
+        return
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(scratch)
 
 
 def _apply_metadata(fd, dst, claim_ino, times_ns, mode):

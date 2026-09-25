@@ -54,10 +54,19 @@ def _row_to_info(row, folder_path):
     user doesn't trash surviving copies of a row whose "winner" file is gone.
     ``volume_offline`` marks a missing file whose volume is unreachable: its
     state is unknown, so it must not count as missing.
+
+    The reachability probe runs BEFORE ``os.path.exists``: a stale SMB/NFS
+    mount can block that stat for minutes, and the bounded reachability
+    check exists precisely to short-circuit before that. Probing first
+    keeps the duplicate-scan worker from wedging on an unreachable share.
     """
     filename = row["filename"] or ""
     full_path = os.path.join(folder_path or "", filename)
-    exists = os.path.exists(full_path)
+    offline = _volume_offline(full_path)
+    if offline:
+        exists = False
+    else:
+        exists = os.path.exists(full_path)
     return {
         "id": row["id"],
         "filename": filename,
@@ -66,7 +75,7 @@ def _row_to_info(row, folder_path):
         "rating": row["rating"] if row["rating"] is not None else 0,
         "file_size": row["file_size"] if row["file_size"] is not None else 0,
         "exists": exists,
-        "volume_offline": not exists and _volume_offline(full_path),
+        "volume_offline": offline,
     }
 
 
@@ -140,21 +149,17 @@ def _build_unresolved_proposal(db, group):
     # recommend orphan cleanup. Offline volumes are unknown, not missing —
     # counting them here would tell the user their archive is gone whenever a
     # NAS is unplugged. ``all_offline`` lets the UI say "reconnect to check"
-    # instead; it must require EVERY absent entry to be on an offline volume
-    # so a group mixing one offline copy with one genuinely-missing copy
-    # doesn't get "reconnect to check" when at least one copy is confirmed
-    # gone from a reachable volume.
+    # instead, and requires EVERY entry to be on an offline volume: a group
+    # with one reachable existing copy and one offline copy already shows
+    # something we can act on, so it deserves the winner/loser-specific
+    # warning, not the "everything is unreachable" banner.
     all_missing = not any(
         info["exists"] or info["volume_offline"]
         for info in info_by_id.values()
     )
     all_offline = (
-        not all_missing
-        and all(
-            info["exists"] or info["volume_offline"]
-            for info in info_by_id.values()
-        )
-        and any(info["volume_offline"] for info in info_by_id.values())
+        len(info_by_id) > 0
+        and all(info["volume_offline"] for info in info_by_id.values())
     )
     empty_file_group = _is_empty_file_group(
         group["file_hash"], info_by_id.values(),
@@ -232,19 +237,15 @@ def _build_resolved_proposal(db, group):
         linfo["rejected"] = True
         losers.append(linfo)
     # See ``_build_unresolved_proposal`` for why offline volumes are unknown
-    # rather than missing, and why ``all_offline`` requires every absent
-    # entry to actually sit on an offline volume.
+    # rather than missing, and why ``all_offline`` requires every entry to
+    # actually sit on an offline volume (not just every absent one).
     all_missing = not any(
         info["exists"] or info["volume_offline"]
         for info in info_by_id.values()
     )
     all_offline = (
-        not all_missing
-        and all(
-            info["exists"] or info["volume_offline"]
-            for info in info_by_id.values()
-        )
-        and any(info["volume_offline"] for info in info_by_id.values())
+        len(info_by_id) > 0
+        and all(info["volume_offline"] for info in info_by_id.values())
     )
     empty_file_group = _is_empty_file_group(
         group["file_hash"], info_by_id.values(),
