@@ -144,6 +144,33 @@ def test_audit_import_untracked_rejects_non_list_paths(scoped):
     assert resp.status_code == 400
 
 
+def test_audit_import_untracked_rejects_symlink_escape(scoped, tmp_path):
+    """A directory symlink inside a workspace root that points outside must
+    not smuggle an out-of-tree path past the containment check: the scanner
+    later canonicalizes the parent through the link and would otherwise
+    catalog files under a directory the workspace does not actually cover.
+    """
+    db = scoped["db"]
+    root_dir = tmp_path / "shoot"
+    root_dir.mkdir()
+    db.add_folder(str(root_dir), name="shoot")
+    outside_dir = tmp_path / "elsewhere"
+    outside_dir.mkdir()
+    (outside_dir / "x.jpg").write_bytes(b"jpg")
+    os.symlink(str(outside_dir), str(root_dir / "link"))
+    path = str(root_dir / "link" / "x.jpg")
+    folders_before = db.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+
+    resp = scoped["client"].post(
+        "/api/audit/import-untracked", json={"paths": [path]},
+    )
+
+    assert resp.status_code == 400
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM folders"
+    ).fetchone()[0] == folders_before
+
+
 # -- collections and highlights ----------------------------------------------
 
 
@@ -372,19 +399,40 @@ def test_scan_of_unrelated_tree_is_not_blocked(staged, tmp_path):
     assert local_copy_scan_conflict(staged["db"], [sibling]) is None
 
 
-def test_copy_import_blocks_only_inside_staged_folder(staged):
+def test_copy_import_blocks_ancestor_and_inside_of_staged_folder(staged):
+    """The two copy-import routes call ``local_copy_scan_conflict`` without
+    ``include_descendants=False`` so that a destination that merely contains
+    a staged day folder is refused too: ``folder_template`` can render a
+    dated folder that coincides with the staged source (``%Y-%m-%d`` when
+    ``/archive/2024-05-01`` is staged and a photo was taken that day), and
+    then the import would copy into the original source and scan it.
+    """
     from services.local_folder import local_copy_scan_conflict
 
     db = staged["db"]
-    # A copy import writes only its own dated folders, so an archive that
-    # merely contains a staged day folder stays importable...
-    assert local_copy_scan_conflict(
-        db, [staged["archive"]], include_descendants=False,
-    ) is None
-    # ...but a destination inside the staged source is refused.
-    assert local_copy_scan_conflict(
-        db, [staged["source"]], include_descendants=False,
-    ) is not None
+    assert local_copy_scan_conflict(db, [staged["archive"]]) is not None
+    assert local_copy_scan_conflict(db, [staged["source"]]) is not None
+
+
+def test_scan_over_symlink_alias_of_staged_source_is_refused(staged, tmp_path):
+    """A symlink alias of a staged source must not slip past the lexical guard.
+
+    Without a physical (``realpath``) comparison the scanner would resolve
+    catalog folder paths through the alias, reach the staged originals, and
+    catalog them a second time despite the local-copy mapping.
+    """
+    from services.local_folder import local_copy_scan_conflict
+
+    alias_dir = tmp_path / "alias-dir"
+    alias_dir.mkdir()
+    alias = alias_dir / "alias-day"
+    os.symlink(staged["source"], alias)
+    inside_alias = str(alias / "sub")
+
+    # Scanning through the symlink to the staged source itself is refused.
+    assert local_copy_scan_conflict(staged["db"], [str(alias)]) is not None
+    # And so is scanning through a subpath of that alias.
+    assert local_copy_scan_conflict(staged["db"], [inside_alias]) is not None
 
 
 def test_folder_rescan_refuses_folder_containing_local_copy(staged):

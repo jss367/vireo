@@ -320,6 +320,12 @@ def local_root_overlapping_path(
     later (an import's dated destination folders), where refusing every
     import into an archive because one old day folder is staged would be
     too broad.
+
+    Both a lexical and a ``realpath`` (physical) comparison run: the
+    lexical check catches spellings the catalog uses even when either side
+    no longer resolves on disk, and the physical check catches symlink
+    aliases of a staged source that would otherwise slip past the lexical
+    guard and let the scanner re-catalog the originals through the alias.
     """
     if not path:
         return None
@@ -330,8 +336,13 @@ def local_root_overlapping_path(
         source = entry["source_path"]
         if not source:
             continue
-        if _is_within(path, source) or (
-            include_descendants and _is_within(source, path)
+        if (
+            _is_within(path, source)
+            or _physical_is_within(path, source)
+            or (
+                include_descendants
+                and (_is_within(source, path) or _physical_is_within(source, path))
+            )
         ):
             return int(entry["root_folder_id"])
     return None

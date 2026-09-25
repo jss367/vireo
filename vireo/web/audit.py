@@ -38,14 +38,33 @@ def create_audit_blueprint(
     blueprint = Blueprint("audit", __name__)
 
     def _path_within(path, root):
-        """True if ``path`` is strictly below ``root`` (separator-aware)."""
+        """True if ``path`` is strictly below ``root`` (separator-aware).
+
+        Compares by the lexical ``normpath`` spelling AND by ``realpath`` so
+        a directory symlink inside the workspace root that points outside
+        cannot smuggle an out-of-tree path past the containment check: the
+        scanner later canonicalizes the parent through the link and would
+        otherwise catalog files under a directory the workspace does not
+        actually cover.
+        """
         try:
-            return (
+            lexical = (
                 path != root
                 and os.path.commonpath([path, root]) == root
             )
         except ValueError:
             # Different drives on Windows, or mixed absolute/relative.
+            lexical = False
+        if not lexical:
+            return False
+        try:
+            real_path = os.path.realpath(path)
+            real_root = os.path.realpath(root)
+            return (
+                real_path != real_root
+                and os.path.commonpath([real_path, real_root]) == real_root
+            )
+        except (ValueError, OSError):
             return False
 
     @blueprint.route("/api/audit/drift")

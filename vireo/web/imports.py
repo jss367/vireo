@@ -1824,12 +1824,21 @@ def create_imports_blueprint(
         # The scan below walks the destination (or, in place, the source); a
         # folder-level local copy of any part of that tree would be
         # catalogued a second time at its original path.
+        #
+        # ``include_descendants=True`` is deliberate even for a copy import.
+        # A copy renders each file's destination folder from ``folder_template``
+        # and the file's capture time, so an archive that merely *contains* a
+        # staged day folder is not automatically safe: a template flat enough
+        # to match the staged folder's own path (``%Y-%m-%d`` when
+        # ``/archive/2024-05-01`` is staged, plus a photo taken that day) would
+        # copy into the original source and then scan it, creating original-path
+        # catalog rows alongside the rebased local-copy rows. Refuse the whole
+        # import in that case and let the user sync or discard the local copy
+        # first, rather than trying to enumerate every ``folder_template``
+        # rendering at request time.
         with stage_boundary_lock():
             conflict = local_copy_scan_conflict(
                 get_db(), [destination if copy else source],
-                # A copy only scans the dated folders it wrote into, so a
-                # staged folder elsewhere under the archive is not walked.
-                include_descendants=not copy,
             )
         if conflict:
             return json_error(conflict, 409)
@@ -4208,12 +4217,18 @@ def create_imports_blueprint(
                 )
         # The copied files are catalogued under the destination; if a local
         # copy covers it, they would land beside rows the catalog only knows
-        # by their local path. Only the dated folders the import writes are
-        # scanned, so a staged folder elsewhere under the archive is fine.
+        # by their local path.
+        #
+        # ``include_descendants`` defaults to True. A staged folder beneath
+        # the destination is not automatically safe just because the import
+        # only walks the dated folders it writes: ``folder_template`` can
+        # render a dated folder that coincides with the staged source
+        # (``%Y-%m-%d`` when ``/archive/2024-05-01`` is staged and a card
+        # holds a photo from that day), and then the import copies into the
+        # original source and scans it. Refuse and let the user sync or
+        # discard the local copy first.
         with stage_boundary_lock():
-            conflict = local_copy_scan_conflict(
-                get_db(), [destination], include_descendants=False,
-            )
+            conflict = local_copy_scan_conflict(get_db(), [destination])
         if conflict:
             return json_error(conflict, 409)
 
