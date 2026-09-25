@@ -397,6 +397,41 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_equivalent_relative_subjects_share_photo_without_xml_base(tmp_path):
+    """Equivalent relative ``rdf:about'' spellings share a subject even without ``xml:base''.
+
+    A sidecar can split its photo properties between
+    ``rdf:about="photo.jpg"'' and ``rdf:about="./photo.jpg"'' -- two
+    references to the same relative resource. Without an explicit
+    ``xml:base'', the raw-text compare treated them as distinct
+    subjects and ``_photo_subject'' returned the empty bucket, so
+    reads dropped whichever properties lived on either Description
+    and writes minted a stray empty-``rdf:about'' Description.
+    ``_description_subject'' now resolves relative references
+    against a stable synthetic base when no ``xml:base'' is set,
+    so the two spellings collapse to the same photo subject.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='photo.jpg'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='./photo.jpg'"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    # Both spellings resolve to the same photo subject, so rating
+    # from one Description and GPS from the other both surface.
+    assert metadata["rating"] == "4"
+    assert metadata["location"]["latitude"] == pytest.approx(10.0)
+    assert metadata["location"]["longitude"] == pytest.approx(20.0)
+
+
 def test_missing_and_empty_rdf_about_share_subject_under_xml_base(tmp_path):
     """A missing ``rdf:about'' and an explicit ``rdf:about="" '' fingerprint together.
 

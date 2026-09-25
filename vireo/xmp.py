@@ -462,6 +462,18 @@ def _all_top_descriptions(root):
     ]
 
 
+# Stable synthetic document URI used when no ``xml:base'' is set on
+# any ancestor of a Description. Only two equivalent RELATIVE
+# spellings of the same non-empty ``rdf:about'' -- ``photo.jpg'' vs.
+# ``./photo.jpg'' -- need to fingerprint together. An empty or
+# absent ``rdf:about'' still stays in the empty-subject bucket
+# unless an explicit ``xml:base'' names something else, so this
+# base is only reached when the reference is a genuine relative
+# URI (and it never changes the meaning of a fully-qualified
+# reference, since ``urljoin'' honors the ref's own scheme).
+_SUBJECT_FALLBACK_BASE = "file:///_vireo_xmp_/"
+
+
 def _effective_xml_base(elem, parent_map):
     """Return the effective ``xml:base`` URI for ``elem``.
 
@@ -508,6 +520,17 @@ def _description_subject(desc, parent_map=None):
     equivalent to an ``rdf:about=""'' -- both mean "the enclosing
     resource" -- and must resolve the same way, so both spellings
     fingerprint together whether or not ``xml:base'' is set.
+
+    When no ``xml:base'' is set anywhere, a *relative* non-empty
+    ``rdf:about'' still needs a fallback base so equivalent
+    spellings like ``photo.jpg'' and ``./photo.jpg'' collapse to
+    the same subject; a stable synthetic base
+    (:data:`_SUBJECT_FALLBACK_BASE`) is used for that. An
+    absent-or-empty ``rdf:about'' stays in the empty bucket, and a
+    fully-qualified relative reference (with its own scheme) is
+    unaffected because ``urljoin'' honors the reference's own
+    scheme over the base.
+
     Without ``parent_map`` the raw text is used, matching the
     pre-xml:base callers that resolve subjects against one another
     only when they were spelled identically.
@@ -519,6 +542,8 @@ def _description_subject(desc, parent_map=None):
         base = _effective_xml_base(desc, parent_map)
         if base:
             about = urllib.parse.urljoin(base, about or "")
+        elif about:
+            about = urllib.parse.urljoin(_SUBJECT_FALLBACK_BASE, about)
     return (about or "", node or "", rid or "")
 
 
