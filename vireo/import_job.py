@@ -799,19 +799,23 @@ def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
         if claims is not None and ctx is not None:
             claim_key = ctx.fold_basename(name)
             if claim_key in claims:
+                if checker is None:
+                    # Mirror the ``checker is not None`` gate in
+                    # ``_resolve_dest_collision``: with
+                    # ``skip_duplicates=False`` the sibling's own walk
+                    # refuses to adopt a same-hash claim and advances to
+                    # the next suffix, so this slot would split the pair
+                    # even for byte-identical bytes. Block it.
+                    return True
                 try:
-                    sib_hash = (
-                        checker.content_hash(sibling)
-                        if checker is not None
-                        else compute_file_hash(str(sibling))
-                    )
+                    sib_hash = checker.content_hash(sibling)
                 except OSError:
                     return True
                 if sib_hash is None or claims[claim_key] != sib_hash:
                     return True
-                # Same-bytes claim: the sibling's own collision walk
-                # will see the intra-batch duplicate and skip this slot
-                # as one, so the pair still settles here.
+                # Same-bytes claim under a checker: the sibling's own
+                # collision walk will see the intra-batch duplicate and
+                # skip this slot as one, so the pair still settles here.
                 continue
         path = os.path.join(batch_st.dest_folder, name)
         try:

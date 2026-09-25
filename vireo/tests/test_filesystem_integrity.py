@@ -652,6 +652,85 @@ def test_slot_for_tries_anchor_first_then_walks_the_rest():
     assert [_slot_for(c, 2) for c in range(5)] == [2, 0, 1, 3, 4]
 
 
+def test_sibling_blocks_slot_blocks_same_hash_claim_without_checker(tmp_path):
+    """Codex P1: with ``skip_duplicates=False`` the sibling's own walk
+    (``_resolve_dest_collision``) refuses to adopt a same-hash claim and
+    advances to the next suffix, so a same-bytes claim at the primary slot
+    would split the pair. ``_sibling_blocks_slot`` must mirror that gate:
+    when ``checker is None`` a same-hash claim blocks, so the RAW advances
+    with its sibling instead of anchoring at a slot the JPEG walk will refuse.
+    """
+    from import_job import _ImportBatchState, _sibling_blocks_slot
+
+    card = tmp_path / "card"
+    card.mkdir()
+    raw = card / "IMG_0001.CR3"
+    jpg = card / "IMG_0001.JPG"
+    raw.write_bytes(b"raw bytes")
+    jpg.write_bytes(b"jpeg bytes")
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    batch_st = _ImportBatchState(rel="rel", dest_folder=str(dest))
+    key = (str(card), "img_0001")
+    batch_st.companion_siblings[key] = [raw, jpg]
+
+    from ingest import compute_file_hash
+    jpg_hash = compute_file_hash(str(jpg))
+
+    class _Ctx:
+        fold_basename = staticmethod(lambda name: name.casefold())
+
+    ctx = _Ctx()
+    # Earlier file in this batch queued IMG_0001.JPG with the JPEG's exact
+    # bytes. With no checker, ``_resolve_dest_collision`` will refuse to
+    # adopt that claim, so the RAW must not anchor slot 0.
+    claims = {ctx.fold_basename("IMG_0001.JPG"): jpg_hash}
+    assert _sibling_blocks_slot(
+        batch_st, raw, "IMG_0001", 0,
+        checker=None, claims=claims, ctx=ctx,
+    ) is True
+
+
+def test_sibling_blocks_slot_allows_same_hash_claim_with_checker(tmp_path):
+    """The mirror of the above: with a checker (``skip_duplicates=True``)
+    the sibling's walk WILL adopt the same-hash claim as an intra-batch
+    duplicate, so the pair still settles at this slot and the RAW may
+    anchor here.
+    """
+    from import_job import _ImportBatchState, _sibling_blocks_slot
+
+    card = tmp_path / "card"
+    card.mkdir()
+    raw = card / "IMG_0001.CR3"
+    jpg = card / "IMG_0001.JPG"
+    raw.write_bytes(b"raw bytes")
+    jpg.write_bytes(b"jpeg bytes")
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    batch_st = _ImportBatchState(rel="rel", dest_folder=str(dest))
+    key = (str(card), "img_0001")
+    batch_st.companion_siblings[key] = [raw, jpg]
+
+    from ingest import compute_file_hash
+    jpg_hash = compute_file_hash(str(jpg))
+
+    class _Checker:
+        def content_hash(self, path):
+            return compute_file_hash(str(path))
+
+    class _Ctx:
+        fold_basename = staticmethod(lambda name: name.casefold())
+
+    ctx = _Ctx()
+    claims = {ctx.fold_basename("IMG_0001.JPG"): jpg_hash}
+    assert _sibling_blocks_slot(
+        batch_st, raw, "IMG_0001", 0,
+        checker=_Checker(), claims=claims, ctx=ctx,
+    ) is False
+
+
 # -- duplicate scan: offline volumes and hand rejections ----------------------
 
 
