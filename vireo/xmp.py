@@ -442,6 +442,24 @@ def _property_occurrences(root, name):
     return found
 
 
+def _photo_scoped_bags(root, tag):
+    """Yield each ``rdf:Bag`` under a photo-scoped Description's property.
+
+    ``tag`` is the Clark-notation property name (e.g. ``{dc}subject``).
+    A property may appear more than once across the photo's Descriptions;
+    a plain ``.//`` search would also match bags nested inside struct
+    values or Descriptions of a different RDF subject (an auxiliary
+    resource such as ``rdf:about="#aux"``). For keyword arrays that would
+    import someone else's ``dc:subject`` or ``lr:hierarchicalSubject`` as
+    the photo's keywords, and delete or rewrite them during a sync.
+    """
+    for desc in _top_descriptions(root):
+        for prop in desc.findall(tag):
+            bag = prop.find(f"{{{NS_RDF}}}Bag")
+            if bag is not None:
+                yield bag
+
+
 def _get_property(root, name):
     """Return a simple property's value from whichever form stores it."""
     for desc, child in _property_occurrences(root, name):
@@ -477,9 +495,10 @@ def read_keywords(xmp_path):
 
     root, _tree = result
     keywords = set()
-    for li in root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"):
-        if li.text:
-            keywords.add(li.text)
+    for bag in _photo_scoped_bags(root, f"{{{NS_DC}}}subject"):
+        for li in bag.findall(f"{{{NS_RDF}}}li"):
+            if li.text:
+                keywords.add(li.text)
     return keywords
 
 
@@ -494,11 +513,10 @@ def read_hierarchical_keywords(xmp_path):
 
     root, _tree = result
     results = []
-    for li in root.findall(
-        f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
-    ):
-        if li.text:
-            results.append(li.text)
+    for bag in _photo_scoped_bags(root, f"{{{NS_LR}}}hierarchicalSubject"):
+        for li in bag.findall(f"{{{NS_RDF}}}li"):
+            if li.text:
+                results.append(li.text)
     return results
 
 
@@ -635,18 +653,16 @@ def read_sync_preview_metadata(xmp_path):
         return {**empty, "status": "unreadable"}
 
     keywords = set()
-    for li in root.findall(
-        f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
-    ):
-        if li.text:
-            keywords.add(li.text)
+    for bag in _photo_scoped_bags(root, f"{{{NS_DC}}}subject"):
+        for li in bag.findall(f"{{{NS_RDF}}}li"):
+            if li.text:
+                keywords.add(li.text)
 
     hierarchical_keywords = set()
-    for li in root.findall(
-        f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
-    ):
-        if li.text:
-            hierarchical_keywords.add(li.text)
+    for bag in _photo_scoped_bags(root, f"{{{NS_LR}}}hierarchicalSubject"):
+        for li in bag.findall(f"{{{NS_RDF}}}li"):
+            if li.text:
+                hierarchical_keywords.add(li.text)
 
     if not _top_descriptions(root):
         return {
@@ -892,7 +908,7 @@ class SidecarEditor:
         def key(path):
             return tuple(keyword_match_key(part) for part in path.split('|'))
         by_key = {key(source): target for source, target in replacements.items()}
-        for bag in self._root.findall(f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"):
+        for bag in _photo_scoped_bags(self._root, f"{{{NS_LR}}}hierarchicalSubject"):
             seen = set()
             for li in list(bag.findall(f"{{{NS_RDF}}}li")):
                 old = li.text or ''
@@ -938,7 +954,7 @@ class SidecarEditor:
         exact = set(keywords_to_remove) if keep_exact else set()
         removed = []
 
-        for bag in self._root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag"):
+        for bag in _photo_scoped_bags(self._root, f"{{{NS_DC}}}subject"):
             for li in bag.findall(f"{{{NS_RDF}}}li"):
                 if not li.text or li.text in exact:
                     continue
@@ -952,8 +968,8 @@ class SidecarEditor:
         # deleting unrelated hierarchies that share a segment with the added
         # flat leaf.
         if hierarchical:
-            for bag in self._root.findall(
-                f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"
+            for bag in _photo_scoped_bags(
+                self._root, f"{{{NS_LR}}}hierarchicalSubject"
             ):
                 for li in bag.findall(f"{{{NS_RDF}}}li"):
                     if not li.text or li.text in exact:
@@ -1294,7 +1310,7 @@ class SidecarEditor:
         removed = []
 
         if owns_flat and leaf_key:
-            for bag in self._root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag"):
+            for bag in _photo_scoped_bags(self._root, f"{{{NS_DC}}}subject"):
                 exact = [
                     li for li in bag.findall(f"{{{NS_RDF}}}li")
                     if li.text == leaf
@@ -1315,8 +1331,8 @@ class SidecarEditor:
                     bag.remove(li)
 
         if owns_hier:
-            for bag in self._root.findall(
-                f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"
+            for bag in _photo_scoped_bags(
+                self._root, f"{{{NS_LR}}}hierarchicalSubject"
             ):
                 exact = [
                     li for li in bag.findall(f"{{{NS_RDF}}}li")

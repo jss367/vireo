@@ -27,6 +27,7 @@ from xmp import (
     SidecarEditor,
     _property_occurrences,
     read_hierarchical_keywords,
+    read_keywords,
     read_sync_preview_metadata,
     read_vireo_location_keywords,
     remove_vireo_gps_location,
@@ -257,6 +258,61 @@ def test_auxiliary_rdf_subject_is_ignored(tmp_path):
     assert metadata["rating"] == "5"
     assert metadata["location"]["latitude"] == pytest.approx(-33.5)
     assert metadata["location"]["longitude"] == pytest.approx(-70.25)
+
+
+def test_auxiliary_rdf_subject_keywords_are_ignored(tmp_path):
+    """Keyword bags on a different rdf:about are not the photo's keywords."""
+    path = tmp_path / "photo.xmp"
+    path.write_text(EXIFTOOL_XMP.replace(
+        "</rdf:RDF>",
+        f" <rdf:Description rdf:about='#aux'"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}'>\n"
+        "  <dc:subject><rdf:Bag>"
+        "<rdf:li>AuxOnly</rdf:li>"
+        "<rdf:li>Heron</rdf:li>"
+        "</rdf:Bag></dc:subject>\n"
+        "  <lr:hierarchicalSubject><rdf:Bag>"
+        "<rdf:li>Aux|Only</rdf:li>"
+        "<rdf:li>Birds|Heron</rdf:li>"
+        "</rdf:Bag></lr:hierarchicalSubject>\n"
+        " </rdf:Description>\n</rdf:RDF>",
+    ))
+    path = str(path)
+
+    assert read_keywords(path) == {"Heron"}
+    assert read_hierarchical_keywords(path) == ["Birds|Heron"]
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["keywords"] == {"Heron"}
+    assert metadata["hierarchical_keywords"] == {"Birds|Heron"}
+
+    editor = SidecarEditor(path)
+    editor.add_keywords({"Heron"}, {"Aux|Only"})
+    editor.remove_keywords({"AuxOnly"})
+    editor.replace_keyword_hierarchies({"Aux|Only": "Aux|Rewritten"})
+    editor.commit()
+
+    root = ET.parse(path).getroot()
+    aux = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "#aux"
+    ]
+    assert len(aux) == 1
+    aux_flat = {
+        li.text for li in aux[0].findall(
+            f"{{{NS_DC}}}subject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
+        )
+    }
+    aux_hier = {
+        li.text for li in aux[0].findall(
+            f"{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
+        )
+    }
+    assert aux_flat == {"AuxOnly", "Heron"}
+    assert aux_hier == {"Aux|Only", "Birds|Heron"}
+
+    assert read_keywords(path) == {"Heron"}
+    assert set(read_hierarchical_keywords(path)) == {"Birds|Heron", "Aux|Rewritten"}
 
 
 def test_new_description_matches_existing_photo_subject(tmp_path):
