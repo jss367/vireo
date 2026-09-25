@@ -32,9 +32,10 @@ runs:
         # rule, and its concurrency group collapses back-to-back merges.
         gh workflow run test-main.yml --repo "$REPO" --ref main
         echo "Dispatched Full tests on main after merging #${PR}."
-        # deploy-website.yml deploys on pushes that touch website/**.
-        if gh pr view "$PR" --repo "$REPO" --json files \
-            --jq '.files[].path' | grep -q '^website/'; then
+        # deploy-website.yml deploys on pushes that touch website/**. The
+        # files endpoint is paginated so a large PR can't hide the change.
+        if gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' \
+            | grep -q '^website/'; then
           gh workflow run deploy-website.yml --repo "$REPO" --ref main
           echo "Dispatched the website deploy: #${PR} changed website/."
         fi
