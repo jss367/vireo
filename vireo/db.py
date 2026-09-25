@@ -13827,6 +13827,21 @@ class Database:
         # undo restores the user's earlier decision instead of ``pending``.
         if old_meta.get("prior_status") == "reviewed" and old_meta.get("prediction_id"):
             self.update_prediction_status(int(old_meta["prediction_id"]), "reviewed")
+        # Group apply snapshots each pick row's pre-apply review status so
+        # undo can restore a member the user had previously rejected. The
+        # scope reset above lands every row at ``alternative`` / ``pending``;
+        # applying the recorded statuses afterwards overwrites those with
+        # the exact prior state.
+        prior_statuses = old_meta.get("prior_statuses")
+        if prior_statuses:
+            for pred_id_str, status in prior_statuses.items():
+                if not status:
+                    continue
+                try:
+                    pred_id = int(pred_id_str)
+                except (TypeError, ValueError):
+                    continue
+                self.update_prediction_status(pred_id, status)
 
     def _redo_prediction_accept_statuses(self, old_meta, old_val):
         """Re-accept every recorded prediction and re-reject its siblings.

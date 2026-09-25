@@ -1505,6 +1505,53 @@ def test_group_apply_without_species_is_undoable(app_and_db):
     assert db.get_review_status(pred_a, ws) == 'accepted'
 
 
+def test_group_apply_undo_restores_pick_prior_rejected_status(app_and_db):
+    """Undo of a re-opened burst apply restores a pick's prior ``rejected``.
+
+    A user re-opens an already applied burst and promotes a previously
+    rejected member into the new pick. ``_accept_group_pick_rows``
+    re-accepts it, but the history payload used to record only the
+    prediction ids: undo's generic scope reset landed every row at
+    ``alternative`` / ``pending`` and silently dropped the earlier
+    ``rejected`` decision, making the prediction reappear in the pending
+    queue. The apply now snapshots each pick row's pre-apply status so
+    undo puts it back exactly where it was.
+    """
+    app, db = app_and_db
+    (pred_a, pick), (_pred_b, reject) = _seed_burst_group(db, 'gprior')
+    ws = db._active_workspace_id
+    client = app.test_client()
+
+    # A prior decision explicitly rejects the burst member the modal will
+    # later re-pick. Any status the generic reset would ignore works here;
+    # rejected is the case Codex named.
+    db.update_prediction_status(pred_a, 'rejected')
+    assert db.get_review_status(pred_a, ws) == 'rejected'
+
+    resp = client.post('/api/predictions/group/apply', json={
+        'picks': [pick], 'rejects': [reject], 'removed': [],
+        'species': 'Azure Jay',
+        'observed': {str(pred_a): 'rejected'},
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert 'Azure Jay' in {k['name'] for k in db.get_photo_keywords(pick)}
+
+    # Undo must land the row back at ``rejected`` — not ``pending`` or
+    # ``alternative`` — so the user's earlier decision is not silently
+    # forgotten and the prediction stays out of the pending queue.
+    assert client.post('/api/undo').status_code == 200
+    assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(pick)}
+    assert db.get_review_status(pred_a, ws) == 'rejected'
+
+    # Redo re-applies the accept, and a second undo still restores the
+    # snapshot rather than settling on the generic ``pending``.
+    assert client.post('/api/redo').status_code == 200
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert client.post('/api/undo').status_code == 200
+    assert db.get_review_status(pred_a, ws) == 'rejected'
+
+
 def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
     """Undo holds the caller's transaction for the whole replay.
 

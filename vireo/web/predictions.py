@@ -1291,6 +1291,40 @@ def create_predictions_blueprint(
                 by_photo.update(grouped)
         return by_photo
 
+    def _snapshot_pick_prior_statuses(db, pick_pred_ids):
+        """Prior review status of each pick row keyed by photo id.
+
+        Returns ``{photo_id: {pred_id: status}}`` covering only rows with an
+        explicit ``prediction_review`` entry in the active workspace. A pick
+        with no row is omitted — the generic reset in
+        ``Database._undo_prediction_accept_statuses`` lands it at
+        ``alternative`` / ``pending`` on undo, which matches "no row".
+
+        Rows carrying a non-default status (``accepted`` / ``rejected`` /
+        ``reviewed``) are the ones this snapshot protects: a re-open of an
+        already-applied burst can pick a member the user previously
+        rejected, and the generic scope reset would drop that decision.
+        """
+        pairs = [(pid, pred_id)
+                 for pid, ids in pick_pred_ids.items()
+                 for pred_id in ids]
+        if not pairs:
+            return {}
+        ws = db._ws_id()
+        pred_to_photo = {pred_id: pid for pid, pred_id in pairs}
+        out = {}
+        for chunk in chunked(sorted(pred_to_photo)):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT prediction_id, status FROM prediction_review
+                    WHERE workspace_id = ?
+                      AND prediction_id IN ({placeholders})""",
+                (ws, *chunk),
+            ):
+                photo_id = pred_to_photo[row["prediction_id"]]
+                out.setdefault(photo_id, {})[row["prediction_id"]] = row["status"]
+        return out
+
     def _accept_group_pick_rows(db, pick_pred_ids):
         """Accept each pick's rows and reject their open siblings, in-transaction.
 
@@ -2087,6 +2121,16 @@ def create_predictions_blueprint(
             pick_pred_ids = _group_pick_prediction_ids(
                 db, actionable_picks, observed,
             )
+            # Snapshot each pick row's pre-apply status before the accept
+            # writes so undo restores it. Without this, a re-open of an
+            # already-applied burst that promotes a previously rejected
+            # member into the pick would undo back to ``pending`` and drop
+            # the earlier reject; the generic scope reset in
+            # ``Database._undo_prediction_accept_statuses`` cannot tell that
+            # the row wasn't at the default state before the accept.
+            prior_pick_statuses = _snapshot_pick_prior_statuses(
+                db, pick_pred_ids,
+            )
             _accept_group_pick_rows(db, pick_pred_ids)
 
             # One history entry covers the keyword and the statuses, so undo
@@ -2103,6 +2147,15 @@ def create_predictions_blueprint(
                     meta = {"prediction_id": ids[0], "prediction_ids": ids}
                     if not tagged:
                         meta["no_tag"] = True
+                    photo_priors = prior_pick_statuses.get(pid) or {}
+                    if photo_priors:
+                        # JSON object keys are strings; keep the encoded form
+                        # so ``_undo_prediction_accept_statuses`` sees the
+                        # same shape after ``json.loads`` on undo.
+                        meta["prior_statuses"] = {
+                            str(pred_id): status
+                            for pred_id, status in photo_priors.items()
+                        }
                     old_value = json.dumps(meta)
                 else:
                     old_value = ''
