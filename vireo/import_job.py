@@ -764,7 +764,8 @@ def _slot_for(counter, anchor):
 
 
 def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
-                          checker=None, stop_requested=None):
+                          checker=None, stop_requested=None,
+                          claims=None, ctx=None):
     """True if a same-stem card sibling could not share this ``slot``.
 
     Blocks on anything that would push the sibling's own walk to a
@@ -775,6 +776,17 @@ def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
     stat'd is ignored; its own walk fails it. Any hash read failure
     (candidate or sibling) falls back to blocking, because keeping the
     pair together beats a split when the sibling's fate is unknown.
+
+    On the remote (rsync) transport, earlier files in this batch are
+    recorded in ``claims`` (``batch_st.claimed_basenames``) but not yet
+    on disk until ``flush_batch``, so a purely filesystem-visible probe
+    treats those destination names as free. Pass ``claims`` and ``ctx``
+    to consult that reservation map first: a queued claim whose hash
+    matches the sibling's own hash is the sibling's own future landing
+    (the sibling walk will adopt it as an intra-batch duplicate), any
+    other claim blocks. ``claims`` is ``None`` on the local path — the
+    filesystem itself is the reservation there because bytes land inside
+    ``enqueue``.
     """
     siblings = batch_st.companion_siblings.get(_companion_key(source_file))
     if not siblings:
@@ -784,6 +796,23 @@ def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
             continue
         sib_suffix = os.path.splitext(sibling.name)[1]
         name = sibling.name if slot == 0 else f"{stem}_{slot}{sib_suffix}"
+        if claims is not None and ctx is not None:
+            claim_key = ctx.fold_basename(name)
+            if claim_key in claims:
+                try:
+                    sib_hash = (
+                        checker.content_hash(sibling)
+                        if checker is not None
+                        else compute_file_hash(str(sibling))
+                    )
+                except OSError:
+                    return True
+                if sib_hash is None or claims[claim_key] != sib_hash:
+                    return True
+                # Same-bytes claim: the sibling's own collision walk
+                # will see the intra-batch duplicate and skip this slot
+                # as one, so the pair still settles here.
+                continue
         path = os.path.join(batch_st.dest_folder, name)
         try:
             dest_stat = os.stat(path)
@@ -3709,6 +3738,7 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
             if anchor is None and _sibling_blocks_slot(
                 batch_st, source_file, stem, slot,
                 checker=checker, stop_requested=stop_requested,
+                claims=claims, ctx=ctx,
             ):
                 counter += 1
                 continue
@@ -3734,10 +3764,13 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
         if anchor is None and _sibling_blocks_slot(
             batch_st, source_file, stem, slot,
             checker=checker, stop_requested=stop_requested,
+            claims=claims, ctx=ctx,
         ):
             # This name is free, but a same-stem sibling from the card
             # would collide with a different file at the same suffix and
-            # be renamed away from us. Move the whole group on together.
+            # be renamed away from us (or the same collision is already
+            # queued for the rsync batch under that basename). Move the
+            # whole group on together.
             counter += 1
             continue
         batch_st.companion_slots.setdefault(group_key, slot)
