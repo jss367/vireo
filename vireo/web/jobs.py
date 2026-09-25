@@ -836,7 +836,19 @@ def create_jobs_blueprint(
             # land between a pipeline's regroup and miss stages (pairing its
             # miss flags with a grouping they never saw) or overwrite a
             # concurrent detach/grouping edit, leaving that edit's undo stale.
-            with acquire_workspace_regroup(ctx.workspace_id):
+            #
+            # Poll acquisition instead of ``with acquire_workspace_regroup(...):``:
+            # the lock is a bare ``threading.Lock`` so a blocking ``with``
+            # would keep this job stuck behind another same-workspace
+            # pipeline's regroup + misses stages even after the user
+            # cancelled it. Short-timeout polling lets ``JobRunner.cancel``
+            # reach this job promptly, and ``is_cancelled`` honours the
+            # cooperative pause between attempts.
+            workspace_regroup_lock = acquire_workspace_regroup(ctx.workspace_id)
+            while not workspace_regroup_lock.acquire(timeout=0.2):
+                if ctx.runner.is_cancelled(job["id"]):
+                    return {}
+            try:
                 photos = load_photo_features(
                     thread_db, collection_id=collection_id, config=effective_cfg,
                 )
@@ -887,8 +899,18 @@ def create_jobs_blueprint(
                 # workspace; a collection-scoped run leaves a partial cache, so
                 # clear the stamp instead (as regroup_stage does) or the
                 # pipeline page would report Group as done-prior.
+                #
+                # Coverage is measured against the loaded photo snapshot, not
+                # the current collection membership: if a smart collection
+                # expanded (a rating just crossed the threshold, matching an
+                # extra photo) or a new workspace photo was added between
+                # ``load_photo_features`` and here, a re-resolve would falsely
+                # claim full-workspace coverage and stamp the fingerprint for
+                # a cache that in fact excluded the newly-eligible photo.
+                snapshot_photo_ids = {p["id"] for p in photos}
                 if collection_covers_workspace(
                     thread_db, ctx.workspace_id, collection_id,
+                    snapshot_photo_ids=snapshot_photo_ids,
                 ):
                     thread_db.set_workspace_group_state(
                         workspace_id=ctx.workspace_id,
@@ -901,6 +923,8 @@ def create_jobs_blueprint(
                         fingerprint=None,
                         when_ts=None,
                     )
+            finally:
+                workspace_regroup_lock.release()
             ctx.runner.update_step(job["id"], "save", status="completed")
 
             return results["summary"]

@@ -139,18 +139,32 @@ def _resolve_collection_photo_ids(db, collection_id):
     return {r["id"] for r in rows} if rows else set()
 
 
-def collection_covers_workspace(db, workspace_id, collection_id):
+def collection_covers_workspace(db, workspace_id, collection_id,
+                                *, snapshot_photo_ids=None):
     """True when a grouping scoped to ``collection_id`` covers every photo in
-    ``workspace_id`` (``collection_id=None`` always does).
+    ``workspace_id`` (``collection_id=None`` always does, unless
+    ``snapshot_photo_ids`` is given).
 
     Callers that write ``pipeline_results_ws*.json`` use this to decide
     whether the workspace's ``last_group_fingerprint`` may be stamped: a
     subset run replaces the whole cache, so a stamp left in place would make
     the pipeline page report Group as done for a cache that is partial.
+
+    ``snapshot_photo_ids`` — when provided, coverage is measured against
+    that exact set of grouped photo IDs (the snapshot ``load_photo_features``
+    actually returned) rather than re-resolving ``collection_id`` after
+    ``save_results``. This closes a race where the collection expanded (a
+    smart-collection rule newly matches a photo whose rating just crossed
+    the threshold) or a workspace photo was added between load and save:
+    the re-resolve path would report full-workspace coverage and stamp the
+    fingerprint for a cache that in fact excluded the newly-eligible photo.
     """
-    if collection_id is None:
+    if snapshot_photo_ids is not None:
+        covered_ids = set(snapshot_photo_ids)
+    elif collection_id is None:
         return True
-    collection_photo_ids = _resolve_collection_photo_ids(db, collection_id)
+    else:
+        covered_ids = _resolve_collection_photo_ids(db, collection_id)
     ws_photo_ids = {
         r["id"] for r in db.conn.execute(
             """SELECT p.id
@@ -161,7 +175,7 @@ def collection_covers_workspace(db, workspace_id, collection_id):
             (workspace_id,),
         ).fetchall()
     }
-    return ws_photo_ids.issubset(collection_photo_ids)
+    return ws_photo_ids.issubset(covered_ids)
 
 
 def _replace_temp_id_scope(conn, table_name, ids):
