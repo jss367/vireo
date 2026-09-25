@@ -326,8 +326,14 @@ def test_copy_via_temp_no_hardlink_fallback_preserves_copy2_metadata(
     is not carried across for free. Without an explicit transfer,
     ``move_photos`` would then delete the source after silently losing
     that metadata. ``_apply_metadata`` must run ``shutil.copystat`` from
-    ``tmp`` to ``dst`` after the fd-based times/mode ops so all of
-    ``copy2``'s metadata reaches ``dst``.
+    ``tmp`` to the claimed destination after the fd-based times/mode
+    ops so all of ``copy2``'s metadata reaches ``dst``.
+
+    On Linux the copystat is bound to ``/proc/self/fd/<fd>`` for
+    identity safety (see the ``_apply_metadata`` docstring); the
+    destination path in the tracker is that magic entry rather than
+    the plain ``dst`` name, but the syscalls still land on the
+    claimed inode so the bytes and metadata reach ``dst``.
     """
     import errno
 
@@ -355,22 +361,105 @@ def test_copy_via_temp_no_hardlink_fallback_preserves_copy2_metadata(
     assert _no_partials(dst.parent) == []
     # ``shutil.copy2(src, tmp)`` internally runs ``copystat(src, tmp)``,
     # so the tracker sees that call first. What matters here is the
-    # follow-up ``copystat(tmp, dst)`` inside the placeholder promote —
-    # that transfer is what carries xattrs/flags/ACLs to ``dst`` when
-    # ``os.link`` cannot promote ``tmp``'s inode.
-    tmp_to_dst = [
+    # follow-up ``copystat(tmp, <claimed-dst>)`` inside the placeholder
+    # promote — that transfer is what carries xattrs/flags/ACLs to
+    # ``dst`` when ``os.link`` cannot promote ``tmp``'s inode. On Linux
+    # the promote binds to ``/proc/self/fd/<fd>`` for identity safety;
+    # on other platforms the dst path itself.
+    promote_calls = [
         call for call in calls
-        if call[1] == str(dst)
+        if call[1] == str(dst) or call[1].startswith("/proc/self/fd/")
     ]
-    assert len(tmp_to_dst) == 1, calls
-    src_arg, dst_arg, follow = tmp_to_dst[0]
-    assert dst_arg == str(dst)
+    assert len(promote_calls) == 1, calls
+    src_arg, dst_arg, follow = promote_calls[0]
+    if staged_copy._PROCFS_FD_AVAILABLE:
+        assert dst_arg.startswith("/proc/self/fd/")
+    else:
+        assert dst_arg == str(dst)
     assert follow is True
     # The tmp is a hidden sibling in dst's directory; it is unlinked
     # after the promote returns, but during the copystat call it lives
     # alongside dst.
     assert os.path.dirname(src_arg) == str(dst.parent)
     assert os.path.basename(src_arg).endswith(".partial")
+
+
+def test_copy_via_temp_metadata_apply_is_identity_safe_against_racer(
+    tmp_path, monkeypatch,
+):
+    """A concurrent writer that unlinks the claimed placeholder and
+    recreates ``dst`` between our pre-op inode check and the copystat
+    call used to see the racer's file's mode, timestamps and xattrs
+    silently rewritten to those of ``tmp``. Rollback cannot restore
+    that metadata. Binding the copystat to ``/proc/self/fd/<fd>``
+    routes every syscall through the kernel-side fd table, so a
+    racer's inode never sees our metadata even inside the TOCTOU
+    window ``_guarded_path_op`` failed to close.
+    """
+    import errno
+
+    if not staged_copy._PROCFS_FD_AVAILABLE:
+        pytest.skip("procfs not available on this platform")
+
+    src = _jpeg(tmp_path / "a.jpg", "red")
+    dst_dir = tmp_path / "out"
+    dst_dir.mkdir()
+    dst = dst_dir / "a.jpg"
+
+    def no_hardlinks(*_a, **_kw):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(staged_copy.os, "link", no_hardlinks)
+
+    # Distinctive mode on the racer's file that must survive the
+    # promote — if the copystat retargets, this becomes ``src``'s mode.
+    racer_bytes = b"racer-content"
+    racer_mode = 0o600
+    racer_atime = 111.0
+    racer_mtime = 222.0
+
+    real_copystat = staged_copy.shutil.copystat
+    tripped = {"once": False}
+
+    def racing_copystat(src_arg, dst_arg, *, follow_symlinks=True):
+        # Trip once, right before the copystat runs: unlink our
+        # placeholder (which our fd still keeps alive) and drop a
+        # racer's file at ``dst`` with distinctive metadata. If the
+        # copystat then retargeted onto the path, the racer's mode
+        # would be overwritten.
+        if not tripped["once"] and str(dst_arg).startswith("/proc/self/fd/"):
+            tripped["once"] = True
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(dst))
+            with open(str(dst), "wb") as fh:
+                fh.write(racer_bytes)
+            os.chmod(str(dst), racer_mode)
+            os.utime(str(dst), (racer_atime, racer_mtime))
+        return real_copystat(src_arg, dst_arg, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(staged_copy.shutil, "copystat", racing_copystat)
+
+    with pytest.raises(FileExistsError):
+        # The nlink check after the promote should detect that our
+        # placeholder was unlinked and refuse to report success.
+        staged_copy.copy_via_temp(str(src), str(dst))
+
+    assert tripped["once"], "racer never ran"
+    # The racer's file survives with its distinctive metadata intact:
+    # the copystat bound to /proc/self/fd/<fd> operated on our (now
+    # orphaned) inode, never on the racer's file. Without hard links
+    # the rollback leaves the racer's bytes at the unique
+    # ``.rollback`` scratch name rather than race a second writer, so
+    # look for the racer's file there.
+    import stat as stat_mod
+    rollbacks = [n for n in os.listdir(dst_dir) if n.endswith(".rollback")]
+    assert len(rollbacks) == 1, os.listdir(dst_dir)
+    scratch = dst_dir / rollbacks[0]
+    assert scratch.read_bytes() == racer_bytes
+    st = scratch.stat()
+    assert stat_mod.S_IMODE(st.st_mode) == racer_mode
+    assert st.st_mtime == racer_mtime
+    assert _no_partials(dst_dir) == []
 
 
 # -- ingest: a failed copy leaves nothing behind ------------------------------

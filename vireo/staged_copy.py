@@ -32,6 +32,17 @@ _HAS_FCHMOD = hasattr(os, "fchmod")
 # provides it; POSIX doesn't define it and doesn't need it.
 _O_BINARY = getattr(os, "O_BINARY", 0)
 
+# ``/proc/self/fd/<fd>`` on Linux is a magic entry whose syscalls target
+# the kernel-side file the fd points to, not whatever path the fd was
+# opened at. Using it as the ``dst`` path binds ``chmod``, ``utime``,
+# ``setxattr``, ``chflags`` and ``shutil.copystat`` to our claimed inode,
+# so a concurrent writer's unlink+recreate of the ``dst`` name cannot
+# cause a path-based metadata op to land on the racer's file. Windows
+# has no equivalent, but its ``os.open`` handle blocks other processes
+# from unlinking or renaming ``dst`` while the fd is open, so the race
+# does not apply there either.
+_PROCFS_FD_AVAILABLE = os.path.isdir("/proc/self/fd")
+
 
 def copy_via_temp(src, dst):
     """Copy ``src`` to ``dst`` through a hidden sibling temp file.
@@ -133,6 +144,16 @@ def _promote_by_placeholder(tmp, dst):
                 src_stat.st_mode,
                 tmp,
             )
+            # Second nlink check after metadata application: on Linux
+            # the copystat runs against ``/proc/self/fd/<fd>`` and is
+            # identity-safe, so a racer's unlink+recreate cannot leak
+            # our metadata onto their file — but our bytes and metadata
+            # then live on an orphan inode while ``dst`` names the
+            # racer's file. Refuse to report success over that file.
+            if os.fstat(claim_fd).st_nlink == 0:
+                raise FileExistsError(
+                    f"{dst}: placeholder was replaced during metadata apply"
+                )
         except BaseException:
             # Release the O_EXCL claim BEFORE running the rollback. On
             # Windows a handle opened without delete-sharing blocks
@@ -239,10 +260,22 @@ def _apply_metadata(fd, dst, claim_ino, times_ns, mode, tmp):
     fresh inode at ``dst`` and none of that metadata reached it —
     ``move_photos`` would then delete the source after silently
     losing Finder tags, resource-fork xattrs, ACL-related xattrs or
-    platform flags. Copy them from ``tmp`` to ``dst`` with
-    ``shutil.copystat`` (path-based, guarded by the same inode
-    re-check). It also re-applies times/mode, which is a harmless
-    no-op on top of the fd-based ops above.
+    platform flags.
+
+    ``shutil.copystat`` is path-based and would normally have a TOCTOU
+    between an inode pre-check and its own syscalls: a racer that
+    unlinks ``dst`` and creates a new file at the same name between
+    the two would see the copystat operations (times, mode, xattrs,
+    flags) applied to its file, and rollback cannot restore the
+    metadata already changed. On Linux, bind the copystat call to
+    ``/proc/self/fd/<fd>``: syscalls through that path go through the
+    kernel-side fd table and always target the inode we claimed, so
+    an intervening unlink+recreate cannot retarget the op. Windows
+    and macOS/BSD have no equivalent stable per-fd path; on Windows
+    the O_EXCL claim's open handle blocks other processes from
+    unlinking or renaming ``dst`` (no delete-share by default), so
+    the race does not apply, and the ``_guarded_path_op`` inode
+    re-check remains the fallback for macOS/BSD.
     """
     if _UTIME_SUPPORTS_FD:
         os.utime(fd, ns=times_ns)
@@ -252,10 +285,14 @@ def _apply_metadata(fd, dst, claim_ino, times_ns, mode, tmp):
         os.fchmod(fd, mode)
     else:
         _guarded_path_op(dst, claim_ino, lambda: os.chmod(dst, mode))
-    _guarded_path_op(
-        dst, claim_ino,
-        lambda: shutil.copystat(tmp, dst, follow_symlinks=True),
-    )
+    if _PROCFS_FD_AVAILABLE:
+        # Identity-safe: /proc/self/fd/<fd> cannot retarget mid-op.
+        shutil.copystat(tmp, f"/proc/self/fd/{fd}", follow_symlinks=True)
+    else:
+        _guarded_path_op(
+            dst, claim_ino,
+            lambda: shutil.copystat(tmp, dst, follow_symlinks=True),
+        )
 
 
 def _guarded_path_op(dst, claim_ino, op):
