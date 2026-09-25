@@ -921,30 +921,46 @@ def ingest(
                 # deliberately NOT updated — zero-byte files are kept out
                 # of the duplicate-identity index everywhere else, and
                 # this skip mirrors that.
-                if src_size == 0 and dest_size == 0:
-                    skipped_duplicate += 1
-                    duplicate_folders.add(str(dest_folder))
-                    continue
+                zero_byte = src_size == 0 and dest_size == 0
+                same_bytes = zero_byte
                 # Same size could be the same bytes — settle it by exact
                 # content, never by metadata (a wrong skip here would
                 # silently drop a photo). Different size proves a
                 # different file with no reads at all.
-                if src_size == dest_size:
+                if not zero_byte and src_size == dest_size:
                     src_hash = (
                         checker.content_hash(source_file)
                         if checker is not None
                         else compute_file_hash(str(source_file))
                     )
                     dest_hash = compute_file_hash(str(dest_file))
-                    if src_hash is not None and src_hash == dest_hash:
-                        # Exact same file already there
-                        skipped_duplicate += 1
-                        if checker is not None:
-                            for token in checker.record(source_file):
-                                batch_dest_folders[token] = str(dest_folder)
-                        duplicate_folders.add(str(dest_folder))
-                        continue
-                # Different file, same name — add numeric suffix
+                    same_bytes = (
+                        src_hash is not None and src_hash == dest_hash
+                    )
+                # Adopting the existing file keeps this member at slot 0,
+                # which is only valid if its same-stem siblings settle
+                # there too: a sibling already placed at a suffix, or one
+                # that would meet a different file at slot 0, would
+                # otherwise be split from it and the scan could pair this
+                # file with the unrelated sibling-named file. In that case
+                # copy to the group's shared suffix instead.
+                if same_bytes and (
+                    anchor == 0
+                    or (anchor is None
+                        and not _sibling_blocks_slot(
+                            source_file, dest_folder, 0,
+                        ))
+                ):
+                    # Exact same file already there
+                    skipped_duplicate += 1
+                    if checker is not None and not zero_byte:
+                        for token in checker.record(source_file):
+                            batch_dest_folders[token] = str(dest_folder)
+                    duplicate_folders.add(str(dest_folder))
+                    companion_slots.setdefault(slot_key, 0)
+                    continue
+                # Different file (or a split-making match), same name —
+                # add numeric suffix
                 needs_suffix = True
             elif anchor:
                 # A same-stem sibling was already renamed to a suffix.
@@ -990,6 +1006,14 @@ def ingest(
                                 dest_hash = compute_file_hash(str(dest_file))
                                 if (src_hash is not None
                                         and src_hash == dest_hash):
+                                    # Same companion gate as a fresh
+                                    # copy below: adopting here must not
+                                    # strand a sibling that would meet a
+                                    # different file at this suffix.
+                                    if anchor is None and _sibling_blocks_slot(
+                                        source_file, dest_folder, slot,
+                                    ):
+                                        continue
                                     matched_existing = True
                                     break
                         except OSError:

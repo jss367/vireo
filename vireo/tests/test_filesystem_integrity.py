@@ -644,6 +644,99 @@ def test_import_job_collision_renames_card_pair_together(tmp_path):
     assert (day_dir / "IMG_0001.CR3").read_bytes() == b"body A raw"
 
 
+def _card_raw_already_archived_beside_unrelated_jpeg(tmp_path, dest_root):
+    """Card RAW already sits byte-for-byte at archive slot 0 (an earlier,
+    interrupted import) while the archive's ``IMG_0001.JPG`` is an unrelated
+    photo. Returns the day folder and the unrelated JPEG's bytes."""
+    day = datetime(2026, 3, 28, 10, 0, 0)
+    day_dir = dest_root / "2026" / "2026-03-28"
+    day_dir.mkdir(parents=True)
+    _card_pair(tmp_path / "card", day)
+    raw_bytes = (tmp_path / "card" / "IMG_0001.CR3").read_bytes()
+    (day_dir / "IMG_0001.CR3").write_bytes(raw_bytes)
+    unrelated = b"unrelated archive JPEG " * 50
+    (day_dir / "IMG_0001.JPG").write_bytes(unrelated)
+    return day_dir, raw_bytes, unrelated
+
+
+def test_ingest_exact_match_does_not_adopt_slot_that_splits_pair(tmp_path):
+    """Codex P1: adopting the card RAW's exact copy at slot 0 left the card
+    JPEG, which collides with an unrelated ``IMG_0001.JPG``, alone at
+    ``_1`` — the scan could then pair the RAW with the unrelated JPEG. The
+    whole card pair must settle at ``_1``."""
+    from ingest import ingest
+
+    dst = tmp_path / "nas"
+    day_dir, raw_bytes, unrelated = (
+        _card_raw_already_archived_beside_unrelated_jpeg(tmp_path, dst)
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(tmp_path / "card"), str(dst), db=db)
+
+    assert result["failed"] == 0
+    assert sorted(os.listdir(day_dir)) == [
+        "IMG_0001.CR3", "IMG_0001.JPG", "IMG_0001_1.CR3", "IMG_0001_1.JPG",
+    ]
+    assert (day_dir / "IMG_0001_1.CR3").read_bytes() == raw_bytes
+    assert (day_dir / "IMG_0001.JPG").read_bytes() == unrelated
+
+
+def test_ingest_retry_adopts_both_siblings_at_their_suffixed_slot(tmp_path):
+    """Codex P2: an interrupted import already landed the card pair at
+    ``_1`` (slot 0 holds another body's RAW). A retry must adopt both exact
+    copies at ``_1`` — the anchored sibling used to skip its own bytes and
+    copy a second identical file to ``_2``."""
+    from ingest import ingest
+
+    day = datetime(2026, 3, 28, 10, 0, 0)
+    dst = tmp_path / "nas"
+    day_dir = dst / "2026" / "2026-03-28"
+    day_dir.mkdir(parents=True)
+    (day_dir / "IMG_0001.CR3").write_bytes(b"body A raw")
+    card = tmp_path / "card"
+    _card_pair(card, day)
+    for name in ("IMG_0001.CR3", "IMG_0001.JPG"):
+        stem, ext = os.path.splitext(name)
+        (day_dir / f"{stem}_1{ext}").write_bytes((card / name).read_bytes())
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(card), str(dst), db=db)
+
+    assert result["failed"] == 0
+    assert result["copied"] == 0
+    assert sorted(os.listdir(day_dir)) == [
+        "IMG_0001.CR3", "IMG_0001_1.CR3", "IMG_0001_1.JPG",
+    ]
+
+
+def test_import_job_exact_match_does_not_adopt_slot_that_splits_pair(tmp_path):
+    """Same as the ingest test, through ``_shared_collision_walk``'s adopt
+    branch in ``import_job.py``."""
+    from import_job import ImportParams, run_import_job
+
+    from vireo.tests.test_import_job import FakeRunner, _make_job
+
+    archive = tmp_path / "archive"
+    day_dir, raw_bytes, unrelated = (
+        _card_raw_already_archived_beside_unrelated_jpeg(tmp_path, archive)
+    )
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, db._active_workspace_id,
+        ImportParams(sources=[str(tmp_path / "card")], destination=str(archive)),
+    )
+
+    assert result["failed"] == 0
+    assert sorted(n for n in os.listdir(day_dir) if not n.startswith(".")) == [
+        "IMG_0001.CR3", "IMG_0001.JPG", "IMG_0001_1.CR3", "IMG_0001_1.JPG",
+    ]
+    assert (day_dir / "IMG_0001_1.CR3").read_bytes() == raw_bytes
+    assert (day_dir / "IMG_0001.JPG").read_bytes() == unrelated
+
+
 def test_slot_for_tries_anchor_first_then_walks_the_rest():
     from import_job import _slot_for
 
