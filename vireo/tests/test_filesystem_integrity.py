@@ -13,6 +13,7 @@ merge or mislabel a user's photo:
   was offline, and un-rejected rows the user had rejected by hand.
 """
 
+import contextlib
 import os
 import sys
 from datetime import datetime
@@ -172,10 +173,8 @@ def test_copy_via_temp_no_hardlink_fallback_never_overwrites_replacement(
         result = original_fstat(fd)
         if not tripped["once"]:
             tripped["once"] = True
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.unlink(str(dst))
-            except FileNotFoundError:
-                pass
             with open(str(dst), "wb") as fh:
                 fh.write(racer_bytes)
         return result
