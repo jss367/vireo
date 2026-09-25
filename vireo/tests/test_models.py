@@ -766,15 +766,13 @@ def test_load_config_propagates_backup_oserror(tmp_path, monkeypatch):
     """If the ``.corrupt`` backup fails, the read must not silently discard
     a recoverable schema-invalid registry.
 
-    Suppressing the ``OSError`` from ``shutil.copy2`` while still returning
+    Suppressing the ``OSError`` from the backup write while still returning
     the normalized empty default lets the next
     ``register_model`` / ``set_active_model`` / ``remove_model`` overwrite
     the original models.json — the only remaining copy of the recoverable
-    data — via ``_save_config``. Let the copy error propagate instead so
+    data — via ``_save_config``. Let the backup error propagate instead so
     every subsequent mutation refuses too, keeping the original on disk.
     """
-    import shutil as _shutil
-
     import models
 
     cfg_path = tmp_path / "models.json"
@@ -787,10 +785,12 @@ def test_load_config_propagates_backup_oserror(tmp_path, monkeypatch):
     })
     cfg_path.write_text(original)
 
-    def failing_copy2(src, dst, *args, **kwargs):
-        raise PermissionError(13, "Permission denied", str(dst))
+    def failing_mkstemp(*args, **kwargs):
+        # The ``.corrupt`` backup is the only mkstemp call reached in this
+        # test — ``_load_config`` raises before ``_save_config`` runs.
+        raise PermissionError(13, "Permission denied", "")
 
-    monkeypatch.setattr(_shutil, "copy2", failing_copy2)
+    monkeypatch.setattr(models.tempfile, "mkstemp", failing_mkstemp)
     with pytest.raises(OSError):
         models._load_config()
     with pytest.raises(OSError):
@@ -802,6 +802,42 @@ def test_load_config_propagates_backup_oserror(tmp_path, monkeypatch):
 
     assert cfg_path.read_text() == original
     assert not (tmp_path / "models.json.corrupt").exists()
+
+
+def test_load_config_backup_uses_bytes_actually_read(tmp_path, monkeypatch):
+    """The ``.corrupt`` backup preserves the bytes ``_load_config`` read,
+    not whatever is at ``CONFIG_PATH`` when the backup is written.
+
+    Reading ``CONFIG_PATH`` again for the backup would race a concurrent
+    mutator holding ``_CONFIG_LOCK`` that itself observed the corrupt
+    bytes, preserved them, and atomically replaced ``CONFIG_PATH`` with a
+    repaired registry. The reader's re-copy would then overwrite
+    ``.corrupt`` with the repaired bytes, destroying the only backup of
+    the malformed data.
+    """
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    corrupt_bytes = '{"models": [{"id": "m1"'
+    cfg_path.write_text(corrupt_bytes)
+
+    real_loads = models.json.loads
+
+    def racing_loads(raw, *args, **kwargs):
+        # Simulate a concurrent mutator that saw the same corrupt bytes,
+        # created its own ``.corrupt`` backup, and atomically replaced
+        # ``CONFIG_PATH`` with a repaired registry — all between our read
+        # and our parse attempt.
+        cfg_path.write_text(json.dumps({"models": [], "active_model": None}))
+        return real_loads(raw, *args, **kwargs)
+
+    monkeypatch.setattr(models.json, "loads", racing_loads)
+
+    assert models._load_config() == {"models": [], "active_model": None}
+    # The backup must reflect the bytes we actually read, not what
+    # CONFIG_PATH holds now.
+    assert (tmp_path / "models.json.corrupt").read_text() == corrupt_bytes
 
 
 def test_load_config_propagates_read_oserror(tmp_path, monkeypatch):

@@ -210,6 +210,41 @@ def _default_config():
     return {"models": [], "active_model": None}
 
 
+def _write_corrupt_backup(raw_bytes):
+    """Write ``raw_bytes`` (what was actually read from ``CONFIG_PATH``)
+    to ``models.json.corrupt`` atomically.
+
+    Reading from ``CONFIG_PATH`` again for the backup would race a
+    concurrent mutator that has since taken ``_CONFIG_LOCK``, preserved
+    the corrupt bytes itself, and atomically replaced ``CONFIG_PATH``
+    with a repaired registry: the reader's re-copy would then overwrite
+    ``.corrupt`` with the repaired bytes, destroying the only backup of
+    the malformed data.
+
+    If the backup already exists it is left alone — the first observer
+    of a corrupt file wins so a later reader who saw a partially-repaired
+    state cannot overwrite the true original.
+    """
+    backup_path = CONFIG_PATH + ".corrupt"
+    if os.path.exists(backup_path):
+        return
+    backup_dir = os.path.dirname(backup_path) or "."
+    os.makedirs(backup_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=backup_dir, prefix=".models.corrupt.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, backup_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
 def _load_config():
     """Load the model config, creating defaults if missing.
 
@@ -230,20 +265,28 @@ def _load_config():
     propagates rather than being suppressed: otherwise the same follow-up
     write would still overwrite the recoverable original with an empty
     registry.
+
+    The backup is written from the bytes we actually read, not by re-
+    opening ``CONFIG_PATH`` — a concurrent mutator holding ``_CONFIG_LOCK``
+    can atomically replace the file between our failed parse and any
+    later ``copy2`` from ``CONFIG_PATH``, and re-copying the (now-
+    repaired) pathname would destroy the true corrupt-bytes backup.
     """
     try:
-        with open(CONFIG_PATH) as f:
-            config = json.load(f)
+        with open(CONFIG_PATH, "rb") as f:
+            raw = f.read()
     except FileNotFoundError:
         return _default_config()
+    try:
+        config = json.loads(raw)
     except ValueError:
         log.warning("Could not parse %s; treating it as empty", CONFIG_PATH,
                     exc_info=True)
-        shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
+        _write_corrupt_backup(raw)
         return _default_config()
     if not isinstance(config, dict):
         log.warning("%s is not a JSON object; treating it as empty", CONFIG_PATH)
-        shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
+        _write_corrupt_backup(raw)
         return _default_config()
     if not isinstance(config.get("models"), list):
         log.warning(
@@ -251,7 +294,7 @@ def _load_config():
             "normalizing to an empty list",
             CONFIG_PATH, type(config.get("models")).__name__,
         )
-        shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
+        _write_corrupt_backup(raw)
         config["models"] = []
     return config
 
