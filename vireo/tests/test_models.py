@@ -5,6 +5,7 @@ Tests cover config persistence, model listing, active model selection,
 registration, removal, and taxonomy info — all without downloading
 real model weights.
 """
+import contextlib
 import json
 import os
 import sys
@@ -574,10 +575,8 @@ def test_save_config_is_atomic_and_leaves_no_temp_files(tmp_path, monkeypatch):
 
     with monkeypatch.context() as m:
         m.setattr(models.json, "dump", exploding_dump)
-        try:
+        with contextlib.suppress(Boom):
             models._save_config({"models": [], "active_model": "new"})
-        except Boom:
-            pass
 
     assert _json.loads(cfg_path.read_text())["active_model"] == "old"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["models.json"]
