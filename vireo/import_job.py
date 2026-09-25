@@ -763,15 +763,18 @@ def _slot_for(counter, anchor):
     return n if n < anchor else n + 1
 
 
-def _sibling_blocks_slot(batch_st, source_file, stem, slot):
+def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
+                          checker=None, stop_requested=None):
     """True if a same-stem card sibling could not share this ``slot``.
 
-    Only a destination entry that PROVABLY holds different bytes counts: a
-    non-regular entry, or a regular file whose size differs from the
-    sibling's. A same-size file might be the sibling's own bytes (a crash
-    retry's earlier landing), which its own walk will adopt, so it does not
-    block. A sibling whose source cannot be stat'd is ignored; its own walk
-    fails it.
+    Blocks on anything that would push the sibling's own walk to a
+    numeric suffix — a non-regular entry, a size mismatch, or a
+    same-size regular file whose bytes differ from the sibling's. Only
+    an exact byte match (which the sibling walk adopts as a crash
+    retry's earlier landing) passes. A sibling whose source cannot be
+    stat'd is ignored; its own walk fails it. Any hash read failure
+    (candidate or sibling) falls back to blocking, because keeping the
+    pair together beats a split when the sibling's fate is unknown.
     """
     siblings = batch_st.companion_siblings.get(_companion_key(source_file))
     if not siblings:
@@ -797,6 +800,35 @@ def _sibling_blocks_slot(batch_st, source_file, stem, slot):
         except OSError:
             continue
         if dest_stat.st_size != sib_size:
+            return True
+        if dest_stat.st_size == 0:
+            # Zero-byte↔zero-byte: the sibling walk's zero-byte adopt
+            # takes the slot, not a rename. See _resolve_dest_collision.
+            continue
+        # Same-sized regular file: settle by content. Only identical
+        # bytes let the sibling's collision walk adopt the slot;
+        # anything else advances it to a numeric suffix and splits the
+        # pair. Use _hash_dest_file for the candidate so a Stop and a
+        # stalled network mount are observed the same way the sibling's
+        # own walk would observe them.
+        try:
+            if stop_requested is not None:
+                cand_hash = _hash_dest_file(path, stop_requested)
+            else:
+                cand_hash = compute_file_hash(path)
+        except DestReadCancelled:
+            raise
+        except OSError:
+            return True
+        try:
+            sib_hash = (
+                checker.content_hash(sibling)
+                if checker is not None
+                else compute_file_hash(str(sibling))
+            )
+        except OSError:
+            return True
+        if sib_hash is None or cand_hash is None or sib_hash != cand_hash:
             return True
     return False
 
@@ -3657,6 +3689,7 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
             return _WALK_HANDLED, None
         if anchor is None and _sibling_blocks_slot(
             batch_st, source_file, stem, slot,
+            checker=checker, stop_requested=stop_requested,
         ):
             # This name is free, but a same-stem sibling from the card
             # would collide with a different file at the same suffix and

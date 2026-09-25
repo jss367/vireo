@@ -81,6 +81,63 @@ def test_copy_via_temp_never_overwrites(tmp_path):
     assert _no_partials(dst.parent) == []
 
 
+def test_copy_via_temp_no_hardlink_fallback_races_never_overwrite(
+    tmp_path, monkeypatch,
+):
+    """On filesystems without hard links (exFAT, some SMB/NFS shares) the
+    fallback promote must still refuse to overwrite ``dst`` when another
+    writer created it AFTER an existence check would have said "free".
+    A ``lexists``-then-``os.replace`` sequence silently overwrites that
+    concurrent write; the atomic ``O_CREAT | O_EXCL`` claim races with
+    it at kernel level and rejects the promote before touching bytes.
+
+    Simulated by pre-creating ``dst`` and monkeypatching ``lexists`` to
+    lie about it — the exact window a real race would open.
+    """
+    import errno
+
+    src = _jpeg(tmp_path / "a.jpg", "red")
+    dst = _jpeg(tmp_path / "out" / "a.jpg", "blue")
+    before = dst.read_bytes()
+
+    def no_hardlinks(*_a, **_kw):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(staged_copy.os, "link", no_hardlinks)
+    # Stand in for a concurrent writer that created ``dst`` after our
+    # existence check would have returned False.
+    monkeypatch.setattr(staged_copy.os.path, "lexists", lambda _p: False)
+
+    with pytest.raises(FileExistsError):
+        staged_copy.copy_via_temp(str(src), str(dst))
+
+    assert dst.read_bytes() == before
+    assert _no_partials(dst.parent) == []
+
+
+def test_copy_via_temp_no_hardlink_fallback_promotes_when_slot_is_free(
+    tmp_path, monkeypatch,
+):
+    """The fallback still copies when ``dst`` is free — the O_EXCL claim
+    just gates against races. On success the destination is the source
+    bytes, with no partial or empty placeholder left behind."""
+    import errno
+
+    src = _jpeg(tmp_path / "a.jpg", "red")
+    dst = tmp_path / "out" / "a.jpg"
+    dst.parent.mkdir()
+
+    def no_hardlinks(*_a, **_kw):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(staged_copy.os, "link", no_hardlinks)
+
+    staged_copy.copy_via_temp(str(src), str(dst))
+
+    assert dst.read_bytes() == src.read_bytes()
+    assert _no_partials(dst.parent) == []
+
+
 # -- ingest: a failed copy leaves nothing behind ------------------------------
 
 
@@ -296,6 +353,102 @@ def test_ingest_collision_renames_card_pair_together(tmp_path):
         "IMG_0001.CR3", "IMG_0001_1.CR3", "IMG_0001_1.JPG",
     ]
     assert (day_dir / "IMG_0001.CR3").read_bytes() == b"body A raw"
+
+
+def _card_pair_fixed_size(card, day, raw_bytes, jpeg_bytes):
+    card.mkdir(parents=True, exist_ok=True)
+    raw = card / "IMG_0001.CR3"
+    raw.write_bytes(raw_bytes)
+    jpeg = card / "IMG_0001.JPG"
+    # A JPEG with a real EXIF timestamp: the ingest-side folder plan
+    # uses EXIF over mtime when both are available.
+    _jpeg(jpeg, "green", mtime=day)
+    real_jpeg_size = jpeg.stat().st_size
+    # Overwrite with a bytes payload of the SAME size so a same-size
+    # collision at the destination is easy to arrange, but keep a real
+    # JPEG header so ingest still classifies it as an image (it also
+    # reads EXIF; a plain byte blob would still be ingested because
+    # ``.JPG`` matches the extension list).
+    jpeg.write_bytes(jpeg_bytes[:real_jpeg_size].ljust(real_jpeg_size, b"\0"))
+    ts = day.timestamp()
+    for path in (raw, jpeg):
+        os.utime(str(path), (ts, ts))
+    return real_jpeg_size
+
+
+def test_ingest_same_size_sibling_collision_keeps_pair_together(tmp_path):
+    """Codex P1: the archive already holds an unrelated ``IMG_0001.JPG``
+    with the SAME size as the card's JPEG but different bytes. The card's
+    RAW processes first; without hashing the same-size sibling collision
+    it took ``IMG_0001.CR3`` alone, then the card's JPEG later renamed to
+    ``IMG_0001_1.JPG`` — splitting the pair, and the scan would merge the
+    card's RAW with the archive's unrelated JPEG. Both must land at
+    ``_1``.
+    """
+    from ingest import ingest
+
+    day = datetime(2026, 3, 28, 10, 0, 0)
+    dst = tmp_path / "nas"
+    day_dir = dst / "2026" / "2026-03-28"
+    day_dir.mkdir(parents=True)
+    jpeg_size = _card_pair_fixed_size(
+        tmp_path / "card", day,
+        raw_bytes=b"card raw payload " * 32,
+        jpeg_bytes=b"card JPEG payload " * 200,
+    )
+    # Archive's unrelated JPEG at exactly the same size as the card's.
+    archive_jpeg = b"archive JPEG payload " * 200
+    (day_dir / "IMG_0001.JPG").write_bytes(
+        archive_jpeg[:jpeg_size].ljust(jpeg_size, b"\1"),
+    )
+    archive_before = (day_dir / "IMG_0001.JPG").read_bytes()
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(tmp_path / "card"), str(dst), db=db)
+
+    assert result["failed"] == 0
+    assert sorted(os.listdir(day_dir)) == [
+        "IMG_0001.JPG", "IMG_0001_1.CR3", "IMG_0001_1.JPG",
+    ]
+    # Archive's original JPEG is untouched.
+    assert (day_dir / "IMG_0001.JPG").read_bytes() == archive_before
+
+
+def test_import_job_same_size_sibling_collision_keeps_pair_together(tmp_path):
+    """Same as the ingest test, but through ``run_import_job``'s mirrored
+    ``_sibling_blocks_slot`` in ``import_job.py``.
+    """
+    from import_job import ImportParams, run_import_job
+
+    from vireo.tests.test_import_job import FakeRunner, _make_job
+
+    day = datetime(2026, 3, 28, 10, 0, 0)
+    archive = tmp_path / "archive"
+    day_dir = archive / "2026" / "2026-03-28"
+    day_dir.mkdir(parents=True)
+    jpeg_size = _card_pair_fixed_size(
+        tmp_path / "card", day,
+        raw_bytes=b"card raw payload " * 32,
+        jpeg_bytes=b"card JPEG payload " * 200,
+    )
+    archive_jpeg = b"archive JPEG payload " * 200
+    (day_dir / "IMG_0001.JPG").write_bytes(
+        archive_jpeg[:jpeg_size].ljust(jpeg_size, b"\1"),
+    )
+    archive_before = (day_dir / "IMG_0001.JPG").read_bytes()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, db._active_workspace_id,
+        ImportParams(sources=[str(tmp_path / "card")], destination=str(archive)),
+    )
+
+    assert result["failed"] == 0
+    assert sorted(n for n in os.listdir(day_dir) if not n.startswith(".")) == [
+        "IMG_0001.JPG", "IMG_0001_1.CR3", "IMG_0001_1.JPG",
+    ]
+    assert (day_dir / "IMG_0001.JPG").read_bytes() == archive_before
 
 
 def test_import_job_collision_renames_card_pair_together(tmp_path):

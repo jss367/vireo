@@ -819,9 +819,14 @@ def ingest(
 
     def _sibling_blocks_slot(source_file, dest_folder, slot):
         """True if a same-stem sibling bound for ``dest_folder`` would meet a
-        different file at ``slot``. Only a provably different file counts
-        (a non-file entry or a size mismatch); a same-size file may be the
-        sibling's own bytes, which its own collision check skips."""
+        different file at ``slot`` and rename away from it, splitting the
+        pair. A non-file entry or a size mismatch proves different. A
+        same-size regular file is settled by content hash — only exactly
+        matching bytes would let the sibling's own collision walk adopt
+        (skip) the slot; different bytes would push it to a numeric
+        suffix. Any read failure (candidate or sibling) falls back to
+        blocking, because keeping the pair together beats a split when
+        we cannot prove the sibling would share the slot."""
         stem = source_file.stem
         for sibling in companion_siblings.get(
             (str(source_file.parent), stem.casefold()), (),
@@ -841,9 +846,27 @@ def ingest(
             try:
                 if not candidate.is_file():
                     return True
-                if candidate.stat().st_size != sibling.stat().st_size:
-                    return True
+                cand_size = candidate.stat().st_size
+                sib_size = sibling.stat().st_size
             except OSError:
+                return True
+            if cand_size != sib_size:
+                return True
+            if cand_size == 0:
+                # Sibling walk treats a zero-byte↔zero-byte collision as
+                # a skip (see the src_size == dest_size == 0 branch
+                # below), so it does not rename away from this slot.
+                continue
+            try:
+                sib_hash = (
+                    checker.content_hash(sibling)
+                    if checker is not None
+                    else compute_file_hash(str(sibling))
+                )
+                cand_hash = compute_file_hash(str(candidate))
+            except OSError:
+                return True
+            if sib_hash is None or cand_hash is None or sib_hash != cand_hash:
                 return True
         return False
 

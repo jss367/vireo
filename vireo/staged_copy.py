@@ -8,7 +8,6 @@ temp file and only promotes it once the copy finished.
 """
 
 import contextlib
-import errno
 import os
 import shutil
 import tempfile
@@ -19,10 +18,14 @@ def copy_via_temp(src, dst):
 
     Never overwrites: raises ``FileExistsError`` if ``dst`` exists by the
     time the copy is promoted. The promote is a no-overwrite ``os.link``;
-    on filesystems without hard links (exFAT, some SMB/NFS shares) it falls
-    back to an existence check followed by ``os.replace``. Any ``OSError``
-    from the copy propagates, and the temp file is always removed, so on
-    failure the destination is exactly as it was.
+    on filesystems without hard links (exFAT, some SMB/NFS shares) it
+    falls back to an atomic exclusive-create claim of ``dst`` (an
+    ``open`` with ``O_CREAT | O_EXCL`` — a check-then-``replace`` would
+    silently overwrite a file created by a concurrent writer inside the
+    window between the two calls) followed by ``os.replace`` onto that
+    just-claimed empty placeholder. Any ``OSError`` from the copy
+    propagates, and the temp file is always removed, so on failure the
+    destination is exactly as it was.
     """
     dst_dir = os.path.dirname(dst) or "."
     fd, tmp = tempfile.mkstemp(
@@ -38,11 +41,27 @@ def copy_via_temp(src, dst):
         except FileExistsError:
             raise
         except OSError:
-            if os.path.lexists(dst):
-                raise FileExistsError(
-                    errno.EEXIST, os.strerror(errno.EEXIST), dst,
-                ) from None
-            os.replace(tmp, dst)
+            # Kernel-level race: exactly one caller wins the O_EXCL
+            # claim, and the loser gets FileExistsError before touching
+            # any bytes.
+            try:
+                claim_fd = os.open(
+                    dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
+                )
+            except FileExistsError:
+                raise
+            os.close(claim_fd)
+            try:
+                os.replace(tmp, dst)
+            except BaseException:
+                # Roll back the empty placeholder so a failed promote
+                # never leaves a zero-byte artifact under ``dst``. This
+                # covers OSError from the replace and cancellations
+                # (KeyboardInterrupt / SystemExit) that would otherwise
+                # skip the cleanup.
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(dst)
+                raise
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
