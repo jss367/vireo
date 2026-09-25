@@ -5406,13 +5406,43 @@ function renderAllSettings(container) {
   container.innerHTML = parts.join('');
 }
 
+function _settingControlSelector(el) {
+  if (!el || !el.getAttribute) return null;
+  var inputKey = el.getAttribute('data-input-key');
+  if (inputKey) return '[data-input-key="' + cssEscape(inputKey) + '"]';
+  var listKey = el.getAttribute('data-list-key');
+  var listItem = el.getAttribute('data-list-item');
+  if (listKey && listItem != null) {
+    return '[data-list-key="' + cssEscape(listKey) + '"][data-list-item="' + cssEscape(listItem) + '"]';
+  }
+  return null;
+}
+
 function rerenderSettingRow(key) {
   var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
   if (!row) return;
+  // A save lands asynchronously, and the user may be back in this row's
+  // field. Replacing the row would swallow the keystrokes typed since, so
+  // leave a row that is being edited alone; its own change event saves it
+  // and re-renders then. Otherwise keep focus where it was.
+  var active = document.activeElement;
+  var focusSelector = (active && row.contains(active)) ? _settingControlSelector(active) : null;
+  if (focusSelector && active.dataset && active.dataset.dirty) return;
   var tmp = document.createElement('div');
   tmp.innerHTML = renderSettingRow(key);
   var fresh = tmp.firstElementChild;
-  if (fresh) row.replaceWith(fresh);
+  if (!fresh) return;
+  row.replaceWith(fresh);
+  if (focusSelector) {
+    var target = fresh.querySelector(focusSelector);
+    if (target) {
+      target.focus();
+      try {
+        var end = String(target.value || '').length;
+        target.setSelectionRange(end, end);
+      } catch (e) {}  // number / checkbox inputs have no selection range
+    }
+  }
 }
 
 function cssEscape(s) {
@@ -5536,6 +5566,11 @@ function renderSettingWidget(key, spec, effective) {
          +    'style="' + inputStyle + 'min-width:120px;">'
          +   opts + '</select>';
   }
+  // Typed fields (number, secret, text) save on `change` (blur or Enter), not
+  // per keystroke: a debounced save while typing wrote partial values such as
+  // half a path to config, and for the working-copy limit raised the
+  // "remove ~X GB" confirm after the first digit. `dirty` marks a field with
+  // unsaved typing so rerenderSettingRow won't replace it mid-edit.
   if (spec.type === 'int' || spec.type === 'float') {
     var step = spec.step != null ? spec.step : (spec.type === 'int' ? 1 : 0.01);
     var min = spec.min != null ? ' min="' + spec.min + '"' : '';
@@ -5543,16 +5578,18 @@ function renderSettingWidget(key, spec, effective) {
     var val = (effective != null) ? effective : '';
     return '<input type="number" ' + keyAttr + ' value="' + escapeAttr(String(val)) + '" '
          +     'step="' + step + '"' + min + max + ' '
-         +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
-     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+         +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
          +     'style="' + inputStyle + 'width:100px;text-align:right;">';
   }
   if (spec.type === 'secret') {
     var sval = (effective != null) ? String(effective) : '';
     return '<input type="password" ' + keyAttr + ' value="' + escapeAttr(sval) + '" '
          +     'placeholder="(unset)" autocomplete="off" '
-         +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
-     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+         +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
          +     'style="' + inputStyle + 'width:200px;font-family:monospace;">';
   }
   if (spec.type === 'list_string') {
@@ -5579,8 +5616,9 @@ function renderSettingWidget(key, spec, effective) {
   var tval = (effective != null) ? String(effective) : '';
   return '<input type="text" ' + keyAttr + ' value="' + escapeAttr(tval) + '" '
        +     'placeholder="(empty)" '
-       +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
-     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+       +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
        +     'style="' + inputStyle + 'width:240px;font-family:monospace;">';
 }
 

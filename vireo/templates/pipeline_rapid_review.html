@@ -2336,7 +2336,11 @@ document.addEventListener('keydown', function(e) {
     e.preventDefault();
     return;
   }
-  if (e.target && e.target.tagName === 'INPUT') return;
+  // Skip every form field, not just INPUT: with the #queueFilter <select>
+  // focused, arrows/Enter must change the filter, not decide the photo.
+  var t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' ||
+            t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
   if (rapidShortcutMatches(e, 'reject')) {
     e.preventDefault();
     decideCurrent('reject');

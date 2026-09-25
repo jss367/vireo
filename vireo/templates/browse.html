@@ -11895,8 +11895,12 @@ async function confirmBatchKeyword() {
   } catch(e) { return; }
   await _refreshBrowseKeywordState(ids);
   if (!selectedKeyword) invalidateKeywordAutocompleteCache();
+  // Re-read the live selection: it may have moved while the POST and the
+  // refresh were in flight. Loading the pre-await ``ids`` here would win the
+  // sequence race and leave the panel's Add/Remove buttons bound to photos
+  // that are no longer selected.
   selectionKeywordKey = '';
-  loadSelectionKeywordSuggestions(ids);
+  loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();
   refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
@@ -12882,7 +12886,10 @@ async function setRating(photoId, rating) {
     refreshGridCards([photoId]);
     refreshExpandedBrowseStackMembers([photoId]);
     scheduleCollectionCountsRefresh();
-    loadDetail(photoId);
+    // The user may have moved on during the POST. loadDetail(A) while B is
+    // open would hide B's panel and null _detailPhotoId, then refuse to render
+    // A, leaving the panel blank.
+    if (selectedPhotoId === photoId) loadDetail(photoId);
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -13242,7 +13249,8 @@ async function removeKeyword(photoId, keywordId) {
       [photoId],
       _keywordNameFromCache(keywordId),
     );
-    loadDetail(photoId);
+    // Same guard as setRating: don't blank the panel of a photo opened since.
+    if (selectedPhotoId === photoId) loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
     refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
@@ -13392,6 +13400,16 @@ function _locationApplyPhotoIds() {
 // in one shot applied the location to *nothing*. Split it. location_review.html
 // chunks against the same cap.
 var LOCATION_BATCH_LIMIT = 1000;
+
+// A location save is async (a big batch posts 1000 ids per request, so it can
+// take seconds) and the user can open another photo meanwhile. The response
+// describes the photos the save targeted (a batch returns photo_ids[0]'s
+// location), so painting it after the target changed would show the saved
+// place on an unrelated photo, whose × button would then clear *that* photo.
+// Capture the target before the await and paint only if it is still open.
+function _locationTargetKey() {
+  return selectionIdsKey(_locationApplyPhotoIds()) + '|' + (window._detailPhotoId || '');
+}
 
 async function _postLocationBatched(endpoint, baseBody, ids) {
   var last = null;
@@ -13548,6 +13566,7 @@ async function _submitLocationPlace(placeId, placeDetails) {
   if (!ids.length) return;
   var useBatch = ids.length > 1;
   var detailPhotoId = window._detailPhotoId || null;
+  var targetKey = _locationTargetKey();
   var body = { place_id: placeId };
   if (placeDetails) body.place = placeDetails;
   try {
@@ -13558,7 +13577,7 @@ async function _submitLocationPlace(placeId, placeDetails) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-    if (resp && resp.location) {
+    if (resp && resp.location && _locationTargetKey() === targetKey) {
       renderLocationFilled(resp.location);
     }
     await _afterLocationMutation(ids, detailPhotoId);
@@ -13574,6 +13593,7 @@ async function _submitLocationKeyword(keyword) {
   if (!ids.length) return;
   var useBatch = ids.length > 1;
   var detailPhotoId = window._detailPhotoId || null;
+  var targetKey = _locationTargetKey();
   var body = { keyword_id: keyword.id };
   try {
     var resp = useBatch
@@ -13583,7 +13603,7 @@ async function _submitLocationKeyword(keyword) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-    if (resp && resp.location) {
+    if (resp && resp.location && _locationTargetKey() === targetKey) {
       renderLocationFilled(resp.location);
     }
     await _afterLocationMutation(ids, detailPhotoId);
@@ -13598,6 +13618,7 @@ async function _submitLocationText(name) {
   if (!ids.length) return;
   var useBatch = ids.length > 1;
   var detailPhotoId = window._detailPhotoId || null;
+  var targetKey = _locationTargetKey();
   try {
     var resp = useBatch
       ? await _postLocationBatched('/api/batch/location/text', { name: name }, ids)
@@ -13607,7 +13628,7 @@ async function _submitLocationText(name) {
           body: JSON.stringify({ name: name }),
         });
     if (resp && resp.location) {
-      renderLocationFilled(resp.location);
+      if (_locationTargetKey() === targetKey) renderLocationFilled(resp.location);
       await _afterLocationMutation(ids, detailPhotoId);
     }
   } catch(e) {
@@ -13825,6 +13846,7 @@ async function acceptExifSuggestion(placeId) {
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
   var useBatch = ids.length > 1;
+  var targetKey = _locationTargetKey();
   try {
     var resp = useBatch
       ? await _postLocationBatched('/api/batch/location', { place_id: placeId }, ids)
@@ -13833,10 +13855,12 @@ async function acceptExifSuggestion(placeId) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ place_id: placeId }),
         });
-    if (resp && resp.location) {
-      renderLocationFilled(resp.location);
+    // The suggestion line now belongs to whatever photo is open; only paint
+    // the saved place or clear the line if that is still the accepted target.
+    if (_locationTargetKey() === targetKey) {
+      if (resp && resp.location) renderLocationFilled(resp.location);
+      clearExifSuggestion();
     }
-    clearExifSuggestion();
     await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
     _showLocationError(e && e.message ? e.message : 'Could not save location.');

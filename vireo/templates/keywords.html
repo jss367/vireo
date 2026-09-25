@@ -1245,7 +1245,12 @@
       }
       if (!resp.ok) throw new Error(data.error || 'Could not rename keyword');
       await loadKeywords();
-    } catch(e) { console.error('Failed to rename', e); }
+    } catch(e) {
+      // The row reverts to the old name on render(); say why, or the rename
+      // (e.g. a location name containing '|') just silently undoes itself.
+      console.error('Failed to rename', e);
+      showToast('Could not rename keyword: ' + (e.message || 'request failed'), 'error');
+    }
     render();
   }
 
@@ -1256,6 +1261,8 @@
     const ids = Array.from(selectedIds);
     if (!ids.length) return;
 
+    let failed = 0;
+    let firstError = '';
     for (const id of ids) {
       try {
         const resp = await fetch('/api/keywords/' + id, {
@@ -1264,6 +1271,7 @@
           body: JSON.stringify({type: newType})
         });
         const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
         if (data && data.merged) {
           // Row was merged into a normalized-equal peer -- can't update in
           // place, will refetch after the loop rather than 100+ round trips.
@@ -1271,11 +1279,19 @@
         }
         const kw = allKeywords.find(k => k.id === id);
         if (kw) kw.type = newType;
-      } catch(e) { console.error('Failed to update', id, e); }
+      } catch(e) {
+        console.error('Failed to update', id, e);
+        failed++;
+        if (!firstError) firstError = e.message || 'request failed';
+      }
     }
     selectedIds.clear();
     document.getElementById('kwBulkType').value = '';
     await loadKeywords();
+    if (failed) {
+      showToast('Could not change the type of ' + failed + ' of ' + ids.length +
+        ' keyword(s): ' + firstError, 'error');
+    }
   });
 
   // -- Bulk delete --
@@ -1284,15 +1300,29 @@
     if (!ids.length) return;
     if (!confirm('Delete ' + ids.length + ' keyword(s)? This will also remove them from all photos.')) return;
 
+    let failed = 0;
+    let firstError = '';
     for (const id of ids) {
       try {
-        await fetch('/api/keywords/' + id, { method: 'DELETE' });
+        const resp = await fetch('/api/keywords/' + id, { method: 'DELETE' });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          throw new Error(data.error || ('HTTP ' + resp.status));
+        }
         allKeywords = allKeywords.filter(k => k.id !== id);
         delete parentMap[id];
-      } catch(e) { console.error('Failed to delete', id, e); }
+      } catch(e) {
+        console.error('Failed to delete', id, e);
+        failed++;
+        if (!firstError) firstError = e.message || 'request failed';
+      }
     }
     selectedIds.clear();
     await loadKeywords();
+    if (failed) {
+      showToast('Could not delete ' + failed + ' of ' + ids.length +
+        ' keyword(s): ' + firstError, 'error');
+    }
   }
   document.getElementById('kwBulkDelete').addEventListener('click', deleteSelectedKeywords);
 

@@ -794,3 +794,54 @@ def test_settings_import_reloads_page_when_config_refetch_fails(live_server, pag
     expect(page.locator("#cfgKeywordCase")).to_have_value("title")
     cfg = page.request.get(f"{url}/api/config").json()
     assert cfg["keyword_case"] == "title"
+
+
+def test_all_settings_text_field_saves_on_commit_not_per_keystroke(live_server, page):
+    """All settings typed fields save the finished value, and keep focus.
+
+    The row used to autosave 300 ms after each keystroke and then replace
+    itself, so a pause mid-path wrote the partial path to config and the
+    next keystrokes went nowhere.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/settings", timeout=5000)
+    _wait_for_settings_idle(page)
+
+    patches = []
+    page.on(
+        "request",
+        lambda r: patches.append(r.post_data_json)
+        if r.method == "PATCH" and "/api/settings/global" in r.url
+        else None,
+    )
+
+    field = page.locator(
+        '#allSettingsCategories input[data-input-key="darktable_style"]'
+    )
+    expect(field).to_be_visible(timeout=10_000)
+    field.click()
+    field.fill("")
+    field.press_sequentially("half")
+    # Longer than the old 300 ms debounce: nothing may be written yet.
+    page.wait_for_timeout(700)
+    assert patches == []
+    field.press_sequentially("-typed")
+
+    row = page.locator(
+        '#allSettingsCategories .setting-row-card[data-key="darktable_style"]'
+    )
+    with page.expect_request(
+        lambda r: r.method == "PATCH" and "/api/settings/global" in r.url
+    ):
+        field.press("Enter")
+    expect(row.locator(".setting-row-status")).to_have_text("✓ Saved", timeout=10_000)
+    assert [p["value"] for p in patches] == ["half-typed"]
+
+    # The row was re-rendered with the saved value and focus stayed in it.
+    refreshed = page.locator(
+        '#allSettingsCategories input[data-input-key="darktable_style"]'
+    )
+    expect(refreshed).to_have_value("half-typed")
+    expect(refreshed).to_be_focused()
+    values = page.request.get(f"{url}/api/settings/values").json()
+    assert values["global"]["darktable_style"] == "half-typed"
