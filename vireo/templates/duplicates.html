@@ -669,7 +669,8 @@
     keptProposals.forEach(function(p) {
       var cands = [p.winner].concat(p.losers || []);
       cands.forEach(function(c) {
-        if (!c || c.exists === false) return;
+        // Offline copies are unknown, not gone: still count their folder.
+        if (!c || (c.exists === false && !c.volume_offline)) return;
         var path = c.path || '';
         var sep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
         if (sep <= 0) return;
@@ -870,18 +871,30 @@
   }
 
   function renderGroupWarning(group) {
-    // Three levels of severity:
+    // Severity, high to low:
     //  - all_missing: every file in the group is gone — nothing to keep.
+    //  - all_offline: every copy is on an unreachable volume — state unknown,
+    //      don't propose orphan cleanup or promote a surviving twin.
     //  - winner missing (status-dependent):
     //      • unresolved: Rule 0 promoted a surviving twin into the KEEP slot.
     //      • resolved: the kept row in the DB is fixed; if a loser file still
     //        exists it's the only surviving copy. Trashing it = data loss.
-    //  - any loser missing: informational; trash actions will be no-ops for it.
+    //  - winner offline: KEEP card sits on an unreachable volume; the file may
+    //      well be there. Never phrase this as "missing".
+    //  - any loser missing/offline: informational; trash actions will be no-ops
+    //      for it.
     var allMissing = group.all_missing === true;
+    var allOffline = group.all_offline === true;
     var winner = group.winner || {};
     var losers = group.losers || [];
-    var winnerMissing = winner.exists === false;
-    var anyLoserMissing = losers.some(function(l) { return l.exists === false; });
+    var winnerOffline = winner.volume_offline === true;
+    var winnerMissing = winner.exists === false && !winnerOffline;
+    var anyLoserMissing = losers.some(function(l) {
+      return l.exists === false && l.volume_offline !== true;
+    });
+    var anyLoserOffline = losers.some(function(l) {
+      return l.volume_offline === true;
+    });
     if (group.empty_file_group) {
       return '<div class="group-warning severe">' +
         '<b>Zero-byte image files detected.</b> These are not real duplicate photos; ' +
@@ -895,6 +908,13 @@
         '<b>All files in this group are missing on disk.</b> ' +
         'Nothing to delete — Vireo just needs to clean up the orphaned DB rows. ' +
         'Re-scanning the affected folders will mark these as missing.' +
+        '</div>';
+    }
+    if (allOffline) {
+      return '<div class="group-warning severe">' +
+        '<b>Every copy in this group is on a volume that isn’t reachable right now.</b> ' +
+        'Their state is unknown — reconnect the drive or NAS and rescan before ' +
+        'applying any action here.' +
         '</div>';
     }
     if (winnerMissing) {
@@ -913,10 +933,22 @@
         'A surviving copy was promoted instead — check the KEEP card before applying.' +
         '</div>';
     }
+    if (winnerOffline) {
+      return '<div class="group-warning">' +
+        '<b>Heads up:</b> the KEEP file is on a volume that isn’t reachable right now — ' +
+        'its state is unknown. Reconnect the drive or NAS before applying.' +
+        '</div>';
+    }
     if (anyLoserMissing) {
       return '<div class="group-warning">' +
         'One or more extra copies are already missing on disk. They’ll be ' +
         'rejected in the DB; trash actions will skip them.' +
+        '</div>';
+    }
+    if (anyLoserOffline) {
+      return '<div class="group-warning">' +
+        'One or more extra copies are on a volume that isn’t reachable right now. ' +
+        'Trash actions will skip them until the volume comes back.' +
         '</div>';
     }
     return '';
@@ -1331,10 +1363,22 @@
     // When the kept-file is missing, any surviving loser file is the only
     // remaining copy. Drop trash affordances for that group entirely so the
     // bulk and per-card paths stay consistent — both check ``data-protected``.
-    var winnerMissing = winner.exists === false;
+    // A winner on an offline volume has unknown state: it may or may not be
+    // there, so we can't tell whether the reachable loser is the last copy
+    // either. Treat the group as protected until the winner's presence can
+    // be confirmed — the ``winner-offline`` label lets ``renderCard`` swap
+    // in the reconnect-first messaging instead of the "kept file missing"
+    // wording. ``isBulkTrashProtected`` mirrors this so the bulk button
+    // never advertises files we've disabled the per-card action for.
+    var winnerAbsent = winner.exists === false;
+    var winnerOffline = winner.volume_offline === true;
+    var winnerMissing = winnerAbsent && !winnerOffline;
+    var winnerProtected = winnerAbsent;
 
     var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '"' +
-               (winnerMissing ? ' data-protected="winner-missing"' : '') + '>';
+               (winnerProtected
+                 ? ' data-protected="' + (winnerMissing ? 'winner-missing' : 'winner-offline') + '"'
+                 : '') + '>';
     html += '<div class="dup-group-header">';
     if (group.empty_file_group) {
       html += '<label style="cursor:default;">' +
@@ -1351,15 +1395,17 @@
     html += '<div class="dup-row">';
     html += renderCard(winner, true, null, false);
     losers.forEach(function(loser) {
-      html += renderCard(loser, false, loser.reason, true, winnerMissing);
+      html += renderCard(loser, false, loser.reason, true, winnerProtected, winnerOffline);
     });
     html += '</div></div>';
     return html;
   }
 
-  function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect) {
+  function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect, winnerOfflineProtect) {
     var cls = isWinner ? 'winner' : 'loser';
-    var missing = photo.exists === false;
+    // A copy on an offline volume is unknown, not missing — don't apply
+    // the ``missing`` styling that renders it as gone.
+    var missing = photo.exists === false && !photo.volume_offline;
     if (missing) cls += ' missing';
     var badge = isWinner ? 'KEEP' : (isResolvedLoser ? 'REJECTED' : 'WILL REJECT');
     var thumbUrl = photo.id != null
@@ -1391,11 +1437,13 @@
               photo.id + ')">Move file to Trash</button>';
       html += '<div class="trash-status" data-trash-status></div>';
     } else if (isResolvedLoser && !missing && winnerMissingProtect) {
-      // The kept-file is gone, so this loser file may be the only remaining
-      // copy. Suppress the trash button and explain why.
-      html += '<div class="trash-status" data-trash-status>' +
-              'Trash disabled \u2014 kept file is missing, this may be the only copy.' +
-              '</div>';
+      // The kept-file is gone (or its volume is unreachable and we can't
+      // tell), so this loser file may be the only remaining copy. Suppress
+      // the trash button and explain why.
+      var msg = winnerOfflineProtect
+        ? 'Trash disabled \u2014 kept file is on an unreachable volume; reconnect it before removing copies.'
+        : 'Trash disabled \u2014 kept file is missing, this may be the only copy.';
+      html += '<div class="trash-status" data-trash-status>' + msg + '</div>';
     }
     html += '</div>';
     return html;
@@ -1452,10 +1500,12 @@
     }
   }
 
-  // Protected: kept-file is missing on disk for this group, so any surviving
-  // loser file may be the only remaining copy. The bulk-button label and the
-  // bulk action share this predicate so the count never advertises files
-  // ``trashAllLoserFiles`` would skip.
+  // Protected: kept-file is either missing on disk, or its volume is
+  // unreachable so we can't tell whether it's still there. In both cases
+  // a surviving loser file may be the only remaining copy, so this
+  // predicate matches ``winnerProtected`` in ``renderGroup``. The
+  // bulk-button label and the bulk action share it so the count never
+  // advertises files ``trashAllLoserFiles`` would skip.
   function isBulkTrashProtected(p) {
     return !!(p && p.winner && p.winner.exists === false);
   }
@@ -1738,8 +1788,38 @@
         body: JSON.stringify({ hashes: hashes }),
       });
       var n = data.rejected_count || 0;
-      showToast('Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's'), 'success');
-      clearResults();
+      var deferred = (data.deferred_hashes || []).filter(Boolean);
+      // Groups the resolver refused because a candidate was on an
+      // offline volume stay on the page — their state is unknown, not
+      // resolved. Prune only the hashes we asked about that were NOT
+      // deferred so the rest of the scan cache stays consistent.
+      var deferredSet = new Set(deferred);
+      var resolvedHashes = new Set();
+      hashes.forEach(function(h) {
+        if (!deferredSet.has(h)) resolvedHashes.add(h);
+      });
+      var deferredToast = deferred.length > 0
+        ? ' (' + deferred.length + ' deferred — volume offline)'
+        : '';
+      var toastKind = deferred.length > 0 && n === 0 ? 'info' : 'success';
+      showToast(
+        'Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's') + deferredToast,
+        toastKind,
+      );
+      if (deferred.length === 0) {
+        clearResults();
+      } else {
+        pruneResolvedHashesFromScan(resolvedHashes);
+        renderResults(_lastScanResult);
+        var status = document.getElementById('applyStatus');
+        if (status) {
+          status.textContent =
+            deferred.length + ' group' + (deferred.length === 1 ? '' : 's') +
+            ' deferred (reconnect the volume and try again)';
+        }
+        var btn = document.getElementById('applyBtn');
+        if (btn) btn.disabled = false;
+      }
     } catch (e) {
       showToast(e.message || 'Apply failed', 'error');
       status.textContent = '';

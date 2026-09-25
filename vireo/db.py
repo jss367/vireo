@@ -1441,6 +1441,21 @@ class Database:
                 PRIMARY KEY (photo_id, workspace_id)
             );
 
+            -- Which rejections the duplicate resolver made. ``photos.flag``
+            -- alone cannot tell them from a rejection the user made by hand,
+            -- and the duplicate scan's auto-reopen may only undo its own.
+            -- Any flag change away from 'rejected' drops the row, so a photo
+            -- the user un-rejects and later rejects again counts as theirs.
+            CREATE TABLE IF NOT EXISTS duplicate_rejections (
+                photo_id  INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE
+            );
+            CREATE TRIGGER IF NOT EXISTS trg_duplicate_rejections_clear
+            AFTER UPDATE OF flag ON photos
+            WHEN NEW.flag IS NOT 'rejected'
+            BEGIN
+                DELETE FROM duplicate_rejections WHERE photo_id = NEW.id;
+            END;
+
             CREATE TABLE IF NOT EXISTS photo_edit_recipes (
                 photo_id    INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
                 recipe_json TEXT NOT NULL,
@@ -2595,6 +2610,49 @@ class Database:
             self.conn.execute(
                 "INSERT INTO db_meta(key, value) "
                 "VALUES ('default_strategy_to_process_id', '1')"
+            )
+
+        # One-shot backfill for ``duplicate_rejections``. Before this table
+        # existed the duplicate scan's reopen path un-rejected every row
+        # under a shared hash. New rejections now record provenance, but a
+        # catalog upgraded from before it does not, so groups resolved
+        # pre-upgrade would never auto-reopen — if the kept file later
+        # disappears, the surviving twin stays rejected behind a ghost
+        # winner. Adopt any existing rejection that shares a ``file_hash``
+        # with a non-rejected sibling as a resolver rejection so those
+        # groups behave the way they used to. A hand-rejection that
+        # coincidentally shared a hash gets the same treatment, which
+        # matches the pre-upgrade behaviour; new hand-rejections after
+        # this point are excluded from ``duplicate_rejections`` normally.
+        backfilled = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key='duplicate_rejections_backfill_v1'"
+        ).fetchone()
+        if backfilled is None:
+            # Probe for the ``flag`` and ``file_hash`` columns before the
+            # backfill runs: synthetic old-shape DBs in tests can predate
+            # either. Nothing to backfill there — just record the marker
+            # so we don't keep probing on every open.
+            try:
+                self.conn.execute(
+                    "SELECT flag, file_hash FROM photos LIMIT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
+            else:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO duplicate_rejections(photo_id) "
+                    "SELECT p.id FROM photos p "
+                    "WHERE p.flag = 'rejected' AND p.file_hash IS NOT NULL "
+                    "AND EXISTS ("
+                    "    SELECT 1 FROM photos q "
+                    "    WHERE q.file_hash = p.file_hash "
+                    "      AND q.id != p.id "
+                    "      AND (q.flag IS NULL OR q.flag != 'rejected')"
+                    ")"
+                )
+            self.conn.execute(
+                "INSERT INTO db_meta(key, value) "
+                "VALUES ('duplicate_rejections_backfill_v1', '1')"
             )
         self.conn.commit()
 
@@ -5345,11 +5403,23 @@ class Database:
 
         Returns ``{"winner_id": int|None, "loser_ids": [int], "rejected": int}``.
         If fewer than 2 non-rejected candidates remain, returns the no-op
-        shape with ``winner_id=None``.
+        shape with ``winner_id=None``. When at least one candidate lives
+        on an offline volume, the resolver defers instead of picking a
+        winner: the return dict adds ``"deferred": True`` so callers can
+        tell deferrals apart from no-ops and keep the group visible.
         """
+        from repositories.duplicates import DEFERRED_PLAN
+
         plan = self._duplicates_repository().resolution_plan(photo_ids)
         if plan is None:
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
+        if plan is DEFERRED_PLAN:
+            return {
+                "winner_id": None,
+                "loser_ids": [],
+                "rejected": 0,
+                "deferred": True,
+            }
         winner_id, loser_ids = plan
 
         self._apply_winner_loser_merge(winner_id, loser_ids)
@@ -5459,11 +5529,13 @@ class Database:
         return {"resolved": resolved, "skipped": skipped}
 
     def reopen_duplicate_group(self, file_hash):
-        """Un-reject all rejected rows sharing this file_hash.
+        """Un-reject the rows sharing this file_hash that duplicate
+        resolution rejected (those recorded in ``duplicate_rejections``).
 
         Used by the duplicate scan when the kept file has gone missing on
         disk but a rejected sibling still exists — clearing the rejection
         lets the next proposal pass run Rule 0 and promote the survivor.
+        A row the user rejected by hand stays rejected.
         Returns the number of rows un-rejected.
         """
         return self._duplicates_repository().reopen(file_hash)

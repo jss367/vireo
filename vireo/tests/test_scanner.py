@@ -2093,21 +2093,24 @@ def test_pair_raw_jpeg_preserves_primary_exif_summary_columns(tmp_path):
     raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
                           file_size=20000000, file_mtime=1.0)
 
+    # Same camera: a make/model mismatch would mean two different shots,
+    # which pairing now refuses (see test_filesystem_integrity.py).
     db.conn.execute(
         "UPDATE photos SET camera_make=?, camera_model=?, iso=? WHERE id=?",
         ("Sony", "A1", 200, raw_id),
     )
     db.conn.execute(
         "UPDATE photos SET camera_make=?, camera_model=?, iso=? WHERE id=?",
-        ("Canon", "R5", 800, jpeg_id),
+        ("SONY", "a1", 800, jpeg_id),
     )
     db.conn.commit()
 
     _pair_raw_jpeg_companions(db)
 
     photo = db.conn.execute(
-        "SELECT camera_make, camera_model, iso FROM photos"
+        "SELECT camera_make, camera_model, iso, companion_path FROM photos"
     ).fetchone()
+    assert photo["companion_path"] == "IMG.jpg"
     assert photo["camera_make"] == "Sony"
     assert photo["camera_model"] == "A1"
     assert photo["iso"] == 200

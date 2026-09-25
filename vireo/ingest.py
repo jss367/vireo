@@ -2,10 +2,10 @@
 
 import contextlib
 import errno
+import itertools
 import logging
 import os
 import posixpath
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +25,7 @@ from import_dedup import (
     stored_metadata_key,
 )
 from scanner import ScanCancelled, compute_file_hash
+from staged_copy import copy_via_temp
 
 log = logging.getLogger(__name__)
 
@@ -784,10 +785,29 @@ def ingest(
     # file's EXIF time for the duplicate gate — reuse those reads and only
     # add the mtime fallback. In verify/no-skip modes, batch the
     # EXIF/ExifTool prepass over just the survivors.
+    #
+    # Also resolve timestamps for filtered card siblings that share a stem
+    # with a survivor. ``_sibling_blocks_slot`` computes each sibling's
+    # destination folder to decide whether an unrelated same-stem file at
+    # the survivor's slot would strand the pair; a filtered sibling with
+    # no timestamp would fall back to ``unsorted`` and be skipped, so we'd
+    # miss the split when a filtered RAW's JPEG survives (or vice versa)
+    # and the destination folder holds an unrelated same-stem file.
+    to_copy_set = set(to_copy)
+    survivor_stems = {
+        (str(sf.parent), sf.stem.casefold()) for sf in to_copy
+    }
+    timestamp_files = list(to_copy)
+    for source_file in files:
+        if source_file in to_copy_set:
+            continue
+        key = (str(source_file.parent), source_file.stem.casefold())
+        if key in survivor_stems:
+            timestamp_files.append(source_file)
     timestamps = _source_file_timestamps(
-        to_copy,
+        timestamp_files,
         capture_times=(
-            {str(f): checker.capture_time(f) for f in to_copy}
+            {str(f): checker.capture_time(f) for f in timestamp_files}
             if checker is not None and not checker.verify_by_hash
             else None
         ),
@@ -800,6 +820,82 @@ def ingest(
     # collision) so an intra-batch duplicate can report the correct
     # post-import scan folder.
     batch_dest_folders: dict[tuple, str] = {}
+
+    # Same-stem card files (IMG_0001.CR3 + IMG_0001.JPG) keep one shared
+    # stem at the destination: a collision rename of one member alone
+    # (IMG_0001_1.CR3 beside IMG_0001.JPG) splits the pair, and the scan
+    # would then pair the JPEG with the unrelated RAW that owns the
+    # original stem. ``companion_siblings`` groups this batch's files by
+    # source folder + stem; ``companion_slots`` records the numeric suffix
+    # (0 = original name) each group's first copied member took, keyed by
+    # destination folder too.
+    # Include EVERY discovered card file, not just survivors. When
+    # ``skip_duplicates`` drops one member of a card pair in pass 1 (e.g.
+    # the RAW is already cataloged elsewhere while its JPEG is new),
+    # iterating over ``to_copy`` alone would make the JPEG look like a
+    # singleton and land at the unsuffixed slot, even when the
+    # destination folder holds an unrelated same-stem file. Feeding the
+    # filtered sibling in lets ``_sibling_blocks_slot`` see that the pair
+    # would meet a different file at slot 0 and force a shared suffix.
+    companion_siblings: dict[tuple, list[Path]] = {}
+    for source_file in files:
+        companion_siblings.setdefault(
+            (str(source_file.parent), source_file.stem.casefold()), [],
+        ).append(source_file)
+    companion_slots: dict[tuple, int] = {}
+
+    def _sibling_blocks_slot(source_file, dest_folder, slot):
+        """True if a same-stem sibling bound for ``dest_folder`` would meet a
+        different file at ``slot`` and rename away from it, splitting the
+        pair. A non-file entry or a size mismatch proves different. A
+        same-size regular file is settled by content hash — only exactly
+        matching bytes would let the sibling's own collision walk adopt
+        (skip) the slot; different bytes would push it to a numeric
+        suffix. Any read failure (candidate or sibling) falls back to
+        blocking, because keeping the pair together beats a split when
+        we cannot prove the sibling would share the slot."""
+        stem = source_file.stem
+        for sibling in companion_siblings.get(
+            (str(source_file.parent), stem.casefold()), (),
+        ):
+            if sibling == source_file:
+                continue
+            sibling_folder = Path(destination_dir) / build_destination_path(
+                timestamps.get(sibling), folder_template, sibling,
+            )
+            if sibling_folder != dest_folder:
+                continue
+            name = (sibling.name if slot == 0
+                    else f"{stem}_{slot}{sibling.suffix}")
+            candidate = dest_folder / name
+            if not os.path.lexists(candidate):
+                continue
+            try:
+                if not candidate.is_file():
+                    return True
+                cand_size = candidate.stat().st_size
+                sib_size = sibling.stat().st_size
+            except OSError:
+                return True
+            if cand_size != sib_size:
+                return True
+            if cand_size == 0:
+                # Sibling walk treats a zero-byte↔zero-byte collision as
+                # a skip (see the src_size == dest_size == 0 branch
+                # below), so it does not rename away from this slot.
+                continue
+            try:
+                sib_hash = (
+                    checker.content_hash(sibling)
+                    if checker is not None
+                    else compute_file_hash(str(sibling))
+                )
+                cand_hash = compute_file_hash(str(candidate))
+            except OSError:
+                return True
+            if sib_hash is None or cand_hash is None or sib_hash != cand_hash:
+                return True
+        return False
 
     for source_file in to_copy:
         if pause_callback:
@@ -829,9 +925,27 @@ def ingest(
             dest_folder.mkdir(parents=True, exist_ok=True)
 
             dest_file = dest_folder / source_file.name
+            slot_key = (
+                str(source_file.parent), source_file.stem.casefold(),
+                str(dest_folder),
+            )
+            anchor = companion_slots.get(slot_key)
+            needs_suffix = False
 
-            # Handle filename collision (different file, same name)
-            if dest_file.exists():
+            # Handle filename collision (different file, same name).
+            #
+            # ``exists()`` follows symlinks, so a dangling link at
+            # ``dest_file`` reports False and would fall through to a
+            # ``copy_via_temp`` promotion whose ``os.link`` and ``O_EXCL``
+            # fallback both raise ``FileExistsError`` against the
+            # directory entry — the file (and every retry) would fail
+            # instead of landing at ``_1``. Split the probe: ``lexists``
+            # detects any entry, ``exists`` gates the content-adopt path
+            # (only a regular follow-through is comparable), and a
+            # lexists-but-not-exists entry advances to the suffix walk
+            # the same way the walk itself already does.
+            dest_exists = dest_file.exists()
+            if dest_exists:
                 src_size = source_file.stat().st_size
                 dest_size = dest_file.stat().st_size
                 # Zero-byte ↔ zero-byte at the same destination path IS
@@ -846,38 +960,141 @@ def ingest(
                 # deliberately NOT updated — zero-byte files are kept out
                 # of the duplicate-identity index everywhere else, and
                 # this skip mirrors that.
-                if src_size == 0 and dest_size == 0:
-                    skipped_duplicate += 1
-                    duplicate_folders.add(str(dest_folder))
-                    continue
+                zero_byte = src_size == 0 and dest_size == 0
+                same_bytes = zero_byte
                 # Same size could be the same bytes — settle it by exact
                 # content, never by metadata (a wrong skip here would
                 # silently drop a photo). Different size proves a
                 # different file with no reads at all.
-                if src_size == dest_size:
+                if not zero_byte and src_size == dest_size:
                     src_hash = (
                         checker.content_hash(source_file)
                         if checker is not None
                         else compute_file_hash(str(source_file))
                     )
                     dest_hash = compute_file_hash(str(dest_file))
-                    if src_hash is not None and src_hash == dest_hash:
-                        # Exact same file already there
-                        skipped_duplicate += 1
-                        if checker is not None:
-                            for token in checker.record(source_file):
-                                batch_dest_folders[token] = str(dest_folder)
-                        duplicate_folders.add(str(dest_folder))
-                        continue
-                # Different file, same name — add numeric suffix
-                stem = dest_file.stem
-                suffix = dest_file.suffix
-                counter = 1
-                while dest_file.exists():
-                    dest_file = dest_folder / f"{stem}_{counter}{suffix}"
-                    counter += 1
+                    same_bytes = (
+                        src_hash is not None and src_hash == dest_hash
+                    )
+                # Adopting the existing file keeps this member at slot 0,
+                # which is only valid if its same-stem siblings settle
+                # there too: a sibling already placed at a suffix, or one
+                # that would meet a different file at slot 0, would
+                # otherwise be split from it and the scan could pair this
+                # file with the unrelated sibling-named file. In that case
+                # copy to the group's shared suffix instead.
+                if same_bytes and (
+                    anchor == 0
+                    or (anchor is None
+                        and not _sibling_blocks_slot(
+                            source_file, dest_folder, 0,
+                        ))
+                ):
+                    # Exact same file already there
+                    skipped_duplicate += 1
+                    if checker is not None and not zero_byte:
+                        for token in checker.record(source_file):
+                            batch_dest_folders[token] = str(dest_folder)
+                    duplicate_folders.add(str(dest_folder))
+                    companion_slots.setdefault(slot_key, 0)
+                    continue
+                # Different file (or a split-making match), same name —
+                # add numeric suffix
+                needs_suffix = True
+            elif os.path.lexists(dest_file):
+                # A directory entry sits at the primary name that does
+                # not resolve to a follow-through (dangling symlink,
+                # link to a non-file, etc.). See the comment above.
+                needs_suffix = True
+            elif anchor:
+                # A same-stem sibling was already renamed to a suffix.
+                needs_suffix = True
+            elif anchor is None and _sibling_blocks_slot(
+                source_file, dest_folder, 0,
+            ):
+                # This name is free, but a same-stem sibling would meet a
+                # different file at it and be renamed away from us.
+                needs_suffix = True
 
-            shutil.copy2(str(source_file), str(dest_file))
+            slot = 0
+            matched_existing = False
+            matched_zero_byte = False
+            if needs_suffix:
+                stem = source_file.stem
+                suffix = source_file.suffix
+                # The sibling's suffix first, then the usual 1, 2, ...
+                candidates = itertools.chain(
+                    [anchor] if anchor else [],
+                    (n for n in itertools.count(1) if n != anchor),
+                )
+                src_size = source_file.stat().st_size
+                for slot in candidates:
+                    dest_file = dest_folder / f"{stem}_{slot}{suffix}"
+                    if os.path.lexists(dest_file):
+                        # A same-size same-hash regular file at this slot
+                        # is already the bytes we would copy. Adopt it
+                        # (matches the slot-0 branch above) rather than
+                        # copying a second identical file at slot+1: the
+                        # anchor case reaches here when the first sibling
+                        # picked a suffixed slot because ``_sibling_blocks_slot``
+                        # found this exact match, and the non-anchored
+                        # case avoids the same duplicate-copy on retry.
+                        try:
+                            if dest_file.is_file():
+                                dest_size = dest_file.stat().st_size
+                                # Zero-byte ↔ zero-byte is bit-identical
+                                # (every empty file is), but zero-byte
+                                # files carry no duplicate identity, so
+                                # a hash-driven adoption would miss it
+                                # and the loop would keep copying empty
+                                # placeholders under _2, _3, ... on
+                                # every retry. Mirror the slot-0 branch
+                                # and adopt without touching the checker.
+                                zero_byte = src_size == 0 and dest_size == 0
+                                same_bytes = zero_byte
+                                if not zero_byte and dest_size == src_size:
+                                    src_hash = (
+                                        checker.content_hash(source_file)
+                                        if checker is not None
+                                        else compute_file_hash(str(source_file))
+                                    )
+                                    dest_hash = compute_file_hash(str(dest_file))
+                                    same_bytes = (
+                                        src_hash is not None
+                                        and src_hash == dest_hash
+                                    )
+                                if same_bytes:
+                                    # Same companion gate as a fresh
+                                    # copy below: adopting here must not
+                                    # strand a sibling that would meet a
+                                    # different file at this suffix.
+                                    if anchor is None and _sibling_blocks_slot(
+                                        source_file, dest_folder, slot,
+                                    ):
+                                        continue
+                                    matched_existing = True
+                                    matched_zero_byte = zero_byte
+                                    break
+                        except OSError:
+                            pass
+                        continue
+                    if anchor is None and _sibling_blocks_slot(
+                        source_file, dest_folder, slot,
+                    ):
+                        continue
+                    break
+
+            if matched_existing:
+                skipped_duplicate += 1
+                if checker is not None and not matched_zero_byte:
+                    for token in checker.record(source_file):
+                        batch_dest_folders[token] = str(dest_folder)
+                duplicate_folders.add(str(dest_folder))
+                companion_slots.setdefault(slot_key, slot)
+                continue
+
+            copy_via_temp(str(source_file), str(dest_file))
+            companion_slots.setdefault(slot_key, slot)
             if checker is not None:
                 for token in checker.record(source_file):
                     batch_dest_folders[token] = str(dest_folder)

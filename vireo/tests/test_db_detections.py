@@ -906,7 +906,11 @@ def test_bulk_reject_updates_in_chunks_of_500(db):
     statements = _trace(db)
     affected = db.bulk_reject_miss_category("no_subject")
     db.conn.set_trace_callback(None)
-    updates = [s for s in statements if s.startswith("UPDATE photos SET flag")]
+    # Distinct texts, in order: the trace callback re-reports the parent
+    # statement each time the per-row duplicate_rejections trigger fires.
+    updates = list(dict.fromkeys(
+        s for s in statements if s.startswith("UPDATE photos SET flag")
+    ))
     assert [s.count(",") + 1 for s in updates] == [500, 1]
     assert {a["photo_id"] for a in affected} == set(pids)
 

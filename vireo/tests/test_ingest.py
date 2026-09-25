@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from datetime import datetime
 
 import pytest
+import staged_copy
 from db import Database
 from ingest import (
     build_destination_path,
@@ -777,7 +778,6 @@ def test_ingest_intra_batch_dup_retries_after_primary_failure(
     """
     import shutil
 
-    import ingest as ingest_module
 
     src = tmp_path / "sd_card"
     dst = tmp_path / "nas"
@@ -792,14 +792,14 @@ def test_ingest_intra_batch_dup_retries_after_primary_failure(
     os.utime(str(src / "IMG_002.jpg"), (mtime, mtime))
 
     # Fail the primary's copy only; the sibling's copy must proceed.
-    real_copy2 = ingest_module.shutil.copy2
+    real_copy2 = staged_copy.shutil.copy2
 
     def failing_copy2(src_path, dst_path):
         if str(src_path).endswith("IMG_001.jpg"):
             raise OSError("simulated copy failure")
         return real_copy2(src_path, dst_path)
 
-    monkeypatch.setattr(ingest_module.shutil, "copy2", failing_copy2)
+    monkeypatch.setattr(staged_copy.shutil, "copy2", failing_copy2)
 
     db = Database(str(tmp_path / "test.db"))
     result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
@@ -973,7 +973,7 @@ def test_ingest_progress_once_per_completed_file(
         def fail_copy(*args, **kwargs):
             raise OSError("simulated copy failure")
 
-        monkeypatch.setattr(ingest_module.shutil, "copy2", fail_copy)
+        monkeypatch.setattr(staged_copy.shutil, "copy2", fail_copy)
         expected_failed = 1
     else:
         expected_copied = 1
@@ -1119,16 +1119,15 @@ def test_ingest_progress_callback_fires_on_failure(tmp_path, monkeypatch):
     Image.new("RGB", (50, 50)).save(str(src / "boom.jpg"))
     Image.new("RGB", (50, 50)).save(str(src / "ok2.jpg"))
 
-    import ingest as ingest_module
 
-    real_copy2 = ingest_module.shutil.copy2
+    real_copy2 = staged_copy.shutil.copy2
 
     def fake_copy2(src_path, dst_path, *args, **kwargs):
         if os.path.basename(str(src_path)) == "boom.jpg":
             raise OSError("simulated copy failure")
         return real_copy2(src_path, dst_path, *args, **kwargs)
 
-    monkeypatch.setattr(ingest_module.shutil, "copy2", fake_copy2)
+    monkeypatch.setattr(staged_copy.shutil, "copy2", fake_copy2)
 
     progress_calls = []
     db = Database(str(tmp_path / "test.db"))

@@ -62,11 +62,55 @@ def test_apply_endpoint_rejects_losers(app_and_db):
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["rejected_count"] == 1
+    # Every apply response carries the deferred-hashes list so the UI can
+    # keep offline-deferred groups on the page.
+    assert body["deferred_hashes"] == []
 
     flag1 = db.conn.execute("SELECT flag FROM photos WHERE id=?", (p1,)).fetchone()["flag"]
     flag2 = db.conn.execute("SELECT flag FROM photos WHERE id=?", (p2,)).fetchone()["flag"]
     assert flag1 != "rejected"
     assert flag2 == "rejected"
+
+
+def test_apply_endpoint_reports_offline_deferred_hashes(app_and_db, monkeypatch):
+    """When ``resolution_plan`` defers a hash because a candidate is on an
+    offline volume, the route must report the hash in ``deferred_hashes``
+    (not silently drop it under a zero rejected_count) so the UI keeps the
+    group on the page instead of clearing it behind a success toast.
+    """
+    from repositories import duplicates as duplicates_repo
+
+    app, db = app_and_db
+    nas_fid = db.add_folder("/tmp/dupapply_nas")
+    local_fid = db.add_folder("/tmp/dupapply_local")
+    _seed_pair(db, "HOFF", nas_fid, name_a="a.jpg", name_b="a-nas.jpg")
+    # Add a second, entirely-reachable hash so we can prove the deferral
+    # is per-hash: the reachable group resolves, the offline group is
+    # returned as deferred.
+    _seed_pair(db, "HREACH", local_fid, name_a="b.jpg", name_b="b-2.jpg")
+
+    monkeypatch.setattr(
+        duplicates_repo, "_volume_offline",
+        lambda path: path.startswith("/tmp/dupapply_nas"),
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/duplicates/apply", json={"hashes": ["HOFF", "HREACH"]},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["deferred_hashes"] == ["HOFF"]
+    # The reachable hash still resolved (1 loser rejected).
+    assert body["rejected_count"] == 1
+    # Nothing under the offline hash was rejected — the reachable
+    # copy is intact until the volume returns.
+    flags = [
+        r["flag"] for r in db.conn.execute(
+            "SELECT flag FROM photos WHERE file_hash='HOFF'",
+        )
+    ]
+    assert flags == ["none", "none"]
 
 
 def test_apply_endpoint_rejects_only_losers_not_all_but_one(app_and_db):
