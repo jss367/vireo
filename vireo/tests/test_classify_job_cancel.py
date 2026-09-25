@@ -376,6 +376,72 @@ def test_stop_during_detector_setup_returns_empty_map(db, tmp_path):
     assert job["errors"] == []
 
 
+def test_failed_redetection_reclassifies_stored_boxes(db, tmp_path):
+    """A reclassify photo whose redetection fails keeps its stored boxes,
+    but it was left out of ``detection_map``: the classify loop then ran an
+    unscoped predictions clear and classified a synthetic full-image box,
+    wiping the box predictions (other fingerprints included) the detection
+    path had deliberately left intact.
+    """
+    from classify_job import _classify_photos, _detect_subjects
+
+    photos = _add_photos(db, 2)
+    stored = {}
+    for photo in photos:
+        det = db.save_detections(
+            photo["id"],
+            [{"box": BOX, "confidence": 0.9, "category": "animal"}],
+            detector_model="megadetector-v6",
+        )[0]
+        db.record_detector_run(photo["id"], "megadetector-v6", box_count=1)
+        db.add_prediction(det, species="Robin", confidence=0.9,
+                          model="BioCLIP", labels_fingerprint="legacy")
+        db.add_prediction(det, species="Robin", confidence=0.8,
+                          model="BioCLIP", labels_fingerprint="other-ws")
+        stored[photo["id"]] = det
+
+    def detect(path):
+        if path.endswith("p0.jpg"):
+            return None  # decode/ONNX failure reported by detect_animals
+        raise RuntimeError("per-photo detector error")  # swallowed by batch
+
+    folders = {db.folder_id: str(tmp_path)}
+    job = _job()
+    detection_map, _ = _run_patched(
+        _detector_patches(detect),
+        lambda: _detect_subjects(photos, folders, _Runner(), job, True, db),
+    )
+
+    assert {pid: [d["id"] for d in dets] for pid, dets in detection_map.items()} == {
+        pid: [det] for pid, det in stored.items()
+    }
+    assert job["_detect_processed_ids"] == set()
+    assert job["_detect_reused_ids"] == set(stored)
+
+    with patch("classify_job._prepare_image",
+               lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
+        raw, failed, _ = _classify_photos(
+            photos, folders, detection_map, set(), _sparrow_clf(), "bioclip",
+            "BioCLIP", _Runner(), job, db, labels_fingerprint="legacy",
+            reclassify=True,
+        )
+
+    assert failed == 0
+    assert {r["detection_id"] for r in raw} == set(stored.values())
+    for photo in photos:
+        # No synthetic full-image anchor was created.
+        assert [
+            d["detector_model"]
+            for d in db.get_detections(photo["id"], min_conf=0)
+        ] == ["megadetector-v6"]
+        # The other workspace's fingerprint on the same box survives.
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM predictions WHERE detection_id = ? "
+            "AND labels_fingerprint = 'other-ws'",
+            (stored[photo["id"]],),
+        ).fetchone()[0] == 1
+
+
 def test_flush_batch_propagates_cancel_instead_of_counting_failures():
     """A Stop during batch inference once fell back to per-image
     classification and reported every image as a failure."""

@@ -958,6 +958,39 @@ def describe_label_source(
     return f"{count} from {len(names)} lists: {shown}"
 
 
+def _stored_detection_list(db, photo_id, min_conf=None):
+    """Return a photo's stored detection rows as ``detection_map`` entries.
+
+    ``min_conf`` is forwarded to ``db.get_detections`` (``None`` means the
+    workspace's ``detector_confidence``). A read failure yields ``[]``.
+    """
+    try:
+        rows = (
+            db.get_detections(photo_id) if min_conf is None
+            else db.get_detections(photo_id, min_conf=min_conf)
+        )
+    except Exception:
+        return []
+    return [{
+        "id": d["id"],
+        "box_x": d["box_x"],
+        "box_y": d["box_y"],
+        "box_w": d["box_w"],
+        "box_h": d["box_h"],
+        "confidence": d["detector_confidence"],
+        "category": d["category"],
+        # sqlite3.Row supports [key] but lacks .get(), and ``key in row`` is
+        # not supported either; .keys() is the documented contains-check.
+        # Fallback to None so test mocks (plain dicts without
+        # detector_model) don't crash this path.
+        "detector_model": (
+            d["detector_model"]
+            if "detector_model" in d.keys()  # noqa: SIM118
+            else None
+        ),
+    } for d in rows]
+
+
 def _detect_batch(photos, folders, runner, job, reclassify, db,
                    det_conf_threshold=None, already_detected_ids=None,
                    cached_detections=None, vireo_dir=None):
@@ -1065,35 +1098,8 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 # Pull cached rows if any; an empty result means this photo
                 # was scanned and had no animals, which is still a skip.
                 # (Task 20 will add a min_conf filter to get_detections.)
-                try:
-                    existing_dets = db.get_detections(photo["id"])
-                except Exception:
-                    existing_dets = []
-                if existing_dets:
-                    det_list = []
-                    for d in existing_dets:
-                        det_list.append({
-                            "id": d["id"],
-                            "box_x": d["box_x"],
-                            "box_y": d["box_y"],
-                            "box_w": d["box_w"],
-                            "box_h": d["box_h"],
-                            "confidence": d["detector_confidence"],
-                            "category": d["category"],
-                            # sqlite3.Row supports [key] but not .get(); use try
-                            # so test mocks (plain dicts without detector_model)
-                            # don't crash this path.
-                            # sqlite3.Row supports [key] but lacks .get(),
-                            # and `key in row` is not supported either; .keys()
-                            # is the documented contains-check. Fallback to None
-                            # so test mocks (plain dicts without detector_model)
-                            # don't crash this path.
-                            "detector_model": (
-                                d["detector_model"]
-                                if "detector_model" in d.keys()  # noqa: SIM118
-                                else None
-                            ),
-                        })
+                det_list = _stored_detection_list(db, photo["id"])
+                if det_list:
                     detection_map[photo["id"]] = det_list
                     detected += 1
                 processed_ids.add(photo["id"])
@@ -1462,7 +1468,10 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
     every workspace's review state; only boxes the new run no longer
     produces are retired. The per-model predictions purge is handled by
     ``_classify_photos`` for the photos it actually reaches, so a cancel at
-    any point leaves the unreached photos' predictions intact.
+    any point leaves the unreached photos' predictions intact. A photo whose
+    redetection fails keeps its stored boxes, and those boxes (not the full
+    image) go into ``detection_map`` so its box predictions are rebuilt
+    under this run's fingerprint instead of being wiped.
 
     ``detection_map`` holds only classifier candidates: MegaDetector animal
     boxes at or above the workspace's ``detector_confidence``, the same set
@@ -1516,6 +1525,11 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
     # on a post-detect cancel — using ``detection_map.keys()`` alone would miss
     # empty-scene photos whose retired boxes took their predictions with them.
     processed_for_rebuild: set[int] = set()
+    # Reclassify photos whose redetection failed and whose stored boxes
+    # were put in ``detection_map`` instead. Their detections were never
+    # rewritten, so a post-detect cancel must not rebuild them.
+    reused_stored_ids: set[int] = set()
+    job["_detect_reused_ids"] = reused_stored_ids
     job["_detect_cancelled"] = False
     job["_non_animal_photo_ids"] = set()
     det_conf_threshold = None
@@ -1679,6 +1693,20 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
                 raise
             if reclassify:
                 processed_for_rebuild.update(batch_processed)
+                if photo["id"] not in batch_processed:
+                    # Redetection failed for this photo (``detect_animals``
+                    # returned None, or ``_detect_batch`` swallowed an
+                    # error) and its stored boxes were left untouched.
+                    # Classify those boxes rather than letting the photo
+                    # fall through to a full-image pass, whose unscoped
+                    # predictions clear would wipe the boxes' cached
+                    # predictions and the review state hanging off them.
+                    stored = _stored_detection_list(
+                        db, photo["id"], min_conf=det_conf_threshold,
+                    )
+                    if stored:
+                        batch_map = {**batch_map, photo["id"]: stored}
+                        reused_stored_ids.add(photo["id"])
             detection_map.update(batch_map)
             detected += batch_detected
 
@@ -4320,6 +4348,7 @@ def run_classify_job(
                 processed_ids = set(detection_map.keys())
             else:
                 processed_ids = set(processed_ids) | set(detection_map.keys())
+            processed_ids -= set(job.get("_detect_reused_ids") or ())
             if params.reclassify and processed_ids:
                 processed = [p for p in photos if p["id"] in processed_ids]
                 if processed:
