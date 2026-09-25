@@ -2185,6 +2185,79 @@ def test_materialize_competing_classifier_runtimes_settle_on_one(tmp_path):
     assert _materialized_classifier_runtime(db) == installed
 
 
+def test_materialize_keeps_every_per_detection_classification(tmp_path):
+    """A photo with multiple detected subjects publishes one classification
+    artifact per detection, each with a different ``input_fingerprint`` and
+    subject box. Grouping without the input identity used to collapse the
+    whole photo to a single artifact so only one detection got predictions
+    and a ``classifier_runs`` row while the rest stayed unclassified on
+    every reapply.
+    """
+    from computation_cache import materialize_artifacts
+
+    db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    box_a = {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.20}
+    box_b = {"x": 0.60, "y": 0.60, "w": 0.20, "h": 0.20}
+    detections = detection_artifact(subjects=[
+        {"key": "d0", "kind": "box", "box": box_a,
+         "confidence": 0.9, "category": "animal"},
+        {"key": "d1", "kind": "box", "box": box_b,
+         "confidence": 0.8, "category": "animal"},
+    ])
+    # promote_and_publish_classifier_run publishes one artifact per
+    # detection with the detection's own single subject keyed "d0".
+    subject_a = {"key": "d0", "kind": "box", "box": box_a, "category": "animal"}
+    subject_b = {"key": "d0", "kind": "box", "box": box_b, "category": "animal"}
+    input_a, input_fp_a = classification_input(PHOTO_HASH, RUNTIME, [subject_a])
+    input_b, input_fp_b = classification_input(PHOTO_HASH, RUNTIME, [subject_b])
+    assert input_fp_a != input_fp_b
+    classifier_runtime = runtime_fingerprint({"rev": "cls"})
+
+    def _cls(subject, input_block, input_fp, species):
+        subject_with_candidates = {**subject, "candidates": [
+            {"species": species, "confidence": 0.9},
+        ]}
+        return {
+            "artifact_schema": 1,
+            "type": "classification",
+            "classifier_model": "bioclip-2.5",
+            "detector_model": "megadetector-v6",
+            "detector_runtime_fingerprint": RUNTIME,
+            "labels": {"fingerprint": "3" * 64, "short_fingerprint": "3" * 12},
+            "photo_sha256": PHOTO_HASH,
+            "runtime_fingerprint": classifier_runtime,
+            "input_fingerprint": input_fp,
+            "input": input_block,
+            "completed": True,
+            "subjects": [subject_with_candidates],
+        }
+
+    result = materialize_artifacts(
+        db,
+        [
+            detections,
+            _cls(subject_a, input_a, input_fp_a, "Robin"),
+            _cls(subject_b, input_b, input_fp_b, "Sparrow"),
+        ],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={classifier_runtime},
+    )
+    assert result["classifier_runs_applied"] == 2
+    species = sorted(
+        r["species"] for r in db.conn.execute(
+            "SELECT species FROM predictions"
+        )
+    )
+    assert species == ["Robin", "Sparrow"]
+    input_fps = sorted(
+        r["input_fingerprint"] for r in db.conn.execute(
+            "SELECT input_fingerprint FROM classifier_runs"
+        )
+    )
+    assert input_fps == sorted([input_fp_a, input_fp_b])
+
+
 def test_exported_classification_keeps_input_recipe(tmp_path):
     """A raw-subject classification run keeps its input_recipe through
     export and import instead of arriving as NULL (a standard crops run)."""

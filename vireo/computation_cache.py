@@ -2138,13 +2138,20 @@ def materialize_artifacts(
             )
         )
     # Classification artifacts churn the same way: every artifact for one
-    # (photo, classifier, detector, labels, detector runtime) run lands on
-    # the same ``classifier_runs`` row, so two trusted runtimes would each
-    # replace the other's unreviewed predictions on every call, settling on
-    # whichever sorts last. Collapse to one per logical run, preferring the
-    # runtime (then input) the catalog already has installed; otherwise the
-    # lowest (runtime_fingerprint, digest) among runtimes this install
+    # (photo, classifier, detector, labels, detector runtime, input) run
+    # lands on the same ``classifier_runs`` row, so two trusted runtimes
+    # would each replace the other's unreviewed predictions on every call,
+    # settling on whichever sorts last. Collapse to one per logical run,
+    # preferring the runtime the catalog already has installed; otherwise
+    # the lowest (runtime_fingerprint, digest) among runtimes this install
     # recognizes, so the choice is stable and not a quarantined artifact.
+    #
+    # ``input_fingerprint`` is part of the key so per-detection artifacts
+    # from one photo stay separate: ``promote_and_publish_classifier_run``
+    # publishes one artifact per detection, each with a different input
+    # (subject/box). Grouping without it would collapse every detection's
+    # classification to one, leaving the rest unclassified on every
+    # reapply.
     identity_cache = {}
     classification_by_key = {}
     for artifact in classification_items:
@@ -2152,6 +2159,7 @@ def materialize_artifacts(
             artifact["photo_sha256"], artifact["classifier_model"],
             artifact["detector_model"], artifact["labels"]["fingerprint"],
             artifact["detector_runtime_fingerprint"],
+            artifact["input_fingerprint"],
         )
         classification_by_key.setdefault(key, []).append(artifact)
     chosen_classifications = []
@@ -2159,14 +2167,18 @@ def materialize_artifacts(
         if len(candidates) == 1:
             chosen_classifications.append(candidates[0])
             continue
-        photo_sha256, classifier_model, detector_model, _labels, _det_rt = key
+        (
+            photo_sha256, classifier_model, detector_model,
+            _labels, _det_rt, input_fingerprint,
+        ) = key
         existing = db.conn.execute(
-            """SELECT cr.runtime_fingerprint, cr.input_fingerprint
+            """SELECT cr.runtime_fingerprint
                FROM classifier_runs cr
                JOIN detections d ON d.id = cr.detection_id
                JOIN photos p ON p.id = d.photo_id
                WHERE p.file_hash = ? AND cr.classifier_model = ?
                  AND cr.labels_fingerprint = ?
+                 AND cr.input_fingerprint = ?
                  AND d.detector_model IN (?, 'full-image')
                  AND p.companion_path IS NULL
                  AND p.working_copy_path IS NULL
@@ -2174,7 +2186,8 @@ def materialize_artifacts(
                LIMIT 1""",
             (
                 photo_sha256, classifier_model,
-                candidates[0]["labels"]["short_fingerprint"], detector_model,
+                candidates[0]["labels"]["short_fingerprint"],
+                input_fingerprint, detector_model,
             ),
         ).fetchone()
         match = None
@@ -2195,12 +2208,6 @@ def materialize_artifacts(
                     identity_cache, extra=known_classifier_runtimes,
                 )
             match = next(
-                (c for c in candidates
-                 if c["runtime_fingerprint"] == existing["runtime_fingerprint"]
-                 and c["input_fingerprint"] == existing["input_fingerprint"]
-                 and _recognized(c)),
-                None,
-            ) or next(
                 (c for c in candidates
                  if c["runtime_fingerprint"] == existing["runtime_fingerprint"]
                  and _recognized(c)),
