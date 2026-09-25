@@ -2876,6 +2876,7 @@ class Database:
             so a nested override (e.g. ``{"pipeline": {"w_focus": 0.5}}``)
             replaces only the named leaf, not the whole parent dict.
         """
+        import config_schema
         from config import _deep_merge
 
         ws = self.get_workspace(self._active_workspace_id)
@@ -2885,9 +2886,12 @@ class Database:
             overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
             if not isinstance(overrides, dict):
                 return global_config
-            return _deep_merge(global_config, overrides)
+            effective = _deep_merge(global_config, overrides)
         except (json.JSONDecodeError, TypeError):
             return global_config
+        # An override stored before the workspace routes validated values
+        # (``null``, ``"abc"``) falls back to the global value it shadows.
+        return config_schema.repair_types(effective, global_config)
 
     def browse_stack_settings(self, global_config=None):
         """Resolve Browse's stack settings for the active workspace.

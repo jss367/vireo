@@ -684,7 +684,48 @@ def create_system_blueprint(
                 return [_redact(item) for item in obj]
             return obj
 
-        sanitized_config = _redact(cfg.load())
+        import config_schema
+
+        # Config strings are kept only where the value is one of a fixed set
+        # of identifiers *the schema allows for that key*. Every other string
+        # (NAS hosts and user names in remote_targets, recent import
+        # destinations, output folders, quick filter labels, and any key
+        # added later) is replaced: matching key names for secrets and paths
+        # let those through whenever a new key was named differently. An
+        # arbitrary string stored for an enum key by an older unvalidated
+        # write path must NOT slip through on the key name alone.
+        enum_allowlist = {}
+        for key, spec in config_schema.SCHEMA.items():
+            if spec["type"] == "enum":
+                enum_allowlist[key] = frozenset(spec["enum"])
+            elif spec["type"] == "list_string" and "items_enum" in spec:
+                enum_allowlist[key] = frozenset(spec["items_enum"])
+
+        def _redact_config(obj, dotted=""):
+            if isinstance(obj, dict):
+                out = {}
+                for k, v in obj.items():
+                    key = str(k).lower()
+                    child = f"{dotted}.{k}" if dotted else str(k)
+                    if any(s in key for s in ("token", "secret", "password")) or key.endswith("_key"):
+                        out[k] = "[REDACTED]"
+                    elif any(s in key for s in ("path", "root", "_bin", "directory", "editor")):
+                        out[k] = "[REDACTED_PATH]" if v else v
+                    else:
+                        out[k] = _redact_config(v, child)
+                return out
+            if isinstance(obj, list):
+                return [_redact_config(item, dotted) for item in obj]
+            if isinstance(obj, str) and obj:
+                if dotted.startswith("keyboard_shortcuts."):
+                    return obj
+                allowed = enum_allowlist.get(dotted)
+                if allowed is not None and obj in allowed:
+                    return obj
+                return "[REDACTED]"
+            return obj
+
+        sanitized_config = _redact_config(cfg.load())
 
         # Exact catalog roots are private and can also appear in logs. Issue
         # reports retain the diagnostic message while replacing those values;
