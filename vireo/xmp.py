@@ -304,13 +304,23 @@ def _li_signature(elem):
     child element -- get distinct fingerprints, so a merge that collapses
     duplicate bags can drop only the items that truly match and keep every
     qualified value the sidecar carried.
+
+    Children include their ``.tail`` so mixed-content items whose value
+    threads text between child elements (an XML-literal ending in
+    ``<rdf:value>B</rdf:value>C`` vs ``<rdf:value>B</rdf:value>D``) compare
+    distinct rather than collapsing on text-only structure. The outer item's
+    own tail is whitespace between the item and its siblings inside the bag,
+    not part of the item's value, so it is excluded.
     """
-    return (
-        elem.tag,
-        elem.text or "",
-        tuple(sorted(elem.attrib.items())),
-        tuple(_li_signature(child) for child in elem),
-    )
+    def sig(e, include_tail):
+        return (
+            e.tag,
+            e.text or "",
+            (e.tail or "") if include_tail else "",
+            tuple(sorted(e.attrib.items())),
+            tuple(sig(child, True) for child in e),
+        )
+    return sig(elem, False)
 
 
 # Attribute recording the location keyword path Vireo last wrote into this
@@ -1028,6 +1038,13 @@ class SidecarEditor:
         deletes the local originals once verified, so a rating skipped here
         has nowhere left to land -- every later sync would find no sidecar
         and skip it again, while the queued change was already cleared.
+
+        On a readable existing sidecar with ambiguous non-empty RDF subjects
+        (several distinct ``rdf:about`` values, no empty subject), no
+        Description currently belongs to the photo. ``_description()`` handles
+        that by adding a fresh Description scoped to the photo, so the rating
+        lands there instead of being silently dropped -- which would let the
+        sync caller clear the queued rating with nothing written.
         """
         if create:
             return self._set_properties(
@@ -1035,10 +1052,9 @@ class SidecarEditor:
             )
         if not self._dirty and not self._readable():
             return False
-        desc = self._find_description()
-        if desc is None:
-            return False
-        return self._set_properties(desc, {f"{{{NS_XMP}}}Rating": str(rating)})
+        return self._set_properties(
+            self._description(), {f"{{{NS_XMP}}}Rating": str(rating)},
+        )
 
     def set_pick_flag(self, flag):
         """Set the Lightroom-compatible pick state, creating a sidecar if needed."""

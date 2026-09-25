@@ -492,6 +492,102 @@ def test_merging_duplicate_bags_keeps_child_only_items(tmp_path):
     assert "Egret" in texts and "Kiwi" in texts
 
 
+def test_merging_duplicate_bags_keeps_mixed_content_tails(tmp_path):
+    """Mixed-content items differing only in a child element's tail both survive.
+
+    An ``rdf:li`` whose value is spelled as an XML literal can end in text
+    that follows a child element (``<rdf:value>B</rdf:value>C``). Two such
+    items differing only in that trailing text carry distinct values; the
+    structural signature must include a child's ``.tail`` so a bag merge
+    keeps both instead of collapsing them into one and then dropping the
+    later property with its unique value.
+    """
+    path = tmp_path / "photo.xmp"
+    body = EXIFTOOL_XMP.replace(
+        "<rdf:li>Heron</rdf:li>",
+        "<rdf:li rdf:parseType='Literal'><rdf:value>Heron</rdf:value>C</rdf:li>",
+    ).replace(
+        "<rdf:Description rdf:about='' xmlns:dc",
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>\n"
+        "  <dc:subject><rdf:Bag>"
+        "<rdf:li rdf:parseType='Literal'><rdf:value>Heron</rdf:value>D</rdf:li>"
+        "</rdf:Bag></dc:subject>\n"
+        " </rdf:Description>\n <rdf:Description rdf:about='' xmlns:dc",
+        1,
+    )
+    path.write_text(body)
+    path = str(path)
+
+    editor = SidecarEditor(path)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    assert _copies(path, SUBJECT) == 1
+    root = ET.parse(path).getroot()
+    literal_lis = [
+        li for li in root.iter(f"{{{NS_RDF}}}li")
+        if li.get(f"{{{NS_RDF}}}parseType") == "Literal"
+    ]
+    assert len(literal_lis) == 2
+    tails = sorted((li.find(f"{{{NS_RDF}}}value").tail or "") for li in literal_lis)
+    assert tails == ["C", "D"]
+
+
+def test_rating_survives_ambiguous_non_empty_subjects(tmp_path):
+    """A rating-only write on a sidecar with ambiguous subjects still lands.
+
+    When every top-level Description carries a distinct non-empty ``rdf:about``
+    (an auxiliary ``#thumbnail`` before a ``uuid:photo`` Description, say),
+    no existing Description belongs to the photo. A rating-only write must
+    still land -- on a fresh empty-subject Description -- instead of silently
+    reporting success while dropping the value; a NAS sync would otherwise
+    clear the queued rating with nothing written.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='#thumbnail'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='1'/>"
+        f"<rdf:Description rdf:about='uuid:photo'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path = str(path)
+
+    write_rating(path, 5)
+
+    root = ET.parse(path).getroot()
+    thumb = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "#thumbnail"
+    ]
+    photo_uuid = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "uuid:photo"
+    ]
+    assert thumb[0].get(RATING) == "1"
+    assert photo_uuid[0].get(RATING) == "4"
+
+    fresh = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if (d.get(f"{{{NS_RDF}}}about") or "") == ""
+    ]
+    assert len(fresh) == 1
+    stored = fresh[0].get(RATING) or fresh[0].findtext(RATING)
+    assert stored == "5"
+    assert read_sync_preview_metadata(path)["rating"] == "5"
+
+
+def test_rating_only_write_does_not_create_missing_sidecar(tmp_path):
+    """A standalone rating write against a missing sidecar creates nothing."""
+    path = str(tmp_path / "missing.xmp")
+
+    write_rating(path, 4)
+
+    assert not os.path.exists(path)
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
