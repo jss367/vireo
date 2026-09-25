@@ -1,4 +1,5 @@
 import builtins
+import contextlib
 import json
 import os
 import sys
@@ -540,10 +541,8 @@ def test_set_active_labels_writes_atomically(tmp_path, monkeypatch):
             raise OSError("disk full")
 
     monkeypatch.setattr(labels_mod.os, "fdopen", lambda *a, **k: _FailingFile(real_fdopen(*a, **k)))
-    try:
+    with contextlib.suppress(OSError):
         set_active_labels(["/b.txt"])
-    except OSError:
-        pass
     with open(config_path) as f:
         assert json.load(f) == {"active_labels": ["/a.txt"]}
     assert os.listdir(tmp_path) == ["labels_active.json"]
