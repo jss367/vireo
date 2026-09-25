@@ -397,6 +397,39 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_relative_and_absolute_rdf_about_share_photo_via_document_uri(tmp_path):
+    """A relative ``rdf:about'' folds with the equivalent absolute form.
+
+    Without ``xml:base'' on the packet, resolving ``rdf:about="photo.jpg"''
+    against a stable synthetic base gives a URI that doesn't match a
+    sibling ``rdf:about="file:///<tmp>/photo.jpg"''. ``read_sync_preview_metadata''
+    and ``SidecarEditor'' now register the sidecar's actual file URI
+    on the parsed root; ``_description_subject'' uses it as the
+    fallback base so both spellings collapse to the same photo
+    subject.
+    """
+    path = tmp_path / "photo.xmp"
+    absolute_uri = (tmp_path / "photo.jpg").as_uri()
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='photo.jpg'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='{absolute_uri}'"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    # Both spellings collapse to the same photo, so rating from one
+    # Description and GPS from the other both surface.
+    assert metadata["rating"] == "4"
+    assert metadata["location"]["latitude"] == pytest.approx(10.0)
+    assert metadata["location"]["longitude"] == pytest.approx(20.0)
+
+
 def test_equivalent_relative_subjects_share_photo_without_xml_base(tmp_path):
     """Equivalent relative ``rdf:about'' spellings share a subject even without ``xml:base''.
 

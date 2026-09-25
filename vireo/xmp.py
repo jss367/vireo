@@ -4,6 +4,7 @@ Provides read/write/merge/remove for XMP keyword and rating metadata.
 All XMP namespace constants and helpers live here as the single source of truth.
 """
 
+import contextlib
 import copy
 import errno
 import logging
@@ -13,6 +14,7 @@ import stat
 import sys
 import urllib.parse
 import uuid
+import weakref
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -463,15 +465,51 @@ def _all_top_descriptions(root):
 
 
 # Stable synthetic document URI used when no ``xml:base'' is set on
-# any ancestor of a Description. Only two equivalent RELATIVE
-# spellings of the same non-empty ``rdf:about'' -- ``photo.jpg'' vs.
-# ``./photo.jpg'' -- need to fingerprint together. An empty or
-# absent ``rdf:about'' still stays in the empty-subject bucket
-# unless an explicit ``xml:base'' names something else, so this
-# base is only reached when the reference is a genuine relative
-# URI (and it never changes the meaning of a fully-qualified
-# reference, since ``urljoin'' honors the ref's own scheme).
+# any ancestor of a Description and the sidecar's real document URI
+# hasn't been registered. Only equivalent RELATIVE spellings of the
+# same non-empty ``rdf:about'' need to fingerprint together
+# (``photo.jpg'' vs. ``./photo.jpg''). An empty or absent
+# ``rdf:about'' stays in the empty-subject bucket. This synthetic
+# base is only reached for a genuine relative URI reference (and it
+# never changes the meaning of a fully-qualified reference, since
+# ``urljoin'' honors the reference's own scheme over the base).
 _SUBJECT_FALLBACK_BASE = "file:///_vireo_xmp_/"
+
+
+# Registered sidecar document URIs, keyed on the parsed root element.
+# When ``read_sync_preview_metadata'' or ``SidecarEditor'' registers
+# the real path, ``_description_subject'' can fold non-empty relative
+# ``rdf:about'' spellings with the equivalent absolute ones -- so a
+# sidecar carrying ``rdf:about="photo.jpg"'' alongside
+# ``rdf:about="file:///photos/photo.jpg"'' in ``/photos/photo.xmp''
+# resolves both to the same subject key.
+_DOCUMENT_URIS = weakref.WeakKeyDictionary()
+
+
+def _register_document_uri(root, xmp_path):
+    """Record the file URI for ``xmp_path'' keyed on the parsed ``root''."""
+    try:
+        uri = Path(xmp_path).resolve(strict=False).as_uri()
+    except (ValueError, OSError):
+        return
+    # Some element implementations don't support weakref; the
+    # synthetic fallback base still handles relative-only equivalence
+    # when that happens.
+    with contextlib.suppress(TypeError):
+        _DOCUMENT_URIS[root] = uri
+
+
+def _document_uri_for(elem, parent_map):
+    """Return the sidecar URI registered for ``elem''s parsed root, or None."""
+    current = elem
+    seen = 0
+    while current is not None and seen < 4096:
+        uri = _DOCUMENT_URIS.get(current)
+        if uri is not None:
+            return uri
+        current = parent_map.get(current)
+        seen += 1
+    return None
 
 
 def _effective_xml_base(elem, parent_map):
@@ -543,7 +581,14 @@ def _description_subject(desc, parent_map=None):
         if base:
             about = urllib.parse.urljoin(base, about or "")
         elif about:
-            about = urllib.parse.urljoin(_SUBJECT_FALLBACK_BASE, about)
+            # Non-empty relative ``rdf:about'' needs a fallback base
+            # so equivalent spellings collapse. Prefer the sidecar's
+            # actual document URI when it's registered (that folds
+            # ``photo.jpg'' with an equivalent absolute
+            # ``file:///photos/photo.jpg'' too), and fall back to
+            # a stable synthetic base otherwise.
+            base = _document_uri_for(desc, parent_map) or _SUBJECT_FALLBACK_BASE
+            about = urllib.parse.urljoin(base, about)
     return (about or "", node or "", rid or "")
 
 
@@ -1365,6 +1410,7 @@ def read_sync_preview_metadata(xmp_path):
         return empty
     except (ET.ParseError, OSError):
         return {**empty, "status": "unreadable"}
+    _register_document_uri(root, path)
 
     keywords = set()
     for bag in _photo_scoped_bags(root, f"{{{NS_DC}}}subject"):
@@ -1470,9 +1516,11 @@ class SidecarEditor:
             self._existed = True
             self._root = tree.getroot()
             self._tree = tree
+            _register_document_uri(self._root, self.path)
             return
         self._root = ET.Element(f"{{{NS_X}}}xmpmeta")
         self._tree = ET.ElementTree(self._root)
+        _register_document_uri(self._root, self.path)
 
     def _readable(self):
         """True when the sidecar existed on disk and parsed cleanly.
@@ -1509,7 +1557,12 @@ class SidecarEditor:
         # resource (rdf:about="uuid:...") would land the photo's rating and
         # GPS on a Description that _top_descriptions no longer treats as
         # the photo -- the write would be invisible on the next read.
-        about, node, rid = _photo_subject(self._root)
+        # Copy the raw ``rdf:about'' spelling from the first existing
+        # photo-scoped Description rather than the URI-resolved subject
+        # key, so a sidecar whose photo Descriptions all use
+        # ``rdf:about=""'' keeps that idiomatic empty spelling rather
+        # than gaining a literal ``file:///path/photo.xmp''.
+        about, node, rid = self._photo_write_subject()
         if about:
             desc.set(f"{{{NS_RDF}}}about", about)
         if node:
@@ -1518,6 +1571,30 @@ class SidecarEditor:
             desc.set(f"{{{NS_RDF}}}ID", rid)
         self._dirty = True
         return desc
+
+    def _photo_write_subject(self):
+        """Return the raw ``rdf:about'' spelling a new photo Description should use.
+
+        ``_photo_subject'' returns the URI-resolved subject key so it
+        can compare against Descriptions across ``xml:base'' and
+        document-URI resolutions. Writers want the sidecar's own
+        spelling instead -- copying it from the first existing
+        photo-scoped Description keeps the idiomatic empty
+        ``rdf:about'' when that's what the sidecar already uses, and
+        preserves whatever relative or absolute form the existing
+        Descriptions pin. Falls back to the resolved subject when
+        no existing Description matches (which only happens for a
+        blank-node or ``rdf:ID''-only subject key).
+        """
+        resolved = _photo_subject(self._root)
+        parent_map = _build_parent_map(self._root)
+        for desc in _all_top_descriptions(self._root):
+            if _description_subject(desc, parent_map) == resolved:
+                raw_about = desc.get(f"{{{NS_RDF}}}about")
+                raw_node = desc.get(f"{{{NS_RDF}}}nodeID")
+                raw_rid = desc.get(f"{{{NS_RDF}}}ID")
+                return (raw_about or "", raw_node or "", raw_rid or "")
+        return resolved
 
     def _find_description(self):
         """Return the first top-level rdf:Description, or None when there is none."""
@@ -1555,7 +1632,7 @@ class SidecarEditor:
         # distinct subjects (``uuid:photo`` and empty) on its next call
         # and fall back to the empty subject -- unscoping every
         # original photo Description.
-        about, node, rid = _photo_subject(self._root)
+        about, node, rid = self._photo_write_subject()
         if self._root.tag == f"{{{NS_RDF}}}RDF":
             rdf = self._root
         else:
