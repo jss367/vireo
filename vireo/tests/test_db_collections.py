@@ -278,6 +278,39 @@ def test_taxonomy_contains_treats_like_wildcards_literally(db, folder):
     assert _ids(db, [{"field": "taxonomy_genus", "op": "contains", "value": "a_b"}]) == [odd]
 
 
+def test_taxonomy_contains_preserves_falsey_scalars(db, folder):
+    """A falsey scalar (``0``, ``False``) must not collapse to ``LIKE '%%'``.
+
+    ``value or ''`` would turn the operand into an empty string and match
+    every classified photo — the exact unbounded match the LIKE escape is
+    meant to block. Preserve the scalar's string form instead.
+    """
+    numeric = _photo(db, folder, "num.jpg")
+    named = _photo(db, folder, "named.jpg")
+    bare = _photo(db, folder, "bare.jpg")
+    _prediction(db, numeric, taxonomy={"family": "Canidae0", "genus": "gen"})
+    _prediction(db, named, taxonomy={"family": "Falseidae", "genus": "gen"})
+    # ``0`` matches only the family literally containing ``0``.
+    assert _ids(db, [{"field": "taxonomy_family", "op": "contains", "value": 0}]) == [numeric]
+    # ``False`` matches only the family literally containing ``False``, not
+    # every classified photo, and bare (no taxonomy at all) is excluded.
+    matched = _ids(db, [{"field": "taxonomy_family", "op": "contains", "value": False}])
+    assert matched == [named]
+    assert bare not in matched
+
+
+def test_active_mask_variant_contains_preserves_falsey_scalars(db, folder):
+    """Same falsey-scalar guard for the active_mask_variant contains branch."""
+    variant_zero = _photo(db, folder, "z.jpg", active_mask_variant="sam2-0-small")
+    variant_named = _photo(db, folder, "n.jpg", active_mask_variant="Falsebranch")
+    variant_plain = _photo(db, folder, "p.jpg", active_mask_variant="sam2-large")
+    _photo(db, folder, "none.jpg")
+    assert _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": 0}]) == [variant_zero]
+    matched = _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": False}])
+    assert matched == [variant_named]
+    assert variant_plain not in matched
+
+
 def test_remap_collection_photo_ids_follows_chains_and_folds_duplicates(db):
     from repositories.collections import remap_collection_photo_ids
 
@@ -308,6 +341,31 @@ def test_remap_collection_photo_ids_follows_chains_and_folds_duplicates(db):
     assert stored["dupes"][0]["rules"][0]["value"] == [3, 3, 4]
     assert stored["plain"] == rows["plain"]
     assert remap_collection_photo_ids(db.conn, {}) == 0
+
+
+def test_remap_collection_photo_ids_normalizes_boolean_ids(db):
+    """A rule value of ``True``/``False`` binds as 1/0 and must remap too.
+
+    ``_is_scalar`` accepts booleans, and the ``photo_ids`` engine binds
+    non-int values (booleans are excluded from the inline int list) so
+    SQLite treats a bound ``True`` as ``p.id = 1``. Missing that spelling
+    leaves a stale entry that silently rejoins the next photo to reuse id 1.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    rules = [{"field": "photo_ids", "value": [True, 1, False, 0, 2]}]
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("bools", json.dumps(rules), other_ws),
+    ).lastrowid
+    assert remap_collection_photo_ids(db.conn, {1: 7, 0: None}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    # Both spellings of id 1 (``True`` and ``1``) fold to 7; both spellings
+    # of id 0 (``False`` and ``0``) drop; id 2 is untouched.
+    assert stored == [{"field": "photo_ids", "value": [7, 2]}]
 
 
 def test_remap_collection_photo_ids_normalizes_float_and_stringified_ids(db):
@@ -351,13 +409,15 @@ def test_photo_id_key_normalizes_the_spellings_sqlite_matches():
     assert _photo_id_key("1.0") == 1
     assert _photo_id_key("-1.0") == -1
     assert _photo_id_key("1e3") == 1000
+    # SQLite treats True/False as integers 1/0 (integer affinity again), so
+    # a rule value of ``True`` names id 1 and must remap alongside int 1.
+    assert _photo_id_key(True) == 1
+    assert _photo_id_key(False) == 0
     # Non-integral or non-numeric spellings never name an integer id.
     assert _photo_id_key(1.5) is None
     assert _photo_id_key("1.5") is None
     assert _photo_id_key(float("nan")) is None
     assert _photo_id_key(float("inf")) is None
-    assert _photo_id_key(True) is None
-    assert _photo_id_key(False) is None
     assert _photo_id_key(None) is None
     assert _photo_id_key("") is None
     assert _photo_id_key("   ") is None

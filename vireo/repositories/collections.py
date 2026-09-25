@@ -870,7 +870,12 @@ class CollectionRepository:
                     exists, params = _prediction_exists(f"{col} = ?", [value])
                     return "NOT " + exists, params
                 if op == "contains":
-                    like = f"%{self._escape_like(str(value or ''))}%"
+                    # ``value or ''`` would turn a falsey scalar like ``0`` or
+                    # ``False`` into an empty string, producing ``LIKE '%%'``
+                    # and matching every non-NULL taxonomy value — the exact
+                    # ``value="%"`` unbounded match this escape is meant to
+                    # block. Preserve the scalar's string form instead.
+                    like = f"%{self._escape_like(str(value if value is not None else ''))}%"
                     return _prediction_exists(f"{col} LIKE ? ESCAPE '\\'", [like])
             if field == "prediction_confidence":
                 cond, cond_params = _numeric_condition("pred.confidence", op, value)
@@ -1022,7 +1027,12 @@ class CollectionRepository:
                 if op == "is not":
                     return "(p.active_mask_variant IS NULL OR p.active_mask_variant != ?)", [value]
                 if op == "contains":
-                    like = f"%{self._escape_like(str(value or ''))}%"
+                    # ``value or ''`` would turn a falsey scalar like ``0`` or
+                    # ``False`` into an empty string, producing ``LIKE '%%'``
+                    # and matching every photo with a variant set — the exact
+                    # ``value="%"`` unbounded match this escape is meant to
+                    # block. Preserve the scalar's string form instead.
+                    like = f"%{self._escape_like(str(value if value is not None else ''))}%"
                     return "p.active_mask_variant LIKE ? ESCAPE '\\'", [like]
             if field == "has_gps":
                 has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
@@ -2686,13 +2696,15 @@ def _photo_id_key(value):
 
     The rules engine matches ints inline and binds anything else, where
     SQLite's integer affinity on ``p.id`` still matches a numeric string, an
-    integral float, or a string spelling of one (e.g. ``"1.0"`` or ``"1e3"``),
-    so every such spelling names the same photo. The rule validator permits
-    those spellings, so a remap that missed them would leave a stale entry for
-    the deleted id and silently rejoin the next photo that reuses it.
+    integral float, a string spelling of one (e.g. ``"1.0"`` or ``"1e3"``),
+    or a Python bool (SQLite treats ``True``/``False`` as 1/0), so every such
+    spelling names the same photo. The rule validator permits those spellings
+    (``_is_scalar`` accepts bool alongside int/float/str), so a remap that
+    missed them would leave a stale entry for the deleted id and silently
+    rejoin the next photo that reuses it.
     """
     if isinstance(value, bool):
-        return None
+        return 1 if value else 0
     if isinstance(value, int):
         return value
     if isinstance(value, float):
