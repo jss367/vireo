@@ -54,10 +54,17 @@ def _row_to_info(row, folder_path):
     user doesn't trash surviving copies of a row whose "winner" file is gone.
     ``volume_offline`` marks a missing file whose volume is unreachable: its
     state is unknown, so it must not count as missing.
+
+    Checks volume reachability BEFORE ``os.path.exists``. On a stale SMB/NFS
+    mount a plain ``os.path.exists`` can block for minutes while the kernel
+    waits for the transport, so the bounded reachability gate has to run
+    first — otherwise the duplicate-scan worker can wedge on one row and
+    never reach the fall-back.
     """
     filename = row["filename"] or ""
     full_path = os.path.join(folder_path or "", filename)
-    exists = os.path.exists(full_path)
+    offline = _volume_offline(full_path)
+    exists = False if offline else os.path.exists(full_path)
     return {
         "id": row["id"],
         "filename": filename,
@@ -66,7 +73,7 @@ def _row_to_info(row, folder_path):
         "rating": row["rating"] if row["rating"] is not None else 0,
         "file_size": row["file_size"] if row["file_size"] is not None else 0,
         "exists": exists,
-        "volume_offline": not exists and _volume_offline(full_path),
+        "volume_offline": offline,
     }
 
 

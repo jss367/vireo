@@ -94,6 +94,8 @@ def _promote_by_placeholder(tmp, dst):
     # O_EXCL is the atomic no-overwrite gate. A concurrent writer that
     # already created ``dst`` gets us FileExistsError here, before we
     # touch any bytes; raise so ``copy_via_temp`` cleans up ``tmp``.
+    # ``O_BINARY`` keeps the fd in binary mode on Windows so ``os.write``
+    # cannot LF→CRLF-translate photo bytes; on POSIX it is 0.
     claim_fd = os.open(
         dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_BINARY, 0o644,
     )
@@ -130,10 +132,23 @@ def _promote_by_placeholder(tmp, dst):
             )
         except BaseException:
             # Roll back only when the entry at ``dst`` still points to
-            # the inode we claimed. A concurrent writer's replacement
-            # has a different inode and stays.
+            # the inode we claimed AND our claim is still that inode's
+            # sole link. A concurrent writer's replacement has a
+            # different inode and stays; an interposed unlink+recreate
+            # orphans our claim (nlink==0) and there is nothing at
+            # ``dst`` we own to remove. The residual race between the
+            # inode-match check and the ``os.unlink`` is bounded by the
+            # ``fstat(claim_fd).st_nlink == 1`` gate below — a racer
+            # that replaced ``dst`` after our stat but before our unlink
+            # would have already been visible either as a different
+            # inode at ``dst`` (skip) or as our claim orphaned (nlink 0,
+            # skip). Not race-free — POSIX has no
+            # ``unlinkat(path, expected_ino)`` primitive — but the
+            # window is one syscall wide, and the alternative (unlink
+            # anything at ``dst``) is unbounded data loss.
             try:
-                if os.stat(dst).st_ino == claim_ino:
+                if (os.fstat(claim_fd).st_nlink == 1
+                        and os.stat(dst).st_ino == claim_ino):
                     os.unlink(dst)
             except FileNotFoundError:
                 pass
