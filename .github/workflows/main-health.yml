@@ -87,10 +87,20 @@ jobs:
           # id and creation time), so a rerun of an old run cannot masquerade
           # as the latest completed run; that newest run's own workflow_run
           # event drives the issue state.
+          #
+          # Filter to conclusion in success/failure. The job condition above
+          # only lets those two conclusions reach this step, but ``gh run list
+          # --status completed`` also returns cancelled/skipped/neutral runs.
+          # When concurrency cancels a queued Full tests run (three pushes
+          # while one is active), the cancelled run has completed status but
+          # a later createdAt than the older failure: it would win the sort,
+          # this run would exit as ``superseded``, and the failure would go
+          # unreported — permanently if the newest queued run also ends
+          # without success or failure.
           latest_id=$(gh run list --repo "$REPO" --workflow "$WORKFLOW_ID" \
             --branch main --status completed --limit 20 \
-            --json databaseId,createdAt \
-            --jq 'sort_by(.createdAt) | reverse | .[0].databaseId // empty')
+            --json databaseId,createdAt,conclusion \
+            --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")] | sort_by(.createdAt) | reverse | .[0].databaseId // empty')
           if [[ -n "$latest_id" && "$latest_id" != "$RUN_ID" ]]; then
             echo "Run $RUN_ID is superseded by run $latest_id; skipping."
             exit 0
@@ -174,29 +184,44 @@ jobs:
           # hours). Stale reservations still count in ``attempts`` above
           # so they still charge against MAX_FIX_ATTEMPTS.
           #
-          # ``fix_prs`` is scoped to the same TTL window so ``pending``
-          # compares like with like: an old fix-main PR whose reservation
-          # has already expired would otherwise mask a fresh reservation
-          # whose routine has not yet published its PR (``recent_attempts
-          # = 1`` for the new marker, ``fix_prs = 1`` for the stale PR,
-          # ``pending = 0``), letting a second concurrent red run fire a
-          # duplicate session. ``open_fixes`` above stays untimed because
-          # an open PR blocks firing regardless of when it was created.
+          # ``pending`` pairs each reservation with the earliest fix-main
+          # PR opened AFTER it that no earlier reservation already claimed
+          # (a two-pointer walk over both timelines sorted ascending). A
+          # reservation with no matching later PR is still in flight.
+          # Comparing counts alone (``recent_attempts - fix_prs``) is not
+          # enough: the routine posts its reservation minutes before it
+          # opens the PR, so within the same TTL window an expired
+          # reservation's PR can still be live and mask a fresh
+          # reservation whose routine has not yet published — the counts
+          # net to zero and let a second concurrent red run fire a
+          # duplicate session. Order-based pairing pins each PR to the
+          # reservation it was actually opened after, so a stale PR
+          # paired with an older reservation cannot cover for a fresh
+          # in-flight one. ``open_fixes`` above stays untimed because an
+          # open PR blocks firing regardless of when it was created.
           RESERVATION_TTL_SECS=7200
           now_epoch=$(date -u +%s)
-          recent_attempts=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
+          recent_reservations=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
             --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$FIRED_MARKER\"))) | .created_at]" \
             | jq -s --argjson now "$now_epoch" --argjson ttl "$RESERVATION_TTL_SECS" \
-              '[.[][] | select(($now - (. | fromdate)) < $ttl)] | length')
-          fix_prs=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state all \
+              '[.[][] | fromdate | select(($now - .) < $ttl)] | sort')
+          recent_attempts=$(echo "$recent_reservations" | jq 'length')
+          recent_fix_prs=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state all \
             --json body,createdAt \
             --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\")) | .createdAt]" \
             | jq -s --argjson now "$now_epoch" --argjson ttl "$RESERVATION_TTL_SECS" \
-              '[.[][] | select(($now - (. | fromdate)) < $ttl)] | length')
-          pending=$(( recent_attempts - fix_prs ))
-          if (( pending < 0 )); then pending=0; fi
+              '[.[][] | fromdate | select(($now - .) < $ttl)] | sort')
+          fix_prs=$(echo "$recent_fix_prs" | jq 'length')
+          pending=$(jq -n --argjson rs "$recent_reservations" --argjson ps "$recent_fix_prs" '
+            def walk($ri; $pi; $count):
+              if $ri >= ($rs | length) then $count
+              elif $pi >= ($ps | length) then $count + ($rs | length) - $ri
+              elif $ps[$pi] <= $rs[$ri] then walk($ri; $pi + 1; $count)
+              else walk($ri + 1; $pi + 1; $count)
+              end;
+            walk(0; 0; 0)')
           if (( pending > 0 )); then
-            echo "A fix-main routine for #${issue} is already in flight (attempts=${attempts}, recent PRs=${fix_prs}); not asking for another."
+            echo "A fix-main routine for #${issue} is already in flight (attempts=${attempts}, recent reservations=${recent_attempts}, recent PRs=${fix_prs}); not asking for another."
           elif [[ "$open_fixes" != "0" ]]; then
             echo "A fix-main PR for #${issue} is already open; not asking for another."
           elif (( attempts >= MAX_FIX_ATTEMPTS )); then

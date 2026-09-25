@@ -497,10 +497,28 @@ def test_superseded_full_tests_runs_are_skipped():
     # the latest run.
     assert 'gh run list --repo "$REPO" --workflow "$WORKFLOW_ID"' in workflow
     assert "--branch main --status completed" in workflow
-    assert "--json databaseId,createdAt" in workflow
+    assert "--json databaseId,createdAt,conclusion" in workflow
     assert "sort_by(.createdAt) | reverse" in workflow
     assert '"$latest_id" != "$RUN_ID"' in workflow
     assert "superseded by run" in workflow
+
+
+def test_supersession_check_ignores_inconclusive_runs():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # The job condition only lets ``success``/``failure`` conclusions reach
+    # this step, but ``gh run list --status completed`` also returns
+    # cancelled/skipped/neutral runs. When three pushes arrive while ``Full
+    # tests`` is active, the concurrency policy cancels the middle queued
+    # run: it has ``completed`` status but a later ``createdAt`` than the
+    # older failure. Without a conclusion filter it would win the sort and
+    # this failing run would exit as ``superseded``, leaving red main
+    # unreported. Select only success/failure candidates before choosing the
+    # latest.
+    assert (
+        '[.[] | select(.conclusion == "success" or .conclusion == "failure")]'
+        in workflow
+    )
 
 
 def test_open_fix_guard_is_scoped_to_the_active_incident():
@@ -556,11 +574,12 @@ def test_pending_reservation_gate_blocks_a_second_concurrent_fix_main_fire():
     # Even with the concurrency group, two red runs finishing back to back
     # can each fire the routine unless the ``attempts`` count includes the
     # first run's reservation and a second gate detects an in-flight
-    # reservation whose fix-main PR has not yet been published. The
-    # ``pending = recent_attempts - fix_prs`` check is that gate.
+    # reservation whose fix-main PR has not yet been published. ``pending``
+    # is that gate; it must consult both the reservation and fix-PR
+    # timelines, and skip firing when any reservation has no matching PR.
     assert "--label \"$FIX_LABEL\" --state all" in workflow
-    assert "fix_prs=$(gh pr list" in workflow
-    assert "pending=$(( recent_attempts - fix_prs ))" in workflow
+    assert "recent_fix_prs=$(gh pr list" in workflow
+    assert "pending=$(jq -n" in workflow
     assert "(( pending > 0 ))" in workflow
     assert "already in flight" in workflow
 
@@ -572,42 +591,61 @@ def test_stale_fix_main_reservations_expire_so_subsequent_attempts_are_allowed()
     # without opening a fix-main PR: step 8 of the ``fix-main`` task
     # explicitly comments on the issue instead of publishing when it
     # cannot fix the failure, and a crash after acceptance has the same
-    # result. Without an expiry, ``pending = attempts - fix_prs`` would
-    # stay positive forever after such a session, permanently blocking
-    # the advertised second and third attempts on later red runs.
-    # ``recent_attempts`` restricts the pending gate to reservations
-    # posted within ``RESERVATION_TTL_SECS`` so a hung reservation
-    # releases itself once the routine can no longer plausibly be
-    # working on it. Total ``attempts`` still counts the marker toward
-    # MAX_FIX_ATTEMPTS so the hard cap survives.
+    # result. Without an expiry, the pending gate would stay positive
+    # forever after such a session, permanently blocking the advertised
+    # second and third attempts on later red runs. ``recent_reservations``
+    # restricts the pending gate to reservations posted within
+    # ``RESERVATION_TTL_SECS`` so a hung reservation releases itself once
+    # the routine can no longer plausibly be working on it. Total
+    # ``attempts`` still counts the marker toward MAX_FIX_ATTEMPTS so the
+    # hard cap survives.
     assert "RESERVATION_TTL_SECS=" in workflow
-    assert "recent_attempts=$(gh api" in workflow
-    assert 'select(($now - (. | fromdate)) < $ttl)' in workflow
+    assert "recent_reservations=$(gh api" in workflow
+    assert "fromdate | select(($now - .) < $ttl)" in workflow
 
 
-def test_fix_prs_pending_pairing_uses_the_same_ttl_window_as_reservations():
+def test_pending_pairs_each_reservation_with_a_later_fix_pr():
     workflow = _read(MAIN_HEALTH_WORKFLOW)
 
-    # ``pending = recent_attempts - fix_prs`` must compare like with like.
-    # If ``fix_prs`` counts every fix-main PR ever opened for this incident
-    # while ``recent_attempts`` only counts reservations posted within
-    # ``RESERVATION_TTL_SECS``, an old closed/merged fix PR from an
-    # expired reservation masks a fresh reservation whose routine has not
-    # yet published its PR: ``recent_attempts = 1`` for the new marker,
-    # ``fix_prs = 1`` for the stale PR, ``pending = 0`` -> the gate lets
-    # a second concurrent red run fire a duplicate routine session.
-    # ``fix_prs`` must therefore also be TTL-scoped by ``createdAt``.
+    # Counts alone (``recent_attempts - fix_prs``) do not pair reservations
+    # with PRs. The routine posts its reservation minutes before it opens
+    # the PR: for an incident whose PR was opened late in the TTL window
+    # the reservation can expire while its PR is still fresh, so a new
+    # in-flight reservation with no PR yet nets ``recent_attempts = 1``,
+    # ``fix_prs = 1``, ``pending = 0`` — the gate lets a duplicate routine
+    # session fire. The pending computation must instead sort both
+    # timelines and pair each reservation with the earliest fix-main PR
+    # opened AFTER it that no earlier reservation already claimed, so a
+    # stale PR paired with an older reservation cannot mask a fresh one.
+    #
     # ``open_fixes`` stays untimed on purpose: an open PR blocks firing
     # regardless of when it was created.
-    assert "fix_prs=$(gh pr list" in workflow
-    reservation_section = workflow.split("recent_attempts=$(gh api", 1)[1]
-    fix_prs_section = reservation_section.split("fix_prs=$(gh pr list", 1)[1].split(
-        "pending=$(( recent_attempts - fix_prs ))", 1
-    )[0]
+    reservation_section = workflow.split("recent_reservations=$(gh api", 1)[1]
+    fix_prs_section = reservation_section.split(
+        "recent_fix_prs=$(gh pr list", 1
+    )[1].split("fix_prs=$(echo", 1)[0]
     assert "--json body,createdAt" in fix_prs_section
     assert ".createdAt" in fix_prs_section
     assert '--argjson ttl "$RESERVATION_TTL_SECS"' in fix_prs_section
-    assert 'select(($now - (. | fromdate)) < $ttl)' in fix_prs_section
+    assert "fromdate | select(($now - .) < $ttl)" in fix_prs_section
+    assert "| sort" in fix_prs_section
+    reservation_sort_section = workflow.split("recent_reservations=$(gh api", 1)[1].split(
+        "recent_attempts=$(echo", 1
+    )[0]
+    assert "| sort" in reservation_sort_section
+
+    # The pending computation must be a walk that pairs reservations with
+    # PRs opened after them, and count each unmatched reservation.
+    pending_section = workflow.split("pending=$(jq -n", 1)[1].split(
+        "if (( pending > 0 ))", 1
+    )[0]
+    assert '--argjson rs "$recent_reservations"' in pending_section
+    assert '--argjson ps "$recent_fix_prs"' in pending_section
+    # The walker advances the PR pointer past PRs at or before the current
+    # reservation, then pairs (advancing both) or counts as unpaired.
+    assert "$ps[$pi] <= $rs[$ri]" in pending_section
+    assert "$count + ($rs | length) - $ri" in pending_section
+
     open_fixes_section = workflow.split("open_fixes=$(gh pr list", 1)[1].split(
         "attempts=$(gh api", 1
     )[0]
