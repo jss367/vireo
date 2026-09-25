@@ -15,6 +15,7 @@ pinned as *not* committing.
 
 import contextlib
 import logging
+import os
 import sqlite3
 
 import pytest
@@ -1015,7 +1016,8 @@ def test_merge_commits_counts_and_invalidates_after_reparent(
         pending = [tuple(r) for r in other.execute(
             "SELECT photo_id, change_token FROM pending_changes")]
     assert not any(p.startswith(str(tmp_path / "stage")) for p in folders)
-    assert folders[t["arch"] + "/day2"] == t["new_leaf"]
+    # The merge keeps the archive root's separator (``\`` on Windows).
+    assert folders[os.path.join(t["arch"], "day2")] == t["new_leaf"]
     assert photos == {t["survivor"]: t["day"], t["fresh"]: t["day"],
                       t["newer"]: t["new_leaf"]}
     assert pending == [(t["survivor"], "tok")]
