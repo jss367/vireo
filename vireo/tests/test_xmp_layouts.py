@@ -588,6 +588,56 @@ def test_rating_only_write_does_not_create_missing_sidecar(tmp_path):
     assert not os.path.exists(path)
 
 
+def test_sync_preview_marks_rating_writable_on_ambiguous_subjects(tmp_path):
+    """A readable sidecar with ambiguous subjects reports rating_writable=True.
+
+    ``set_rating`` creates a fresh empty-subject Description in that case,
+    so the sync preview must report the rating as a real write rather than
+    "unchanged". Otherwise the pending-changes review shows the rating as
+    staying only in Vireo while the sync would actually write it, and the
+    queued change is cleared with nothing user-visible in the sidecar.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='#thumbnail'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='1'/>"
+        f"<rdf:Description rdf:about='uuid:photo'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path = str(path)
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["status"] == "ok"
+    assert metadata["rating"] is None
+    assert metadata["rating_writable"] is True
+
+    write_rating(path, 5)
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["rating"] == "5"
+    assert metadata["rating_writable"] is True
+
+
+def test_sync_preview_marks_missing_sidecar_rating_unwritable(tmp_path):
+    """Missing and unreadable sidecars still report rating_writable=False.
+
+    A rating-only sync must not create a sidecar or overwrite a corrupt one.
+    """
+    missing = str(tmp_path / "missing.xmp")
+    metadata = read_sync_preview_metadata(missing)
+    assert metadata["status"] == "missing"
+    assert metadata["rating_writable"] is False
+
+    corrupt = tmp_path / "corrupt.xmp"
+    corrupt.write_text("not xml <<<")
+    metadata = read_sync_preview_metadata(str(corrupt))
+    assert metadata["status"] == "unreadable"
+    assert metadata["rating_writable"] is False
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

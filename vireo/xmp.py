@@ -699,11 +699,19 @@ def read_sync_preview_metadata(xmp_path):
                 hierarchical_keywords.add(li.text)
 
     if not _top_descriptions(root):
+        # The sidecar parsed cleanly, so rating writes will land here even
+        # though no Description currently belongs to the photo -- either
+        # because the packet has ambiguous non-empty subjects, or because it
+        # simply carries no top-level Descriptions yet. ``SidecarEditor.set_rating``
+        # creates a fresh empty-subject Description in that case, so the
+        # rating-only sync preview must report the write as it would happen,
+        # not as "unchanged".
         return {
             **empty,
             "status": "ok",
             "keywords": keywords,
             "hierarchical_keywords": hierarchical_keywords,
+            "rating_writable": True,
         }
 
     pick_to_flag = {"1": "flagged", "0": "none", "-1": "rejected"}
