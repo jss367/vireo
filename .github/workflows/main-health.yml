@@ -81,9 +81,10 @@ jobs:
           # Only conclusive runs count: GitHub cancels a pending run when a
           # newer one queues behind the active run, and that cancelled run's
           # later createdAt must not make the active run's real result look
-          # superseded.
+          # superseded. The filter runs client-side, so the limit is generous
+          # enough that cancelled runs can't crowd the conclusive ones out.
           latest_id=$(gh run list --repo "$REPO" --workflow "$WORKFLOW_ID" \
-            --branch main --status completed --limit 20 \
+            --branch main --status completed --limit 100 \
             --json databaseId,createdAt,conclusion \
             --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]
                   | sort_by(.createdAt) | reverse | .[0].databaseId // empty')
