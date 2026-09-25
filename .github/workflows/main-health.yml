@@ -20,6 +20,15 @@ name: Main health
 # provider (burning one of the three attempts) but never opens a PR.
 # The maintainer flips the variable once ``docs/pr-agent-routine-prompt.md``
 # has been pasted into the routine.
+#
+# The in-flight (``pending``) guard expires after a couple of hours: an
+# accepted routine session may still terminate without a PR — step 8 of
+# the ``fix-main`` task comments on the issue and opens no PR when it
+# cannot fix the failure, and a crash after acceptance has the same
+# result. Without expiry, a stale marker would keep every subsequent
+# failing run stuck at the pending check and prevent the advertised
+# second and third attempts. Total ``attempts`` is not expired, so the
+# hard MAX_FIX_ATTEMPTS cap survives.
 
 on:
   workflow_run:
@@ -154,9 +163,30 @@ jobs:
           # produces a PR or the reservation is released, so a second
           # concurrent red run cannot fire a duplicate routine session for
           # the same incident. The reserve-before-fire step below posts the
-          # marker atomically before the routine POST, so this count
+          # marker atomically before the routine POST, so recent_attempts
           # includes any reservation held by an earlier serialized run.
-          pending=$(( attempts - fix_prs ))
+          #
+          # ``recent_attempts`` filters to markers posted within the last
+          # $RESERVATION_TTL_SECS seconds. The routine can accept the POST
+          # (fired=true, marker kept) and still terminate without a PR:
+          # step 8 of the fix-main task explicitly comments on the issue
+          # and opens no PR when it cannot fix the failure, and a crash
+          # after acceptance has the same result. A stale marker would
+          # then keep ``pending > 0`` forever and block the advertised
+          # second and third attempts. Expiring the reservation gate
+          # after the TTL releases those hung reservations without giving
+          # up the concurrency guard for genuinely in-flight sessions
+          # (the routine's own diagnose-and-publish takes minutes, not
+          # hours). Stale reservations still count in ``attempts`` above
+          # so they still charge against MAX_FIX_ATTEMPTS.
+          RESERVATION_TTL_SECS=7200
+          now_epoch=$(date -u +%s)
+          recent_attempts=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$FIRED_MARKER\"))) | .created_at]" \
+            | jq -s --argjson now "$now_epoch" --argjson ttl "$RESERVATION_TTL_SECS" \
+              '[.[][] | select(($now - (. | fromdate)) < $ttl)] | length')
+          pending=$(( recent_attempts - fix_prs ))
+          if (( pending < 0 )); then pending=0; fi
           if (( pending > 0 )); then
             echo "A fix-main routine for #${issue} is already in flight (attempts=${attempts}, PRs=${fix_prs}); not asking for another."
           elif [[ "$open_fixes" != "0" ]]; then

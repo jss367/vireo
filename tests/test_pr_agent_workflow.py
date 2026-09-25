@@ -557,12 +557,32 @@ def test_pending_reservation_gate_blocks_a_second_concurrent_fix_main_fire():
     # can each fire the routine unless the ``attempts`` count includes the
     # first run's reservation and a second gate detects an in-flight
     # reservation whose fix-main PR has not yet been published. The
-    # ``pending = attempts - fix_prs`` check is that gate.
+    # ``pending = recent_attempts - fix_prs`` check is that gate.
     assert "--label \"$FIX_LABEL\" --state all" in workflow
     assert "fix_prs=$(gh pr list" in workflow
-    assert "pending=$(( attempts - fix_prs ))" in workflow
+    assert "pending=$(( recent_attempts - fix_prs ))" in workflow
     assert "(( pending > 0 ))" in workflow
     assert "already in flight" in workflow
+
+
+def test_stale_fix_main_reservations_expire_so_subsequent_attempts_are_allowed():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # The routine can accept a POST (``fired=true``) and still terminate
+    # without opening a fix-main PR: step 8 of the ``fix-main`` task
+    # explicitly comments on the issue instead of publishing when it
+    # cannot fix the failure, and a crash after acceptance has the same
+    # result. Without an expiry, ``pending = attempts - fix_prs`` would
+    # stay positive forever after such a session, permanently blocking
+    # the advertised second and third attempts on later red runs.
+    # ``recent_attempts`` restricts the pending gate to reservations
+    # posted within ``RESERVATION_TTL_SECS`` so a hung reservation
+    # releases itself once the routine can no longer plausibly be
+    # working on it. Total ``attempts`` still counts the marker toward
+    # MAX_FIX_ATTEMPTS so the hard cap survives.
+    assert "RESERVATION_TTL_SECS=" in workflow
+    assert "recent_attempts=$(gh api" in workflow
+    assert 'select(($now - (. | fromdate)) < $ttl)' in workflow
 
 
 def test_fix_attempt_marker_counts_only_workflow_authored_comments():
