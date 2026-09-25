@@ -397,6 +397,42 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_missing_and_empty_rdf_about_share_subject_under_xml_base(tmp_path):
+    """A missing ``rdf:about'' and an explicit ``rdf:about="" '' fingerprint together.
+
+    RDF/XML treats an absent ``rdf:about'' as identical to
+    ``rdf:about=""'': both mean the enclosing resource. Before this
+    fix ``_description_subject'' only resolved the *present* form
+    against ``xml:base'', so under a ``file:///photos/photo.jpg''
+    base the two spellings landed in different subject buckets --
+    ``_photo_subject'' returned the empty bucket and silently
+    dropped properties stored on the explicit-empty Description.
+    Both spellings now resolve to the base URI, so a rating stored
+    under one and GPS stored under the other collapse to the same
+    photo.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:base='file:///photos/photo.jpg'>"
+        f"<rdf:Description xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    # Both Descriptions collapse to the same photo subject: rating
+    # from the absent-``rdf:about'' Description and GPS from the
+    # explicit-empty sibling both surface.
+    assert metadata["rating"] == "4"
+    assert metadata["location"]["latitude"] == pytest.approx(10.0)
+    assert metadata["location"]["longitude"] == pytest.approx(20.0)
+
+
 def test_empty_rdf_about_resolves_against_xml_base(tmp_path):
     """An explicitly-empty ``rdf:about="" `` resolves to the effective ``xml:base'.
 

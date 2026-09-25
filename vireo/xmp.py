@@ -502,23 +502,23 @@ def _description_subject(desc, parent_map=None):
     happens here, so ``rdf:about="photo.jpg"'' under
     ``xml:base="file:///photos/"'' fingerprints the same as
     ``rdf:about="file:///photos/photo.jpg"''; an *explicitly empty*
-    ``rdf:about=""'' is also a URI reference (RFC 3986 §4.2, the
+    ``rdf:about=""'' is a URI reference too (RFC 3986 §4.2, the
     empty reference), so it resolves to the base URI when one is
-    present -- otherwise a Description carrying it would sit in the
-    empty-subject bucket while an equivalent absolute-spelled sibling
-    landed elsewhere. Without ``parent_map`` the raw text is used,
-    matching the pre-xml:base callers that resolve subjects against
-    one another only when they were spelled identically. An *absent*
-    ``rdf:about'' still means "the enclosing resource" and stays in
-    the empty bucket.
+    present. An *absent* ``rdf:about'' is per RDF/XML spec
+    equivalent to an ``rdf:about=""'' -- both mean "the enclosing
+    resource" -- and must resolve the same way, so both spellings
+    fingerprint together whether or not ``xml:base'' is set.
+    Without ``parent_map`` the raw text is used, matching the
+    pre-xml:base callers that resolve subjects against one another
+    only when they were spelled identically.
     """
     about = desc.get(f"{{{NS_RDF}}}about")
     node = desc.get(f"{{{NS_RDF}}}nodeID")
     rid = desc.get(f"{{{NS_RDF}}}ID")
-    if about is not None and parent_map is not None:
+    if parent_map is not None:
         base = _effective_xml_base(desc, parent_map)
         if base:
-            about = urllib.parse.urljoin(base, about)
+            about = urllib.parse.urljoin(base, about or "")
     return (about or "", node or "", rid or "")
 
 
