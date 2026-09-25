@@ -371,12 +371,6 @@ def test_sidecar_alias_missing_own_photo(lib):
     assert db._pending_keyword_sidecar_alias(999999, ws, "Robin") is False
 
 
-# Windows' ``os.path.normcase`` folds case, so there "Dir" and "dir" are one
-# path and alias without a filesystem check; elsewhere case variants alias
-# only when ``os.path.samefile`` says so.
-_NORMCASE_FOLDS_CASE = os.path.normcase("A") == os.path.normcase("a")
-
-
 def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     ws = db._active_workspace_id
     upper = tmp_path / "Dir"
@@ -390,9 +384,10 @@ def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     pu = db.add_photo(fu, "a.jpg", ".jpg", 1, 1.0)
     pl = db.add_photo(fl, "a.png", ".png", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
-    # Neither sidecar exists: samefile raises OSError, suppressed -> False
-    # (unless the platform folds case, when the paths are simply equal).
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
+    # Raw DB paths differ ("Dir" vs "dir"): production must confirm with
+    # samefile before treating them as aliases. Neither sidecar exists yet,
+    # so samefile raises OSError and the answer is False on every platform.
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
     (upper / "a.xmp").write_text("x")
     if not (lower / "a.xmp").exists():
         os.link(upper / "a.xmp", lower / "a.xmp")
@@ -409,7 +404,11 @@ def test_sidecar_alias_case_variant_distinct_files(db, tmp_path):
     px = db.add_photo(fx, "z.jpg", ".jpg", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
     _insert(db, px, "keyword_add", "Robin", ws)
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
+    # No sidecars on disk: production cannot confirm any aliasing with
+    # samefile (raises OSError) and must return False on every platform,
+    # so a case-fold collision on Windows does not queue a destructive
+    # inverse keyword removal against an unrelated file.
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
 
 
 # -- remove_pending_changes ------------------------------------------------------------

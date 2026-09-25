@@ -176,17 +176,33 @@ class SyncRepository:
                 def sidecar_path(row):
                     return os.path.join(row["path"], os.path.splitext(row["filename"])[0] + ".xmp")
 
-                own_path = os.path.normcase(os.path.realpath(sidecar_path(own)))
-                for path in {sidecar_path(row) for row in candidates}:
-                    other_path = os.path.normcase(os.path.realpath(path))
-                    if own_path == other_path:
+                own_raw = sidecar_path(own)
+                own_real = os.path.realpath(own_raw)
+                own_folded = os.path.normcase(own_real).casefold()
+                for raw in {sidecar_path(row) for row in candidates}:
+                    if raw == own_raw:
+                        # Byte-identical DB paths are the same sidecar; no
+                        # syscall needed and none possible before write.
                         needs_inverse = True
                         break
-                    if own_path.casefold() == other_path.casefold():
-                        # Scheduling may over-group case variants;
-                        # cancellation must confirm they are aliases.
+                    other_real = os.path.realpath(raw)
+                    if own_real == other_real:
+                        # realpath canonicalizes both spellings to the
+                        # same path (e.g. "./" segments); same file even
+                        # if the sidecar has not been written yet.
+                        needs_inverse = True
+                        break
+                    if own_folded == os.path.normcase(other_real).casefold():
+                        # Match only after case-folding: Windows normcase
+                        # collapses "Dir" and "dir", but per-directory case
+                        # sensitivity can keep them distinct on disk, and a
+                        # case-insensitive fs may still alias them. samefile
+                        # is the definitive check. If it raises (missing
+                        # file), leave the answer False so a cancellation
+                        # does not queue a destructive inverse against an
+                        # unrelated sidecar.
                         with contextlib.suppress(OSError):
-                            needs_inverse = os.path.samefile(own_path, other_path)
+                            needs_inverse = os.path.samefile(own_raw, raw)
                         if needs_inverse:
                             break
         return needs_inverse
