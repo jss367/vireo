@@ -4245,9 +4245,8 @@ def test_jobs_regroup_collection_scope_clears_group_fingerprint(app_and_db, monk
 
 def test_jobs_regroup_full_workspace_stamps_group_fingerprint(app_and_db, monkeypatch):
     """A whole-workspace regroup stamps the current grouping fingerprint."""
-    from pipeline import compute_group_fingerprint
-
     import config as cfg
+    from pipeline import compute_group_fingerprint
 
     app, db = app_and_db
     saved = []

@@ -2970,13 +2970,19 @@ function _onPipelineComplete(result) {
     });
     var firstFailedCard = null;
     for (var stage in errorStages) {
-      var cardSuffix = _stageToCard[stage];
+      // Failure-only stages (e.g. ``collection``) have no card of their own
+      // but must fail their parent card here — the SSE progress path uses
+      // _failureOnlyStageToCard for the same reason, and a fast failure
+      // that finishes before the browser subscribes reaches only this path.
+      var cardSuffix = _stageToCard[stage] || _failureOnlyStageToCard[stage];
       if (cardSuffix) {
         var statusEl = document.getElementById('status' + cardSuffix);
         if (statusEl) statusEl.textContent = 'Failed: ' + errorStages[stage];
         delete _runningStages[cardSuffix];
         _stageOutcomes[cardSuffix] = 'failed';
         _setPill(cardSuffix, 'failed');
+        var numEl = document.getElementById('num' + cardSuffix);
+        if (numEl) numEl.className = 'stage-num';
         if (!firstFailedCard) firstFailedCard = cardSuffix;
       }
     }
