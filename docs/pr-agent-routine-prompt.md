@@ -331,7 +331,18 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    `ruff check vireo/ tests/`. If the failure is OS-specific and you are on
    another OS, say so in the PR body; the PR's own CI and the next
    post-merge run are the check.
-6. Commit, push, and open a ready-for-review PR against `main` with the
+6. Immediately before pushing, repeat both checks from step 1. Diagnosis and
+   validation take real wall-clock, and in that window a newer `Full tests`
+   run may have gone green (closing the issue), or another accepted routine
+   invocation may have opened its own `fix-main` PR. Publishing on top of
+   stale checks produces an unnecessary or duplicate fix; stop silently
+   instead. This mirrors the reconciliation flow's revalidation of live
+   state right before publication:
+   ```bash
+   test "$(gh issue view "$ISSUE" --json state -q .state)" = OPEN || exit 0
+   test "$(gh pr list --label fix-main --state open --json number -q length)" = 0 || exit 0
+   ```
+7. Commit, push, and open a ready-for-review PR against `main` with the
    `fix-main` label. The body names the failing run, lists each failure with
    its root cause and fix, and ends with `Refs #$ISSUE` (not `Fixes`: the
    issue closes itself on the next green run) and
@@ -339,7 +350,7 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    ```bash
    gh pr create --base main --label fix-main --title "fix: <what broke> on main" --body-file <file>
    ```
-7. If you cannot fix it, comment on the issue instead, explaining what you
+8. If you cannot fix it, comment on the issue instead, explaining what you
    found and what is left, ending with `<!-- pr-agent-generated -->`, and
    open no PR.
 
