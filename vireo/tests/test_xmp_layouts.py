@@ -1689,6 +1689,120 @@ def test_attribute_form_qualifier_on_wrapper_survives_merge(tmp_path):
     assert u_items == {"Heron", "Kiwi"}
 
 
+def test_fragment_rdf_about_subject_is_not_treated_as_the_photo(tmp_path):
+    """A lone ``rdf:about='#thumbnail'`` names a fragment inside the sidecar.
+
+    A fragment identifier (any ``rdf:about`` value starting with
+    ``#``) points at a resource *within* the packet, not the enclosing
+    photo. If we accepted it as the photo subject, reads would expose
+    the fragment's rating and GPS, and writes would mutate that
+    auxiliary resource instead of creating a fresh empty-subject
+    photo Description.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='#thumbnail'"
+        f" xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}' xmlns:dc='{NS_DC}'"
+        f" xmp:Rating='1'"
+        f" exif:GPSLatitude='40,0.0N' exif:GPSLongitude='40,0.0E'>"
+        f"<dc:subject><rdf:Bag><rdf:li>AuxOnly</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["rating"] is None
+    assert metadata["location"] is None
+    assert read_keywords(path_str) == set()
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    thumbnail = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "#thumbnail"
+    ]
+    assert len(thumbnail) == 1
+    # The fragment Description is left untouched.
+    assert thumbnail[0].get(RATING) == "1"
+    assert thumbnail[0].get(GPS_LATITUDE) == "40,0.0N"
+    aux_items = sorted(
+        li.text for li in thumbnail[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert aux_items == ["AuxOnly"]
+
+    # The rating landed on a fresh empty-subject photo Description.
+    fresh = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if (d.get(f"{{{NS_RDF}}}about") or "") == ""
+        and d.get(RATING) == "5"
+    ]
+    assert len(fresh) == 1
+
+    assert read_sync_preview_metadata(path_str)["rating"] == "5"
+
+
+def test_rdf_id_on_wrapper_blocks_bag_collapse(tmp_path):
+    """A duplicate wrapper Description carrying ``rdf:ID`` is left alone.
+
+    ``rdf:ID`` (like ``rdf:about`` and ``rdf:nodeID``) names a
+    distinct RDF resource that other statements in the packet may
+    point at. Removing an element that carries an identity attribute
+    silently drops the resource from the graph, so a keyword
+    addition must not collapse such a duplicate: it must leave the
+    identified container in place.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject>"
+        f"<rdf:Description rdf:ID='sparrow-subject'>"
+        f"<rdf:value>"
+        f"<rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag>"
+        f"</rdf:value>"
+        f"</rdf:Description>"
+        f"</dc:subject>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+
+    # The identified wrapper Description still holds Sparrow and its rdf:ID.
+    identified = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}ID") == "sparrow-subject"
+    ]
+    assert len(identified) == 1
+    q_items = sorted(
+        li.text for li in identified[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert q_items == ["Sparrow"]
+
+    # The unqualified dc:subject picked up the new keyword next to Heron.
+    unqualified_subjects = [
+        s for s in root.iter(SUBJECT)
+        if s.find(f"{{{NS_RDF}}}Description") is None
+    ]
+    u_items = set()
+    for s in unqualified_subjects:
+        for li in s.iter(f"{{{NS_RDF}}}li"):
+            if li.text:
+                u_items.add(li.text)
+    assert u_items == {"Heron", "Kiwi"}
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

@@ -30,14 +30,13 @@ NS_EXIF = "http://ns.adobe.com/exif/1.0/"
 NS_VIREO = "https://vireo.app/ns/1.0/"
 NS_XML = "http://www.w3.org/XML/1998/namespace"
 
-# RDF attributes that describe serialization form or resource identity
-# rather than the value's qualifiers. Anything else on a property, one
-# of its wrappers, or its ``rdf:Bag`` is a qualifier that would be
-# silently dropped if we removed the element as a duplicate.
+# RDF attributes that describe serialization form only. Anything else
+# on a property, one of its wrappers, or its ``rdf:Bag`` -- including
+# an identity attribute (``rdf:about``, ``rdf:nodeID``, ``rdf:ID``)
+# that names a distinct RDF resource other statements may point at --
+# is a qualifier that would be silently dropped if we removed the
+# element as a duplicate.
 _STRUCTURAL_RDF_ATTRIBUTES = frozenset({
-    f"{{{NS_RDF}}}about",
-    f"{{{NS_RDF}}}nodeID",
-    f"{{{NS_RDF}}}ID",
     f"{{{NS_RDF}}}parseType",
     f"{{{NS_RDF}}}datatype",
 })
@@ -439,8 +438,10 @@ def _photo_subject(root):
     ``rdf:about=""`` (or a missing attribute) is the sidecar convention for
     "the enclosing resource" -- the photo. When no top-level Description
     carries the empty subject but every Description shares a single
-    non-empty ``rdf:about``, treat that as the photo's, so a sidecar written
-    by a tool that pins its Descriptions is still handled coherently. When
+    non-empty ``rdf:about`` that isn't a fragment (a value starting with
+    ``#`` names a resource *inside* the packet, not the enclosing
+    photo), treat that as the photo's, so a sidecar written by a tool
+    that pins its Descriptions is still handled coherently. When
     the sidecar carries several distinct non-empty subjects, refuse to
     guess from document order: fall back to the empty subject, which
     leaves reads returning nothing rather than an auxiliary resource's
@@ -458,7 +459,7 @@ def _photo_subject(root):
     if empty in subjects or len(subjects) > 1:
         return empty
     about, node, rid = next(iter(subjects))
-    if not about or node or rid:
+    if not about or node or rid or about.startswith("#"):
         return empty
     return (about, node, rid)
 
