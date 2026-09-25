@@ -503,3 +503,63 @@ def test_classify_photos_stops_cleanly_on_cancel_during_flush(db, tmp_path):
     assert len(prepared) == classify_job._BATCH_SIZE
     clf.classify_with_embedding.assert_not_called()
     assert db.conn.execute("SELECT COUNT(*) FROM classifier_runs").fetchone()[0] == 0
+
+
+def test_non_animal_skip_retires_stale_full_image_prediction(db, tmp_path):
+    """A photo with a prior full-image species prediction that now shows a
+    confident person/vehicle box must not keep surfacing that prediction.
+
+    Before the fix, ``_classify_photos`` skipped ``non_animal_ids`` photos
+    with a bare ``continue``. MegaDetector writes only replace the
+    ``megadetector-v6`` rows, so the older ``full-image`` detection and its
+    cascaded species predictions stayed intact and reads returned them under
+    the newest fingerprint per detection.
+    """
+    from classify_job import _classify_photos, _detect_subjects
+
+    photos = _add_photos(db, 1)
+    photo = photos[0]
+    full_det = db.save_detections(
+        photo["id"],
+        [{"box": BOX, "confidence": 0, "category": "animal"}],
+        detector_model="full-image",
+    )[0]
+    db.record_detector_run(photo["id"], "full-image", box_count=1)
+    db.add_prediction(full_det, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+
+    folders = {db.folder_id: str(tmp_path)}
+    job = _job()
+    detection_map, detected = _run_patched(
+        _detector_patches(
+            lambda path: [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+                           "confidence": 0.85, "category": "person"}]
+        ),
+        lambda: _detect_subjects(photos, folders, _Runner(), job, False, db),
+    )
+
+    assert detected == 0
+    assert photo["id"] not in detection_map
+    assert job["_non_animal_photo_ids"] == {photo["id"]}
+    # Sanity: the stale full-image prediction is still on disk pre-classify.
+    assert _prediction_count(db, photo["id"], "BioCLIP") == 1
+
+    clf = _sparrow_clf()
+    with patch("classify_job._prepare_image",
+               lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
+        raw, _, _ = _classify_photos(
+            photos, folders, detection_map, set(), clf, "bioclip", "BioCLIP",
+            _Runner(), job, db, labels_fingerprint="fp", reclassify=False,
+        )
+
+    # No classification ran for the skipped photo.
+    assert raw == []
+    clf.classify_batch_with_embedding.assert_not_called()
+    clf.classify_with_embedding.assert_not_called()
+    # The stale full-image detection AND its cascaded predictions are gone;
+    # the freshly-written MegaDetector person box stays.
+    assert _prediction_count(db, photo["id"]) == 0
+    assert sorted({
+        d["detector_model"]
+        for d in db.get_detections(photo["id"], min_conf=0)
+    }) == ["megadetector-v6"]

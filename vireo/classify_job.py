@@ -2324,6 +2324,18 @@ def _classify_photos(
         )
 
         if photo["id"] in non_animal_ids:
+            # A confident person or vehicle box takes this photo out of
+            # scope for species classification. MegaDetector writes only
+            # replace rows for ``megadetector-v6``, so any prior
+            # ``full-image`` detection (and its cascaded classifier rows)
+            # would still surface a stale species prediction — reads pick
+            # the newest fingerprint per detection independently, and the
+            # full-image detection lives under its own detector_model.
+            # Retire the full-image detection here; the CASCADE takes
+            # its predictions, classifier_runs and match-score rows in
+            # one transaction, and the call is a no-op when nothing
+            # was there.
+            db.clear_detections(photo["id"], detector_model="full-image")
             continue
 
         folder_path = folders.get(photo["folder_id"], "")
