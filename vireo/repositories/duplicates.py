@@ -147,16 +147,13 @@ class DuplicatesRepository:
             return None
 
         candidates = []
+        any_offline = False
         for r in rows:
             path = os.path.join(r["folder_path"] or "", r["filename"] or "")
             # Stat each candidate so the resolver doesn't pick a winner
             # whose file was moved/deleted on disk. The DB row would
             # otherwise outvote a surviving twin solely on path-string
-            # heuristics. A copy on an unreachable volume is "state
-            # unknown", not "missing" — treat it as present so Rule 0
-            # doesn't reject the archive original just because the NAS is
-            # unplugged (which would then get frozen into the group by
-            # the ``duplicate_rejections`` row ``reject`` writes).
+            # heuristics.
             #
             # Probe volume reachability BEFORE ``os.path.exists``. This
             # auto-resolver runs from ``add_photo`` and
@@ -168,14 +165,30 @@ class DuplicatesRepository:
             # same ordering.
             offline = _volume_offline(path)
             present = False if offline else os.path.exists(path)
+            if offline:
+                any_offline = True
             candidates.append(
                 DupCandidate(
                     id=r["id"],
                     path=path,
                     mtime=r["file_mtime"] or 0.0,
-                    exists=present or offline,
+                    # Placeholder; overridden by the offline-defer below when
+                    # we return None. When every candidate is reachable, this
+                    # is the real on-disk state and Rule 0 applies as usual.
+                    exists=present,
                 )
             )
+        # An offline candidate's on-disk state is unknown. Auto-resolution
+        # can't safely pick a winner without confirming: if the offline
+        # row wins by path/mtime and its file was actually deleted while
+        # the volume was down, ``apply_duplicate_resolution`` would reject
+        # the only reachable copy and stamp a ``duplicate_rejections`` row
+        # that ``reopen_duplicate_group`` would then un-reject only after
+        # the volume returns and the scan re-runs. Defer instead and let
+        # the interactive duplicate scan surface the group; that scan
+        # treats offline as "state unknown" for the user to resolve.
+        if any_offline:
+            return None
         winner_id, losers_with_reasons = resolve_duplicates(candidates)
         loser_ids = [lid for lid, _reason in losers_with_reasons]
         return winner_id, loser_ids

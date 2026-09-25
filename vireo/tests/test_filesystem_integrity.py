@@ -818,7 +818,12 @@ def test_resolution_plan_probes_reachability_before_stat(
     and ``check_and_resolve_duplicates_for_hash``, so it must consult
     the bounded ``_volume_offline`` probe BEFORE touching the path —
     otherwise the auto-resolver deadlocks the way ``duplicate_scan._row_to_info``
-    used to before it was fixed."""
+    used to before it was fixed.
+
+    Also verifies the offline-defer contract: an offline candidate whose
+    on-disk state is unknown must not be handed to the resolver, whose
+    path/mtime rules could promote the unreachable row and cause the only
+    reachable copy to be rejected."""
     from repositories import duplicates as duplicates_repo
 
     db = Database(str(tmp_path / "t.db"))
@@ -862,7 +867,7 @@ def test_resolution_plan_probes_reachability_before_stat(
 
     photo_ids = [r["id"] for r in db.conn.execute("SELECT id FROM photos")]
     repo = duplicates_repo.DuplicatesRepository(db.conn)
-    winner_id, loser_ids = repo.resolution_plan(photo_ids)
+    plan = repo.resolution_plan(photo_ids)
 
     # Every offline candidate had its reachability probe run BEFORE any
     # exists probe for that same path (they never should have gotten
@@ -870,14 +875,53 @@ def test_resolution_plan_probes_reachability_before_stat(
     nas_probes = [k for (k, p) in call_order if os.path.dirname(p) == str(nas)]
     assert nas_probes and all(k == "offline" for k in nas_probes), call_order
 
-    # The NAS candidate stays a valid winner even though its file isn't
-    # on disk right now — offline is "state unknown", not "missing".
-    assert winner_id is not None
-    assert loser_ids == [
-        r["id"] for r in db.conn.execute(
-            "SELECT id FROM photos WHERE id != ?", (winner_id,),
+    # Auto-resolution defers while any candidate is offline: the NAS row
+    # might have been deleted while the volume was down, and picking it
+    # by path/mtime would reject the only reachable copy.
+    assert plan is None
+
+
+def test_resolution_plan_defers_when_any_candidate_offline(tmp_path, monkeypatch):
+    """Verify the deferral end-to-end: ``apply_duplicate_resolution`` writes
+    nothing and returns the no-op shape when a hash group has an offline
+    twin, so the reachable copy is not rejected while the volume is down."""
+    from repositories import duplicates as duplicates_repo
+
+    db = Database(str(tmp_path / "t.db"))
+    nas = tmp_path / "nas"
+    laptop = tmp_path / "laptop"
+    nas.mkdir()
+    laptop.mkdir()
+    (laptop / "owl.jpg").write_bytes(b"x")
+    nas_fid = db.add_folder(str(nas))
+    laptop_fid = db.add_folder(str(laptop))
+    for fid, name in ((nas_fid, "owl.jpg"), (laptop_fid, "owl.jpg")):
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, extension, file_size,"
+            " file_mtime, file_hash, flag) VALUES (?, ?, '.jpg', 1, 100.0, 'H', 'none')",
+            (fid, name),
         )
-    ]
+    db.conn.commit()
+
+    monkeypatch.setattr(
+        duplicates_repo,
+        "_volume_offline",
+        lambda path: os.path.dirname(path) == str(nas),
+    )
+
+    photo_ids = [r["id"] for r in db.conn.execute("SELECT id FROM photos")]
+    result = db.apply_duplicate_resolution(photo_ids)
+    assert result == {"winner_id": None, "loser_ids": [], "rejected": 0}
+
+    # No photo was rejected — the reachable laptop copy is intact.
+    flags = [r["flag"] for r in db.conn.execute("SELECT flag FROM photos")]
+    assert flags == ["none", "none"]
+    # And no ``duplicate_rejections`` row was written that a later reopen
+    # would have to undo.
+    (count,) = db.conn.execute(
+        "SELECT COUNT(*) FROM duplicate_rejections"
+    ).fetchone()
+    assert count == 0
 
 
 def test_duplicate_scan_reopen_keeps_hand_rejected_rows_rejected(resolved_pair):
