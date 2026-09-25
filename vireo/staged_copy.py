@@ -200,23 +200,22 @@ def _rollback_placeholder(dst, claim_ino):
         return
     # Not ours: the entry at ``dst`` at rollback time was a concurrent
     # writer's replacement, and ``scratch`` now holds their bytes. Try
-    # to put them back. Prefer ``os.link`` on the odd chance hard links
-    # work here (we entered this fallback because they didn't for the
-    # promote, but detach paths can differ on some shares); otherwise
-    # fall back to a ``lexists``-gated ``os.rename`` — a narrow race
-    # since we own ``scratch``'s unique name. If ``dst`` is taken
-    # again in that window, leave the ``scratch`` in place with its
-    # ``.rollback`` marker so nothing of theirs is overwritten.
+    # to put them back with ``os.link`` on the odd chance hard links
+    # work for detach even though they didn't for the promote (some
+    # shares route the two operations through different code paths).
+    # If ``os.link`` isn't available we leave the writer's bytes at the
+    # unique ``.rollback`` scratch name for an operator to recover
+    # rather than risk overwriting a second concurrent writer that
+    # took ``dst`` after our detach: a ``lexists``-then-``os.rename``
+    # sequence has a TOCTOU window (POSIX rename overwrites; on Windows
+    # the rename raises but only after that check-then-act split), and
+    # this fallback exists precisely because atomic no-replace
+    # primitives are absent here.
     try:
         os.link(scratch, dst)
     except FileExistsError:
         return
     except OSError:
-        try:
-            if not os.path.lexists(dst):
-                os.rename(scratch, dst)
-        except OSError:
-            return
         return
     with contextlib.suppress(FileNotFoundError):
         os.unlink(scratch)

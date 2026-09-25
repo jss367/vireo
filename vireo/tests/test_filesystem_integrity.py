@@ -149,6 +149,12 @@ def test_copy_via_temp_no_hardlink_fallback_never_overwrites_replacement(
     was at the name. The new promote transfers bytes into the still-open
     claim fd and re-checks the inode's link count, so the racer's file
     survives untouched and the caller sees FileExistsError.
+
+    Without hard links the rollback cannot atomically restore the
+    racer's bytes to ``dst``, so it leaves them at the unique
+    ``.rollback`` scratch name rather than race a second writer with a
+    check-then-rename (Codex P2 on dbf07e9). The racer's bytes still
+    survive — just at a marker name an operator can recover.
     """
     import errno
 
@@ -198,7 +204,15 @@ def test_copy_via_temp_no_hardlink_fallback_never_overwrites_replacement(
         staged_copy.copy_via_temp(str(src), str(dst))
 
     assert tripped["once"], "racer never ran against the O_EXCL claim fd"
-    assert dst.read_bytes() == racer_bytes
+    # ``dst`` is either absent (we did not restore) or holds racer bytes;
+    # what matters is that our promote never wrote its own bytes over
+    # the racer's file. The racer's bytes remain recoverable at the
+    # unique ``.rollback`` scratch name.
+    rollbacks = [n for n in os.listdir(dst_dir) if n.endswith(".rollback")]
+    assert len(rollbacks) == 1, os.listdir(dst_dir)
+    assert (dst_dir / rollbacks[0]).read_bytes() == racer_bytes
+    if dst.exists():
+        assert dst.read_bytes() == racer_bytes
     assert _no_partials(dst_dir) == []
 
 
@@ -1318,3 +1332,174 @@ def test_ingest_retry_adopts_zero_byte_sibling_at_anchored_suffix(tmp_path):
         "IMG_0001_1.CR3", "IMG_0001_1.JPG",
     ]
     assert (day_dir / "IMG_0001_1.CR3").stat().st_size == 0
+
+
+def test_ingest_advances_past_dangling_primary_symlink(tmp_path):
+    """Codex P2 on dbf07e9: when the unsuffixed destination is a dangling
+    symlink, ``Path.exists()`` returns False and the primary-collision
+    branch used to fall through to ``copy_via_temp``. That helper's
+    ``os.link`` promotion and ``O_EXCL`` fallback both raise
+    ``FileExistsError`` against the existing directory entry, so the file
+    (and every retry) failed instead of landing at ``_1``. The primary
+    slot must probe ``lexists`` and route past any non-following entry
+    the way the suffix walk already does."""
+    from ingest import ingest
+
+    day = datetime(2026, 3, 28, 10, 0, 0)
+    card = tmp_path / "card"
+    card.mkdir()
+    _jpeg(card / "IMG_0001.JPG", "red", mtime=day)
+
+    dst = tmp_path / "nas"
+    day_dir = dst / "2026" / "2026-03-28"
+    day_dir.mkdir(parents=True)
+    # Dangling symlink at the primary name: lexists sees it, exists()
+    # follows through and reports False.
+    os.symlink(str(tmp_path / "missing.jpg"), str(day_dir / "IMG_0001.JPG"))
+    assert os.path.lexists(day_dir / "IMG_0001.JPG")
+    assert not (day_dir / "IMG_0001.JPG").exists()
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(card), str(dst), db=db)
+
+    assert result["failed"] == 0, result
+    assert result["copied"] == 1
+    # The dangling entry is untouched; the real bytes landed at ``_1``.
+    assert sorted(os.listdir(day_dir)) == ["IMG_0001.JPG", "IMG_0001_1.JPG"]
+    assert os.path.islink(day_dir / "IMG_0001.JPG")
+    assert (day_dir / "IMG_0001_1.JPG").is_file()
+
+
+def test_rollback_leaves_racer_bytes_at_scratch_when_hardlinks_unavailable(
+    tmp_path, monkeypatch,
+):
+    """Codex P2 on dbf07e9: after our detach moved a concurrent writer's
+    file to the unique ``.rollback`` scratch path, the fallback used to
+    ``lexists``-check ``dst`` and then ``os.rename(scratch, dst)`` to put
+    the writer's bytes back. That check-then-act pair races a SECOND
+    concurrent writer that claims ``dst`` in the window, and POSIX
+    ``rename`` overwrites their file — defeating this helper's own
+    no-overwrite contract. When atomic no-replace restore is unavailable
+    (hard links unsupported here, which is why we were in this fallback)
+    the rollback must leave the writer's file at the unique
+    ``.rollback`` name instead of racing them."""
+    import errno
+
+    src = _jpeg(tmp_path / "a.jpg", "red")
+    dst_dir = tmp_path / "out"
+    dst_dir.mkdir()
+    dst = dst_dir / "a.jpg"
+
+    def no_hardlinks(*_a, **_kw):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(staged_copy.os, "link", no_hardlinks)
+
+    # Set up the racer: after our O_EXCL claim succeeds, replace our
+    # placeholder with the racer's file (nlink=0 for us). The write then
+    # fails, rollback runs, detaches the racer's file into scratch, and
+    # then a SECOND writer claims dst before rollback's restore.
+    racer_bytes = b"first-racer"
+    second_writer_bytes = b"second-writer"
+    original_fstat = os.fstat
+    original_open = os.open
+    original_rename = os.rename
+    claim_fds = set()
+    tripped = {"once": False}
+
+    def tracking_open(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == str(dst) and (flags & os.O_EXCL):
+            claim_fds.add(fd)
+        return fd
+
+    def racing_fstat(fd):
+        result = original_fstat(fd)
+        if fd in claim_fds and not tripped["once"]:
+            tripped["once"] = True
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(dst))
+            with open(str(dst), "wb") as fh:
+                fh.write(racer_bytes)
+        return result
+
+    def slot_stealing_rename(src_arg, dst_arg):
+        # After rollback detaches racer bytes into scratch, a second
+        # writer claims dst before the restore step. Trip once so this
+        # doesn't fire on the initial detach (dst -> scratch).
+        result = original_rename(src_arg, dst_arg)
+        if os.fspath(src_arg) == str(dst) and not os.path.lexists(dst):
+            with open(str(dst), "wb") as fh:
+                fh.write(second_writer_bytes)
+        return result
+
+    monkeypatch.setattr(staged_copy.os, "open", tracking_open)
+    monkeypatch.setattr(staged_copy.os, "fstat", racing_fstat)
+    monkeypatch.setattr(staged_copy.os, "rename", slot_stealing_rename)
+
+    with pytest.raises(FileExistsError):
+        staged_copy.copy_via_temp(str(src), str(dst))
+
+    # The second writer's bytes at dst survive untouched: rollback never
+    # overwrote them with the first racer's file.
+    assert dst.read_bytes() == second_writer_bytes
+    # The first racer's bytes are still recoverable from the unique
+    # scratch name (an operator can move them back if needed).
+    rollbacks = [n for n in os.listdir(dst_dir) if n.endswith(".rollback")]
+    assert len(rollbacks) == 1, os.listdir(dst_dir)
+    assert (dst_dir / rollbacks[0]).read_bytes() == racer_bytes
+    assert _no_partials(dst_dir) == []
+
+
+def test_sibling_blocks_slot_rejects_source_backed_candidate(tmp_path):
+    """Codex P1 on 86c7b99: when a suffixed sibling candidate is a symlink
+    into the source card, ``os.stat`` and any subsequent hash follow the
+    link back and the walk would accept the slot as an exact byte match.
+    The first companion would anchor there, but the sibling's own
+    ``_resolve_dest_collision`` correctly rejects via
+    ``_is_source_backed_dest`` and advances, splitting the RAW/JPEG pair;
+    a later scan can then pair the landed file with the source-backed
+    entry and leave the archive dependent on the card. ``_sibling_blocks_slot``
+    must apply the same guard.
+    """
+    from import_job import _ImportBatchState, _sibling_blocks_slot
+
+    card = tmp_path / "card"
+    card.mkdir()
+    raw = card / "IMG_0001.CR3"
+    jpg = card / "IMG_0001.JPG"
+    raw.write_bytes(b"raw bytes")
+    jpg.write_bytes(b"jpeg bytes")
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    # A symlink at ``dest/IMG_0001.JPG`` that resolves back into the
+    # source card — the geometry the guard exists to catch.
+    os.symlink(str(jpg), str(dest / "IMG_0001.JPG"))
+
+    batch_st = _ImportBatchState(rel="rel", dest_folder=str(dest))
+    key = (str(card), "img_0001")
+    batch_st.companion_siblings[key] = [raw, jpg]
+
+    class _Ctx:
+        def __init__(self, card_root):
+            self._card_root = os.path.realpath(str(card_root))
+
+        fold_basename = staticmethod(lambda name: name.casefold())
+
+        def path_under_any_source(self, path):
+            resolved = os.path.realpath(str(path))
+            return (
+                resolved == self._card_root
+                or resolved.startswith(self._card_root + os.sep)
+            )
+
+    ctx = _Ctx(card)
+
+    # Without the guard the walk would stat the symlink target (jpg on
+    # the card), see the same bytes as sibling ``jpg``, and return False.
+    # With the guard the source-backed entry is treated as blocking so
+    # the RAW walks past this slot instead of anchoring here.
+    assert _sibling_blocks_slot(
+        batch_st, raw, "IMG_0001", 0, ctx=ctx,
+    ) is True

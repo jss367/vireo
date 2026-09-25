@@ -932,8 +932,20 @@ def ingest(
             anchor = companion_slots.get(slot_key)
             needs_suffix = False
 
-            # Handle filename collision (different file, same name)
-            if dest_file.exists():
+            # Handle filename collision (different file, same name).
+            #
+            # ``exists()`` follows symlinks, so a dangling link at
+            # ``dest_file`` reports False and would fall through to a
+            # ``copy_via_temp`` promotion whose ``os.link`` and ``O_EXCL``
+            # fallback both raise ``FileExistsError`` against the
+            # directory entry — the file (and every retry) would fail
+            # instead of landing at ``_1``. Split the probe: ``lexists``
+            # detects any entry, ``exists`` gates the content-adopt path
+            # (only a regular follow-through is comparable), and a
+            # lexists-but-not-exists entry advances to the suffix walk
+            # the same way the walk itself already does.
+            dest_exists = dest_file.exists()
+            if dest_exists:
                 src_size = source_file.stat().st_size
                 dest_size = dest_file.stat().st_size
                 # Zero-byte ↔ zero-byte at the same destination path IS
@@ -988,6 +1000,11 @@ def ingest(
                     continue
                 # Different file (or a split-making match), same name —
                 # add numeric suffix
+                needs_suffix = True
+            elif os.path.lexists(dest_file):
+                # A directory entry sits at the primary name that does
+                # not resolve to a follow-through (dangling symlink,
+                # link to a non-file, etc.). See the comment above.
                 needs_suffix = True
             elif anchor:
                 # A same-stem sibling was already renamed to a suffix.

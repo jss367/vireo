@@ -828,6 +828,16 @@ def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
             return True
         if not stat_mod.S_ISREG(dest_stat.st_mode):
             return True
+        # A candidate that IS the sibling on the card, or a symlink into
+        # any source root, would look byte-identical here (both stat and
+        # any subsequent hash follow the link back to the card). The
+        # sibling's own ``_resolve_dest_collision`` correctly rejects
+        # such a slot via ``_is_source_backed_dest`` and advances, which
+        # would split the pair if we accepted the slot here. Mirror that
+        # guard so the walk anchors somewhere safe for both members. See
+        # ``_is_source_backed_dest`` for the geometry and PR 7b.
+        if ctx is not None and _is_source_backed_dest(ctx, sibling, path):
+            return True
         try:
             sib_size = sibling.stat().st_size
         except OSError:
