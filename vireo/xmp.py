@@ -853,11 +853,10 @@ def _update_simple_property_value(child, value):
 def _property_occurrence_score(entry):
     """How authoritative an ``(owner, child)`` occurrence is.
 
-    A qualified child (either the child-element form -- one with
-    children of its own, ``rdf:parseType='Resource'`` short form or
-    the ``rdf:Description`` long form carrying ``rdf:value`` and
-    qualifier siblings -- or the RDF/XML attribute abbreviation with
-    an ``rdf:value`` attribute) is the most authoritative; an
+    A qualified child (child-element form, the RDF/XML attribute
+    abbreviation with an ``rdf:value`` attribute, OR a plain-text
+    child carrying any non-structural attribute -- ``rdf:datatype``,
+    ``foo:source``, ``xml:lang``) is the most authoritative; an
     unqualified child element ranks next; a plain attribute is the
     least authoritative. Readers and writers both use this so they
     agree on which copy holds the truth, and the write path leaves
@@ -868,7 +867,11 @@ def _property_occurrence_score(entry):
     _, child = entry
     if child is None:
         return 0
-    if len(child) or f"{{{NS_RDF}}}value" in child.attrib:
+    if (
+        len(child)
+        or f"{{{NS_RDF}}}value" in child.attrib
+        or _has_non_structural_attribute(child)
+    ):
         return 2
     return 1
 
@@ -1560,16 +1563,27 @@ class SidecarEditor:
     # ── Mutations ───────────────────────────────────────────────────────
 
     def add_keywords(self, flat_keywords=(), hierarchical_keywords=()):
-        """Merge keywords into dc:subject and lr:hierarchicalSubject."""
+        """Merge keywords into dc:subject and lr:hierarchicalSubject.
+
+        Deduplicate against every photo-scoped bag, not just the merge
+        target ``_bag`` picks. When every existing bag is qualified,
+        ``_bag`` returns a fresh empty unqualified bag; reading only
+        that target would let a keyword already present in a
+        qualified sibling bag land as a plain-text duplicate.
+        """
         desc = self._description()
         dc_bag = self._bag(desc, NS_DC, "subject")
-        existing_flat = _read_bag_values(dc_bag)
+        existing_flat = _all_photo_scoped_values(
+            self._root, f"{{{NS_DC}}}subject",
+        )
         for kw in sorted(set(flat_keywords) - existing_flat):
             ET.SubElement(dc_bag, f"{{{NS_RDF}}}li").text = kw
             self._dirty = True
 
         lr_bag = self._bag(desc, NS_LR, "hierarchicalSubject")
-        existing_hier = _read_bag_values(lr_bag)
+        existing_hier = _all_photo_scoped_values(
+            self._root, f"{{{NS_LR}}}hierarchicalSubject",
+        )
         for kw in sorted(set(hierarchical_keywords) - existing_hier):
             ET.SubElement(lr_bag, f"{{{NS_RDF}}}li").text = kw
             self._dirty = True
@@ -1587,11 +1601,12 @@ class SidecarEditor:
                 old = _li_value(li) or ''
                 value = by_key.get(key(old), old)
                 if value is None:
-                    # Removal target. A qualified item carries user
-                    # metadata we mustn't silently drop; leave it in
-                    # place. Plain duplicates are safe to remove.
-                    if _simple_prop_carries_qualifier(li):
-                        continue
+                    # Explicit removal. The caller mapped this path to
+                    # ``None`` on purpose (an obsolete source/target
+                    # hierarchy in ``sync.py``'s merge planner), so
+                    # even a qualified item goes -- leaving the stale
+                    # hierarchy visible could let a re-import bring
+                    # the rejected path back.
                     bag.remove(li)
                     self._dirty = True
                     continue

@@ -2592,6 +2592,117 @@ def test_hierarchy_replacement_preserves_qualified_collision(tmp_path):
     assert qualified[0].findtext(f"{{{foo_ns}}}source") == "user"
 
 
+def test_add_keywords_dedupes_across_all_photo_scoped_bags(tmp_path):
+    """``add_keywords`` doesn't duplicate a keyword already in a qualified bag.
+
+    When every existing ``dc:subject`` occurrence is qualified,
+    ``_bag`` creates a fresh unqualified target. Reading only that
+    target let a keyword already present in a qualified sibling
+    land as a plain-text duplicate. Deduplicate against every
+    photo-scoped bag.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Heron"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    all_texts = []
+    for subj in root.iter(SUBJECT):
+        for li in subj.iter(f"{{{NS_RDF}}}li"):
+            if li.text:
+                all_texts.append(li.text)
+    # ``Heron`` was already present in the qualified bag; no second copy.
+    assert all_texts == ["Heron"]
+
+
+def test_replace_hierarchy_none_removes_qualified_item(tmp_path):
+    """An explicit ``None`` in ``replace_keyword_hierarchies`` deletes the item.
+
+    Merge planning sometimes maps an obsolete hierarchy to ``None``
+    to strip it. A qualified item must not survive that -- otherwise
+    the sync finishes with the rejected path still visible and a
+    later re-import can bring it back.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:lr='{NS_LR}' xmlns:foo='{foo_ns}'>"
+        f"<lr:hierarchicalSubject><rdf:Bag>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>Birds|Stale</rdf:value>"
+        f"<foo:source>legacy</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.replace_keyword_hierarchies({"Birds|Stale": None})
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    lis = list(root.iter(f"{{{NS_RDF}}}li"))
+    assert lis == []
+
+
+def test_rdf_datatype_child_ranks_as_qualified_keeper(tmp_path):
+    """A ``<xmp:Rating rdf:datatype='...'>3</xmp:Rating>`` wins the keeper slot.
+
+    A plain-text child carrying ``rdf:datatype`` (or another
+    non-structural attribute) changes the RDF literal's semantics
+    even without children. Rank such an occurrence as qualified so
+    reads and writes agree on it, and a stale plain sibling doesn't
+    win the keeper score.
+    """
+    path = tmp_path / "photo.xmp"
+    xsd = "http://www.w3.org/2001/XMLSchema"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating>2</xmp:Rating>"
+        f"<xmp:Rating rdf:datatype='{xsd}#integer'>3</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # Read agrees with the qualified occurrence: the typed value.
+    assert read_sync_preview_metadata(path_str)["rating"] == "3"
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    # The typed rating is the keeper -- its value was updated in place
+    # and its ``rdf:datatype`` survived; the plain sibling was removed.
+    typed = [
+        r for r in ratings
+        if r.get(f"{{{NS_RDF}}}datatype") == f"{xsd}#integer"
+    ]
+    assert len(typed) == 1
+    assert (typed[0].text or "").strip() == "5"
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
