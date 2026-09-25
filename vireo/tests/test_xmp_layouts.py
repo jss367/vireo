@@ -391,6 +391,60 @@ def test_ambiguous_non_empty_subjects_do_not_designate_a_photo(tmp_path):
     assert metadata["location"]["longitude"] == pytest.approx(-70.25)
 
 
+def test_lone_blank_node_subject_is_not_treated_as_the_photo(tmp_path):
+    """A single Description identified only by rdf:nodeID is auxiliary.
+
+    A blank-node label never refers to the enclosing resource (the photo);
+    it identifies an unnamed side-resource the packet happens to describe.
+    Reads therefore return nothing, and a write that creates its own
+    Description scopes it to the empty (enclosing-resource) subject rather
+    than mutating the blank node's properties.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:nodeID='aux'"
+        f" xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}' xmlns:dc='{NS_DC}'"
+        f" xmp:Rating='1'"
+        f" exif:GPSLatitude='40,0.0N' exif:GPSLongitude='40,0.0E'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>AuxOnly</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path = str(path)
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["rating"] is None
+    assert metadata["location"] is None
+    assert read_keywords(path) == set()
+
+    write_gps_location(path, -33.5, -70.25)
+
+    root = ET.parse(path).getroot()
+    aux = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}nodeID") == "aux"
+    ]
+    assert len(aux) == 1
+    assert aux[0].get(RATING) == "1"
+    assert aux[0].get(GPS_LATITUDE) == "40,0.0N"
+    assert aux[0].get(GPS_LONGITUDE) == "40,0.0E"
+
+    fresh = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if (d.get(f"{{{NS_RDF}}}about") or "") == ""
+        and not d.get(f"{{{NS_RDF}}}nodeID")
+        and d.get(f"{{{NS_VIREO}}}gpsSource") == "assigned"
+    ]
+    assert len(fresh) == 1
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["location"]["latitude"] == pytest.approx(-33.5)
+    assert metadata["location"]["longitude"] == pytest.approx(-70.25)
+
+
 def test_merging_duplicate_bags_preserves_rdf_li_qualifiers(tmp_path):
     """When collapsing duplicate keyword bags, rdf:li attributes survive."""
     path = tmp_path / "photo.xmp"
