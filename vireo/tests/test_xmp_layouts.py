@@ -1987,6 +1987,173 @@ def test_rdf_value_attribute_abbreviation_is_read_and_updated(tmp_path):
     assert read_sync_preview_metadata(path_str)["rating"] == "5"
 
 
+def test_location_keyword_ownership_checked_across_all_bags(tmp_path):
+    """A user's keyword in a qualified bag isn't reclassified as Vireo-owned.
+
+    ``set_location_keywords`` used to judge ownership from the merge
+    target ``_bag`` returned. When ``_bag`` decided every existing
+    bag was qualified and created a fresh empty one, the ownership
+    check saw no matching entry and marked the newly added keyword
+    as Vireo-owned. ``remove_vireo_location_keywords`` then stripped
+    exact matches from every photo-scoped bag on the next removal
+    -- including the user's original qualified entry -- an
+    irreversible data loss. Check ownership against every
+    photo-scoped bag.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Kumeyaay Lake</rdf:li></rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject>"
+        f"<rdf:Bag><rdf:li>Places|Kumeyaay Lake</rdf:li></rdf:Bag>"
+        f"</lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.set_location_keywords(["Places", "Kumeyaay Lake"])
+    editor.commit()
+
+    # Now clear the Vireo-set location. If ownership were miscounted,
+    # this would strip the user's original qualified entry too.
+    editor = SidecarEditor(path_str)
+    editor.remove_vireo_location_keywords()
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # The original qualified bag under ``xml:lang='en'`` still has the
+    # user's keyword; ``remove_vireo_location_keywords`` left it alone.
+    qualified_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    assert len(qualified_descs) == 1
+    q_items = sorted(
+        li.text for li in qualified_descs[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert "Kumeyaay Lake" in q_items
+    assert "Places|Kumeyaay Lake" in q_items
+
+
+def test_rdf_datatype_blocks_duplicate_simple_property_removal(tmp_path):
+    """A ``rdf:datatype`` marker on a duplicate is preserved.
+
+    ``rdf:datatype`` changes the RDF literal's semantics (a typed
+    literal vs. a plain literal), so it must count as a qualifier
+    -- removing an occurrence carrying one silently drops the typing.
+
+    Here the keeper is the attribute-form
+    ``<xmp:Rating rdf:value='3'/>`` (highest score), and the typed
+    plain-text occurrence is the duplicate the removal loop would
+    otherwise sweep.
+    """
+    path = tmp_path / "photo.xmp"
+    xsd = "http://www.w3.org/2001/XMLSchema"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating rdf:value='3'/>"
+        f"<xmp:Rating rdf:datatype='{xsd}#integer'>3</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    # The typed occurrence survives with its ``rdf:datatype``.
+    typed = [
+        r for r in ratings
+        if r.get(f"{{{NS_RDF}}}datatype") == f"{xsd}#integer"
+    ]
+    assert len(typed) == 1
+
+
+def test_owner_xml_lang_blocks_removal_of_plain_child_duplicate(tmp_path):
+    """A duplicate under a language-qualified owner Description survives.
+
+    When a plain-text child sits inside a Description that carries
+    (or inherits) ``xml:lang``, that text is a language-tagged RDF
+    statement in its own right. Removing the duplicate wholesale
+    would silently drop the language tag. Preserve such duplicates.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating>3</xmp:Rating>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'>"
+        f"<xmp:Rating>4</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    # The language-qualified duplicate still exists with its owner Description.
+    qualified_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    assert len(qualified_descs) == 1
+    ratings_under_qualified = qualified_descs[0].findall(RATING)
+    assert len(ratings_under_qualified) == 1
+
+
+def test_rdf_value_attribute_occurrence_is_the_keeper(tmp_path):
+    """An ``rdf:value`` attribute duplicate is chosen over an unqualified sibling.
+
+    The attribute-abbreviation form is a qualified occurrence, so
+    ``_property_occurrence_score`` must rank it above a plain-text
+    child. Otherwise a rating update would update the plain-text
+    duplicate and leave the qualified attribute with a stale value
+    -- external readers might resolve the conflict differently.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}' xmlns:foo='{foo_ns}'>"
+        f"<xmp:Rating>3</xmp:Rating>"
+        f"<xmp:Rating rdf:value='3' foo:source='camera'/>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    attributed = [r for r in ratings if r.get(f"{{{NS_RDF}}}value") is not None]
+    # The attribute-form qualified occurrence is the keeper; its
+    # ``rdf:value`` was updated in place and its qualifier survived.
+    assert len(attributed) == 1
+    assert attributed[0].get(f"{{{NS_RDF}}}value") == "5"
+    assert attributed[0].get(f"{{{foo_ns}}}source") == "camera"
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

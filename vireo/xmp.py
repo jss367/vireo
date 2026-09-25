@@ -33,12 +33,12 @@ NS_XML = "http://www.w3.org/XML/1998/namespace"
 # RDF attributes that describe serialization form only. Anything else
 # on a property, one of its wrappers, or its ``rdf:Bag`` -- including
 # an identity attribute (``rdf:about``, ``rdf:nodeID``, ``rdf:ID``)
-# that names a distinct RDF resource other statements may point at --
-# is a qualifier that would be silently dropped if we removed the
-# element as a duplicate.
+# that names a distinct RDF resource other statements may point at,
+# or a typed-literal marker (``rdf:datatype``) that changes the
+# value's semantics -- is a qualifier that would be silently dropped
+# if we removed the element as a duplicate.
 _STRUCTURAL_RDF_ATTRIBUTES = frozenset({
     f"{{{NS_RDF}}}parseType",
-    f"{{{NS_RDF}}}datatype",
 })
 
 # Register namespaces so ET preserves prefixes on output
@@ -305,6 +305,21 @@ def _read_bag_values(bag):
     for li in bag.findall(f"{{{NS_RDF}}}li"):
         if li.text:
             values.add(li.text)
+    return values
+
+
+def _all_photo_scoped_values(root, tag):
+    """Return every ``rdf:li`` text under the photo's ``tag`` bags.
+
+    Unlike ``_read_bag_values`` (which reads one bag), this walks every
+    photo-scoped occurrence of ``tag`` -- direct child of a photo
+    Description, or wrapped in an ``rdf:value`` / ``rdf:Description``
+    -- so a keyword's presence is judged against the entire photo
+    subject, not just the bag ``_bag`` picked as its merge target.
+    """
+    values = set()
+    for bag in _photo_scoped_bags(root, tag):
+        values.update(_read_bag_values(bag))
     return values
 
 
@@ -763,21 +778,22 @@ def _qualified_value(child):
 def _property_occurrence_score(entry):
     """How authoritative an ``(owner, child)`` occurrence is.
 
-    A qualified child element (one with children of its own -- the
-    ``rdf:parseType='Resource'`` short form or the ``rdf:Description``
-    long form carrying ``rdf:value`` and qualifier siblings) is the
-    most authoritative; an unqualified child element ranks next; a
-    plain attribute is the least authoritative. Readers and writers
-    both use this so they agree on which copy holds the truth, and
-    the write path leaves that copy in place while removing the
-    others -- ``set_gps_location`` would otherwise back up the
-    attribute's stale value and later restore that instead of the
-    qualified coordinate the write kept.
+    A qualified child (either the child-element form -- one with
+    children of its own, ``rdf:parseType='Resource'`` short form or
+    the ``rdf:Description`` long form carrying ``rdf:value`` and
+    qualifier siblings -- or the RDF/XML attribute abbreviation with
+    an ``rdf:value`` attribute) is the most authoritative; an
+    unqualified child element ranks next; a plain attribute is the
+    least authoritative. Readers and writers both use this so they
+    agree on which copy holds the truth, and the write path leaves
+    that copy in place while removing the others -- ``set_gps_location``
+    would otherwise back up the attribute's stale value and later
+    restore that instead of the qualified coordinate the write kept.
     """
     _, child = entry
     if child is None:
         return 0
-    if len(child):
+    if len(child) or f"{{{NS_RDF}}}value" in child.attrib:
         return 2
     return 1
 
@@ -1432,14 +1448,22 @@ class SidecarEditor:
                 if child is None:
                     del owner.attrib[name]
                     changed = True
-                elif _simple_prop_carries_qualifier(child):
+                elif (
+                    _simple_prop_carries_qualifier(child)
+                    or _ancestor_carries_xml_qualifier(owner, parent_map)
+                ):
                     # Removing this duplicate would silently drop its
                     # qualifier attributes or elements (a distinct
                     # ``rdf:ID``, a ``foo:source`` attribute-form
                     # qualifier, a sibling qualifier element alongside
-                    # ``rdf:value``, etc.). Leave it in place so its
-                    # data survives; the keeper we updated above still
-                    # holds the value most readers will see.
+                    # ``rdf:value``, etc.) OR its owner's inherited
+                    # ``xml:lang`` / ``xml:base`` -- the child text
+                    # inside a language-qualified owner Description is
+                    # a language-tagged statement in its own right, so
+                    # dropping it would silently lose the tag. Leave
+                    # it in place so its data survives; the keeper we
+                    # updated above still holds the value most readers
+                    # will see.
                     continue
                 else:
                     owner.remove(child)
@@ -1738,18 +1762,36 @@ class SidecarEditor:
         # same ownership treatment: _remove_location_keyword_entries matches
         # on normalized keys, so a hier variant would be stripped on removal
         # if we claimed the canonical form we added beside it.
-        dc_bag = self._bag(desc, NS_DC, "subject")
-        lr_bag = self._bag(desc, NS_LR, "hierarchicalSubject")
+        # Check ownership across EVERY photo-scoped bag, not just the
+        # merge target that ``_bag`` picks. ``_bag`` returns a fresh
+        # empty bag when every existing occurrence is qualified (an
+        # ``xml:lang`` on the property, wrapper or ancestor, an
+        # attribute-form qualifier, an identity, etc.), so the target
+        # would report "not present" even when the user's keyword
+        # sits in one of the qualified bags. Silently claiming the
+        # keyword as Vireo-owned would let a later
+        # ``remove_vireo_location_keywords`` strip the user's original
+        # entry from every photo-scoped bag, an irreversible data
+        # loss.
         leaf_key = keyword_match_key(parts[-1])
         path_keys = [keyword_match_key(part) for part in parts]
+        flat_values_before = _all_photo_scoped_values(
+            self._root, f"{{{NS_DC}}}subject",
+        )
+        hier_values_before = _all_photo_scoped_values(
+            self._root, f"{{{NS_LR}}}hierarchicalSubject",
+        )
         existed_flat = bool(leaf_key) and any(
-            keyword_match_key(v) == leaf_key
-            for v in _read_bag_values(dc_bag)
+            keyword_match_key(v) == leaf_key for v in flat_values_before
         )
         existed_hier = any(
             [keyword_match_key(s) for s in v.split("|")] == path_keys
-            for v in _read_bag_values(lr_bag)
+            for v in hier_values_before
         )
+        # Ensure the bags exist so the ``add_keywords`` call below has
+        # somewhere to land -- we no longer need the return values.
+        self._bag(desc, NS_DC, "subject")
+        self._bag(desc, NS_LR, "hierarchicalSubject")
 
         # Canonicalize a flat variant of the leaf the way the species-keyword
         # path does: add_keywords() dedupes on exact text, so a sidecar
@@ -1764,11 +1806,21 @@ class SidecarEditor:
         # matches survive the canonicalization step above and show up as
         # "already present"; normalized variants were stripped by that step,
         # so a straight bag re-read would misread them as fresh inserts.
-        # ``existed_*`` captured that pre-canonicalization truth.
+        # ``existed_*`` captured that pre-canonicalization truth. Re-read
+        # across every photo-scoped bag for the same reason ``existed_*``
+        # did: a qualified sibling bag can hold the pre-existing entry.
         added_flat = (
-            parts[-1] not in _read_bag_values(dc_bag) and not existed_flat
+            parts[-1] not in _all_photo_scoped_values(
+                self._root, f"{{{NS_DC}}}subject",
+            )
+            and not existed_flat
         )
-        added_hier = path not in _read_bag_values(lr_bag) and not existed_hier
+        added_hier = (
+            path not in _all_photo_scoped_values(
+                self._root, f"{{{NS_LR}}}hierarchicalSubject",
+            )
+            and not existed_hier
+        )
 
         # Skip inserting the canonical hierarchy when the user already has a
         # normalized variant of it: add_keywords() would otherwise leave both
