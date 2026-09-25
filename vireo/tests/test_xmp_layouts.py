@@ -397,6 +397,81 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_write_preserves_local_xml_base_context_on_absolute_subject(tmp_path):
+    """A local-``xml:base'' photo doesn't lose its subject when a sibling is added.
+
+    When the photo Description carries a local ``xml:base=""'' and
+    an empty ``rdf:about'' (so its resolved subject is the sidecar
+    URI) and an inherited ``xml:lang'' forces a fresh sibling for
+    a new keyword, the writer used to convert the resolved subject
+    back to the empty spelling. That empty spelling on the new
+    Description (which sits under ``rdf:RDF'' without the local
+    ``xml:base'') resolves to a DIFFERENT subject, and
+    ``_photo_subject'' then picks the new sibling's literal empty
+    subject over the original -- silently hiding the photo's
+    rating/keywords from the next read. The writer now compares
+    the resolved subject against what an empty ``rdf:about'' at
+    the new Description's own context would resolve to, and only
+    uses the empty spelling when they'd match.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xml:base=''"
+        f" xml:lang='en'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Heron"}, set())
+    editor.commit()
+
+    # After the write the photo's rating still surfaces alongside
+    # the new keyword: both Descriptions share a subject key.
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["rating"] == "4"
+    assert "Heron" in metadata["keywords"]
+    _ = xml_ns
+
+
+def test_divergent_empty_origin_subjects_fall_back_to_ambiguous(tmp_path):
+    """Divergent empty-origin subjects fall back to ambiguous instead of guessing.
+
+    When two Descriptions omit ``rdf:about'' but carry distinct
+    local ``xml:base'' values, they resolve to different photo
+    subjects. Returning an arbitrary empty-origin subject would
+    scope every read and write to whichever happened to win the
+    set iteration, silently hiding the other Description's
+    metadata. ``_photo_subject'' now only prioritizes an
+    empty-origin subject when all empty-originated Descriptions
+    resolve identically -- otherwise it falls back to the empty
+    subject and the ambiguous-subject behavior takes over.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xml:base='file:///a/'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='' xml:base='file:///b/'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='2'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+
+    metadata = read_sync_preview_metadata(str(path))
+    # Ambiguous packet: the preview doesn't guess -- rating stays
+    # unresolved (rating_writable=True so the sync path knows a
+    # write would land on a fresh empty-subject Description).
+    assert metadata["rating"] is None
+    assert metadata["rating_writable"] is True
+
+
 def test_empty_rdf_about_priority_survives_explicit_xml_base(tmp_path):
     """The empty-``rdf:about'' priority still fires under an explicit ``xml:base''.
 

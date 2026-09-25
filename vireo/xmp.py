@@ -659,11 +659,17 @@ def _photo_subject(root):
             empty_origin.add(subject)
     if empty in subjects:
         return empty
-    if empty_origin:
-        # All empty-originated Descriptions in a given packet share
-        # the same effective base (they resolve identically), so any
-        # one entry names the photo's subject.
+    if len(empty_origin) == 1:
+        # Every empty-originated Description resolves identically
+        # (they share the same effective ``xml:base''), so their
+        # resolved subject names the photo. When more than one
+        # empty-origin subject exists the packet's Descriptions
+        # carry conflicting local ``xml:base'' values and can't
+        # agree on the photo -- fall back to the empty (ambiguous)
+        # subject rather than picking one arbitrarily.
         return next(iter(empty_origin))
+    if empty_origin:
+        return empty
     photo_candidates = {
         (about, node, rid)
         for (about, node, rid) in subjects
@@ -1621,25 +1627,41 @@ class SidecarEditor:
         """Return the ``rdf:about'' spelling a new photo Description should use.
 
         The new Description will sit under ``rdf:RDF'' with no local
-        ``xml:base'', so any raw ``rdf:about'' copied from an
-        existing Description that carries additional context
-        (a local ``xml:base'' or a namespace defaulting quirk) would
-        drift once placed under the new context. Use the resolved
-        absolute URI ``_photo_subject'' returns, so the new
-        Description is context-independent -- with one exception:
-        when the photo's subject IS the sidecar's document URI
-        (the empty ``rdf:about'' at root resolves there), keep the
-        idiomatic empty spelling so sidecars using the convention
-        stay unchanged. ``rdf:nodeID'' / ``rdf:ID'' subjects don't
-        resolve, so they pass through unchanged.
+        ``xml:base'', so any raw ``rdf:about'' spelling that
+        depended on local context (an ``xml:base'' on the matching
+        Description, for instance) would drift once placed here.
+        Use the resolved absolute URI ``_photo_subject'' returns so
+        the new Description is context-independent -- with one
+        exception: when the photo's resolved subject equals what
+        an empty ``rdf:about'' would resolve to at the new
+        Description's own context, keep the idiomatic empty
+        spelling so plain sidecars stay unchanged. That check
+        computes the effective base an empty ``rdf:about'' at
+        ``rdf:RDF'' would see; only when the resolved subject
+        matches is the empty spelling safe.
+
+        ``rdf:nodeID'' / ``rdf:ID'' subjects don't resolve, so they
+        pass through unchanged.
         """
         resolved = _photo_subject(self._root)
         about, node, rid = resolved
         if not about:
             return resolved
         parent_map = _build_parent_map(self._root)
-        doc_uri = _document_uri_for(self._root, parent_map)
-        if doc_uri and about == doc_uri:
+        anchor = self._root
+        if anchor.tag != f"{{{NS_RDF}}}RDF":
+            candidate = anchor.find(f"{{{NS_RDF}}}RDF")
+            if candidate is not None:
+                anchor = candidate
+        empty_at_anchor = _effective_xml_base(anchor, parent_map)
+        if not empty_at_anchor:
+            # No ancestor ``xml:base'' -- an empty ``rdf:about''
+            # under ``rdf:RDF'' would fingerprint literally empty,
+            # so the empty spelling is only safe when the photo's
+            # subject is also literally empty (already handled
+            # above by the ``if not about'' short-circuit).
+            return resolved
+        if about == empty_at_anchor:
             return ("", node, rid)
         return resolved
 
