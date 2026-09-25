@@ -675,18 +675,22 @@ def _simple_prop_carries_qualifier(prop):
     * the long form with just a nested ``rdf:Description`` holding
       only ``rdf:value``.
 
-    Anything else -- a non-structural attribute anywhere, a sibling
-    qualifier element alongside ``rdf:value``, an identity attribute
-    on the property or a nested Description -- is a qualifier.
+    Anything else -- a value-qualifier attribute anywhere (see
+    :func:`_has_own_value_qualifier`, which counts non-structural
+    RDF attributes and identity attributes but skips non-semantic
+    XML directives like ``xml:space``, ``xml:base`` and an empty
+    ``xml:lang''), a sibling qualifier element alongside
+    ``rdf:value``, an identity attribute on the property or a
+    nested Description -- is a qualifier.
     """
-    if _has_non_structural_attribute(prop):
+    if _has_own_value_qualifier(prop):
         return True
     if len(prop) == 0:
         return False
     for child in prop:
         tag = child.tag
         if tag == f"{{{NS_RDF}}}value":
-            if _has_non_structural_attribute(child):
+            if _has_own_value_qualifier(child):
                 return True
             if len(child) and not all(
                 c.tag == f"{{{NS_RDF}}}Bag" for c in child
@@ -952,7 +956,7 @@ def _property_occurrence_score(entry, parent_map=None):
     if (
         len(child)
         or f"{{{NS_RDF}}}value" in child.attrib
-        or _has_non_structural_attribute(child)
+        or _has_own_value_qualifier(child)
     ):
         return 2
     if parent_map is not None and _ancestor_carries_xml_qualifier(

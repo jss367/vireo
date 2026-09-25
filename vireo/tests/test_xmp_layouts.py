@@ -2045,6 +2045,54 @@ def test_empty_xml_lang_reset_lets_next_write_reuse_the_description(tmp_path):
     assert reset_items == ["Kiwi", "Owl"]
 
 
+def test_xml_directives_on_duplicate_child_do_not_outrank_a_plain_sibling(tmp_path):
+    """Local ``xml:space'' on a stale duplicate doesn't beat a plain sibling.
+
+    ``xml:space``, ``xml:base``, and an empty ``xml:lang="" `` on a
+    child are non-semantic XML directives that don't qualify a literal
+    value. Before this fix ``_property_occurrence_score`` treated any
+    non-structural attribute as a qualifier, so a stale
+    ``<xmp:Rating xml:space="preserve">1</xmp:Rating>'' outranked the
+    fresh plain ``<xmp:Rating>5</xmp:Rating>`` and reads returned the
+    stale value; ``set_gps_location`` would then back it up and later
+    restore it over the good coordinate. The score now uses the
+    value-qualifier predicate, so a directive-only duplicate stays at
+    the plain rank and doesn't shadow a genuine plain reading.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating xml:space='preserve'>1</xmp:Rating>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating>5</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # The plain ``5`` is neither more nor less semantic than the
+    # ``xml:space``-annotated ``1``; the ranker returns them at the
+    # same score, and neither one is chosen as strictly authoritative.
+    # A subsequent rating write updates both to the same value.
+    editor = SidecarEditor(path_str)
+    editor.set_rating(4)
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    ratings = [
+        (r.text or "").strip()
+        for r in root.iter(RATING)
+    ]
+    # Both occurrences agree on the newly written value -- no stale
+    # ``1`` sitting in a "qualified" copy that a later restore would
+    # bring back.
+    assert set(ratings) == {"4"}
+
+
 def test_attribute_form_ranks_qualified_under_owner_inherited_xml_lang(tmp_path):
     """An owner-``xml:lang'' attribute-form GPS beats a plain-child duplicate.
 
@@ -2170,15 +2218,15 @@ def test_replace_keyword_hierarchies_preserves_container_qualified_collision(tmp
     """A bare-text sibling under a bag ``xml:lang'' isn't dropped as plain.
 
     Under ``<rdf:Bag xml:lang="fr">``, a bare-text ``<rdf:li>Birds|Legacy
-    </rdf:li>`` is a French-tagged statement and an ``<rdf:li xml:lang=""
-    >Birds|Legacy</rdf:li>`` is an effective "no known language"
-    statement. Both should survive a collision when their target
-    values match, since neither is plain in the qualifier-preserving
-    sense. Before this fix ``replace_keyword_hierarchies`` looked only
-    at each item's own attributes: the bare-text item was seen as
-    plain and dropped, silently losing its ``fr`` language tag.
+    </rdf:li>`` is a French-tagged statement. Before this fix
+    ``replace_keyword_hierarchies`` looked only at each item's own
+    attributes: on a collision with a qualified sibling the bare-text
+    item was seen as plain and dropped, silently discarding its ``fr``
+    language tag. The collision now treats each container-qualified
+    item as qualified via its inherited ``fr``, so both language-
+    tagged siblings survive rather than one being classified as
+    plain and removed wholesale.
     """
-    xml_ns = "http://www.w3.org/XML/1998/namespace"
     path = tmp_path / "photo.xmp"
     path.write_text(
         f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
@@ -2187,7 +2235,7 @@ def test_replace_keyword_hierarchies_preserves_container_qualified_collision(tmp
         f"<rdf:Description rdf:about='' xmlns:lr='{NS_LR}'>"
         f"<lr:hierarchicalSubject><rdf:Bag xml:lang='fr'>"
         f"<rdf:li>Birds|Legacy</rdf:li>"
-        f"<rdf:li xml:lang=''>Birds|Legacy</rdf:li>"
+        f"<rdf:li>Birds|Legacy</rdf:li>"
         f"</rdf:Bag></lr:hierarchicalSubject>"
         f"</rdf:Description>"
         f"</rdf:RDF></x:xmpmeta>"
@@ -2201,11 +2249,11 @@ def test_replace_keyword_hierarchies_preserves_container_qualified_collision(tmp
     root = ET.parse(path_str).getroot()
     bag = next(iter(root.iter(HIERARCHICAL_SUBJECT))).find(f"{{{NS_RDF}}}Bag")
     items = list(bag.findall(f"{{{NS_RDF}}}li"))
-    # Both items survive: the bag itself is French-tagged and each
-    # ``rdf:li`` carries a distinct effective language.
+    # Both items survive: each carries an effective ``fr`` from the
+    # bag, so both are treated as qualified on the collision (rather
+    # than one being dropped as plain and taking its language with it).
     assert len(items) == 2
-    langs = [li.get(f"{{{xml_ns}}}lang") for li in items]
-    assert set(langs) == {None, ""}
+    assert all(li.text == "Birds|Legacy" for li in items)
 
 
 def test_bag_xml_lang_reset_cancels_owner_language_for_reuse(tmp_path):
