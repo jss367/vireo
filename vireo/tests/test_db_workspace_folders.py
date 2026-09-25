@@ -741,6 +741,33 @@ def test_move_folders_carries_workspace_scoped_rows(db, move_setup, cache):
     assert cache.invalidated == [(db._db_path, sorted([src, target]))]
 
 
+def test_move_folders_carries_color_labels(db, move_setup, cache):
+    src, target, p, a, b, q = move_setup
+    pb = _photo(db, b, "b.jpg")
+    pp = _photo(db, p, "p.jpg")
+    pq = _photo(db, q, "q.jpg")
+    db.conn.executemany(
+        "INSERT INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
+        [(pb, src, "red"), (pp, src, "green"), (pp, target, "blue"),
+         (pq, src, "yellow")],
+    )
+    db.conn.commit()
+
+    db.move_folders_to_workspace(src, target, [p])
+
+    labels = {
+        (r["photo_id"], r["workspace_id"]): r["color"]
+        for r in db.conn.execute("SELECT * FROM photo_color_labels")
+    }
+    assert labels == {
+        (pb, target): "red",       # nested folder's label follows the photo
+        (pp, target): "blue",      # target's existing label wins
+        (pq, src): "yellow",       # unmoved folder untouched
+    }
+    db.set_active_workspace(target)
+    assert db.get_color_label(pb) == "red"
+
+
 def test_move_folders_marks_only_selected_folders_as_roots(db, cache):
     src = db._ws_id()
     target = db.create_workspace("Target")

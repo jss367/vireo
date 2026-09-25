@@ -869,7 +869,8 @@ class CollectionRepository:
                     exists, params = _prediction_exists(f"{col} = ?", [value])
                     return "NOT " + exists, params
                 if op == "contains":
-                    return _prediction_exists(f"{col} LIKE ?", [f"%{value}%"])
+                    like = f"%{self._escape_like(str(value or ''))}%"
+                    return _prediction_exists(f"{col} LIKE ? ESCAPE '\\'", [like])
             if field == "prediction_confidence":
                 cond, cond_params = _numeric_condition("pred.confidence", op, value)
                 return _prediction_exists(cond, cond_params)
@@ -1020,7 +1021,8 @@ class CollectionRepository:
                 if op == "is not":
                     return "(p.active_mask_variant IS NULL OR p.active_mask_variant != ?)", [value]
                 if op == "contains":
-                    return "p.active_mask_variant LIKE ?", [f"%{value}%"]
+                    like = f"%{self._escape_like(str(value or ''))}%"
+                    return "p.active_mask_variant LIKE ? ESCAPE '\\'", [like]
             if field == "has_gps":
                 has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 return _boolean_predicate(has, op, value)
@@ -2676,3 +2678,105 @@ class CollectionRepository:
         if updated:
             self.conn.commit()
         return updated
+
+
+def _photo_id_key(value):
+    """The integer photo id a ``photo_ids`` rule value names, or None.
+
+    The rules engine matches ints inline and binds anything else, where
+    SQLite's integer affinity on ``p.id`` still matches a numeric string, so
+    both spellings name the same photo.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return None
+
+
+def remap_collection_photo_ids(conn, mapping):
+    """Rewrite ``photo_ids`` rules in every workspace's collections.
+
+    ``mapping`` maps a photo id that is leaving the catalog to the id that
+    absorbed it, or to None when the photo is simply gone. Photos are global,
+    so a static collection in any workspace can name the id, and SQLite reuses
+    a freed ``photos.id``: a stale entry would make the next imported photo
+    join that collection. A remapped id that the rule already lists is not
+    repeated. Runs inside the caller's transaction and never commits. Returns
+    the number of collections rewritten.
+    """
+    targets = {}
+    for old, new in mapping.items():
+        key = _photo_id_key(old)
+        if key is not None:
+            targets[key] = new
+    if not targets:
+        return 0
+    # Follow chains (A absorbed into B, then B into C) to the final survivor,
+    # so a caller can collect one mapping across a multi-step merge.
+    for key in list(targets):
+        seen_chain = {key}
+        new = targets[key]
+        while _photo_id_key(new) in targets and _photo_id_key(new) not in seen_chain:
+            seen_chain.add(_photo_id_key(new))
+            new = targets[_photo_id_key(new)]
+        targets[key] = new
+    # Only an id a remap introduces can create a duplicate this pass should
+    # fold; duplicates a rule already held are left as the user saved them.
+    survivors = {
+        k for k in (_photo_id_key(v) for v in targets.values()) if k is not None
+    }
+
+    def rewrite(node):
+        if isinstance(node, list):
+            changed_any = False
+            for child in node:
+                changed_any = rewrite(child) or changed_any
+            return changed_any
+        if not isinstance(node, dict):
+            return False
+        changed_any = rewrite(node.get("rules"))
+        if node.get("field") != "photo_ids":
+            return changed_any
+        values = node.get("value")
+        if not isinstance(values, list):
+            return changed_any
+        out = []
+        seen = set()
+        changed = False
+        for v in values:
+            key = _photo_id_key(v)
+            if key in targets:
+                changed = True
+                v = targets[key]
+                if v is None:
+                    continue
+                key = _photo_id_key(v)
+            if key in survivors:
+                if key in seen:
+                    changed = True
+                    continue
+                seen.add(key)
+            out.append(v)
+        if changed:
+            node["value"] = out
+        return changed_any or changed
+
+    rewritten = 0
+    rows = conn.execute(
+        "SELECT id, rules FROM collections WHERE rules LIKE '%photo_ids%'"
+    ).fetchall()
+    for row in rows:
+        try:
+            rules = json.loads(row["rules"])
+        except (TypeError, ValueError):
+            continue
+        if rewrite(rules):
+            conn.execute(
+                "UPDATE collections SET rules = ? WHERE id = ?",
+                (json.dumps(rules), row["id"]),
+            )
+            rewritten += 1
+    return rewritten

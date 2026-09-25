@@ -893,6 +893,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         db._transfer_gps_review_for_merge(companion["id"], primary["id"])
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
+        db.remap_collection_photo_ids({companion["id"]: primary["id"]})
         merged_ids.add(companion["id"])
         # The companion's rowid is now free for SQLite to hand to the next
         # insert. Its derivatives must be unlinked so the next photo to

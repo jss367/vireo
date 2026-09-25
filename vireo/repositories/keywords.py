@@ -765,45 +765,10 @@ class KeywordRepository:
         # (e.g. typing into a generic keyword input) doesn't silently
         # bind to a hand-tagged 'general' duplicate when a canonical
         # typed row exists. Tie-break by id for determinism.
-        # NB: SQL literals here are constants, not parameter bindings.
-        type_priority_case = (
-            "CASE type "
-            "WHEN 'taxonomy' THEN 0 "
-            "WHEN 'genre' THEN 1 "
-            "WHEN 'individual' THEN 2 "
-            "WHEN 'location' THEN 3 "
-            "ELSE 4 END"
-        )
-        if parent_id is None:
-            if kw_type is None:
-                existing = self.conn.execute(
-                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    f"AND parent_id IS NULL "
-                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
-                    (name,),
-                ).fetchone()
-            else:
-                existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id IS NULL AND type IN (?, 'general') "
-                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
-                    (name, kw_type, kw_type),
-                ).fetchone()
-        else:
-            if kw_type is None:
-                existing = self.conn.execute(
-                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    f"AND parent_id = ? "
-                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
-                    (name, parent_id),
-                ).fetchone()
-            else:
-                existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id = ? AND type IN (?, 'general') "
-                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
-                    (name, parent_id, kw_type, kw_type),
-                ).fetchone()
+        existing = self._find_add_candidate(name, parent_id, kw_type)
+        # The lookup key, before the insert path below rewrites ``name``
+        # (case convention) and ``kw_type`` (auto-detection).
+        lookup_name, lookup_kw_type, lookup_is_species = name, kw_type, is_species
         if existing:
             # Older confirmed-species rows can be correctly typed yet have a
             # NULL taxon_id because the historic is_species=True insert path
@@ -947,13 +912,90 @@ class KeywordRepository:
                 if taxon_id:
                     kw_type = 'taxonomy'
 
-        cur = self.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
-            (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
-        )
+        # The lookup above ran without a write lock, so a second connection
+        # can pass the same check before either inserts. UNIQUE(name,
+        # parent_id) cannot catch that for a top-level keyword (SQLite treats
+        # NULL parents as distinct) and is case-sensitive besides. When this
+        # call owns its transaction, take the write lock and look again, so
+        # the loser of the race reuses the winner's row.
+        owns_transaction = _commit and not self.conn.in_transaction
+        if owns_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+            if self._find_add_candidate(lookup_name, parent_id, lookup_kw_type) is not None:
+                self.conn.commit()
+                # Rerun so the reused row gets the same promotions as any
+                # other hit on the lookup.
+                return self.add(
+                    lookup_name, parent_id, is_species=lookup_is_species,
+                    kw_type=lookup_kw_type, _commit=_commit,
+                )
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
+                (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
+            )
+        except sqlite3.IntegrityError:
+            # A same-spelling row under this parent committed after the
+            # lookup (possible while the caller owns the transaction).
+            # Reuse it when it is one ``add`` would have returned.
+            if owns_transaction:
+                self.conn.rollback()
+            if self._find_add_candidate(lookup_name, parent_id, lookup_kw_type) is None:
+                raise
+            return self.add(
+                lookup_name, parent_id, is_species=lookup_is_species,
+                kw_type=lookup_kw_type, _commit=_commit,
+            )
+        except BaseException:
+            if owns_transaction:
+                self.conn.rollback()
+            raise
         if _commit:
             self.conn.commit()
         return cur.lastrowid
+
+    def _find_add_candidate(self, name, parent_id, kw_type):
+        """The row ``add`` reuses for ``name`` under ``parent_id``, or None."""
+        # NB: SQL literals here are constants, not parameter bindings.
+        type_priority_case = (
+            "CASE type "
+            "WHEN 'taxonomy' THEN 0 "
+            "WHEN 'genre' THEN 1 "
+            "WHEN 'individual' THEN 2 "
+            "WHEN 'location' THEN 3 "
+            "ELSE 4 END"
+        )
+        if parent_id is None:
+            if kw_type is None:
+                existing = self.conn.execute(
+                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id IS NULL "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
+                    (name,),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id IS NULL AND type IN (?, 'general') "
+                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
+                    (name, kw_type, kw_type),
+                ).fetchone()
+        else:
+            if kw_type is None:
+                existing = self.conn.execute(
+                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id = ? "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
+                    (name, parent_id),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id = ? AND type IN (?, 'general') "
+                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
+                    (name, parent_id, kw_type, kw_type),
+                ).fetchone()
+        return existing
 
     def merge_duplicates(self):
         """Find and merge normalized duplicate keywords in active workspace.

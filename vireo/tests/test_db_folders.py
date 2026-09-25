@@ -15,6 +15,7 @@ that the call still routes through it.
 import ast
 import contextlib
 import inspect
+import json
 import logging
 import os
 import sqlite3
@@ -769,6 +770,33 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
     assert prov[witness] is None
     assert prov[kid_witness] == str(target_dir / "kid")
     assert taken in folders
+
+
+def test_merge_into_existing_repoints_collection_photo_ids(db, tmp_path):
+    other_ws = db.create_workspace("Other")
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = db.add_folder(str(target_dir), workspace_root=False)
+    source = db.add_folder("/coll-src")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
+    db.conn.commit()
+    survivor = _photo(db, target, "dup.jpg")
+    dup = _photo(db, source, "dup.jpg")
+    phantom = _photo(db, source, "phantom.jpg")
+    coll = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("static", json.dumps([{"field": "photo_ids", "value": [dup, survivor, phantom]}]),
+         other_ws),
+    ).lastrowid
+    db.conn.commit()
+
+    db._merge_into_existing(source, target, str(target_dir))
+
+    rules = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (coll,),
+    ).fetchone()[0])
+    # The duplicate folds into its survivor (listed once); the phantom goes.
+    assert rules == [{"field": "photo_ids", "value": [survivor]}]
 
 
 def test_merge_into_existing_without_commit_leaves_transaction_open(db, tmp_path):

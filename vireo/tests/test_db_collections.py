@@ -268,6 +268,48 @@ def test_taxonomy_rules_is_not_and_contains(db, folder):
     assert _ids(db, [{"field": "taxonomy_family", "op": "is not", "value": "Canidae"}]) == [bare]
 
 
+def test_taxonomy_contains_treats_like_wildcards_literally(db, folder):
+    fox = _photo(db, folder, "fox.jpg")
+    odd = _photo(db, folder, "odd.jpg")
+    _prediction(db, fox, taxonomy={"family": "Canidae", "genus": "axb"})
+    _prediction(db, odd, taxonomy={"family": "100%_wild", "genus": "a_b"})
+    assert _ids(db, [{"field": "taxonomy_family", "op": "contains", "value": "%"}]) == [odd]
+    assert _ids(db, [{"field": "taxonomy_family", "op": "contains", "value": "_"}]) == [odd]
+    assert _ids(db, [{"field": "taxonomy_genus", "op": "contains", "value": "a_b"}]) == [odd]
+
+
+def test_remap_collection_photo_ids_follows_chains_and_folds_duplicates(db):
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    rows = {
+        "chain": [{"field": "photo_ids", "value": [1, "2", 9]}],
+        "dupes": [{"match": "any", "rules": [
+            {"field": "photo_ids", "value": [3, 3, 1, 4]},
+        ]}],
+        "plain": [{"field": "rating", "op": ">=", "value": 3}],
+    }
+    ids = {}
+    for name, rules in rows.items():
+        ids[name] = db.conn.execute(
+            "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+            (name, json.dumps(rules), other_ws),
+        ).lastrowid
+    # 1 -> 2 -> 4, and 2 itself is gone into 4; 9 is deleted outright.
+    assert remap_collection_photo_ids(db.conn, {1: 2, 2: 4, 9: None}) == 2
+    stored = {
+        name: json.loads(db.conn.execute(
+            "SELECT rules FROM collections WHERE id = ?", (cid,),
+        ).fetchone()[0])
+        for name, cid in ids.items()
+    }
+    assert stored["chain"] == [{"field": "photo_ids", "value": [4]}]
+    # The pre-existing 3, 3 is left as saved; only the remap's 4 is folded.
+    assert stored["dupes"][0]["rules"][0]["value"] == [3, 3, 4]
+    assert stored["plain"] == rows["plain"]
+    assert remap_collection_photo_ids(db.conn, {}) == 0
+
+
 def test_needs_review_rule(db, folder):
     pending = _photo(db, folder, "a.jpg")
     accepted = _photo(db, folder, "b.jpg")
@@ -290,6 +332,9 @@ def test_active_mask_variant_is_not_and_contains(db, folder):
     assert _ids(db, [{"field": "active_mask_variant", "op": "is not", "value": "sam2-large"}]) == [small, none]
     assert _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": "small"}]) == [small]
     assert large not in _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": "small"}])
+    # ``_`` and ``%`` are literal characters, not LIKE wildcards.
+    assert _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": "sam2_"}]) == []
+    assert _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": "%"}]) == []
 
 
 def test_rules_engine_reads_workspace_lazily(db):

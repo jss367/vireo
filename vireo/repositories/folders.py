@@ -14,6 +14,8 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 
 import os
 
+from repositories.collections import remap_collection_photo_ids
+
 
 class FolderRepository:
     def __init__(self, conn, workspace_id, *, commit_with_retry,
@@ -513,6 +515,9 @@ class FolderRepository:
 
         # Reassign or drop each photo
         drop_ids = []
+        # Where each dropped id's collection memberships go: the duplicate
+        # that absorbs it, or nowhere for a phantom.
+        collection_remap = {}
         for photo in source_photos:
             existing = self.conn.execute(
                 "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
@@ -521,6 +526,7 @@ class FolderRepository:
             if existing:
                 transfer_gps_review(photo["id"], existing["id"])
                 drop_ids.append(photo["id"])
+                collection_remap[photo["id"]] = existing["id"]
             elif os.path.exists(os.path.join(new_path, photo["filename"])):
                 self.conn.execute(
                     "UPDATE photos SET folder_id = ? WHERE id = ?",
@@ -529,6 +535,7 @@ class FolderRepository:
             else:
                 # File doesn't exist on disk at target — drop phantom record
                 drop_ids.append(photo["id"])
+                collection_remap[photo["id"]] = None
 
         # Delete duplicate photos and their associated data
         if drop_ids:
@@ -537,6 +544,7 @@ class FolderRepository:
             self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", drop_ids)
+            remap_collection_photo_ids(self.conn, collection_remap)
 
         # Reparent child folders from source to target
         self.conn.execute(
