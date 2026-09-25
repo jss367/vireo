@@ -619,6 +619,49 @@ def test_read_keywords_uses_document_uri_resolution(tmp_path):
     assert keywords == {"Heron", "Sparrow"}
 
 
+def test_document_uri_preserves_symlinked_retrieval_path(tmp_path):
+    """A sidecar reached through a symlinked dir folds alias-URI siblings.
+
+    ``Path.resolve()'' replaced the retrieval path with its physical
+    target, so a sidecar accessed as ``<tmp>/alias/photo.xmp'' with
+    a sibling ``rdf:about="file://<tmp>/alias/photo.jpg"'' fell out
+    of sync with a relative ``rdf:about="photo.jpg"'' (that folded
+    under the physical target directory instead). ``_photo_subject''
+    then treated the packet as ambiguous. Preserving the supplied
+    path with ``Path.absolute()'' keeps the alias in the URI so both
+    subjects fingerprint together.
+    """
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(physical, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("filesystem does not support directory symlinks")
+
+    sidecar = physical / "photo.xmp"
+    absolute_uri = f"{alias.as_uri()}/photo.jpg"
+    sidecar.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='photo.jpg' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Heron</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about='{absolute_uri}' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Sparrow</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+
+    keywords = read_keywords(str(alias / "photo.xmp"))
+    # Both Descriptions fold under the alias URI, so both keywords surface.
+    assert keywords == {"Heron", "Sparrow"}
+
+
 def test_relative_xml_base_resolves_from_document_uri(tmp_path):
     """A relative ``xml:base'' composes against the sidecar's URI.
 

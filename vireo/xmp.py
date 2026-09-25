@@ -489,9 +489,18 @@ _DOCUMENT_URIS = weakref.WeakKeyDictionary()
 
 
 def _register_document_uri(root, xmp_path):
-    """Record the file URI for ``xmp_path'' keyed on the parsed ``root''."""
+    """Record the file URI for ``xmp_path'' keyed on the parsed ``root''.
+
+    Uses ``Path.absolute()'' rather than ``Path.resolve()'' so a
+    sidecar accessed through a symlinked directory keeps the
+    retrieval path in the URI (Codex finding: otherwise a relative
+    ``rdf:about="photo.jpg"'' folds against the physical target
+    while a sibling ``rdf:about="file:///alias/photo.jpg"'' keeps
+    the alias, and ``_photo_subject'' treats the packet as
+    ambiguous).
+    """
     try:
-        uri = Path(xmp_path).resolve(strict=False).as_uri()
+        uri = Path(xmp_path).absolute().as_uri()
     except (ValueError, OSError):
         return
     # Some element implementations don't support weakref; the
