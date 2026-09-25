@@ -22,6 +22,7 @@ from xmp import (
     NS_LR,
     NS_RDF,
     NS_VIREO,
+    NS_XML,
     NS_XMP,
     NS_XMPDM,
     SidecarEditor,
@@ -483,9 +484,15 @@ def test_ambiguous_write_stays_visible_under_inherited_xml_base(tmp_path):
     ``_top_descriptions'' (filtering by ``("", "", "")'') never
     selects it. The write becomes invisible on re-read and the
     queued change could be cleared without any observable file
-    change. ``_description'' now emits ``xml:base=""'' on the fresh
-    Description in this fallback path so its resolved subject stays
-    empty; ``_effective_xml_base'' honors the reset.
+    change. ``_photo_write_subject'' now pins the fresh
+    Description with ``rdf:nodeID=vireoPhoto'' (a
+    context-independent blank node -- unaffected by any inherited
+    ``xml:base''), and ``_photo_subject'' recognizes that marker
+    as the photo subject in the ambiguous-fallback path so the
+    write is selectable on re-read. Standards-compliant consumers
+    see the write clearly as an anonymous Vireo-owned resource
+    rather than one misleadingly attributed to the inherited-base
+    subject.
     """
     path = tmp_path / "photo.xmp"
     path.write_text(
@@ -502,10 +509,22 @@ def test_ambiguous_write_stays_visible_under_inherited_xml_base(tmp_path):
     write_rating(str(path), 3)
 
     metadata = read_sync_preview_metadata(str(path))
-    # The write is selectable now that the new Description carries
-    # a reset ``xml:base'' -- its fingerprint stays empty and
-    # matches ``_photo_subject''s ambiguous fallback.
+    # The write is selectable through the ``rdf:nodeID=vireoPhoto''
+    # marker that ``_photo_subject'' now recognizes as the
+    # ambiguous-fallback photo subject.
     assert metadata["rating"] == "3"
+    # The new Description carries the blank-node marker rather
+    # than a bare ``rdf:about'' (which would drift into the
+    # inherited base) or an ``xml:base=""'' reset (which is a
+    # non-standard interpretation).
+    root = ET.parse(str(path)).getroot()
+    marker_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}nodeID") == "vireoPhoto"
+    ]
+    assert len(marker_descs) == 1
+    assert marker_descs[0].get(f"{{{NS_RDF}}}about") is None
+    assert marker_descs[0].get(f"{{{NS_XML}}}base") is None
 
 
 def test_empty_rdf_about_priority_survives_explicit_xml_base(tmp_path):
@@ -3170,6 +3189,59 @@ def test_qualified_gps_duplicates_keep_their_original_values(tmp_path):
         if d.get(f"{{{NS_VIREO}}}gpsSource")
     ]
     assert "assigned" in [v for v in all_marker_values if v]
+
+
+def test_remove_vireo_gps_restore_leaves_post_write_plain_copy_alone(tmp_path):
+    """A plain GPS occurrence added AFTER the Vireo write survives removal.
+
+    ``_set_plain_property_value'' collapses plain duplicates at
+    write time, so exactly one plain occurrence carries Vireo's
+    coordinate after ``set_gps_location''. If an external tool
+    then adds a SECOND plain occurrence (a fresh coordinate for
+    a different purpose, say), the earlier loop-restore would
+    overwrite that new occurrence with the pre-write backup on
+    the next ``remove_vireo_gps_location'' call -- silently
+    destroying the external data. ``_restore_plain_property_value''
+    now targets only the first plain occurrence Vireo owns and
+    leaves every other plain (and qualified) copy intact.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_gps_location(path_str, -33.5, -70.25, source="assigned")
+
+    # Simulate an external tool adding a second plain
+    # ``exif:GPSLatitude'' child (a new value beside Vireo's
+    # attribute) after Vireo's write.
+    root = ET.parse(path_str).getroot()
+    desc = next(root.iter(f"{{{NS_RDF}}}Description"))
+    external = ET.SubElement(desc, f"{{{NS_EXIF}}}GPSLatitude")
+    external.text = "30,0.0N"
+    ET.ElementTree(root).write(path_str, encoding="utf-8", xml_declaration=True)
+
+    remove_vireo_gps_location(path_str)
+
+    # The backup restored Vireo's ATTRIBUTE occurrence to "10,0.0N"
+    # (the pre-write value) and left the external's child element's
+    # "30,0.0N" intact -- not overwritten with the backup.
+    root_after = ET.parse(path_str).getroot()
+    plain_lats = []
+    for d in root_after.iter(f"{{{NS_RDF}}}Description"):
+        attr = d.get(f"{{{NS_EXIF}}}GPSLatitude")
+        if attr is not None:
+            plain_lats.append(attr)
+        for child in d.findall(f"{{{NS_EXIF}}}GPSLatitude"):
+            plain_lats.append((child.text or "").strip())
+    assert "30,0.0N" in plain_lats
+    assert "10,0.0N" in plain_lats
 
 
 def test_remove_vireo_gps_recreates_target_when_plain_occurrence_gone(tmp_path):

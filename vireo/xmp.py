@@ -478,6 +478,21 @@ def _all_top_descriptions(root):
 _SUBJECT_FALLBACK_BASE = "file:///_vireo_xmp_/"
 
 
+# Blank-node identifier Vireo pins to a new Description when it must
+# write to an ambiguous packet -- one where ``_photo_subject''
+# returns the empty fallback because sibling empty-origin
+# Descriptions carry distinct local ``xml:base'' values, so a bare
+# ``rdf:about=""'' would silently inherit the ancestor base and
+# resolve to a NON-empty subject that ``_top_descriptions'' can't
+# select on re-read. ``rdf:nodeID'' is context-independent (a blank
+# node ignores ``xml:base'') and self-labels the write as Vireo's,
+# so standards-compliant consumers see it clearly instead of a
+# write that appears to be about the inherited-base subject.
+# ``_photo_subject'' recognizes this nodeID as the photo when the
+# packet would otherwise be ambiguous.
+_VIREO_PHOTO_NODE_ID = "vireoPhoto"
+
+
 # Registered sidecar document URIs, keyed on the parsed root element.
 # When ``read_sync_preview_metadata'' or ``SidecarEditor'' registers
 # the real path, ``_description_subject'' can fold non-empty relative
@@ -543,16 +558,6 @@ def _effective_xml_base(elem, parent_map):
     handles the non-empty relative case separately, using the
     document URI as an implicit resolver only when the reference
     itself isn't empty.
-
-    An explicit ``xml:base=""'' on an ancestor is treated as a
-    RESET to the empty base rather than as RFC 3986's same-document
-    reference (Codex finding: the ambiguous-fallback write in
-    ``_description()'' emits this reset so its own subject stays
-    empty even under an inherited ancestor base; without the
-    reset the fresh Description's fingerprint would drift into
-    the ancestor's base and ``_top_descriptions'' would fail to
-    select it on re-read). A subsequent non-empty ``xml:base'' on
-    a deeper ancestor overrides the reset per normal composition.
     """
     xml_base = f"{{{NS_XML}}}base"
     chain = []
@@ -563,21 +568,12 @@ def _effective_xml_base(elem, parent_map):
     chain.reverse()
     base = ""
     declared = False
-    reset = False
     for anc in chain:
         b = anc.get(xml_base)
-        if b is None:
-            continue
-        declared = True
-        if b == "":
-            base = ""
-            reset = True
-            continue
-        reset = False
-        base = urllib.parse.urljoin(base, b) if base else b
+        if b is not None:
+            declared = True
+            base = urllib.parse.urljoin(base, b) if base else b
     if not declared:
-        return ""
-    if reset:
         return ""
     if not urllib.parse.urlparse(base).scheme:
         doc_uri = _document_uri_for(elem, parent_map)
@@ -625,7 +621,17 @@ def _description_subject(desc, parent_map=None):
     about = desc.get(f"{{{NS_RDF}}}about")
     node = desc.get(f"{{{NS_RDF}}}nodeID")
     rid = desc.get(f"{{{NS_RDF}}}ID")
-    if parent_map is not None:
+    if parent_map is not None and (about is not None or (not node and not rid)):
+        # ``xml:base'' only affects ``rdf:about'' (and ``rdf:ID''),
+        # which are URI references. When a Description uses
+        # ``rdf:nodeID'' or ``rdf:ID'' as its subject and carries
+        # no ``rdf:about'' at all, the effective base is irrelevant
+        # -- the subject is the blank-node id or fragment id, not
+        # a URI to resolve. Composing the base into an empty
+        # ``about'' anyway would leak the inherited base into
+        # the tuple's first slot and knock the Description out of
+        # the blank-node / fragment bucket that ``_photo_subject''
+        # matches against.
         base = _effective_xml_base(desc, parent_map)
         if base:
             about = urllib.parse.urljoin(base, about or "")
@@ -696,7 +702,17 @@ def _photo_subject(root):
         # agree on the photo -- fall back to the empty (ambiguous)
         # subject rather than picking one arbitrarily.
         return next(iter(empty_origin))
+    vireo_marker = ("", _VIREO_PHOTO_NODE_ID, "")
     if empty_origin:
+        # Multiple conflicting empty-origin subjects. Vireo's
+        # own ambiguous-fallback writes are pinned to
+        # ``rdf:nodeID=_VIREO_PHOTO_NODE_ID'' (context-independent,
+        # not affected by any inherited ``xml:base''); prefer
+        # that marker when present so the write is selectable
+        # on re-read, and fall back to the empty (ambiguous)
+        # subject otherwise.
+        if vireo_marker in subjects:
+            return vireo_marker
         return empty
     photo_candidates = {
         (about, node, rid)
@@ -707,6 +723,12 @@ def _photo_subject(root):
         and not rid
     }
     if len(photo_candidates) != 1:
+        # Same ambiguity, from a different direction: no consensus
+        # among non-fragment, non-blank-node, non-``rdf:ID'' photo
+        # candidates. Prefer Vireo's ambiguous-fallback marker if
+        # present so its own writes stay reachable.
+        if vireo_marker in subjects:
+            return vireo_marker
         return empty
     return next(iter(photo_candidates))
 
@@ -1644,22 +1666,6 @@ class SidecarEditor:
         about, node, rid = self._photo_write_subject()
         if about:
             desc.set(f"{{{NS_RDF}}}about", about)
-        elif not node and not rid:
-            # An empty resolved subject (either the naive
-            # ``rdf:about=""'' or the ambiguous fallback from
-            # ``_photo_subject'') leaves the new Description
-            # invisible when an ancestor ``xml:base'' leaks through:
-            # ``_description_subject'' would resolve the missing
-            # ``rdf:about'' against that base, producing a non-empty
-            # subject that ``_top_descriptions'' -- filtering by
-            # ``("", "", "")'' -- never selects. Emit ``xml:base=""''
-            # as a reset so the new Description fingerprints empty
-            # on re-read; ``_effective_xml_base'' honors the reset,
-            # and a sidecar without any ancestor ``xml:base'' stays
-            # untouched.
-            parent_map = _build_parent_map(self._root)
-            if _effective_xml_base(rdf, parent_map):
-                desc.set(f"{{{NS_XML}}}base", "")
         if node:
             desc.set(f"{{{NS_RDF}}}nodeID", node)
         if rid:
@@ -1668,7 +1674,7 @@ class SidecarEditor:
         return desc
 
     def _photo_write_subject(self):
-        """Return the ``rdf:about'' spelling a new photo Description should use.
+        """Return the subject spelling a new photo Description should use.
 
         The new Description will sit under ``rdf:RDF'' with no local
         ``xml:base'', so any raw ``rdf:about'' spelling that
@@ -1684,13 +1690,26 @@ class SidecarEditor:
         ``rdf:RDF'' would see; only when the resolved subject
         matches is the empty spelling safe.
 
+        When the resolved subject is empty (either the literal
+        ``rdf:about=""'' or the ambiguous fallback from
+        ``_photo_subject'') AND an ancestor ``xml:base'' would
+        leak into the new Description, a bare ``rdf:about=""''
+        would silently resolve into that inherited base and
+        fingerprint to a non-empty subject that
+        ``_top_descriptions'' can't select on re-read. Pin the
+        new Description with ``rdf:nodeID=_VIREO_PHOTO_NODE_ID''
+        (a context-independent blank node): ``_photo_subject''
+        recognizes that nodeID as the ambiguous-packet photo,
+        so Vireo's own writes stay reachable while
+        standards-compliant consumers see the write clearly as
+        an anonymous Vireo-owned resource instead of one
+        misleadingly attributed to the inherited-base subject.
+
         ``rdf:nodeID'' / ``rdf:ID'' subjects don't resolve, so they
         pass through unchanged.
         """
         resolved = _photo_subject(self._root)
         about, node, rid = resolved
-        if not about:
-            return resolved
         parent_map = _build_parent_map(self._root)
         anchor = self._root
         if anchor.tag != f"{{{NS_RDF}}}RDF":
@@ -1698,12 +1717,13 @@ class SidecarEditor:
             if candidate is not None:
                 anchor = candidate
         empty_at_anchor = _effective_xml_base(anchor, parent_map)
+        if not about:
+            if node or rid:
+                return resolved
+            if empty_at_anchor:
+                return ("", _VIREO_PHOTO_NODE_ID, "")
+            return resolved
         if not empty_at_anchor:
-            # No ancestor ``xml:base'' -- an empty ``rdf:about''
-            # under ``rdf:RDF'' would fingerprint literally empty,
-            # so the empty spelling is only safe when the photo's
-            # subject is also literally empty (already handled
-            # above by the ``if not about'' short-circuit).
             return resolved
         if about == empty_at_anchor:
             return ("", node, rid)
@@ -2152,34 +2172,42 @@ class SidecarEditor:
         return changed
 
     def _restore_plain_property_value(self, name, value):
-        """Restore ``value'' to only plain (unqualified) copies of a property.
+        """Restore ``value'' onto the FIRST plain copy of a property.
 
-        Vireo's own writes land on plain occurrences, so a restore of
-        a backed-up value belongs there too. A qualified occurrence
-        added by another tool AFTER Vireo's initial write carries
-        data we can't restore per-occurrence -- and it's not what
-        Vireo overwrote anyway, so overwriting it now with the
-        backup would permanently destroy the external data. Leave
-        qualified duplicates entirely alone: their metadata and
-        their values both survive. "Plain" here is the same
-        classification :meth:`_delete_plain_property_copies` uses;
-        the short qualified-serialization form (``rdf:parseType=
-        "Resource"'' with a bare ``rdf:value'' child and nothing
-        else) is treated as plain because Vireo's own writes
-        preserve it and update through it.
+        Vireo's own writes land on a single plain occurrence
+        (``_set_plain_property_value'' collapses plain duplicates
+        at write time). So on removal only ONE plain occurrence is
+        Vireo's to restore; anything a later external tool added
+        alongside it carries data Vireo didn't overwrite and can't
+        vouch for (Codex finding: looping the whole plain set
+        overwrites a newly-added external ``30,0N'' back to the
+        pre-write ``10,0N''). Restore just the first plain
+        occurrence in document order -- the same one
+        ``_get_plain_property_value'' would read -- and leave
+        every other occurrence (plain OR qualified) entirely
+        alone. "Plain" here is the same classification
+        :meth:`_delete_plain_property_copies` uses; the short
+        qualified-serialization form (``rdf:parseType="Resource"''
+        with a bare ``rdf:value'' child and nothing else) is
+        treated as plain because Vireo's own writes preserve it
+        and update through it.
+
+        Returns True when a plain target was found (the value was
+        written, or already matched); False when no plain
+        occurrence remains for the caller to recreate.
         """
         found = _property_occurrences(self._root, name)
         if not found:
             return False
         parent_map = _build_parent_map(self._root)
-        changed = False
         for owner, child in found:
             if child is None:
                 if _ancestor_carries_xml_qualifier(owner, parent_map):
                     continue
                 if owner.get(name) != value:
                     owner.set(name, value)
-                    changed = True
+                    self._dirty = True
+                return True
             elif _simple_prop_carries_qualifier(child) or (
                 _ancestor_carries_xml_qualifier(child, parent_map)
             ):
@@ -2193,10 +2221,9 @@ class SidecarEditor:
                 # ``rdf:value'') is restored correctly instead of
                 # having the value written into the wrapper's text.
                 if _update_simple_property_value(child, value):
-                    changed = True
-        if changed:
-            self._dirty = True
-        return changed
+                    self._dirty = True
+                return True
+        return False
 
     # ── Mutations ───────────────────────────────────────────────────────
 
