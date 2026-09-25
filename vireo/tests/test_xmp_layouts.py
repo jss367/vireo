@@ -2154,6 +2154,170 @@ def test_rdf_value_attribute_occurrence_is_the_keeper(tmp_path):
     assert attributed[0].get(f"{{{foo_ns}}}source") == "camera"
 
 
+def test_set_location_keywords_does_not_duplicate_a_qualified_flat_leaf(tmp_path):
+    """Skip the flat insertion when the leaf already lives in a qualified bag.
+
+    ``set_location_keywords`` used to unconditionally add the flat
+    leaf regardless of whether it existed. When the user's leaf sat
+    only in a qualified bag, ``_bag`` created a fresh empty bag and
+    ``add_keywords`` inserted the leaf there. Ownership was False
+    (``existed_flat`` correctly detected the user's copy), so a
+    later ``remove_vireo_location_keywords`` cleared neither entry
+    -- a permanent duplicate. Detecting the exact leaf text across
+    every photo-scoped bag lets us skip that insertion.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Kumeyaay Lake</rdf:li></rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject>"
+        f"<rdf:Bag><rdf:li>Places|Kumeyaay Lake</rdf:li></rdf:Bag>"
+        f"</lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.set_location_keywords(["Places", "Kumeyaay Lake"])
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # Every ``dc:subject`` bag: no duplicates.
+    all_flat_items = []
+    for subj in root.iter(SUBJECT):
+        for li in subj.iter(f"{{{NS_RDF}}}li"):
+            if li.text:
+                all_flat_items.append(li.text)
+    assert all_flat_items == ["Kumeyaay Lake"]
+
+    # The qualified bag still holds the user's original entry.
+    qualified_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    assert len(qualified_descs) == 1
+    q_flat = sorted(
+        li.text for subj in qualified_descs[0].findall(SUBJECT)
+        for li in subj.iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert q_flat == ["Kumeyaay Lake"]
+
+
+def test_preserved_qualified_duplicate_gets_its_value_updated(tmp_path):
+    """Qualified duplicates receive the new value, keeping their qualifiers.
+
+    Before: the removal loop preserved a qualified duplicate but
+    left its ``rdf:value`` untouched, so external readers could
+    resolve the conflicting ratings differently from Vireo. The fix
+    keeps the qualifier structure while updating the value in
+    place.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}' xmlns:foo='{foo_ns}'>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>3</rdf:value>"
+        f"<foo:origin>keeper</foo:origin>"
+        f"</xmp:Rating>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>2</rdf:value>"
+        f"<foo:origin>preserve-me</foo:origin>"
+        f"</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    assert len(ratings) == 2
+    # Every rating carries the updated value...
+    for r in ratings:
+        assert (r.find(f"{{{NS_RDF}}}value").text or "") == "5"
+    # ...and every ``foo:origin`` qualifier is preserved.
+    origins = sorted(
+        r.findtext(f"{{{foo_ns}}}origin") for r in ratings
+    )
+    assert origins == ["keeper", "preserve-me"]
+
+
+def test_qualified_rdf_li_is_read_as_the_keyword_value(tmp_path):
+    """A qualified ``rdf:li`` value is read from its nested ``rdf:value``.
+
+    A qualified item's direct ``.text`` is whitespace between
+    children, so plain ``li.text`` misses the keyword. Reads must
+    follow the nested value, otherwise every keyword-set consumer
+    ignores the qualified entry.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<dc:subject>"
+        f"<rdf:Bag>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>Heron</rdf:value>"
+        f"<foo:source xmlns:foo='http://example.com/foo/'>ebird</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag>"
+        f"</dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    assert "Heron" in read_keywords(path_str)
+
+
+def test_xml_space_is_not_reset_with_empty_value(tmp_path):
+    """A ``xml:space`` inherited from ``rdf:RDF`` is not written as empty.
+
+    ``xml:lang=""`` is XML's way of saying "no language" and is a
+    valid cancel. ``xml:space``, in contrast, only permits
+    ``default`` or ``preserve``; writing ``xml:space=""`` produces
+    invalid XML. The reset should only apply to ``xml:lang``.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:space='preserve'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.set_rating(4)
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # No Description carries an empty ``xml:space`` reset.
+    for d in root.iter(f"{{{NS_RDF}}}Description"):
+        if f"{{{xml_ns}}}space" in d.attrib:
+            assert d.get(f"{{{xml_ns}}}space") in ("default", "preserve")
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

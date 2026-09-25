@@ -299,12 +299,41 @@ def _write_tree_atomic(tree, xmp_path):
             temp_path.unlink(missing_ok=True)
 
 
+def _li_value(li):
+    """Return an ``rdf:li``'s value text, following any qualifier form.
+
+    XMP arrays permit a qualified item spelling, where each entry
+    wraps its value in an ``rdf:value`` (or the RDF/XML attribute
+    abbreviation): ``<rdf:li rdf:parseType='Resource'><rdf:value>
+    Heron</rdf:value><foo:qual>...</foo:qual></rdf:li>``. The
+    item's direct ``.text`` is then only whitespace between its
+    children, so readers must resolve the nested value first;
+    otherwise every keyword-set consumer misses the qualified
+    entry.
+    """
+    rdf_value_tag = f"{{{NS_RDF}}}value"
+    if rdf_value_tag in li.attrib:
+        return li.get(rdf_value_tag)
+    nested = li.find(f"{{{NS_RDF}}}Description")
+    if nested is not None and rdf_value_tag in nested.attrib:
+        return nested.get(rdf_value_tag)
+    rdf_value = li.find(rdf_value_tag)
+    if rdf_value is not None:
+        return (rdf_value.text or "").strip()
+    if nested is not None:
+        rdf_value = nested.find(rdf_value_tag)
+        if rdf_value is not None:
+            return (rdf_value.text or "").strip()
+    return li.text
+
+
 def _read_bag_values(bag):
-    """Read all rdf:li values from a bag."""
+    """Read all rdf:li values from a bag, following qualified spellings."""
     values = set()
     for li in bag.findall(f"{{{NS_RDF}}}li"):
-        if li.text:
-            values.add(li.text)
+        value = _li_value(li)
+        if value:
+            values.add(value)
     return values
 
 
@@ -775,6 +804,43 @@ def _qualified_value(child):
     return None
 
 
+def _update_simple_property_value(child, value):
+    """Update a simple-property occurrence's value in place. Returns True on change.
+
+    Handles every equivalent serialization: attribute form on the
+    property or a nested ``rdf:Description``, element form (short
+    or long), or a plain-text child. When no spelling carries a
+    value yet, creates ``rdf:value`` under the innermost wrapper.
+    """
+    rdf_value_tag = f"{{{NS_RDF}}}value"
+    owner = _qualified_value_attribute_owner(child)
+    if owner is not None:
+        if owner.get(rdf_value_tag) != value:
+            owner.set(rdf_value_tag, value)
+            return True
+        return False
+    rdf_value = child.find(rdf_value_tag)
+    value_owner = child
+    if rdf_value is None:
+        nested = child.find(f"{{{NS_RDF}}}Description")
+        if nested is not None:
+            value_owner = nested
+            rdf_value = nested.find(rdf_value_tag)
+    if rdf_value is not None:
+        if (rdf_value.text or "") != value:
+            rdf_value.text = value
+            return True
+        return False
+    if len(child) == 0:
+        if (child.text or "").strip() != value:
+            child.text = value
+            return True
+        return False
+    rdf_value = ET.SubElement(value_owner, rdf_value_tag)
+    rdf_value.text = value
+    return True
+
+
 def _property_occurrence_score(entry):
     """How authoritative an ``(owner, child)`` occurrence is.
 
@@ -850,8 +916,9 @@ def read_keywords(xmp_path):
     keywords = set()
     for bag in _photo_scoped_bags(root, f"{{{NS_DC}}}subject"):
         for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text:
-                keywords.add(li.text)
+            value = _li_value(li)
+            if value:
+                keywords.add(value)
     return keywords
 
 
@@ -868,8 +935,9 @@ def read_hierarchical_keywords(xmp_path):
     results = []
     for bag in _photo_scoped_bags(root, f"{{{NS_LR}}}hierarchicalSubject"):
         for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text:
-                results.append(li.text)
+            value = _li_value(li)
+            if value:
+                results.append(value)
     return results
 
 
@@ -1008,14 +1076,16 @@ def read_sync_preview_metadata(xmp_path):
     keywords = set()
     for bag in _photo_scoped_bags(root, f"{{{NS_DC}}}subject"):
         for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text:
-                keywords.add(li.text)
+            value = _li_value(li)
+            if value:
+                keywords.add(value)
 
     hierarchical_keywords = set()
     for bag in _photo_scoped_bags(root, f"{{{NS_LR}}}hierarchicalSubject"):
         for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text:
-                hierarchical_keywords.add(li.text)
+            value = _li_value(li)
+            if value:
+                hierarchical_keywords.add(value)
 
     if not _top_descriptions(root):
         # The sidecar parsed cleanly, so rating writes will land here even
@@ -1204,17 +1274,20 @@ class SidecarEditor:
             desc.set(f"{{{NS_RDF}}}nodeID", node)
         if rid:
             desc.set(f"{{{NS_RDF}}}ID", rid)
-        # Explicitly reset every ``xml:*`` attribute inherited from an
-        # ancestor. ``xml:lang=""`` is XML's way of saying "no known
-        # language" -- it cancels an inherited language on the new
-        # Description's descendants, so a numeric rating or a GPS
-        # coordinate we later add under here does not silently
-        # language-tag itself with the sidecar's outer language. The
-        # new Description isn't in ``parent_map`` yet, so walk from
-        # its known parent (``rdf``) upward: those attributes are
-        # what it would inherit.
-        for xml_attr in _ancestor_xml_attributes(rdf, parent_map):
-            desc.set(xml_attr, "")
+        # Explicitly reset the ``xml:*`` attributes that permit an
+        # empty cancelling value. ``xml:lang=""`` is XML's way of
+        # saying "no known language", so it cancels an inherited
+        # language on the new Description's descendants. Other
+        # inherited ``xml:*`` attributes have stricter grammars --
+        # ``xml:space`` accepts only ``default`` or ``preserve``,
+        # ``xml:id`` must be a valid non-empty identifier -- so we
+        # leave them alone here rather than emitting invalid XML.
+        # The new Description isn't in ``parent_map`` yet, so walk
+        # from its known parent (``rdf``) upward: those attributes
+        # are what it would inherit.
+        xml_lang = f"{{{NS_XML}}}lang"
+        if xml_lang in _ancestor_xml_attributes(rdf, parent_map):
+            desc.set(xml_lang, "")
         self._dirty = True
         return desc
 
@@ -1407,40 +1480,15 @@ class SidecarEditor:
                     owner.set(name, value)
                     changed = True
             elif f"{{{NS_RDF}}}value" in child.attrib or len(child):
-                # Qualified property. The value may live as an
-                # ``rdf:value`` element or as an ``rdf:value``
-                # attribute (RDF/XML's attribute abbreviation),
-                # either directly under the property or inside a
-                # nested ``rdf:Description``. Update whichever
-                # spelling already carries the value in place; only
-                # create a fresh ``<rdf:value>`` element when no
-                # spelling exists yet. Anything else -- writing plain
-                # text into the container, or appending a second
-                # ``rdf:value`` beside the existing one -- would
-                # strip qualifiers or leave a stale value alongside
-                # the new one.
-                attr_owner = _qualified_value_attribute_owner(child)
-                if attr_owner is not None:
-                    if attr_owner.get(f"{{{NS_RDF}}}value") != value:
-                        attr_owner.set(f"{{{NS_RDF}}}value", value)
-                        changed = True
-                else:
-                    rdf_value = child.find(f"{{{NS_RDF}}}value")
-                    value_owner = child
-                    if rdf_value is None:
-                        nested = child.find(f"{{{NS_RDF}}}Description")
-                        if nested is not None:
-                            value_owner = nested
-                            rdf_value = nested.find(f"{{{NS_RDF}}}value")
-                    if rdf_value is None:
-                        rdf_value = ET.SubElement(
-                            value_owner, f"{{{NS_RDF}}}value"
-                        )
-                        rdf_value.text = value
-                        changed = True
-                    elif (rdf_value.text or "") != value:
-                        rdf_value.text = value
-                        changed = True
+                # Qualified property. Update whichever spelling
+                # already carries the value -- attribute or element
+                # form, on the property itself or inside a nested
+                # ``rdf:Description`` -- in place. That preserves
+                # qualifier attributes and sibling elements; the
+                # helper only writes a fresh ``rdf:value`` if no
+                # form carries one yet.
+                if _update_simple_property_value(child, value):
+                    changed = True
             elif (child.text or "").strip() != value:
                 child.text = value
                 changed = True
@@ -1461,9 +1509,13 @@ class SidecarEditor:
                     # inside a language-qualified owner Description is
                     # a language-tagged statement in its own right, so
                     # dropping it would silently lose the tag. Leave
-                    # it in place so its data survives; the keeper we
-                    # updated above still holds the value most readers
-                    # will see.
+                    # it in place so its data survives, BUT still
+                    # update its own value to the requested one so
+                    # every occurrence agrees; otherwise external
+                    # readers could resolve the conflicting copies
+                    # differently from Vireo.
+                    if _update_simple_property_value(child, value):
+                        changed = True
                     continue
                 else:
                     owner.remove(child)
@@ -1822,14 +1874,29 @@ class SidecarEditor:
             and not existed_hier
         )
 
-        # Skip inserting the canonical hierarchy when the user already has a
-        # normalized variant of it: add_keywords() would otherwise leave both
-        # spellings side by side, and the leaked canonical would drift out of
-        # step with the user's spelling forever. The species-keyword sync path
-        # only canonicalizes flat entries for the same reason.
+        # Skip inserting the canonical hierarchy when the user already
+        # has a normalized variant of it: ``add_keywords()`` would
+        # otherwise leave both spellings side by side, and the leaked
+        # canonical would drift out of step with the user's spelling
+        # forever. The species-keyword sync path only canonicalizes
+        # flat entries for the same reason.
+        #
+        # For the flat leaf, skip only when the EXACT canonical
+        # string is already present -- the case-variant path relies
+        # on ``add_keywords`` inserting the canonical after
+        # ``remove_keywords`` stripped the variant. When the exact
+        # canonical string sits only in a qualified sibling bag,
+        # ``_bag`` will still target a fresh unqualified bag, so
+        # skipping the add is the only way to avoid appending a
+        # duplicate that ``remove_vireo_location_keywords`` can't
+        # clean up (its ownership is False).
+        flat_leaf_present = parts[-1] in _all_photo_scoped_values(
+            self._root, f"{{{NS_DC}}}subject",
+        )
+        flat_to_add = set() if flat_leaf_present else {parts[-1]}
         hier_to_add = set() if existed_hier else {path}
         self.add_keywords(
-            flat_keywords={parts[-1]}, hierarchical_keywords=hier_to_add,
+            flat_keywords=flat_to_add, hierarchical_keywords=hier_to_add,
         )
 
         # A no-op rewrite of the same path must not shrink an ownership
