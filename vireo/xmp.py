@@ -481,31 +481,36 @@ def _photo_subject(root):
 
     ``rdf:about=""`` (or a missing attribute) is the sidecar convention for
     "the enclosing resource" -- the photo. When no top-level Description
-    carries the empty subject but every Description shares a single
-    non-empty ``rdf:about`` that isn't a fragment (a value starting with
-    ``#`` names a resource *inside* the packet, not the enclosing
-    photo), treat that as the photo's, so a sidecar written by a tool
-    that pins its Descriptions is still handled coherently. When
-    the sidecar carries several distinct non-empty subjects, refuse to
-    guess from document order: fall back to the empty subject, which
-    leaves reads returning nothing rather than an auxiliary resource's
-    rating or GPS, and lets writes land on a fresh Description that is
-    unambiguously the photo's. A lone ``rdf:nodeID`` or ``rdf:ID`` is
-    always an auxiliary side-resource -- neither identifies the
-    enclosing photo -- so fall back to the empty subject there too, no
-    matter how many share the same identifier.
+    carries the empty subject but exactly one non-fragment, non-blank-node,
+    non-``rdf:ID`` ``rdf:about`` remains after filtering out clearly
+    auxiliary side-resources (a ``#thumbnail`` fragment, a blank-node
+    ``rdf:nodeID``, a locally-scoped ``rdf:ID``), treat that
+    ``rdf:about`` as the photo's. So a sidecar that pins its Description
+    to ``uuid:photo`` alongside an auxiliary ``#thumbnail`` Description
+    is still handled coherently. When more than one photo-candidate
+    subject remains, refuse to guess from document order and fall back
+    to the empty subject: reads then return nothing rather than an
+    auxiliary resource's rating or GPS, and writes land on a fresh
+    Description that is unambiguously the photo's.
     """
     empty = ("", "", "")
     descriptions = _all_top_descriptions(root)
     if not descriptions:
         return empty
     subjects = {_description_subject(d) for d in descriptions}
-    if empty in subjects or len(subjects) > 1:
+    if empty in subjects:
         return empty
-    about, node, rid = next(iter(subjects))
-    if not about or node or rid or about.startswith("#"):
+    photo_candidates = {
+        (about, node, rid)
+        for (about, node, rid) in subjects
+        if about
+        and not about.startswith("#")
+        and not node
+        and not rid
+    }
+    if len(photo_candidates) != 1:
         return empty
-    return (about, node, rid)
+    return next(iter(photo_candidates))
 
 
 def _top_descriptions(root):
@@ -2131,9 +2136,13 @@ class SidecarEditor:
                 and not _simple_prop_carries_qualifier(li)
             ]
             if plain_exact_targets:
-                for bag, li in plain_exact_targets:
-                    removed.append(_li_value(li))
-                    bag.remove(li)
+                # Vireo authored one entry, not many. Remove a single
+                # plain occurrence -- if another tool added exact
+                # duplicates later, they're user- or tool-owned data
+                # we shouldn't sweep away.
+                bag, li = plain_exact_targets[0]
+                removed.append(_li_value(li))
+                bag.remove(li)
             else:
                 any_exact = any(
                     _li_value(li) == leaf
@@ -2171,9 +2180,11 @@ class SidecarEditor:
                 and not _simple_prop_carries_qualifier(li)
             ]
             if plain_exact_targets:
-                for bag, li in plain_exact_targets:
-                    removed.append(_li_value(li))
-                    bag.remove(li)
+                # See the flat branch above: only remove one plain
+                # occurrence.
+                bag, li = plain_exact_targets[0]
+                removed.append(_li_value(li))
+                bag.remove(li)
             else:
                 any_exact = any(
                     _li_value(li) == path

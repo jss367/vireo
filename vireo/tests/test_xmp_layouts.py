@@ -338,14 +338,16 @@ def test_new_description_matches_existing_photo_subject(tmp_path):
     assert read_sync_preview_metadata(path)["rating"] == "5"
 
 
-def test_ambiguous_non_empty_subjects_do_not_designate_a_photo(tmp_path):
-    """Distinct non-empty rdf:about values never elect a photo by document order.
+def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
+    """A ``#thumbnail`` fragment Description doesn't count as photo-ambiguous.
 
     A sidecar carrying an auxiliary ``#thumbnail`` Description before a
-    ``uuid:photo`` Description must not silently treat the first one as
-    the photo. Reads return nothing, and a write that creates its own
-    Description scopes it to the empty (enclosing-resource) subject so
-    the auxiliary and photo Descriptions are left alone.
+    ``uuid:photo`` Description names its enclosing photo unambiguously: the
+    fragment identifies a resource *inside* the packet, not the enclosing
+    photo, so ``uuid:photo`` is the sole photo candidate. Reads must return
+    that Description's rating and GPS, and writes must land on it rather
+    than creating a fresh empty-subject copy that the auxiliary would then
+    shadow on the next read.
     """
     path = tmp_path / "photo.xmp"
     path.write_text(
@@ -355,15 +357,17 @@ def test_ambiguous_non_empty_subjects_do_not_designate_a_photo(tmp_path):
         f" xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}'"
         f" xmp:Rating='1' exif:GPSLatitude='40,0.0N' exif:GPSLongitude='40,0.0E'/>"
         f"<rdf:Description rdf:about='uuid:photo'"
-        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f" xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}'"
+        f" xmp:Rating='4'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
         f"</rdf:RDF></x:xmpmeta>"
     )
     path = str(path)
 
     metadata = read_sync_preview_metadata(path)
-    assert metadata["rating"] is None
-    assert metadata["location"] is None
-    assert read_keywords(path) == set()
+    assert metadata["rating"] == "4"
+    assert metadata["location"]["latitude"] == pytest.approx(10.0)
+    assert metadata["location"]["longitude"] == pytest.approx(20.0)
 
     write_gps_location(path, -33.5, -70.25)
 
@@ -376,9 +380,60 @@ def test_ambiguous_non_empty_subjects_do_not_designate_a_photo(tmp_path):
         d for d in root.iter(f"{{{NS_RDF}}}Description")
         if d.get(f"{{{NS_RDF}}}about") == "uuid:photo"
     ]
+    # The auxiliary thumbnail Description must remain untouched.
     assert thumb[0].get(RATING) == "1"
     assert thumb[0].get(GPS_LATITUDE) == "40,0.0N"
-    assert photo_uuid[0].get(RATING) == "4"
+    # The photo's GPS write lands on the ``uuid:photo`` Description, not on
+    # a freshly-minted empty-subject copy that reads would then ignore.
+    fresh = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if (d.get(f"{{{NS_RDF}}}about") or "") == ""
+        and d.get(f"{{{NS_VIREO}}}gpsSource") == "assigned"
+    ]
+    assert fresh == []
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["location"]["latitude"] == pytest.approx(-33.5)
+    assert metadata["location"]["longitude"] == pytest.approx(-70.25)
+    assert metadata["rating"] == "4"
+
+
+def test_multiple_non_fragment_subjects_stay_ambiguous(tmp_path):
+    """Two non-fragment ``rdf:about`` values still refuse to guess a photo.
+
+    Only fragments/blank-nodes/``rdf:ID`` are auxiliary side-resources; two
+    distinct URI subjects that could equally well be the photo remain
+    ambiguous. Reads fall back to the empty subject (nothing to report) and
+    a write creates a fresh empty-subject Description rather than mutating
+    either candidate.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='urn:a'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='1'/>"
+        f"<rdf:Description rdf:about='urn:b'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path = str(path)
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["rating"] is None
+
+    write_gps_location(path, -33.5, -70.25)
+
+    root = ET.parse(path).getroot()
+    a = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "urn:a"
+    ]
+    b = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "urn:b"
+    ]
+    assert a[0].get(RATING) == "1"
+    assert b[0].get(RATING) == "4"
 
     fresh = [
         d for d in root.iter(f"{{{NS_RDF}}}Description")
@@ -386,9 +441,6 @@ def test_ambiguous_non_empty_subjects_do_not_designate_a_photo(tmp_path):
         and d.get(f"{{{NS_VIREO}}}gpsSource") == "assigned"
     ]
     assert len(fresh) == 1
-    metadata = read_sync_preview_metadata(path)
-    assert metadata["location"]["latitude"] == pytest.approx(-33.5)
-    assert metadata["location"]["longitude"] == pytest.approx(-70.25)
 
 
 def test_lone_blank_node_subject_is_not_treated_as_the_photo(tmp_path):
@@ -587,15 +639,15 @@ def test_merging_duplicate_bags_keeps_mixed_content_tails(tmp_path):
     assert tails == ["C", "D"]
 
 
-def test_rating_survives_ambiguous_non_empty_subjects(tmp_path):
-    """A rating-only write on a sidecar with ambiguous subjects still lands.
+def test_rating_write_updates_photo_subject_alongside_fragment(tmp_path):
+    """A rating write updates the photo Description when a fragment shares the packet.
 
-    When every top-level Description carries a distinct non-empty ``rdf:about``
-    (an auxiliary ``#thumbnail`` before a ``uuid:photo`` Description, say),
-    no existing Description belongs to the photo. A rating-only write must
-    still land -- on a fresh empty-subject Description -- instead of silently
-    reporting success while dropping the value; a NAS sync would otherwise
-    clear the queued rating with nothing written.
+    When the sidecar pins its photo Description to ``uuid:photo`` and also
+    carries an auxiliary ``#thumbnail`` Description, the fragment is a side
+    resource inside the packet -- not the enclosing photo. A rating write
+    must update ``uuid:photo`` in place rather than creating a fresh
+    empty-subject Description that a subsequent read would ignore (leaving
+    the queued rating silently dropped from the sidecar's perspective).
     """
     path = tmp_path / "photo.xmp"
     path.write_text(
@@ -621,15 +673,16 @@ def test_rating_survives_ambiguous_non_empty_subjects(tmp_path):
         if d.get(f"{{{NS_RDF}}}about") == "uuid:photo"
     ]
     assert thumb[0].get(RATING) == "1"
-    assert photo_uuid[0].get(RATING) == "4"
+    stored = photo_uuid[0].get(RATING) or photo_uuid[0].findtext(RATING)
+    assert stored == "5"
 
+    # No fresh empty-subject Description is added -- the write landed on the
+    # existing photo Description.
     fresh = [
         d for d in root.iter(f"{{{NS_RDF}}}Description")
         if (d.get(f"{{{NS_RDF}}}about") or "") == ""
     ]
-    assert len(fresh) == 1
-    stored = fresh[0].get(RATING) or fresh[0].findtext(RATING)
-    assert stored == "5"
+    assert fresh == []
     assert read_sync_preview_metadata(path)["rating"] == "5"
 
 
@@ -642,14 +695,15 @@ def test_rating_only_write_does_not_create_missing_sidecar(tmp_path):
     assert not os.path.exists(path)
 
 
-def test_sync_preview_marks_rating_writable_on_ambiguous_subjects(tmp_path):
-    """A readable sidecar with ambiguous subjects reports rating_writable=True.
+def test_sync_preview_reads_photo_subject_alongside_fragment(tmp_path):
+    """A ``#thumbnail`` beside a URI photo Description doesn't hide its rating.
 
-    ``set_rating`` creates a fresh empty-subject Description in that case,
-    so the sync preview must report the rating as a real write rather than
-    "unchanged". Otherwise the pending-changes review shows the rating as
-    staying only in Vireo while the sync would actually write it, and the
-    queued change is cleared with nothing user-visible in the sidecar.
+    The auxiliary fragment identifies a resource inside the packet, so the
+    URI Description is unambiguously the photo. The sync preview must
+    report that Description's rating rather than blanking it as if the
+    subjects were ambiguous -- otherwise the pending-changes review would
+    treat every re-read of an unchanged sidecar as a rating "loss" and
+    keep re-writing it.
     """
     path = tmp_path / "photo.xmp"
     path.write_text(
@@ -665,7 +719,7 @@ def test_sync_preview_marks_rating_writable_on_ambiguous_subjects(tmp_path):
 
     metadata = read_sync_preview_metadata(path)
     assert metadata["status"] == "ok"
-    assert metadata["rating"] is None
+    assert metadata["rating"] == "4"
     assert metadata["rating_writable"] is True
 
     write_rating(path, 5)
@@ -2801,6 +2855,57 @@ def test_remove_location_preserves_qualified_exact_duplicate(tmp_path):
     assert len(remaining) == 1
     assert (remaining[0].find(f"{{{NS_RDF}}}value").text or "") == "Paris"
     assert remaining[0].findtext(f"{{{foo_ns}}}source") == "user"
+
+
+def test_remove_location_removes_only_one_plain_owned_duplicate(tmp_path):
+    """Vireo owns one plain entry, not every plain occurrence.
+
+    When a user (or another tool) adds a second plain ``<rdf:li>Paris
+    </rdf:li>`` alongside Vireo's own plain copy, Vireo removed both
+    entries on location removal -- silently deleting the user's data.
+    Vireo authored exactly one entry, so only one plain occurrence
+    should be removed on removal; the sibling plain entry survives.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}' xmlns:vireo='{NS_VIREO}'"
+        f" vireo:locationKeywords='Places|Paris'"
+        f" vireo:locationKeywordsOwned='flat,hier'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Paris</rdf:li>"
+        f"<rdf:li>Paris</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject><rdf:Bag>"
+        f"<rdf:li>Places|Paris</rdf:li>"
+        f"<rdf:li>Places|Paris</rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.remove_vireo_location_keywords()
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    flat = sorted(
+        li.text
+        for subj in root.iter(SUBJECT)
+        for li in subj.iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert flat == ["Paris"]
+    hier = sorted(
+        li.text
+        for subj in root.iter(HIERARCHICAL_SUBJECT)
+        for li in subj.iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert hier == ["Places|Paris"]
 
 
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
