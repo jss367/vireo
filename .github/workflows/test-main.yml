@@ -22,9 +22,14 @@ on:
 permissions:
   contents: read
 
+# Runs on main are never cancelled. With cancellation, back-to-back merges
+# killed most runs before the ~45-minute Windows leg finished, so main went
+# unverified for hours. GitHub keeps only the newest pending run in a group,
+# so a burst of merges still collapses to one queued run behind the active
+# one, and every completed run is reported by main-health.yml.
 concurrency:
   group: full-tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   full-suite:

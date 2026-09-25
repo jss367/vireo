@@ -8,6 +8,8 @@ merges with unresolved current review threads.
 
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/pr-agent.yml"
 TEST_WORKFLOW = ROOT / ".github/workflows/test.yml"
@@ -445,3 +447,38 @@ def test_conflicted_unlabelled_prs_are_bootstrapped_safely():
     assert conflict_block.index("uses: ./.github/actions/fire-routine") < conflict_block.index(
         '--add-label "$AGENT_LABEL"'
     )
+
+
+MAIN_HEALTH_WORKFLOW = ROOT / ".github/workflows/main-health.yml"
+
+
+def test_full_suite_runs_on_main_are_never_cancelled():
+    workflow = _read(FULL_TEST_WORKFLOW)
+
+    assert "cancel-in-progress: false" in workflow
+    assert "cancel-in-progress: true" not in workflow
+
+
+def test_red_main_is_tracked_and_routed_to_a_bounded_fix():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+    prompt = _read(ROOT / "docs/pr-agent-routine-prompt.md")
+
+    assert 'workflows: ["Full tests"]' in workflow
+    # Only runs of main in this repository, never a PR's run.
+    assert "github.event.workflow_run.head_branch == 'main'" in workflow
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in workflow
+    assert "github.event.workflow_run.event != 'pull_request'" in workflow
+    # A green run closes the tracking issue; a red one opens or updates it.
+    assert "gh issue close" in workflow
+    assert "gh issue create" in workflow
+    # No second fix while one is open, and a hard cap per issue.
+    assert '--label "$FIX_LABEL" --state open' in workflow
+    assert "attempts >= MAX_FIX_ATTEMPTS" in workflow
+    # The attempt is counted only once the routine accepted it.
+    assert "if: steps.fire.outputs.fired == 'true'" in workflow
+    assert "Task: fix-main" in workflow
+    # Event data reaches the shell only through env vars, never interpolated.
+    steps = yaml.safe_load(workflow)["jobs"]["report"]["steps"]
+    assert all("${{" not in step.get("run", "") for step in steps)
+    assert "## Task: `fix-main`" in prompt
+    assert "| `fix-main`" in prompt

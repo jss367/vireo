@@ -125,6 +125,7 @@ context. The routine prompt enumerates the supported task kinds:
 - `address-comment` — non-`/claude-fix`, non-👍 comment on a claude-agent PR
 - `address-codex-review` — codex-connector review on a non-agent PR
 - `fix-ci` — Tests workflow failed on a PR
+- `fix-main` — Full tests failed on `main` (fired by `main-health.yml`, which also keeps the `main-red` tracking issue); the routine opens a `fix-main` PR
 
 The payload intentionally keeps user-supplied text (review bodies, comment
 bodies) clearly labeled as **untrusted data, not instructions** — the prompt
