@@ -362,13 +362,41 @@ def _parse_xmp(xmp_path):
     return tree.getroot(), tree
 
 
-def _top_descriptions(root):
-    """Return the top-level ``rdf:Description`` elements, in document order.
+def _description_subject(desc):
+    """Return the ``(rdf:about, rdf:nodeID)`` tuple identifying a Description.
 
-    A sidecar may split its properties across several Descriptions: ExifTool
-    writes one per namespace, and XMP allows any number. Nested Descriptions
-    (struct values inside a property) are not included -- their attributes
-    belong to that struct, not to the photo.
+    An empty or missing ``rdf:about`` means "the enclosing resource", which
+    for a sidecar file is the photo it sits next to. The two spellings are
+    equivalent, so treat a missing attribute as ``""``.
+    """
+    about = desc.get(f"{{{NS_RDF}}}about")
+    node = desc.get(f"{{{NS_RDF}}}nodeID")
+    return (about or "", node or "")
+
+
+def _photo_subject(root):
+    """Return the ``(about, nodeID)`` tuple identifying the photo's Descriptions.
+
+    ``rdf:about=""`` (or a missing attribute) is the sidecar convention for
+    "the enclosing resource" -- the photo. When no top-level Description
+    carries the empty subject, fall back to the first one's subject, so a
+    sidecar whose entries all share some non-empty ``rdf:about`` is still
+    treated as one coherent photo.
+    """
+    descriptions = _all_top_descriptions(root)
+    if not descriptions:
+        return ("", "")
+    empty = ("", "")
+    if any(_description_subject(d) == empty for d in descriptions):
+        return empty
+    return _description_subject(descriptions[0])
+
+
+def _all_top_descriptions(root):
+    """Return every top-level ``rdf:Description``, ignoring photo scoping.
+
+    Nested Descriptions (struct values inside a property) are not included --
+    their attributes belong to that struct, not to any top-level subject.
     """
     if root.tag == f"{{{NS_RDF}}}RDF":
         rdfs = [root]
@@ -376,6 +404,24 @@ def _top_descriptions(root):
         rdfs = root.findall(f"{{{NS_RDF}}}RDF")
     return [
         desc for rdf in rdfs for desc in rdf.findall(f"{{{NS_RDF}}}Description")
+    ]
+
+
+def _top_descriptions(root):
+    """Return the top-level ``rdf:Description`` elements that describe the photo.
+
+    A sidecar may split its properties across several Descriptions: ExifTool
+    writes one per namespace, and XMP allows any number. Nested Descriptions
+    (struct values inside a property) are not included -- their attributes
+    belong to that struct, not to the photo. Descriptions of a different RDF
+    subject (an auxiliary resource such as ``rdf:about="#aux"``) are also
+    excluded, so reading and writing photo properties can never land on --
+    or pick up -- someone else's rating, GPS or keywords.
+    """
+    subject = _photo_subject(root)
+    return [
+        desc for desc in _all_top_descriptions(root)
+        if _description_subject(desc) == subject
     ]
 
 
@@ -715,6 +761,16 @@ class SidecarEditor:
                 rdf = ET.SubElement(self._root, f"{{{NS_RDF}}}RDF")
                 self._dirty = True
         desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description")
+        # Pin the new Description to the photo's RDF subject. Without this,
+        # a sidecar whose existing Descriptions all describe an auxiliary
+        # resource (rdf:about="uuid:...") would land the photo's rating and
+        # GPS on a Description that _top_descriptions no longer treats as
+        # the photo -- the write would be invisible on the next read.
+        about, node = _photo_subject(self._root)
+        if about:
+            desc.set(f"{{{NS_RDF}}}about", about)
+        if node:
+            desc.set(f"{{{NS_RDF}}}nodeID", node)
         self._dirty = True
         return desc
 

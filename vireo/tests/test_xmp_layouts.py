@@ -221,6 +221,67 @@ def test_nested_struct_descriptions_are_not_treated_as_the_photo(tmp_path):
     assert read_sync_preview_metadata(path)["rating"] == "5"
 
 
+def test_auxiliary_rdf_subject_is_ignored(tmp_path):
+    """A Description of a different rdf:about is not the photo's."""
+    path = tmp_path / "photo.xmp"
+    path.write_text(EXIFTOOL_XMP.replace(
+        "</rdf:RDF>",
+        f" <rdf:Description rdf:about='#aux' xmlns:xmp='{NS_XMP}'"
+        f" xmlns:exif='{NS_EXIF}'"
+        " xmp:Rating='1' exif:GPSLatitude='40,0.0N' exif:GPSLongitude='40,0.0E'/>"
+        "\n</rdf:RDF>",
+    ))
+    path = str(path)
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["rating"] == "3"
+    assert metadata["location"]["latitude"] == pytest.approx(10.5)
+    assert metadata["location"]["longitude"] == pytest.approx(20.25)
+
+    editor = SidecarEditor(path)
+    editor.set_rating(5)
+    editor.set_gps_location(-33.5, -70.25)
+    editor.commit()
+
+    root = ET.parse(path).getroot()
+    aux = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}about") == "#aux"
+    ]
+    assert len(aux) == 1
+    assert aux[0].get(RATING) == "1"
+    assert aux[0].get(GPS_LATITUDE) == "40,0.0N"
+    assert aux[0].get(GPS_LONGITUDE) == "40,0.0E"
+
+    metadata = read_sync_preview_metadata(path)
+    assert metadata["rating"] == "5"
+    assert metadata["location"]["latitude"] == pytest.approx(-33.5)
+    assert metadata["location"]["longitude"] == pytest.approx(-70.25)
+
+
+def test_new_description_matches_existing_photo_subject(tmp_path):
+    """A sidecar with only non-empty rdf:about keeps its subject on new writes."""
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='uuid:photo'"
+        f" xmlns:dc='{NS_DC}'><dc:subject><rdf:Bag>"
+        f"<rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description></rdf:RDF></x:xmpmeta>"
+    )
+    path = str(path)
+
+    write_rating(path, 5)
+
+    root = ET.parse(path).getroot()
+    descriptions = list(root.iter(f"{{{NS_RDF}}}Description"))
+    assert all(
+        d.get(f"{{{NS_RDF}}}about") == "uuid:photo" for d in descriptions
+    ), [d.attrib for d in descriptions]
+    assert read_sync_preview_metadata(path)["rating"] == "5"
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
