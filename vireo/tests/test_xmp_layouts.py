@@ -1161,6 +1161,53 @@ def test_add_keywords_when_only_owner_is_qualified_creates_fresh_description(tmp
     assert u_items == ["Birds|Kiwi", "Kiwi"]
 
 
+def test_fallback_description_inherits_photo_subject_when_all_qualified(tmp_path):
+    """A fallback bag on a subject-pinned, all-qualified sidecar keeps the subject.
+
+    When every existing photo Description is XML-qualified and the
+    photo is pinned to a unique non-empty subject
+    (``rdf:about='uuid:photo'``), the fallback Description created for
+    a new keyword bag must inherit that same subject. If it were
+    inserted subjectless, ``_photo_subject`` would then see two
+    distinct subjects (``uuid:photo`` and empty) on the next call and
+    fall back to the empty subject -- unscoping every original photo
+    Description, so a follow-up read would see only the fresh bag and
+    hide the original rating, GPS and keywords.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='uuid:photo'"
+        f" xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}' xmlns:dc='{NS_DC}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'"
+        f" xmp:Rating='3' exif:GPSLatitude='10,30.0N' exif:GPSLongitude='20,15.0E'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    descriptions = list(root.iter(f"{{{NS_RDF}}}Description"))
+    subjects = {d.get(f"{{{NS_RDF}}}about") for d in descriptions}
+    # Every top-level Description still belongs to the photo -- no
+    # empty-subject sibling has been created that would unscope the
+    # original.
+    assert subjects == {"uuid:photo"}
+
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["rating"] == "3"
+    assert metadata["location"]["latitude"] == pytest.approx(10.5)
+    assert metadata["location"]["longitude"] == pytest.approx(20.25)
+    assert read_keywords(path_str) == {"Sparrow", "Kiwi"}
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

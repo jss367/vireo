@@ -892,13 +892,22 @@ class SidecarEditor:
         new property added under such a Description would silently
         carry that qualifier. Return the first photo-scoped Description
         that has no ``xml:*`` attribute of its own; create a fresh
-        empty-subject Description when none exists.
+        Description scoped to the photo when none exists.
         """
         for desc in _top_descriptions(self._root):
             if not any(
                 name.startswith(f"{{{NS_XML}}}") for name in desc.attrib
             ):
                 return desc
+        # Capture the photo's subject BEFORE inserting the new
+        # Description. If every existing photo Description is qualified
+        # and pinned to a unique non-empty subject like
+        # ``rdf:about='uuid:photo'``, appending a subjectless
+        # Description first would make ``_photo_subject`` see two
+        # distinct subjects (``uuid:photo`` and empty) on its next call
+        # and fall back to the empty subject -- unscoping every
+        # original photo Description.
+        about, node = _photo_subject(self._root)
         if self._root.tag == f"{{{NS_RDF}}}RDF":
             rdf = self._root
         else:
@@ -907,7 +916,6 @@ class SidecarEditor:
                 rdf = ET.SubElement(self._root, f"{{{NS_RDF}}}RDF")
                 self._dirty = True
         desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description")
-        about, node = _photo_subject(self._root)
         if about:
             desc.set(f"{{{NS_RDF}}}about", about)
         if node:
