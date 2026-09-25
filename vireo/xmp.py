@@ -1867,11 +1867,36 @@ class SidecarEditor:
         self._bag(desc, NS_DC, "subject")
         self._bag(desc, NS_LR, "hierarchicalSubject")
 
+        # Canonicalize any *qualified* variant of the leaf in place so
+        # its user-authored qualifier metadata survives. Removing a
+        # qualified ``<rdf:li rdf:parseType='Resource'><rdf:value>paris
+        # </rdf:value><foo:source>user</foo:source></rdf:li>`` wholesale
+        # (as ``remove_keywords`` does below) would silently drop
+        # ``foo:source``. Update its nested value to the canonical
+        # spelling instead; the subsequent ``add_keywords`` will see
+        # it as already present and skip inserting a plain duplicate.
+        if leaf_key:
+            for bag in _photo_scoped_bags(
+                self._root, f"{{{NS_DC}}}subject",
+            ):
+                for li in bag.findall(f"{{{NS_RDF}}}li"):
+                    li_value = _li_value(li)
+                    if (
+                        li_value
+                        and li_value != parts[-1]
+                        and keyword_match_key(li_value) == leaf_key
+                        and _simple_prop_carries_qualifier(li)
+                        and _update_simple_property_value(li, parts[-1])
+                    ):
+                        self._dirty = True
+
         # Canonicalize a flat variant of the leaf the way the species-keyword
         # path does: add_keywords() dedupes on exact text, so a sidecar
         # spelling like `kumeyaay lake` would otherwise sit beside the clean
         # one as a second <rdf:li>. ``keep_exact`` keeps a re-sync of an
-        # already-correct sidecar a no-op.
+        # already-correct sidecar a no-op. Qualified variants were
+        # canonicalized in place above, so ``remove_keywords`` here only
+        # sees plain-text variants that are safe to drop.
         self.remove_keywords({parts[-1]}, hierarchical=False, keep_exact=True)
 
         # An entry the sidecar already carries -- because the user typed it

@@ -2489,6 +2489,64 @@ def test_ancestor_xml_base_does_not_block_bag_reuse(tmp_path):
         assert xml_base not in d.attrib
 
 
+def test_qualified_variant_is_canonicalized_in_place_preserving_qualifiers(tmp_path):
+    """A qualified variant of the leaf keeps its qualifiers on canonicalization.
+
+    Before: ``set_location_keywords``'s canonicalization step called
+    ``remove_keywords`` on a case variant like ``paris``. After the
+    ``_li_value`` fix, a qualified ``<rdf:li rdf:parseType='Resource'>
+    <rdf:value>paris</rdf:value><foo:source>user</foo:source></rdf:li>``
+    matched — and the wholesale removal silently dropped
+    ``foo:source``. The fix now updates such a qualified variant's
+    nested value to the canonical spelling in place, so the
+    qualifier survives and the follow-up add sees the leaf as
+    already present.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}' xmlns:foo='{foo_ns}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>paris</rdf:value>"
+        f"<foo:source>user</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject><rdf:Bag>"
+        f"<rdf:li>Places|Paris</rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.set_location_keywords(["Places", "Paris"])
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # Exactly one flat entry across every ``dc:subject`` bag: the
+    # canonicalized qualified item, with its ``foo:source`` intact.
+    lis = []
+    for subj in root.iter(SUBJECT):
+        for li in subj.iter(f"{{{NS_RDF}}}li"):
+            lis.append(li)
+    assert len(lis) == 1
+    assert _li_value_local(lis[0]) == "Paris"
+    assert lis[0].findtext(f"{{{foo_ns}}}source") == "user"
+
+
+def _li_value_local(li):
+    """Local helper mirroring ``xmp._li_value`` for test assertions."""
+    rdf_value = li.find(f"{{{NS_RDF}}}value")
+    if rdf_value is not None:
+        return (rdf_value.text or "").strip()
+    return li.text
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
