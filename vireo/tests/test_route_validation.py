@@ -62,6 +62,20 @@ def test_stored_bad_numbers_fall_back_to_defaults(app_and_db):
     assert app.test_client().get("/api/browse/init").status_code == 200
 
 
+def test_stored_huge_int_does_not_break_config_load(app_and_db):
+    """math.isfinite raises OverflowError on an int past the float range.
+
+    A legacy unvalidated `photos_per_page` (or any int field) can hold such
+    a value, and `config.load()` must not crash when repairing types on it.
+    """
+    import config as cfg
+
+    huge = 10 ** 400
+    _write_raw_config({"photos_per_page": huge})
+    loaded = cfg.load()
+    assert loaded["photos_per_page"] == huge
+
+
 def test_stored_bad_workspace_override_inherits_global(app_and_db):
     import config as cfg
 

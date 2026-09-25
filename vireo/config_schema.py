@@ -963,11 +963,17 @@ _MISSING = object()
 
 
 def _usable_number(value):
-    return (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        # Python ints are arbitrary precision, so they cannot be NaN or
+        # infinity. Calling ``math.isfinite`` on one raises OverflowError
+        # once its magnitude exceeds the float range, which would break
+        # every reader of a legacy config that stored such a value.
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return False
 
 
 def repair_types(config, defaults):
