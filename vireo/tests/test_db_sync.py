@@ -386,8 +386,11 @@ def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     _insert(db, pl, "keyword_add", "Robin", ws)
     # Raw DB paths differ ("Dir" vs "dir"): production must confirm with
     # samefile before treating them as aliases. Neither sidecar exists yet,
-    # so samefile raises OSError and the answer is False on every platform.
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
+    # so the parent folders decide: one case-insensitive directory (macOS,
+    # Windows) means the same future sidecar, two case-sensitive
+    # directories (Linux) mean distinct ones.
+    same_dir = os.path.samefile(upper, lower)
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is same_dir
     (upper / "a.xmp").write_text("x")
     if not (lower / "a.xmp").exists():
         os.link(upper / "a.xmp", lower / "a.xmp")
