@@ -915,14 +915,27 @@ class KeywordRepository:
         # The lookup above ran without a write lock, so a second connection
         # can pass the same check before either inserts. UNIQUE(name,
         # parent_id) cannot catch that for a top-level keyword (SQLite treats
-        # NULL parents as distinct) and is case-sensitive besides. When this
-        # call owns its transaction, take the write lock and look again, so
-        # the loser of the race reuses the winner's row.
-        owns_transaction = _commit and not self.conn.in_transaction
-        if owns_transaction:
+        # NULL parents as distinct) and is case-sensitive besides. Whenever
+        # the connection is not already in a transaction, take the write
+        # lock and look again, so the loser of the race reuses the winner's
+        # row. This must include ``_commit=False`` callers (``sync.py``,
+        # ``web/encounters.py``, ``web/highlights.py``, the import job at
+        # ``web/imports.py``): each passes ``_commit=False`` as the first
+        # mutation on a fresh worker connection, so without the write lock
+        # the same race lets both sides insert a duplicate root keyword.
+        # When we start the transaction under ``_commit=False``, the caller
+        # inherits our open ``BEGIN IMMEDIATE`` and finalises it with the
+        # rest of their work.
+        started_transaction = not self.conn.in_transaction
+        if started_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
             if self._find_add_candidate(lookup_name, parent_id, lookup_kw_type) is not None:
-                self.conn.commit()
+                # No writes happened under our new transaction. When we own
+                # the commit, finalise it before recursing so the reused row
+                # is visible; when the caller owns it, leave the transaction
+                # open so the recursion runs under it and the caller commits.
+                if _commit:
+                    self.conn.commit()
                 # Rerun so the reused row gets the same promotions as any
                 # other hit on the lookup.
                 return self.add(
@@ -936,9 +949,8 @@ class KeywordRepository:
             )
         except sqlite3.IntegrityError:
             # A same-spelling row under this parent committed after the
-            # lookup (possible while the caller owns the transaction).
-            # Reuse it when it is one ``add`` would have returned.
-            if owns_transaction:
+            # lookup. Reuse it when it is one ``add`` would have returned.
+            if started_transaction:
                 self.conn.rollback()
             if self._find_add_candidate(lookup_name, parent_id, lookup_kw_type) is None:
                 raise
@@ -947,7 +959,7 @@ class KeywordRepository:
                 kw_type=lookup_kw_type, _commit=_commit,
             )
         except BaseException:
-            if owns_transaction:
+            if started_transaction:
                 self.conn.rollback()
             raise
         if _commit:

@@ -163,6 +163,28 @@ def test_add_keyword_race_reuses_concurrent_child_row(db, lib, monkeypatch):
     ) == [(1,)]
 
 
+def test_add_keyword_race_reuses_concurrent_top_level_row_commit_false(db, lib, monkeypatch):
+    # ``_commit=False`` is the first mutation on caller-managed connections
+    # (sync.py, web/encounters.py, web/highlights.py, the import job at
+    # web/imports.py). Without the write-locked re-check both callers would
+    # commit a root "Sunrise" — SQLite treats NULL parents as distinct in
+    # UNIQUE(name, parent_id), so IntegrityError never fires.
+    other, state = _race_add(db, monkeypatch, lambda o: o.add_keyword("Sunrise"))
+    try:
+        kid = db.add_keyword("sunrise", _commit=False)
+        # The recursion at the ``existing`` fast path must leave the caller's
+        # transaction open — the caller (encounters, highlights, import, sync)
+        # commits later with its own follow-up writes.
+        assert db.conn.in_transaction
+        db.conn.commit()
+    finally:
+        other.close()
+    assert kid == state["winner"]
+    assert _visible(
+        db, "SELECT COUNT(*) FROM keywords WHERE name = 'sunrise' COLLATE NOCASE",
+    ) == [(1,)]
+
+
 @pytest.mark.parametrize("kwargs", [
     {"is_species": True},
     {"kw_type": "genre"},
