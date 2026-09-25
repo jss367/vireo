@@ -784,7 +784,8 @@ def _has_own_value_qualifier(elem):
     """True if ``elem`` carries a non-structural attribute that changes value semantics.
 
     Same as :func:`_has_non_structural_attribute`, except three XML
-    directives are treated as not qualifying a literal value:
+    directives and the ``rdf:value`` attribute are treated as not
+    qualifying a literal value:
 
     * ``xml:lang=""`` is XML's cancel-inheritance form. It doesn't
       itself attach a language to the element's descendants, it just
@@ -800,6 +801,14 @@ def _has_own_value_qualifier(elem):
       carrying only ``xml:space="preserve"`` is a valid reuse target.
     * ``xml:base`` affects URI resolution but never changes a literal
       keyword or numeric value the way ``xml:lang`` does.
+    * ``rdf:value`` is the RDF/XML attribute abbreviation for the
+      value itself -- ``<rdf:Description rdf:value="Paris"/>`` is a
+      spelling of ``<rdf:Description><rdf:value>Paris</rdf:value>
+      </rdf:Description>``, not a qualifier that decorates the
+      value. Skip it here so a serializer's rewrite of a plain leaf
+      into that attribute-form Description isn't misread as
+      qualifier metadata and locked out of Vireo's own-keyword
+      removal.
 
     Non-empty ``xml:lang`` and ``xml:id`` (an XML identifier the
     element defines in its own right) still count as own qualifiers.
@@ -810,12 +819,13 @@ def _has_own_value_qualifier(elem):
     xml_lang = f"{{{NS_XML}}}lang"
     xml_space = f"{{{NS_XML}}}space"
     xml_base = f"{{{NS_XML}}}base"
+    rdf_value = f"{{{NS_RDF}}}value"
     for name, value in elem.attrib.items():
         if name in _STRUCTURAL_RDF_ATTRIBUTES:
             continue
         if name == xml_lang and value == "":
             continue
-        if name in (xml_space, xml_base):
+        if name in (xml_space, xml_base, rdf_value):
             continue
         return True
     return False

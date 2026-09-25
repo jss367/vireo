@@ -3561,6 +3561,62 @@ def test_remove_location_falls_back_past_qualified_exact_duplicate(tmp_path):
     assert hier_items[0].findtext(f"{{{foo_ns}}}source") == "user"
 
 
+def test_remove_location_removes_bare_rdf_value_attribute_form(tmp_path):
+    """The bare ``rdf:value'' attribute form counts as plain for owned removal.
+
+    A serializer can rewrite a bare-text ``<rdf:li>Paris</rdf:li>'' as
+    the equivalent attribute-abbreviated form
+    ``<rdf:li><rdf:Description rdf:value="Paris"/></rdf:li>''. Both
+    spellings describe the same statement with no qualifier data.
+    Before this fix the ``rdf:value'' attribute made the nested
+    Description look qualified, so ``_li_carries_qualifier'' excluded
+    Vireo's owned item from removal while
+    ``remove_vireo_location_keywords'' still cleared the ownership
+    marker -- the stale keyword stayed on the sidecar forever. The
+    value carrier is now skipped when counting own qualifiers, so
+    Vireo's owned entry is removed and the marker cleared together.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}' xmlns:vireo='{NS_VIREO}'"
+        f" vireo:locationKeywords='Places|Paris'"
+        f" vireo:locationKeywordsOwned='flat,hier'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li><rdf:Description rdf:value='Paris'/></rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject><rdf:Bag>"
+        f"<rdf:li><rdf:Description rdf:value='Places|Paris'/></rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.remove_vireo_location_keywords()
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    flat_items = [
+        li
+        for subj in root.iter(SUBJECT)
+        for li in subj.iter(f"{{{NS_RDF}}}li")
+    ]
+    hier_items = [
+        li
+        for subj in root.iter(HIERARCHICAL_SUBJECT)
+        for li in subj.iter(f"{{{NS_RDF}}}li")
+    ]
+    # Both attribute-abbreviated entries are removed alongside the
+    # ownership marker (rather than left behind because the ``rdf:value``
+    # attribute made them look qualified).
+    assert flat_items == []
+    assert hier_items == []
+
+
 def test_remove_location_removes_only_one_plain_owned_duplicate(tmp_path):
     """Vireo owns one plain entry, not every plain occurrence.
 
