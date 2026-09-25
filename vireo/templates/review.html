@@ -1389,7 +1389,7 @@ function renderButtons() {
     return;
   }
   acceptAllBtn.disabled = false;
-  var pending = predictions.filter(function(p) { return p.status === 'pending'; }).length;
+  var pending = visiblePendingCards().length;
   if (pending > 0) {
     acceptAllBtn.style.display = '';
     acceptAllBtn.textContent = 'Accept All (' + pending + ')';
@@ -1699,6 +1699,14 @@ function groupMembersHtml(pred) {
 
 /* ---------- Actions ---------- */
 
+// The pending cards the grid is showing right now: the confidence, model,
+// label-set and tab filters applied, one card per burst. Accept All acts on
+// exactly these (each burst card's accept covers its burst, as clicking it
+// would), so rows the filters hide are never tagged behind the user's back.
+function visiblePendingCards() {
+  return getVisibleItems().filter(function(p) { return p.status === 'pending'; });
+}
+
 // Mark every row the accept says it decided, not only the one in the URL.
 // ``accept_prediction`` fans a decision across the still-pending members of
 // the same burst group, so the response names siblings too; leaving those at
@@ -1740,12 +1748,21 @@ async function acceptPrediction(predId) {
 async function rejectPrediction(predId) {
   if (_predictionsReloading) return;
   var epoch = _loadPredictionsEpoch;
+  var resp;
   try {
-    await safeFetch('/api/predictions/' + predId + '/reject', { method: 'POST' });
+    resp = await safeFetch('/api/predictions/' + predId + '/reject', { method: 'POST' });
   } catch(e) { return; }
   if (_predictionEpochStale(epoch)) return;
-  var pred = predictions.find(function(p) { return p.id === predId; });
-  if (pred) pred.status = 'rejected';
+  // A burst card's reject covers every undecided member, as its accept does;
+  // the response names each row it rejected.
+  // Walk ``allPredictions`` too: a member outside the collection filter is
+  // only in the unfiltered copy (see _markPredictionsAccepted).
+  var rejected = new Set([predId].concat((resp && resp.rejected_prediction_ids) || []));
+  [allPredictions, predictions].forEach(function(list) {
+    (list || []).forEach(function(p) {
+      if (p && rejected.has(p.id)) p.status = 'rejected';
+    });
+  });
   renderAll();
 }
 
@@ -1771,7 +1788,7 @@ async function acceptAllPending() {
   // accepting rows from the pre-reload ``predictions`` array while the
   // visible chips already show a narrower filter. See r3618935660.
   var epoch = _loadPredictionsEpoch;
-  var pending = predictions.filter(function(p) { return p.status === 'pending'; });
+  var pending = visiblePendingCards();
   // ``pending`` is a snapshot, and one accept can settle several of its rows:
   // ``accept_prediction`` expands across the burst group and the response
   // names every row it decided. Without consuming that, the next member of the

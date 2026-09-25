@@ -13536,6 +13536,15 @@ def test_highlights_confirm_accepts_reviewed_prediction(app_and_db):
     assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
     assert "Bald Eagle" in {kw["name"] for kw in db.get_photo_keywords(pid)}
 
+    # Undo restores the user's earlier "reviewed" decision. It used to reset
+    # the row to ``pending``, a status it had not had since the user reviewed
+    # it, so the prediction reappeared in Review's pending queue.
+    assert client.post("/api/undo").status_code == 200
+    assert db.get_review_status(pred["id"], db._ws_id()) == "reviewed"
+    assert "Bald Eagle" not in {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert client.post("/api/redo").status_code == 200
+    assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
+
 
 def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
     """Taxonomy keywords already count as confirmed for Highlights confirm."""
@@ -24147,6 +24156,10 @@ async function %s(url) {
     throw err;
   }
   var members = __groups[predId] || [predId];
+  if (url.endsWith('/reject')) {
+    members.forEach(function(m) { __status[m] = 'rejected'; });
+    return {ok: true, rejected_prediction_ids: members};
+  }
   members.forEach(function(m) { __status[m] = 'accepted'; });
   if ((__input.unconfirmed || []).indexOf(predId) >= 0) {
     throw new Error('connection lost after commit');
@@ -24304,6 +24317,13 @@ var predictions = allPredictions.filter(function(p) {
 var _predictionsReloading = false;
 var _loadPredictionsEpoch = 0;
 function _predictionEpochStale(epoch) { return epoch !== _loadPredictionsEpoch; }
+// The grid's filter state, read by the real ``getVisibleItems``.
+var __filters = __input.filters || {};
+var minConfidence = __filters.min_confidence || 0;
+var currentModel = __filters.model || 'all';
+var currentLabelsFingerprint = __filters.labels_fingerprint || '';
+var currentTab = __filters.tab || 'all';
+var currentSort = 'default';
 var __renders = 0;
 function renderAll() { __renders++; }
 async function loadPredictions() {}
@@ -24325,11 +24345,17 @@ def _run_review_accept(html, payload, call):
     assert start != -1 and end > start, (
         "review.html's accept actions could not be located"
     )
+    grid_start = html.find("function getVisibleItems(")
+    grid_end = html.find("function renderGrid(")
+    assert grid_start != -1 and grid_end > grid_start, (
+        "review.html's getVisibleItems could not be located"
+    )
     import json as _json
 
     source = "\n".join([
         _grouped_decision_server_stub("safeFetch"), _grouped_decision_module(),
-        _REVIEW_ACCEPT_STUB, html[start:end], call + ".then(__report);",
+        _REVIEW_ACCEPT_STUB, html[grid_start:grid_end], html[start:end],
+        call + ".then(__report);",
     ])
     return _run_node(source, [_json.dumps(payload)])
 
@@ -24428,6 +24454,63 @@ def test_review_single_accept_marks_expanded_group_members(app_and_db):
         "11": "accepted", "12": "accepted", "13": "pending",
     }
     assert result["renders"] == 1
+
+
+def test_review_accept_all_accepts_only_the_cards_the_filters_show(app_and_db):
+    """Accept All must not tag predictions the grid's filters are hiding.
+
+    The confidence, model and label-set filters only narrow what the grid
+    renders; ``acceptAllPending`` used to loop over every pending row in
+    ``predictions`` regardless, so with the confidence slider at 80% and one
+    model picked it still tagged the hidden low-confidence rows and the other
+    model's species on photos the user never saw.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/review").get_data(as_text=True)
+    predictions = [
+        {"id": 11, "status": "pending", "confidence": 0.95, "model": "m1"},
+        {"id": 12, "status": "pending", "confidence": 0.30, "model": "m1"},
+        {"id": 13, "status": "pending", "confidence": 0.90, "model": "m2"},
+        {"id": 14, "status": "pending", "confidence": 0.85, "model": "m1"},
+    ]
+
+    result = _run_review_accept(html, {
+        "predictions": predictions,
+        "filters": {"min_confidence": 0.8, "model": "m1"},
+        "status": {"11": "pending", "12": "pending", "13": "pending",
+                   "14": "pending"},
+        "groups": {},
+    }, "acceptAllPending()")
+    assert sorted(result["requests"]) == [11, 14]
+    assert result["serverStatus"]["12"] == "pending"
+    assert result["serverStatus"]["13"] == "pending"
+
+
+def test_review_reject_marks_burst_members_outside_the_filter(app_and_db):
+    """"Not X" on a burst card settles every member the server rejected.
+
+    ``/reject`` now expands across the burst the way accept does and names
+    the rows it wrote. A member outside the collection filter lives only in
+    ``allPredictions``, so walking just the filtered view would leave the
+    unfiltered copy claiming it is still pending.
+    """
+    app, _ = app_and_db
+    html = app.test_client().get("/review").get_data(as_text=True)
+
+    result = _run_review_accept(html, {
+        "predictions": [
+            {"id": 11, "status": "pending"},
+            {"id": 12, "status": "pending"},
+            {"id": 13, "status": "pending"},
+        ],
+        "filtered_out": [12],
+        "status": {"11": "pending", "12": "pending", "13": "pending"},
+        "groups": {"11": [11, 12]},
+    }, "rejectPrediction(11)")
+    assert result["requests"] == [11]
+    assert result["localStatus"] == {
+        "11": "rejected", "12": "rejected", "13": "pending",
+    }
 
 
 def _seed_pending_prediction(db, filename, species):
