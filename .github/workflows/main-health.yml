@@ -51,7 +51,9 @@ jobs:
       && github.event.workflow_run.head_repository.full_name == github.repository
       && github.event.workflow_run.event != 'pull_request'
       && (github.event.workflow_run.conclusion == 'failure'
-          || github.event.workflow_run.conclusion == 'success')
+          || github.event.workflow_run.conclusion == 'success'
+          || github.event.workflow_run.conclusion == 'timed_out'
+          || github.event.workflow_run.conclusion == 'startup_failure')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -82,12 +84,16 @@ jobs:
           # Only conclusive runs count: GitHub cancels a pending run when a
           # newer one queues behind the active run, and that cancelled run's
           # later createdAt must not make the active run's real result look
-          # superseded. The filter runs client-side, so the limit is generous
-          # enough that cancelled runs can't crowd the conclusive ones out.
+          # superseded. ``timed_out`` and ``startup_failure`` are terminal
+          # unhealthy outcomes we treat as red (see the job's ``if``), so they
+          # count here alongside ``failure``. The filter runs client-side, so
+          # the limit is generous enough that cancelled runs can't crowd the
+          # conclusive ones out.
           latest_id=$(gh run list --repo "$REPO" --workflow "$WORKFLOW_ID" \
             --branch main --status completed --limit 100 \
             --json databaseId,createdAt,conclusion \
-            --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]
+            --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure"
+                                or .conclusion == "timed_out" or .conclusion == "startup_failure")]
                   | sort_by(.createdAt) | reverse | .[0].databaseId // empty')
           if [[ -n "$latest_id" && "$latest_id" != "$RUN_ID" ]]; then
             echo "Run $RUN_ID is superseded by run $latest_id; skipping."

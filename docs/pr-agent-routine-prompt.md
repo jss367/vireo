@@ -318,28 +318,43 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    tests` run on main. Diagnosis, branching from current `main`, and
    validation all take real wall-clock, so a newer commit may have
    concluded a different `Full tests` run since `main-health.yml` fired
-   this session. Only `success` and `failure` count: GitHub can cancel a
-   pending run when a newer one queues, and that cancelled run's later
-   `createdAt` must not make the current diagnosis look superseded. Also
-   check the conclusion, not just the `databaseId`: GitHub retains the ID
-   across reruns, so a manual rerun of `WORKFLOW_RUN` that now succeeds
-   still reports `latest_id == WORKFLOW_RUN` — an ID-only check would keep
-   diagnosing the obsolete failure. If any newer conclusive run went green
-   (whether a same-ID rerun or a different run entirely), stop silently —
-   `main` is now green and the issue will close on its own. If a newer
-   failure has concluded on a different run, switch `WORKFLOW_RUN` to it
-   (its failing tests are what actually need fixing, and `main-health.yml`
+   this session. Only `success`, `failure`, `timed_out` and
+   `startup_failure` count as conclusive (matching `main-health.yml`'s
+   own filter): GitHub can cancel a pending run when a newer one queues,
+   and that cancelled run's later `createdAt` must not make the current
+   diagnosis look superseded. Do not filter by `--status completed`
+   either: a manual rerun of `WORKFLOW_RUN` keeps its `databaseId`
+   while the new attempt is queued or in progress, so `--status
+   completed` would hide it and the lookup would fall back to an older
+   run — an older green would exit silently and strand the incident, an
+   older failure would diagnose the wrong logs. Inspect the newest run
+   overall; when its `status` is not yet `completed`, fall through to
+   diagnosing `WORKFLOW_RUN` (a real past failure) because that
+   in-flight attempt's result is not yet known. Also check the
+   conclusion, not just the `databaseId`: GitHub retains the ID across
+   reruns, so a manual rerun of `WORKFLOW_RUN` that now succeeds still
+   reports `latest_id == WORKFLOW_RUN` — an ID-only check would keep
+   diagnosing the obsolete failure. If any newer conclusive run went
+   green (whether a same-ID rerun or a different run entirely), stop
+   silently — `main` is now green and the issue will close on its own.
+   If a newer red conclusion (failure, timed_out or startup_failure)
+   has concluded on a different run, switch `WORKFLOW_RUN` to it (its
+   failing tests are what actually need fixing, and `main-health.yml`
    will not fire a second time for this incident):
    ```bash
    latest=$(gh run list --workflow "Full tests" --branch main \
-     --status completed --limit 100 \
-     --json databaseId,createdAt,conclusion \
-     --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]
+     --limit 100 \
+     --json databaseId,createdAt,conclusion,status \
+     --jq '[.[] | select(.status != "completed"
+                          or .conclusion == "success" or .conclusion == "failure"
+                          or .conclusion == "timed_out"
+                          or .conclusion == "startup_failure")]
            | sort_by(.createdAt) | reverse | .[0]')
    latest_id=$(printf %s "$latest" | jq -r '.databaseId // empty')
+   latest_status=$(printf %s "$latest" | jq -r '.status // empty')
    latest_conclusion=$(printf %s "$latest" | jq -r '.conclusion // empty')
-   if [ -n "$latest_id" ]; then
-     [ "$latest_conclusion" = "failure" ] || exit 0
+   if [ -n "$latest_id" ] && [ "$latest_status" = "completed" ]; then
+     [ "$latest_conclusion" = "success" ] && exit 0
      [ "$latest_id" = "$WORKFLOW_RUN" ] || WORKFLOW_RUN="$latest_id"
    fi
    ```
@@ -376,22 +391,33 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    addresses a real failure of `main`, its checks in the fix PR's own CI
    are the guard against regressions in a different area, and if the newer
    failure still stands after this merges, the next red run opens a new
-   incident. The check therefore keys on `conclusion == "success"` (not
-   the `databaseId`), which also handles a same-ID rerun of `WORKFLOW_RUN`
-   that succeeded in this window. This mirrors the reconciliation flow's
-   revalidation of live state right before publication:
+   incident. A newer run that is queued or in progress at publish time
+   (including a rerun of `WORKFLOW_RUN` that shares its `databaseId`)
+   is likewise not a reason to abandon: its result is not yet known and
+   the accepted-request marker prevents a replacement dispatch, so
+   publishing on the diagnosed failure keeps the incident moving. The
+   check therefore keys on a completed newer `conclusion == "success"`
+   (not the `databaseId`), which also handles a same-ID rerun of
+   `WORKFLOW_RUN` that succeeded in this window. This mirrors the
+   reconciliation flow's revalidation of live state right before
+   publication:
    ```bash
    test "$(gh issue view "$ISSUE" --json state -q .state)" = OPEN || exit 0
    test "$(gh pr list --label fix-main --state open --json body \
      -q "[.[] | select((.body // \"\") | test(\"Refs #$ISSUE([^0-9]|$)\"))] | length")" = 0 || exit 0
    latest=$(gh run list --workflow "Full tests" --branch main \
-     --status completed --limit 100 \
-     --json databaseId,createdAt,conclusion \
-     --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]
+     --limit 100 \
+     --json databaseId,createdAt,conclusion,status \
+     --jq '[.[] | select(.status != "completed"
+                          or .conclusion == "success" or .conclusion == "failure"
+                          or .conclusion == "timed_out"
+                          or .conclusion == "startup_failure")]
            | sort_by(.createdAt) | reverse | .[0]')
    latest_id=$(printf %s "$latest" | jq -r '.databaseId // empty')
+   latest_status=$(printf %s "$latest" | jq -r '.status // empty')
    latest_conclusion=$(printf %s "$latest" | jq -r '.conclusion // empty')
-   [ -z "$latest_id" ] || [ "$latest_conclusion" = "failure" ] || exit 0
+   [ -z "$latest_id" ] || [ "$latest_status" != "completed" ] \
+     || [ "$latest_conclusion" != "success" ] || exit 0
    ```
 8. Commit, push, and open a ready-for-review PR against `main` with the
    `fix-main` label. The body names the failing run, lists each failure with

@@ -456,6 +456,41 @@ def _main_health_steps():
     return yaml.safe_load(_read(MAIN_HEALTH_WORKFLOW))["jobs"]["report"]["steps"]
 
 
+def _gh_run_list_invocations(section):
+    """Yield each ``gh run list`` invocation body from a routine-prompt section.
+
+    A single invocation spans until an unbroken line that does not end with
+    a shell continuation ``\\`` — the ``--jq`` filter is a multi-line
+    single-quoted string, so the loop stops on its closing ``'`` line rather
+    than at the first newline. The prose outside code fences is ignored.
+    """
+    lines = section.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.startswith("gh run list "):
+            block = [line]
+            j = i + 1
+            in_jq = False
+            while j < len(lines):
+                nxt = lines[j]
+                block.append(nxt)
+                if "--jq '" in nxt and nxt.count("'") % 2 == 1:
+                    in_jq = True
+                elif in_jq and "'" in nxt and nxt.count("'") % 2 == 1:
+                    in_jq = False
+                    if not nxt.rstrip().endswith("\\"):
+                        break
+                elif not in_jq and not nxt.rstrip().endswith("\\"):
+                    break
+                j += 1
+            yield "\n".join(block)
+            i = j + 1
+            continue
+        i += 1
+
+
 def test_full_suite_runs_on_main_are_never_cancelled():
     workflow = _read(FULL_TEST_WORKFLOW)
 
@@ -484,14 +519,32 @@ def test_superseded_and_inconclusive_runs_do_not_drive_the_issue():
 
     # A rerun of an older run, or an out-of-order completion, must not
     # overwrite the issue with a stale result. Compare against the newest
-    # run by ``createdAt`` (immutable to reruns), counting only runs that
-    # passed or failed: GitHub cancels a pending run when a newer one queues,
-    # and that cancelled run must not make the active run look superseded.
+    # run by ``createdAt`` (immutable to reruns), counting only runs whose
+    # conclusion is one we drive the issue from: GitHub cancels a pending
+    # run when a newer one queues, and that cancelled run must not make
+    # the active run look superseded. ``timed_out`` and ``startup_failure``
+    # are terminal unhealthy conclusions treated as red, so they count too.
     assert "--branch main --status completed" in workflow
     assert "--json databaseId,createdAt,conclusion" in workflow
-    assert '.conclusion == "success" or .conclusion == "failure"' in workflow
+    assert (
+        '.conclusion == "success" or .conclusion == "failure"\n'
+        '                                or .conclusion == "timed_out" or .conclusion == "startup_failure"'
+    ) in workflow
     assert "sort_by(.createdAt) | reverse" in workflow
     assert '"$latest_id" != "$RUN_ID"' in workflow
+
+
+def test_timed_out_and_startup_failure_runs_are_treated_as_red():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # A ``Full tests`` run that hits its per-job timeout or ends with
+    # ``startup_failure`` never successfully tested ``main``, so it must
+    # open (or update) the tracking issue rather than being skipped. The
+    # ``if`` gate on the job admits all four unhealthy terminal conclusions
+    # alongside ``success`` (the close-issue branch); the body's non-success
+    # path then opens/updates the issue for the failure-like ones.
+    assert "conclusion == 'timed_out'" in workflow
+    assert "conclusion == 'startup_failure'" in workflow
 
 
 def test_stale_attempt_events_of_the_latest_run_are_skipped():
@@ -552,24 +605,61 @@ def test_fix_main_revalidates_workflow_run_before_diagnosing_and_publishing():
 
     supersede_lookup = (
         'gh run list --workflow "Full tests" --branch main '
-        "\\\n     --status completed --limit 100 "
-        "\\\n     --json databaseId,createdAt,conclusion "
-        "\\\n     --jq '[.[] | select(.conclusion == \"success\" or .conclusion == \"failure\")]"
+        "\\\n     --limit 100 "
+        "\\\n     --json databaseId,createdAt,conclusion,status "
+        "\\\n     --jq '[.[] | select(.status != \"completed\""
+        "\n                          or .conclusion == \"success\" or .conclusion == \"failure\""
+        "\n                          or .conclusion == \"timed_out\""
+        "\n                          or .conclusion == \"startup_failure\")]"
         "\n           | sort_by(.createdAt) | reverse"
     )
     assert section.count(supersede_lookup) == 2
 
     # Pre-diagnosis: switch to the newer failure, or exit silently if the
-    # newer run went green (main is now healthy).
-    assert '[ "$latest_conclusion" = "failure" ] || exit 0' in section
+    # newer run went green (main is now healthy). An in-flight newer run
+    # (queued or in progress) falls through — its result is not yet known
+    # and diagnosing WORKFLOW_RUN (a real past failure) is still meaningful.
+    assert 'if [ -n "$latest_id" ] && [ "$latest_status" = "completed" ]; then' in section
+    assert '[ "$latest_conclusion" = "success" ] && exit 0' in section
     assert 'WORKFLOW_RUN="$latest_id"' in section
 
     # Pre-publication: exit silently only when the incident is resolved
     # (a newer success closed main). A newer failure that concluded during
     # diagnosis is a different situation: the accepted-request marker
     # prevents another dispatch, so abandoning here strands the incident;
-    # publish the fix and let the fix PR's own CI catch regressions.
-    assert '[ -z "$latest_id" ] || [ "$latest_conclusion" = "failure" ] || exit 0' in section
+    # publish the fix and let the fix PR's own CI catch regressions. An
+    # in-flight newer run is also not a reason to abandon — its result is
+    # unknown, so the publish check requires status == "completed".
+    assert (
+        '[ -z "$latest_id" ] || [ "$latest_status" != "completed" ] \\\n'
+        '     || [ "$latest_conclusion" != "success" ] || exit 0'
+    ) in section
+
+
+def test_fix_main_revalidation_survives_an_in_flight_rerun_of_workflow_run():
+    prompt = _read(ROUTINE_PROMPT)
+
+    # When ``WORKFLOW_RUN`` is manually rerun while this session is
+    # running, its shared ``databaseId`` becomes queued or in progress.
+    # ``--status completed`` would then hide the rerun and the lookup
+    # would fall back to an older run — an older green would exit
+    # silently and strand the incident, an older failure would diagnose
+    # the wrong logs. The revalidation therefore inspects the newest run
+    # regardless of status, admits queued/in-progress rows into the
+    # newest-first selection, and skips the ID/conclusion checks when
+    # that newest row is not yet ``completed``.
+    fix_main_start = prompt.index("## Task: `fix-main`")
+    fix_main_end = prompt.index("## Absolute Rules", fix_main_start)
+    section = prompt[fix_main_start:fix_main_end]
+
+    # Look only at ``gh run list`` invocations, not at the prose that
+    # names ``--status completed`` to explain what NOT to do.
+    for gh_call in _gh_run_list_invocations(section):
+        assert "--status completed" not in gh_call, gh_call
+        assert '.status != "completed"' in gh_call
+        assert '--json databaseId,createdAt,conclusion,status' in gh_call
+
+    assert 'latest_status=$(printf %s "$latest" | jq -r' in section
 
 
 def test_fix_main_revalidation_keys_on_conclusion_not_run_id():
