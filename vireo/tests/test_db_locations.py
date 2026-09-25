@@ -677,6 +677,30 @@ def test_get_or_create_text_location_rejects_none_and_commits(db):
     assert db.get_or_create_text_location("Back garden") == kid
 
 
+def test_get_or_create_text_location_matches_case_insensitively(db):
+    # ``add_keyword`` dedupes location names case-insensitively; the text
+    # path must agree, or one place splits into two keyword rows.
+    kid = db.get_or_create_text_location("Paris")
+    assert db.get_or_create_text_location("paris") == kid
+    assert db.add_keyword("PARIS", kw_type="location") == kid
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = 'Paris' COLLATE NOCASE"
+    ).fetchone()[0] == 1
+
+
+def test_get_or_create_text_location_prefers_exact_spelling(db):
+    # Legacy catalogs can already hold both spellings; the exact one wins.
+    upper = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Paris', 'location')"
+    ).lastrowid
+    lower = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('paris', 'location')"
+    ).lastrowid
+    db.conn.commit()
+    assert db.get_or_create_text_location("paris") == lower
+    assert db.get_or_create_text_location("Paris") == upper
+
+
 # -- link_keyword_to_place (stays on Database: pinned provenance writer) ---------
 
 

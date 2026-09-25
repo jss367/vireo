@@ -408,6 +408,32 @@ class WorkspaceFolderRepository:
                     [source_ws_id, source_ws_id] + chunk,
                 )
 
+            # Move color labels, which are per (photo, workspace) like the
+            # review rows above. A label the target already holds for the
+            # photo wins; the source row is dropped either way, since the
+            # source can no longer see the photo.
+            for chunk in self._chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""INSERT OR IGNORE INTO photo_color_labels
+                          (photo_id, workspace_id, color)
+                        SELECT photo_id, ?, color
+                        FROM photo_color_labels
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [target_ws_id, source_ws_id] + chunk,
+                )
+                self.conn.execute(
+                    f"""DELETE FROM photo_color_labels
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [source_ws_id] + chunk,
+                )
+
             # Move manually selected Life List / Highlights representative
             # photos with the folder. If the target already has a preference
             # for the same (purpose, species), keep the target value and drop

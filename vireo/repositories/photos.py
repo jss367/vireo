@@ -17,6 +17,8 @@ hook. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
 
 import os
 
+from repositories.collections import remap_collection_photo_ids
+
 
 class PhotoRepository:
     def __init__(
@@ -917,39 +919,14 @@ class PhotoRepository:
                 # Deleting detections cascades to predictions via ON DELETE CASCADE
                 self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", chunk)
 
-            # Clean collection rules
-            import json as _json
-            collections = self.conn.execute(
-                "SELECT id, rules FROM collections WHERE workspace_id = ?",
-                (workspace_id_fn(),),
-            ).fetchall()
-            deleted_set = set(all_ids)
-            def _remove_deleted_photo_ids(node):
-                if isinstance(node, list):
-                    changed_any = False
-                    for child in node:
-                        changed_any = _remove_deleted_photo_ids(child) or changed_any
-                    return changed_any
-                if not isinstance(node, dict):
-                    return False
-                changed_any = _remove_deleted_photo_ids(node.get("rules"))
-                if node.get("field") == "photo_ids" and "value" in node:
-                    values = node.get("value")
-                    if not isinstance(values, list):
-                        return changed_any
-                    original_len = len(values)
-                    node["value"] = [v for v in values if v not in deleted_set]
-                    return changed_any or len(node["value"]) != original_len
-                return changed_any
-
-            for coll in collections:
-                rules = _json.loads(coll["rules"])
-                changed = _remove_deleted_photo_ids(rules)
-                if changed:
-                    self.conn.execute(
-                        "UPDATE collections SET rules = ? WHERE id = ?",
-                        (_json.dumps(rules), coll["id"]),
-                    )
+            # Clean collection rules. Photos are global and SQLite reuses a
+            # freed ``photos.id``, so every workspace's static collections are
+            # rewritten, not only the active one's. The active workspace is
+            # still resolved here so a delete without one rolls back.
+            workspace_id_fn()
+            remap_collection_photo_ids(
+                self.conn, dict.fromkeys(all_ids),
+            )
 
             # Delete photos (cascades to edit_history_items, inat_submissions)
             for chunk in id_chunks:

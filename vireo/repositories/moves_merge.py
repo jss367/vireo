@@ -23,6 +23,7 @@ import os
 
 from keyword_normalization import keyword_match_key
 from repositories import UNSET
+from repositories.collections import remap_collection_photo_ids
 
 log = logging.getLogger(__name__)
 
@@ -899,6 +900,9 @@ class MovesMergeRepository:
         # archive folder later in the loop. A set, so two edits sharing a
         # survivor write one link.
         sibling_links = set()
+        # Collection memberships of every photo row this merge drops, keyed
+        # to the survivor that absorbs it; applied once, before the commit.
+        collection_remap = {}
         # Map of target-path -> folder id for folders already processed in this
         # run, so a child can fall back to its parent's id (Fix I2) even if the
         # parent's row isn't yet findable by path lookup.
@@ -1337,6 +1341,7 @@ class MovesMergeRepository:
                                 (pid,))
                             self.conn.execute(
                                 "DELETE FROM photos WHERE id = ?", (pid,))
+                            collection_remap[pid] = survivor_id
                             counts["already_present"] += 1
                             # The staged photo id is now free. Thumbnails,
                             # previews, working copies, and offline cache files
@@ -1445,6 +1450,7 @@ class MovesMergeRepository:
                                 self.conn.execute(
                                     "DELETE FROM photos WHERE id = ?",
                                     (collision["id"],))
+                                collection_remap[collision["id"]] = pid
                                 # The phantom target-row id is likewise freed —
                                 # its cache files can be reused for a new
                                 # photo. Report it up for cleanup too.
@@ -1490,6 +1496,8 @@ class MovesMergeRepository:
             for sibling_ws, survivor_photo_id in sorted(sibling_links):
                 link_survivor_for_sibling_edits(
                     sibling_ws, survivor_photo_id)
+
+            remap_collection_photo_ids(self.conn, collection_remap)
 
             self.conn.commit()
             invalidate_new_images([ws])

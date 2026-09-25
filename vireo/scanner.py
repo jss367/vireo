@@ -518,6 +518,16 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     # so a commit failure rolls every deletion back and none of them
     # happened.
     merged_ids = set()
+    # ``companion_id -> primary_id`` accumulated across every pair so we can
+    # remap collection ``photo_ids`` rules once at the end of the loop.
+    # ``remap_collection_photo_ids`` scans and JSON-parses every collection
+    # that carries ``photo_ids``, then writes each rewritten row; a per-pair
+    # call would repeat that O(collections) work N times and, for a static
+    # collection containing many companions, rewrite the same row once per
+    # deletion. One post-loop call is O(pairs + collections) instead of
+    # O(pairs * collections). The remap runs in the same transaction as the
+    # pair deletes below and is rolled back with them if the commit fails.
+    collection_remap = {}
 
     for (_folder_id, _base), members in groups.items():
         if len(members) < 2:
@@ -893,6 +903,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         db._transfer_gps_review_for_merge(companion["id"], primary["id"])
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
+        collection_remap[companion["id"]] = primary["id"]
         merged_ids.add(companion["id"])
         # The companion's rowid is now free for SQLite to hand to the next
         # insert. Its derivatives must be unlinked so the next photo to
@@ -920,6 +931,8 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
 
             post_commit_fs_actions.append(_cleanup_companion)
 
+    if collection_remap:
+        db.remap_collection_photo_ids(collection_remap)
     commit_with_retry(db.conn)
     # DB state is durable now. Run the collected filesystem operations —
     # any exception here is per-action so a single failing unlink doesn't

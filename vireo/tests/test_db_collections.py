@@ -268,6 +268,278 @@ def test_taxonomy_rules_is_not_and_contains(db, folder):
     assert _ids(db, [{"field": "taxonomy_family", "op": "is not", "value": "Canidae"}]) == [bare]
 
 
+def test_taxonomy_contains_treats_like_wildcards_literally(db, folder):
+    fox = _photo(db, folder, "fox.jpg")
+    odd = _photo(db, folder, "odd.jpg")
+    _prediction(db, fox, taxonomy={"family": "Canidae", "genus": "axb"})
+    _prediction(db, odd, taxonomy={"family": "100%_wild", "genus": "a_b"})
+    assert _ids(db, [{"field": "taxonomy_family", "op": "contains", "value": "%"}]) == [odd]
+    assert _ids(db, [{"field": "taxonomy_family", "op": "contains", "value": "_"}]) == [odd]
+    assert _ids(db, [{"field": "taxonomy_genus", "op": "contains", "value": "a_b"}]) == [odd]
+
+
+def test_taxonomy_contains_preserves_falsey_scalars(db, folder):
+    """A falsey scalar (``0``, ``False``) must not collapse to ``LIKE '%%'``.
+
+    ``value or ''`` would turn the operand into an empty string and match
+    every classified photo — the exact unbounded match the LIKE escape is
+    meant to block. Preserve the scalar's string form instead.
+    """
+    numeric = _photo(db, folder, "num.jpg")
+    named = _photo(db, folder, "named.jpg")
+    bare = _photo(db, folder, "bare.jpg")
+    _prediction(db, numeric, taxonomy={"family": "Canidae0", "genus": "gen"})
+    _prediction(db, named, taxonomy={"family": "Falseidae", "genus": "gen"})
+    # ``0`` matches only the family literally containing ``0``.
+    assert _ids(db, [{"field": "taxonomy_family", "op": "contains", "value": 0}]) == [numeric]
+    # ``False`` matches only the family literally containing ``False``, not
+    # every classified photo, and bare (no taxonomy at all) is excluded.
+    matched = _ids(db, [{"field": "taxonomy_family", "op": "contains", "value": False}])
+    assert matched == [named]
+    assert bare not in matched
+
+
+def test_active_mask_variant_contains_preserves_falsey_scalars(db, folder):
+    """Same falsey-scalar guard for the active_mask_variant contains branch."""
+    variant_zero = _photo(db, folder, "z.jpg", active_mask_variant="sam2-0-small")
+    variant_named = _photo(db, folder, "n.jpg", active_mask_variant="Falsebranch")
+    variant_plain = _photo(db, folder, "p.jpg", active_mask_variant="sam2-large")
+    _photo(db, folder, "none.jpg")
+    assert _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": 0}]) == [variant_zero]
+    matched = _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": False}])
+    assert matched == [variant_named]
+    assert variant_plain not in matched
+
+
+def test_remap_collection_photo_ids_follows_chains_and_folds_duplicates(db):
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    rows = {
+        "chain": [{"field": "photo_ids", "value": [1, "2", 9]}],
+        "dupes": [{"match": "any", "rules": [
+            {"field": "photo_ids", "value": [3, 3, 1, 4]},
+        ]}],
+        "plain": [{"field": "rating", "op": ">=", "value": 3}],
+    }
+    ids = {}
+    for name, rules in rows.items():
+        ids[name] = db.conn.execute(
+            "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+            (name, json.dumps(rules), other_ws),
+        ).lastrowid
+    # 1 -> 2 -> 4, and 2 itself is gone into 4; 9 is deleted outright.
+    assert remap_collection_photo_ids(db.conn, {1: 2, 2: 4, 9: None}) == 2
+    stored = {
+        name: json.loads(db.conn.execute(
+            "SELECT rules FROM collections WHERE id = ?", (cid,),
+        ).fetchone()[0])
+        for name, cid in ids.items()
+    }
+    assert stored["chain"] == [{"field": "photo_ids", "value": [4]}]
+    # The pre-existing 3, 3 is left as saved; only the remap's 4 is folded.
+    assert stored["dupes"][0]["rules"][0]["value"] == [3, 3, 4]
+    assert stored["plain"] == rows["plain"]
+    assert remap_collection_photo_ids(db.conn, {}) == 0
+
+
+def test_remap_collection_photo_ids_normalizes_boolean_ids(db):
+    """A rule value of ``True``/``False`` binds as 1/0 and must remap too.
+
+    ``_is_scalar`` accepts booleans, and the ``photo_ids`` engine binds
+    non-int values (booleans are excluded from the inline int list) so
+    SQLite treats a bound ``True`` as ``p.id = 1``. Missing that spelling
+    leaves a stale entry that silently rejoins the next photo to reuse id 1.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    rules = [{"field": "photo_ids", "value": [True, 1, False, 0, 2]}]
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("bools", json.dumps(rules), other_ws),
+    ).lastrowid
+    assert remap_collection_photo_ids(db.conn, {1: 7, 0: None}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    # Both spellings of id 1 (``True`` and ``1``) fold to 7; both spellings
+    # of id 0 (``False`` and ``0``) drop; id 2 is untouched.
+    assert stored == [{"field": "photo_ids", "value": [7, 2]}]
+
+
+def test_remap_collection_photo_ids_normalizes_float_and_stringified_ids(db):
+    """Non-int spellings SQLite's integer affinity still matches must remap.
+
+    The rule validator permits any scalar (``_is_scalar`` accepts int, float,
+    str, bool, None), and the ``photo_ids`` engine binds anything that isn't
+    an ``int`` — so ``1.0``, ``"1"`` and ``"1.0"`` all match ``p.id = 1`` at
+    query time. Miss any spelling here and the stale entry silently rejoins
+    the next photo that reuses id 1.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    rules = [
+        {"field": "photo_ids", "value": [1, 1.0, "1", "1.0", "1e0", "2"]},
+    ]
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("mixed", json.dumps(rules), other_ws),
+    ).lastrowid
+    assert remap_collection_photo_ids(db.conn, {1: 7, 2: None}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    # Every spelling of 1 is remapped to 7 and folded to a single entry; 2 is
+    # dropped outright. Order preserved from the first surviving occurrence.
+    assert stored == [{"field": "photo_ids", "value": [7]}]
+
+
+def test_remap_collection_photo_ids_leaves_unicode_whitespace_wrapped_ids_alone(db):
+    """SQLite's numeric affinity only skips ASCII whitespace before parsing.
+
+    A rule value like ``"\\xa01\\xa0"`` (NBSP-wrapped) never matches photo 1
+    through the rules engine because SQLite leaves the NBSP bytes in place,
+    the value stays TEXT, and TEXT never coerces to an integer id. Remapping
+    id 1 must therefore leave that spelling alone — rewriting it would remove
+    an entry the deleted photo never actually owned.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    rules = [
+        {"field": "photo_ids", "value": [" 1 ", " 1 ", "1"]},
+    ]
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("mixed-ws", json.dumps(rules), other_ws),
+    ).lastrowid
+    assert remap_collection_photo_ids(db.conn, {1: 7}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    # Only the plain ``"1"`` (which SQLite does match to id 1) is rewritten;
+    # the NBSP- and U+2000-wrapped spellings stay verbatim so the collection
+    # still says what the user saved.
+    assert stored == [{"field": "photo_ids", "value": [" 1 ", " 1 ", 7]}]
+
+
+def test_photo_id_key_normalizes_the_spellings_sqlite_matches():
+    from repositories.collections import _photo_id_key
+
+    assert _photo_id_key(1) == 1
+    assert _photo_id_key(-3) == -3
+    assert _photo_id_key(1.0) == 1
+    assert _photo_id_key(-1.0) == -1
+    assert _photo_id_key("1") == 1
+    assert _photo_id_key(" 1 ") == 1
+    assert _photo_id_key("-1") == -1
+    assert _photo_id_key("1.0") == 1
+    assert _photo_id_key("-1.0") == -1
+    assert _photo_id_key("1e3") == 1000
+    # SQLite treats True/False as integers 1/0 (integer affinity again), so
+    # a rule value of ``True`` names id 1 and must remap alongside int 1.
+    assert _photo_id_key(True) == 1
+    assert _photo_id_key(False) == 0
+    # Non-integral or non-numeric spellings never name an integer id.
+    assert _photo_id_key(1.5) is None
+    assert _photo_id_key("1.5") is None
+    assert _photo_id_key(float("nan")) is None
+    assert _photo_id_key(float("inf")) is None
+    assert _photo_id_key(None) is None
+    assert _photo_id_key("") is None
+    assert _photo_id_key("   ") is None
+    assert _photo_id_key("abc") is None
+    # Spellings Python parses but SQLite does not: PEP 515 underscores and
+    # Unicode digits never reach an integer id through SQLite's numeric
+    # affinity, so accepting them would rewrite the wrong photo.
+    assert _photo_id_key("1_0") is None
+    assert _photo_id_key("1_000") is None
+    assert _photo_id_key("٢") is None
+    assert _photo_id_key("١٢٣") is None
+    assert _photo_id_key("०") is None
+    # SQLite's numeric affinity skips only ASCII space/tab/newline/vtab/
+    # form feed/CR before conversion. ``str.strip()`` without arguments
+    # additionally removes Unicode whitespace like NBSP and the U+2000
+    # range, but SQLite leaves those bytes in place so the value stays
+    # TEXT and never matches an integer id; accepting them here would
+    # rewrite an unrelated collection entry.
+    assert _photo_id_key(" 1 ") is None
+    assert _photo_id_key(" 1 ") is None
+    assert _photo_id_key("　1　") is None
+    assert _photo_id_key(" 1") is None
+    # ASCII whitespace SQLite does skip must still parse.
+    assert _photo_id_key("\t1\t") == 1
+    assert _photo_id_key("\n1\n") == 1
+    assert _photo_id_key("\v1\v") == 1
+    assert _photo_id_key("\f1\f") == 1
+    assert _photo_id_key("\r1\r") == 1
+    # Digit-only spellings must not lose precision above 2^53: Python's
+    # ``float`` rounds them, but SQLite stores TEXT with integer affinity
+    # as a 64-bit INTEGER exactly, so we mirror SQLite by parsing pure
+    # integer forms through ``int``.
+    assert _photo_id_key("9007199254740993") == 9007199254740993
+    assert _photo_id_key("-9007199254740993") == -9007199254740993
+    assert _photo_id_key(" 9007199254740993 ") == 9007199254740993
+    assert _photo_id_key("+9007199254740993") == 9007199254740993
+    # Decimal and exponent spellings still fall back to ``float`` because
+    # SQLite's own REAL conversion loses the same precision there.
+    assert _photo_id_key("9007199254740993.0") == 9007199254740992
+    assert _photo_id_key("9007199254740993e0") == 9007199254740992
+
+
+def test_remap_collection_photo_ids_preserves_large_integer_string_ids(db):
+    """A digit-only string above 2^53 names a photo id exactly.
+
+    SQLite parses ``"9007199254740993"`` bound against ``p.id`` as a 64-bit
+    INTEGER without rounding, so the rules engine's ``photo_ids`` match hits
+    that photo. If ``_photo_id_key`` collapsed that spelling through
+    ``float()`` it would remap the neighbouring id instead, leaving a stale
+    entry that silently rejoins the next reused id.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    big = 9007199254740993
+    rules = [{"field": "photo_ids", "value": [str(big), big + 2]}]
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("big", json.dumps(rules), other_ws),
+    ).lastrowid
+    # Remap the exact id; the neighbouring id must be left alone.
+    assert remap_collection_photo_ids(db.conn, {big: 7, big + 1: None}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    assert stored == [{"field": "photo_ids", "value": [7, big + 2]}]
+
+
+def test_remap_collection_photo_ids_handles_json_escaped_field_names(db):
+    """Valid JSON may spell ``photo_ids`` with escapes like ``photo\\u005fids``.
+
+    ``add_collection`` stores callers' JSON text verbatim, so the raw row
+    can encode the field name with unicode escapes even though the rules
+    engine still parses it as ``photo_ids``. A raw-text ``LIKE`` filter on
+    ``%photo_ids%`` would skip that row, leaving the stale id behind for
+    the next photo that reuses it.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    raw = '[{"field":"photo\\u005fids","value":[1]}]'
+    assert "photo_ids" not in raw
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("escaped", raw, other_ws),
+    ).lastrowid
+    assert remap_collection_photo_ids(db.conn, {1: 7}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    assert stored == [{"field": "photo_ids", "value": [7]}]
+
+
 def test_needs_review_rule(db, folder):
     pending = _photo(db, folder, "a.jpg")
     accepted = _photo(db, folder, "b.jpg")
@@ -290,6 +562,9 @@ def test_active_mask_variant_is_not_and_contains(db, folder):
     assert _ids(db, [{"field": "active_mask_variant", "op": "is not", "value": "sam2-large"}]) == [small, none]
     assert _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": "small"}]) == [small]
     assert large not in _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": "small"}])
+    # ``_`` and ``%`` are literal characters, not LIKE wildcards.
+    assert _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": "sam2_"}]) == []
+    assert _ids(db, [{"field": "active_mask_variant", "op": "contains", "value": "%"}]) == []
 
 
 def test_rules_engine_reads_workspace_lazily(db):

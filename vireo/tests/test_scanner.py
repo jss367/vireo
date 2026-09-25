@@ -7120,3 +7120,76 @@ def test_xmp_import_skips_a_location_keyword_the_user_already_changed(tmp_path):
     names = {k["name"] for k in db.get_photo_keywords(photo_id)}
     assert "House finch" in names, "unrelated sidecar keywords still import"
     db.close()
+
+
+def test_pair_raw_jpeg_batches_collection_remap(tmp_path):
+    """Every pair's companion→primary mapping is collapsed into one remap.
+
+    ``remap_collection_photo_ids`` scans and JSON-parses every collection
+    that carries a ``photo_ids`` rule, then rewrites each matching row; a
+    per-pair call would repeat that O(collections) work N times and rewrite
+    a static collection containing many companions once per deletion. One
+    post-loop call keeps the pairing loop O(pairs + collections) and folds
+    every companion in the same static collection to a single UPDATE.
+    """
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder(str(img_dir), name="photos")
+
+    companion_ids = []
+    primary_ids = []
+    # Three raw+JPEG pairs: three companions destined for three primaries.
+    for i in range(3):
+        jpeg = db.add_photo(
+            folder_id=fid, filename=f"IMG_00{i}.jpg", extension=".jpg",
+            file_size=1000, file_mtime=1.0,
+        )
+        raw = db.add_photo(
+            folder_id=fid, filename=f"IMG_00{i}.cr3", extension=".cr3",
+            file_size=2000, file_mtime=1.0,
+        )
+        companion_ids.append(jpeg)
+        primary_ids.append(raw)
+
+    # A static collection that lists every companion — the batched remap
+    # should collapse all three companion ids to their primaries in one
+    # rewrite of this row.
+    import json as _json
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        (
+            "companions",
+            _json.dumps([{"field": "photo_ids", "value": list(companion_ids)}]),
+            ws,
+        ),
+    ).lastrowid
+
+    calls = {"count": 0, "mappings": []}
+    real_remap = db.remap_collection_photo_ids
+
+    def counted(mapping):
+        calls["count"] += 1
+        calls["mappings"].append(dict(mapping))
+        return real_remap(mapping)
+
+    db.remap_collection_photo_ids = counted
+
+    merged = _pair_raw_jpeg_companions(db)
+    assert set(merged) == set(companion_ids)
+
+    # Exactly one remap call — not one per pair.
+    assert calls["count"] == 1
+    assert calls["mappings"][0] == dict(zip(companion_ids, primary_ids, strict=True))
+
+    stored = _json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    assert stored == [{"field": "photo_ids", "value": list(primary_ids)}]
+    db.close()

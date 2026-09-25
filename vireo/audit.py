@@ -643,6 +643,7 @@ def remove_orphans(db, photo_ids):
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
         db.conn.execute("DELETE FROM pending_changes WHERE photo_id = ?", (pid,))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (pid,))
+    db.remap_collection_photo_ids(dict.fromkeys(photo_ids))
     db.conn.commit()
     db.update_folder_counts()
     log.info("Removed %d orphan entries", len(photo_ids))

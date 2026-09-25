@@ -7846,20 +7846,22 @@ class Database:
                 if parent_id is None:
                     existing_component = self.conn.execute(
                         "SELECT id, type FROM keywords "
-                        "WHERE name = ? AND parent_id IS NULL "
+                        "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
                         "  AND place_id IS NULL "
                         "ORDER BY CASE WHEN type = 'location' THEN 0 "
-                        "  WHEN type = 'taxonomy' THEN 1 ELSE 2 END, id "
+                        "  WHEN type = 'taxonomy' THEN 1 ELSE 2 END, "
+                        "  (name = ?) DESC, id "
                         "LIMIT 1",
-                        (name,),
+                        (name, name),
                     ).fetchone()
                 else:
                     existing_component = self.conn.execute(
                         "SELECT id, type FROM keywords "
-                        "WHERE name = ? AND parent_id = ? "
+                        "WHERE name = ? COLLATE NOCASE AND parent_id = ? "
                         "  AND place_id IS NULL "
+                        "ORDER BY (name = ?) DESC, id "
                         "LIMIT 1",
-                        (name, parent_id),
+                        (name, parent_id, name),
                     ).fetchone()
                 if (
                     existing_component is not None
@@ -7991,13 +7993,13 @@ class Database:
                 # place-bearing row happens to have the lower id.
                 candidates = self.conn.execute(
                     "SELECT id, type, place_id FROM keywords "
-                    "WHERE name = ? AND parent_id IS NULL "
+                    "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
                     "  AND type IN ('location', 'taxonomy') "
                     "ORDER BY "
                     "  CASE WHEN type = 'location' THEN 0 ELSE 1 END, "
                     "  CASE WHEN place_id IS NULL THEN 0 ELSE 1 END, "
-                    "  id",
-                    (name,),
+                    "  (name = ?) DESC, id",
+                    (name, name),
                 ).fetchall()
                 existing = None
                 if candidates:
@@ -8005,19 +8007,23 @@ class Database:
                     if top["place_id"] is None:
                         existing = top
             else:
+                # Case-insensitive, like ``add_keyword``: "paris" must
+                # reuse the "Paris" row rather than start a second place.
                 existing = self.conn.execute(
                     "SELECT id, type FROM keywords "
-                    "WHERE name = ? AND parent_id IS NULL "
-                    "  AND type = 'location' AND place_id IS NULL",
-                    (name,),
+                    "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
+                    "  AND type = 'location' AND place_id IS NULL "
+                    "ORDER BY (name = ?) DESC, id LIMIT 1",
+                    (name, name),
                 ).fetchone()
         else:
             existing = self.conn.execute(
                 "SELECT id, type FROM keywords "
-                "WHERE name = ? AND parent_id = ? "
+                "WHERE name = ? COLLATE NOCASE AND parent_id = ? "
                 "  AND type = 'location' "
-                + ("" if reuse_location_component else "AND place_id IS NULL"),
-                (name, parent_id),
+                + ("" if reuse_location_component else "AND place_id IS NULL ")
+                + "ORDER BY (name = ?) DESC, id LIMIT 1",
+                (name, parent_id, name),
             ).fetchone()
         if existing:
             if existing["type"] == "location":
@@ -8699,7 +8705,9 @@ class Database:
 
                 self._normalize_keyword_row_name(keep_id)
                 for rid in remove_ids:
-                    total_merged += self._merge_keyword_into(rid, keep_id)
+                    total_merged += self._merge_keyword_into(
+                        rid, keep_id, pending_source_only=True,
+                    )
 
         return total_merged
 
@@ -9316,7 +9324,9 @@ class Database:
                     for rid in ids:
                         if rid == keep_id or rid not in alive:
                             continue
-                        merged += self._merge_keyword_into(rid, keep_id)
+                        merged += self._merge_keyword_into(
+                            rid, keep_id, pending_source_only=True,
+                        )
                         made_progress = True
             if not made_progress:
                 break
@@ -10838,7 +10848,12 @@ class Database:
                         # Return the surviving id so callers
                         # (api_update_keyword) can retarget sidecar and
                         # preferences bookkeeping onto the surviving row.
-                        self._merge_keyword_into(keyword_id, peer["id"])
+                        # Source-only: a photo that already removed the
+                        # old spelling must keep that queued removal even
+                        # when it also carries the peer.
+                        self._merge_keyword_into(
+                            keyword_id, peer["id"], pending_source_only=True,
+                        )
                         self._keyword_repository().commit()
                         return peer["id"]
                     # No same-type peer, but a DIFFERENT-type peer at the
@@ -14136,6 +14151,11 @@ class Database:
     def delete_collection(self, collection_id):
         """Delete a collection."""
         self._collection_repository().delete(collection_id)
+
+    def remap_collection_photo_ids(self, mapping):
+        """Point every workspace's ``photo_ids`` rules at surviving photos; no commit."""
+        from repositories.collections import remap_collection_photo_ids
+        return remap_collection_photo_ids(self.conn, mapping)
 
     def rename_collection(self, collection_id, new_name):
         """Rename a collection within the active workspace.
