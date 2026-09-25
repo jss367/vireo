@@ -832,6 +832,43 @@ def test_pipeline_card_shows_actionable_error_not_the_last_one(
     expect(page.locator("#statusExtract")).to_contain_text("Reconnect the source")
 
 
+def test_pipeline_collection_failure_fails_scan_card_on_terminal_path(
+    live_server, page,
+):
+    """A collection failure reaching only the terminal completion payload must
+    still fail the Scan card.
+
+    ``collection`` is a failure-only backend stage that shares the Scan card.
+    ``_updatePipelineStageUI`` already maps it through ``_failureOnlyStageToCard``,
+    but the SSE stream does not replay buffered progress events, so a fast
+    collection failure (locked DB at snapshot resolution, empty scope, etc.)
+    can arrive before the browser subscribes. ``_onPipelineComplete`` is then
+    the only path that renders it; keying its errors loop through
+    ``_stageToCard`` alone drops the entry, leaves the successfully-finished
+    scan marked Done, and hides the reason the run stopped (Codex #1816 P2).
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.evaluate("""
+        _onPipelineComplete({
+          status: 'failed',
+          result: {
+            stages: {
+              scan: {status: 'completed', photos_indexed: 42},
+              collection: {status: 'failed'},
+            },
+            errors: [
+              '[collection] Fatal: could not resolve snapshot path — ' +
+              'database is locked.',
+            ],
+          },
+        });
+    """)
+    expect(page.locator("#pillScan")).to_contain_text("Failed")
+    expect(page.locator("#statusScan")).to_contain_text("could not resolve")
+    expect(page.locator("#numScan")).not_to_have_class(re.compile("complete"))
+
+
 def test_extract_masks_clean_rejects_unreadable_and_failed_results(
     live_server, page,
 ):
