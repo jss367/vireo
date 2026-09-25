@@ -1788,8 +1788,38 @@
         body: JSON.stringify({ hashes: hashes }),
       });
       var n = data.rejected_count || 0;
-      showToast('Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's'), 'success');
-      clearResults();
+      var deferred = (data.deferred_hashes || []).filter(Boolean);
+      // Groups the resolver refused because a candidate was on an
+      // offline volume stay on the page — their state is unknown, not
+      // resolved. Prune only the hashes we asked about that were NOT
+      // deferred so the rest of the scan cache stays consistent.
+      var deferredSet = new Set(deferred);
+      var resolvedHashes = new Set();
+      hashes.forEach(function(h) {
+        if (!deferredSet.has(h)) resolvedHashes.add(h);
+      });
+      var deferredToast = deferred.length > 0
+        ? ' (' + deferred.length + ' deferred — volume offline)'
+        : '';
+      var toastKind = deferred.length > 0 && n === 0 ? 'info' : 'success';
+      showToast(
+        'Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's') + deferredToast,
+        toastKind,
+      );
+      if (deferred.length === 0) {
+        clearResults();
+      } else {
+        pruneResolvedHashesFromScan(resolvedHashes);
+        renderResults(_lastScanResult);
+        var status = document.getElementById('applyStatus');
+        if (status) {
+          status.textContent =
+            deferred.length + ' group' + (deferred.length === 1 ? '' : 's') +
+            ' deferred (reconnect the volume and try again)';
+        }
+        var btn = document.getElementById('applyBtn');
+        if (btn) btn.disabled = false;
+      }
     } catch (e) {
       showToast(e.message || 'Apply failed', 'error');
       status.textContent = '';

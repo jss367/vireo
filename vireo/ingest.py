@@ -1031,8 +1031,8 @@ def ingest(
                                 # a hash-driven adoption would miss it
                                 # and the loop would keep copying empty
                                 # placeholders under _2, _3, ... on
-                                # every retry. Adopt without touching
-                                # the checker, mirroring slot 0.
+                                # every retry. Mirror the slot-0 branch
+                                # and adopt without touching the checker.
                                 zero_byte = src_size == 0 and dest_size == 0
                                 same_bytes = zero_byte
                                 if not zero_byte and dest_size == src_size:

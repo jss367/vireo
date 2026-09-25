@@ -51,7 +51,10 @@ def create_duplicates_blueprint(
         non-rejected photo sharing it and hand that set to
         apply_duplicate_resolution, which picks a winner via the pure
         resolver and flags the losers as rejected. Returns the total number
-        of photos rejected across all hashes.
+        of photos rejected across all hashes, plus ``deferred_hashes``:
+        the subset the resolver refused to touch because at least one
+        candidate was on an offline volume. The UI keeps those groups on
+        the page (state unknown, not resolved).
         """
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -66,6 +69,7 @@ def create_duplicates_blueprint(
 
         db = get_db()
         total_rejected = 0
+        deferred_hashes = []
         for h in hashes:
             rows = db.conn.execute(
                 "SELECT id FROM photos "
@@ -76,7 +80,12 @@ def create_duplicates_blueprint(
                 continue
             result = db.apply_duplicate_resolution([r["id"] for r in rows])
             total_rejected += result.get("rejected", 0)
-        return jsonify({"rejected_count": total_rejected})
+            if result.get("deferred"):
+                deferred_hashes.append(h)
+        return jsonify({
+            "rejected_count": total_rejected,
+            "deferred_hashes": deferred_hashes,
+        })
 
     @blueprint.route("/api/duplicates/bulk-resolve", methods=["POST"])
     def api_duplicates_bulk_resolve():

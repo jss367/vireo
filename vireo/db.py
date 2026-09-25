@@ -5378,11 +5378,23 @@ class Database:
 
         Returns ``{"winner_id": int|None, "loser_ids": [int], "rejected": int}``.
         If fewer than 2 non-rejected candidates remain, returns the no-op
-        shape with ``winner_id=None``.
+        shape with ``winner_id=None``. When at least one candidate lives
+        on an offline volume, the resolver defers instead of picking a
+        winner: the return dict adds ``"deferred": True`` so callers can
+        tell deferrals apart from no-ops and keep the group visible.
         """
+        from repositories.duplicates import DEFERRED_PLAN
+
         plan = self._duplicates_repository().resolution_plan(photo_ids)
         if plan is None:
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
+        if plan is DEFERRED_PLAN:
+            return {
+                "winner_id": None,
+                "loser_ids": [],
+                "rejected": 0,
+                "deferred": True,
+            }
         winner_id, loser_ids = plan
 
         self._apply_winner_loser_merge(winner_id, loser_ids)
