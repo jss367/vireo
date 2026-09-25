@@ -2829,9 +2829,12 @@ def remap_collection_photo_ids(conn, mapping):
         return changed_any or changed
 
     rewritten = 0
-    rows = conn.execute(
-        "SELECT id, rules FROM collections WHERE rules LIKE '%photo_ids%'"
-    ).fetchall()
+    # Scan every collection: ``add_collection`` stores callers' JSON verbatim,
+    # so a valid rule can spell the field with unicode escapes like
+    # ``"photo\\u005fids"`` (which the rules engine parses as ``photo_ids``).
+    # A raw-text ``LIKE '%photo_ids%'`` filter would miss it and leave the
+    # stale id behind for the next photo that reuses it.
+    rows = conn.execute("SELECT id, rules FROM collections").fetchall()
     for row in rows:
         try:
             rules = json.loads(row["rules"])

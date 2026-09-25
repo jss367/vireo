@@ -515,6 +515,31 @@ def test_remap_collection_photo_ids_preserves_large_integer_string_ids(db):
     assert stored == [{"field": "photo_ids", "value": [7, big + 2]}]
 
 
+def test_remap_collection_photo_ids_handles_json_escaped_field_names(db):
+    """Valid JSON may spell ``photo_ids`` with escapes like ``photo\\u005fids``.
+
+    ``add_collection`` stores callers' JSON text verbatim, so the raw row
+    can encode the field name with unicode escapes even though the rules
+    engine still parses it as ``photo_ids``. A raw-text ``LIKE`` filter on
+    ``%photo_ids%`` would skip that row, leaving the stale id behind for
+    the next photo that reuses it.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    raw = '[{"field":"photo\\u005fids","value":[1]}]'
+    assert "photo_ids" not in raw
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("escaped", raw, other_ws),
+    ).lastrowid
+    assert remap_collection_photo_ids(db.conn, {1: 7}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    assert stored == [{"field": "photo_ids", "value": [7]}]
+
+
 def test_needs_review_rule(db, folder):
     pending = _photo(db, folder, "a.jpg")
     accepted = _photo(db, folder, "b.jpg")

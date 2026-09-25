@@ -925,7 +925,7 @@ def test_delete_photos_sql_order(db, lib, monkeypatch, tmp_path):
         f"DELETE FROM photo_keywords WHERE photo_id IN ({a})",
         f"DELETE FROM pending_changes WHERE photo_id IN ({a})",
         f"DELETE FROM detections WHERE photo_id IN ({a})",
-        "SELECT id, rules FROM collections WHERE rules LIKE '%photo_ids%'",
+        "SELECT id, rules FROM collections",
         f"DELETE FROM photos WHERE id IN ({a})",
         f"SELECT filename FROM photos WHERE folder_id = {root}",
         "SELECT id, filename, last_move_source_folder_path FROM photos "
