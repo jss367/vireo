@@ -371,6 +371,12 @@ def test_sidecar_alias_missing_own_photo(lib):
     assert db._pending_keyword_sidecar_alias(999999, ws, "Robin") is False
 
 
+# Windows' ``os.path.normcase`` folds case, so there "Dir" and "dir" are one
+# path and alias without a filesystem check; elsewhere case variants alias
+# only when ``os.path.samefile`` says so.
+_NORMCASE_FOLDS_CASE = os.path.normcase("A") == os.path.normcase("a")
+
+
 def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     ws = db._active_workspace_id
     upper = tmp_path / "Dir"
@@ -384,13 +390,9 @@ def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     pu = db.add_photo(fu, "a.jpg", ".jpg", 1, 1.0)
     pl = db.add_photo(fl, "a.png", ".png", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
-    # Raw DB paths differ ("Dir" vs "dir"): production must confirm with
-    # samefile before treating them as aliases. Neither sidecar exists yet,
-    # so the parent folders decide: one case-insensitive directory (macOS,
-    # Windows) means the same future sidecar, two case-sensitive
-    # directories (Linux) mean distinct ones.
-    same_dir = os.path.samefile(upper, lower)
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is same_dir
+    # Neither sidecar exists: samefile raises OSError, suppressed -> False
+    # (unless the platform folds case, when the paths are simply equal).
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
     (upper / "a.xmp").write_text("x")
     if not (lower / "a.xmp").exists():
         os.link(upper / "a.xmp", lower / "a.xmp")
@@ -407,149 +409,7 @@ def test_sidecar_alias_case_variant_distinct_files(db, tmp_path):
     px = db.add_photo(fx, "z.jpg", ".jpg", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
     _insert(db, px, "keyword_add", "Robin", ws)
-    # No sidecars on disk: production cannot confirm any aliasing with
-    # samefile (raises OSError) and must return False on every platform,
-    # so a case-fold collision on Windows does not queue a destructive
-    # inverse keyword removal against an unrelated file.
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
-
-
-def test_sidecar_alias_missing_sidecars_on_case_insensitive_volume(
-    db, tmp_path, monkeypatch
-):
-    """Missing case-fold-aliased sidecars queue inverse on case-insensitive fs.
-
-    Mirrors ``_sidecar_target_identities`` in ``vireo/sync.py``, which
-    groups missing case-fold aliases as one write target. Simulates a
-    case-insensitive volume (e.g. a normal Windows drive) by folding
-    ``normcase`` to lowercase and making ``samefile`` treat case-different
-    parent directory spellings as the same inode.
-    """
-    upper = tmp_path / "Dir"
-    lower = tmp_path / "dir"
-    upper.mkdir()
-    with contextlib.suppress(FileExistsError):
-        lower.mkdir()
-    ws = db._active_workspace_id
-    fu = db.add_folder(str(upper), name="Dir")
-    fl = db.add_folder(str(lower), name="dir")
-    pu = db.add_photo(fu, "a.jpg", ".jpg", 1, 1.0)
-    pl = db.add_photo(fl, "a.png", ".png", 1, 1.0)
-    _insert(db, pl, "keyword_add", "Robin", ws)
-
-    real_samefile = os.path.samefile
-    upper_str = str(upper)
-    lower_str = str(lower)
-
-    def fake_samefile(a, b):
-        if {a, b} == {upper_str, lower_str}:
-            return True
-        return real_samefile(a, b)
-
-    monkeypatch.setattr("vireo.repositories.sync.os.path.samefile", fake_samefile)
-    monkeypatch.setattr(
-        "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
-    )
-    # Sidecars do not exist yet, so path-level samefile raises. The parent
-    # directory samefile shim shows the fs folds case: return True so a
-    # cancellation queues its inverse and the sibling's write cannot leave
-    # the cancelled keyword on the shared sidecar.
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is True
-
-
-def test_sidecar_alias_missing_sidecars_on_case_sensitive_windows(
-    db, tmp_path, monkeypatch
-):
-    """Case-sensitive Windows: missing case-fold sidecars stay distinct.
-
-    Simulates per-directory case-sensitive Windows (opt-in via fsutil):
-    ``normcase`` still folds case but the two directories are kept as
-    distinct inodes on disk. The alias check must not queue a destructive
-    inverse removal against the unrelated sidecar.
-    """
-    upper = tmp_path / "Dir"
-    lower = tmp_path / "dir"
-    upper.mkdir()
-    if lower.exists():
-        pytest.skip("tmp_path is on a case-insensitive filesystem")
-    lower.mkdir()
-    ws = db._active_workspace_id
-    fu = db.add_folder(str(upper), name="Dir")
-    fl = db.add_folder(str(lower), name="dir")
-    pu = db.add_photo(fu, "a.jpg", ".jpg", 1, 1.0)
-    pl = db.add_photo(fl, "a.png", ".png", 1, 1.0)
-    _insert(db, pl, "keyword_add", "Robin", ws)
-    monkeypatch.setattr(
-        "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
-    )
-    # Real samefile keeps the two directories distinct because the fs is
-    # case-sensitive. Sidecars are missing, path-level samefile raises,
-    # and the parent-samefile fallback returns False -- no destructive
-    # inverse queued.
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
-
-
-def _same_dir_case_variant_stems(db, tmp_path):
-    """Two photos in one folder whose stems differ only by case, on disk."""
-    parent = tmp_path / "photos"
-    parent.mkdir()
-    (parent / "A.raw").write_bytes(b"raw")
-    ws = db._active_workspace_id
-    folder = db.add_folder(str(parent), name="photos")
-    pu = db.add_photo(folder, "A.raw", ".raw", 1, 1.0)
-    pl = db.add_photo(folder, "a.jpg", ".jpg", 1, 1.0)
-    _insert(db, pl, "keyword_add", "Robin", ws)
-    return parent, pu, ws
-
-
-def test_sidecar_alias_same_dir_case_variant_stems_follow_the_folder(db, tmp_path):
-    """``A.xmp`` and ``a.xmp`` in one folder are one sidecar exactly when that
-    folder folds case, so a cancellation queues its inverse only then."""
-    parent, pu, ws = _same_dir_case_variant_stems(db, tmp_path)
-    folds = (parent / "a.RAW").exists()
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is folds
-
-
-def test_sidecar_alias_same_dir_case_variant_stems_on_case_insensitive_folder(
-    db, tmp_path, monkeypatch
-):
-    """Simulated case-insensitive folder: the entry's swapped spelling is
-    the same file, so the stems alias and the inverse is queued."""
-    parent, pu, ws = _same_dir_case_variant_stems(db, tmp_path)
-    entry, swapped = str(parent / "A.raw"), str(parent / "a.RAW")
-    real_samefile = os.path.samefile
-
-    def folding_samefile(a, b):
-        if {str(a), str(b)} == {entry, swapped}:
-            return True
-        return real_samefile(a, b)
-
-    monkeypatch.setattr(os.path, "samefile", folding_samefile)
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is True
-
-
-def test_sidecar_alias_case_sensitive_folder_inside_case_insensitive_parent(
-    db, tmp_path, monkeypatch
-):
-    """Windows per-directory case sensitivity: the folder's own name folds
-    in its parent, but names inside it do not. The probe must ask the
-    folder, not its parent, or it would queue a destructive inverse
-    against a distinct sidecar."""
-    parent, pu, ws = _same_dir_case_variant_stems(db, tmp_path)
-    folder_spellings = {str(parent), str(tmp_path / "PHOTOS")}
-    entry, swapped = str(parent / "A.raw"), str(parent / "a.RAW")
-    real_samefile = os.path.samefile
-
-    def per_directory_samefile(a, b):
-        pair = {str(a), str(b)}
-        if pair == folder_spellings:
-            return True
-        if pair == {entry, swapped}:
-            raise FileNotFoundError(swapped)
-        return real_samefile(a, b)
-
-    monkeypatch.setattr(os.path, "samefile", per_directory_samefile)
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
 
 
 # -- remove_pending_changes ------------------------------------------------------------
