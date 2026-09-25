@@ -595,6 +595,38 @@ def test_load_config_tolerates_corrupt_file(tmp_path, monkeypatch):
     assert models._load_config() == {"models": [], "active_model": None}
 
 
+def test_load_config_backs_up_schema_invalid_models_field(tmp_path, monkeypatch):
+    """A schema-invalid ``models`` field is preserved as ``.corrupt``.
+
+    A hand-edited ``models.json`` might carry a mapping in place of the
+    expected list. Normalizing to ``[]`` in memory without backing up
+    the original file first would let the next ``register_model`` /
+    ``set_active_model`` / ``remove_model`` save the empty default over
+    the only copy of the recoverable data.
+    """
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    original = json.dumps({
+        "models": {
+            "m1": {"id": "m1", "name": "One", "weights_path": "/w1"},
+            "m2": {"id": "m2", "name": "Two", "weights_path": "/w2"},
+        },
+        "active_model": "m1",
+    })
+    cfg_path.write_text(original)
+
+    loaded = models._load_config()
+    assert loaded["models"] == []
+    assert loaded["active_model"] == "m1"
+    assert (tmp_path / "models.json.corrupt").read_text() == original
+
+    # A subsequent write does not overwrite the backed-up original.
+    models.register_model("new", "N", "s", "/w", "d")
+    assert (tmp_path / "models.json.corrupt").read_text() == original
+
+
 def test_load_config_propagates_read_oserror(tmp_path, monkeypatch):
     """A transient read-side OSError must not silently discard the registry.
 

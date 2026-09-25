@@ -220,6 +220,12 @@ def _load_config():
     otherwise the next ``register_model`` / ``set_active_model`` /
     ``remove_model`` would save the empty default over an existing
     registry it never actually managed to read.
+
+    A dict whose ``models`` value is not a list — for example, a hand-
+    edited ``models.json`` where ``models`` is a mapping of id → entry —
+    is normalized to an empty list in memory, but the original file is
+    preserved as ``models.json.corrupt`` first so a subsequent write does
+    not overwrite the only copy of the recoverable data.
     """
     try:
         with open(CONFIG_PATH) as f:
@@ -238,6 +244,13 @@ def _load_config():
             shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
         return _default_config()
     if not isinstance(config.get("models"), list):
+        log.warning(
+            "%s has a %s 'models' field; backing up as .corrupt and "
+            "normalizing to an empty list",
+            CONFIG_PATH, type(config.get("models")).__name__,
+        )
+        with contextlib.suppress(OSError):
+            shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
         config["models"] = []
     return config
 
