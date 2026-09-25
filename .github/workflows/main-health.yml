@@ -55,9 +55,25 @@ jobs:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_ID: ${{ github.event.workflow.id }}
         run: |
           set -euo pipefail
           echo "fire=false" >> "$GITHUB_OUTPUT"
+
+          # A rerun of an older run, or a completion event delivered out of
+          # order, must not overwrite the tracking issue with a stale result:
+          # rerunning an old failure after a newer green would reopen the
+          # incident, and a stale success arriving after a newer failure would
+          # close it. Skip when this run is not the newest completed run for
+          # main; that run's own workflow_run event drives the issue state.
+          latest_id=$(gh run list --repo "$REPO" --workflow "$WORKFLOW_ID" \
+            --branch main --status completed --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty')
+          if [[ -n "$latest_id" && "$latest_id" != "$RUN_ID" ]]; then
+            echo "Run $RUN_ID is superseded by run $latest_id; skipping."
+            exit 0
+          fi
+
           gh label create "$RED_LABEL" --repo "$REPO" --color B60205 \
             --description "Full tests failing on main" 2>/dev/null || true
           gh label create "$FIX_LABEL" --repo "$REPO" --color 0E8A16 \
@@ -99,13 +115,19 @@ jobs:
           fi
           echo "issue=$issue" >> "$GITHUB_OUTPUT"
 
+          # Scope the guard to this incident: an unrelated fix-main PR left
+          # open after its own incident closed would otherwise permanently
+          # block firing for a later, unrelated failure. The routine writes
+          # ``Refs #$ISSUE`` into every fix-main PR body, so a body match
+          # identifies a PR that belongs to this incident.
           open_fixes=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state open \
-            --json number --jq 'length')
+            --json body \
+            --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\"))] | length")
           attempts=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
             --jq "[.[] | select(.body | contains(\"$FIRED_MARKER\"))] | length" \
             | awk '{s += $1} END {print s + 0}')
           if [[ "$open_fixes" != "0" ]]; then
-            echo "A fix-main PR is already open; not asking for another."
+            echo "A fix-main PR for #${issue} is already open; not asking for another."
           elif (( attempts >= MAX_FIX_ATTEMPTS )); then
             echo "Already asked for ${attempts} fixes on #${issue}; leaving it to a human."
           else

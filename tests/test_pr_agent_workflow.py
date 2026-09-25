@@ -482,3 +482,31 @@ def test_red_main_is_tracked_and_routed_to_a_bounded_fix():
     assert all("${{" not in step.get("run", "") for step in steps)
     assert "## Task: `fix-main`" in prompt
     assert "| `fix-main`" in prompt
+
+
+def test_superseded_full_tests_runs_are_skipped():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # A rerun of an older Full tests run, or a completed event delivered out
+    # of order, must not overwrite the tracking issue with a stale result.
+    # The job compares this run to the newest completed run for main and
+    # stops when we are not it.
+    assert 'gh run list --repo "$REPO" --workflow "$WORKFLOW_ID"' in workflow
+    assert "--branch main --status completed --limit 1" in workflow
+    assert '"$latest_id" != "$RUN_ID"' in workflow
+    assert "superseded by run" in workflow
+
+
+def test_open_fix_guard_is_scoped_to_the_active_incident():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+    prompt = _read(ROOT / "docs/pr-agent-routine-prompt.md")
+
+    # A ``fix-main`` PR left open past its incident would otherwise
+    # permanently block firing on later, unrelated incidents. Match by
+    # ``Refs #$issue`` (main-health) / ``Refs #$ISSUE`` (routine prompt)
+    # in the PR body so only PRs belonging to this incident count.
+    assert 'contains(\\"Refs #$issue\\")' in workflow
+    assert "Refs #$ISSUE" in prompt
+    # And the prompt must actually pipe the PR body into the check, not
+    # the raw count that was there before.
+    assert "--json body" in prompt

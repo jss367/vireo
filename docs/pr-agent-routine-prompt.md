@@ -305,10 +305,14 @@ Fired by `main-health.yml` when the post-merge `Full tests` run failed on
 the open `main-red` tracking issue, and `Workflow run` is the failing run.
 
 1. Check the situation is still live. Stop silently if the issue is closed
-   (a later run went green), or if a PR labelled `fix-main` is already open:
+   (a later run went green), or if a `fix-main` PR for this same issue is
+   already open. The open-PR guard scopes to `Refs #$ISSUE` because an
+   unrelated `fix-main` PR left open past its own incident would otherwise
+   permanently block firing for this one:
    ```bash
    test "$(gh issue view "$ISSUE" --json state -q .state)" = OPEN || exit 0
-   test "$(gh pr list --label fix-main --state open --json number -q length)" = 0 || exit 0
+   test "$(gh pr list --label fix-main --state open --json body \
+     -q "[.[] | select((.body // \"\") | contains(\"Refs #$ISSUE\"))] | length")" = 0 || exit 0
    ```
 2. Read the failure. The run covers Linux, macOS and Windows; a test that
    fails on one OS only is usually a platform assumption in the test or the
@@ -334,13 +338,14 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
 6. Immediately before pushing, repeat both checks from step 1. Diagnosis and
    validation take real wall-clock, and in that window a newer `Full tests`
    run may have gone green (closing the issue), or another accepted routine
-   invocation may have opened its own `fix-main` PR. Publishing on top of
-   stale checks produces an unnecessary or duplicate fix; stop silently
-   instead. This mirrors the reconciliation flow's revalidation of live
-   state right before publication:
+   invocation may have opened its own `fix-main` PR for this issue.
+   Publishing on top of stale checks produces an unnecessary or duplicate
+   fix; stop silently instead. This mirrors the reconciliation flow's
+   revalidation of live state right before publication:
    ```bash
    test "$(gh issue view "$ISSUE" --json state -q .state)" = OPEN || exit 0
-   test "$(gh pr list --label fix-main --state open --json number -q length)" = 0 || exit 0
+   test "$(gh pr list --label fix-main --state open --json body \
+     -q "[.[] | select((.body // \"\") | contains(\"Refs #$ISSUE\"))] | length")" = 0 || exit 0
    ```
 7. Commit, push, and open a ready-for-review PR against `main` with the
    `fix-main` label. The body names the failing run, lists each failure with
