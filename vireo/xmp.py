@@ -549,7 +549,7 @@ def _wrappers_carry_qualifier(prop):
         return False
     chain = [prop, *wrappers]
     next_in_chain = [*wrappers, bag]
-    for container, expected in zip(chain, next_in_chain):
+    for container, expected in zip(chain, next_in_chain, strict=True):
         for actual in container:
             if actual is not expected:
                 return True
