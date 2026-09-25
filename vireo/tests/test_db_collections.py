@@ -430,6 +430,44 @@ def test_photo_id_key_normalizes_the_spellings_sqlite_matches():
     assert _photo_id_key("٢") is None
     assert _photo_id_key("١٢٣") is None
     assert _photo_id_key("०") is None
+    # Digit-only spellings must not lose precision above 2^53: Python's
+    # ``float`` rounds them, but SQLite stores TEXT with integer affinity
+    # as a 64-bit INTEGER exactly, so we mirror SQLite by parsing pure
+    # integer forms through ``int``.
+    assert _photo_id_key("9007199254740993") == 9007199254740993
+    assert _photo_id_key("-9007199254740993") == -9007199254740993
+    assert _photo_id_key(" 9007199254740993 ") == 9007199254740993
+    assert _photo_id_key("+9007199254740993") == 9007199254740993
+    # Decimal and exponent spellings still fall back to ``float`` because
+    # SQLite's own REAL conversion loses the same precision there.
+    assert _photo_id_key("9007199254740993.0") == 9007199254740992
+    assert _photo_id_key("9007199254740993e0") == 9007199254740992
+
+
+def test_remap_collection_photo_ids_preserves_large_integer_string_ids(db):
+    """A digit-only string above 2^53 names a photo id exactly.
+
+    SQLite parses ``"9007199254740993"`` bound against ``p.id`` as a 64-bit
+    INTEGER without rounding, so the rules engine's ``photo_ids`` match hits
+    that photo. If ``_photo_id_key`` collapsed that spelling through
+    ``float()`` it would remap the neighbouring id instead, leaving a stale
+    entry that silently rejoins the next reused id.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    big = 9007199254740993
+    rules = [{"field": "photo_ids", "value": [str(big), big + 2]}]
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("big", json.dumps(rules), other_ws),
+    ).lastrowid
+    # Remap the exact id; the neighbouring id must be left alone.
+    assert remap_collection_photo_ids(db.conn, {big: 7, big + 1: None}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    assert stored == [{"field": "photo_ids", "value": [7, big + 2]}]
 
 
 def test_needs_review_rule(db, folder):

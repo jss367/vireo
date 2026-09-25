@@ -2696,6 +2696,7 @@ _SQLITE_NUMERIC_TEXT_RE = re.compile(
     r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$",
     re.ASCII,
 )
+_SQLITE_INTEGER_TEXT_RE = re.compile(r"^[+-]?\d+$", re.ASCII)
 
 
 def _photo_id_key(value):
@@ -2716,6 +2717,14 @@ def _photo_id_key(value):
     numeric affinity, so binding ``"٢"`` or ``"1_0"`` stays TEXT and never
     matches an integer id. Only accept strings SQLite would convert with
     numeric affinity so we do not rewrite an unrelated id.
+
+    Digit-only spellings must parse through ``int``: Python's ``float`` rounds
+    integers above 2^53 to the nearest representable double, so a rule value
+    of ``"9007199254740993"`` would become ``9007199254740992`` and rewrite
+    the wrong photo. SQLite parses that same TEXT as a 64-bit INTEGER exactly,
+    so we mirror that by parsing pure-integer spellings with ``int`` and only
+    falling back to ``float`` for decimal or exponent forms (where SQLite's
+    own REAL conversion loses the same precision).
     """
     if isinstance(value, bool):
         return 1 if value else 0
@@ -2729,6 +2738,11 @@ def _photo_id_key(value):
         text = value.strip()
         if not text or not _SQLITE_NUMERIC_TEXT_RE.match(text):
             return None
+        if _SQLITE_INTEGER_TEXT_RE.match(text):
+            try:
+                return int(text)
+            except ValueError:
+                return None
         try:
             as_float = float(text)
         except ValueError:
