@@ -515,21 +515,25 @@ def _document_uri_for(elem, parent_map):
 
 
 def _effective_xml_base(elem, parent_map):
-    """Return the effective ``xml:base`` URI for ``elem``.
+    """Return the effective ``xml:base`` URI for ``elem``, or the empty string.
 
-    Per the XML Base recommendation, an element's base URI for
-    resolving a relative URI reference in one of its own attributes
-    is the composition of every ancestor's ``xml:base'', starting
-    from the document's base URI (the sidecar's file URI when it
-    was registered via :func:`_register_document_uri`) and resolving
-    each successive ``xml:base'' against the previous. That
-    seeding lets a relative ``xml:base="sub/"'' compose into an
-    absolute path -- otherwise ``photo.jpg'' under such a base
-    would stay relative and drift out of alignment with a sibling
-    absolute-URI Description that names the same photo. Missing
-    ``xml:base'' declarations contribute nothing; a bare
-    ``xml:base'' on ``rdf:RDF'' or higher is honored just as one
-    directly on the Description would be.
+    Composes every ancestor's ``xml:base'' per the XML Base
+    recommendation. When at least one ``xml:base'' is declared and
+    the composed value is still a relative reference, resolves it
+    against the sidecar's document URI so ``xml:base="sub/"''
+    becomes an absolute path (Codex finding: otherwise a relative
+    base leaves ``photo.jpg'' relative and it can't fold with a
+    sibling absolute-URI Description).
+
+    Returns ``""'' when no ``xml:base'' is declared anywhere in the
+    ancestor chain, even if the sidecar's document URI is
+    registered: an *empty* ``rdf:about'' should keep the
+    enclosing-photo convention rather than resolving into the
+    sidecar's own URI (which would knock the "empty subject wins"
+    priority off in ``_photo_subject''). ``_description_subject''
+    handles the non-empty relative case separately, using the
+    document URI as an implicit resolver only when the reference
+    itself isn't empty.
     """
     xml_base = f"{{{NS_XML}}}base"
     chain = []
@@ -538,11 +542,19 @@ def _effective_xml_base(elem, parent_map):
         chain.append(current)
         current = parent_map.get(current)
     chain.reverse()
-    base = _document_uri_for(elem, parent_map) or ""
+    base = ""
+    declared = False
     for anc in chain:
         b = anc.get(xml_base)
         if b is not None:
+            declared = True
             base = urllib.parse.urljoin(base, b) if base else b
+    if not declared:
+        return ""
+    if not urllib.parse.urlparse(base).scheme:
+        doc_uri = _document_uri_for(elem, parent_map)
+        if doc_uri:
+            base = urllib.parse.urljoin(doc_uri, base)
     return base
 
 
@@ -2225,7 +2237,25 @@ class SidecarEditor:
         if not remove_keys:
             return False
         exact = set(keywords_to_remove) if keep_exact else set()
+        # In canonicalization mode (``keep_exact=True'') the caller
+        # is stripping variant spellings so ``add_keywords'' can
+        # write the canonical. For a QUALIFIED variant, dropping
+        # the ``rdf:li'' wholesale would silently discard whatever
+        # ``foo:source'', ``rdf:ID'' or other metadata a user or
+        # external tool authored on it; rewrite its nested value to
+        # the canonical spelling in place instead, mirroring what
+        # ``set_location_keywords'' does. Only relevant to the flat
+        # branch: hierarchical segments don't have a 1:1 canonical
+        # in ``keywords_to_remove'' (a variant can share a segment
+        # with multiple keywords), so a qualified hierarchical
+        # variant is left in place entirely.
+        canonical_by_key = (
+            {keyword_match_key(kw): kw for kw in keywords_to_remove}
+            if keep_exact
+            else {}
+        )
         removed = []
+        parent_map = _build_parent_map(self._root) if keep_exact else None
 
         for bag in _photo_scoped_bags(self._root, f"{{{NS_DC}}}subject"):
             for li in bag.findall(f"{{{NS_RDF}}}li"):
@@ -2233,6 +2263,18 @@ class SidecarEditor:
                 if not value or value in exact:
                     continue
                 if keyword_match_key(value) in remove_keys:
+                    if (
+                        keep_exact
+                        and _li_carries_qualifier(li, parent_map)
+                    ):
+                        canonical = canonical_by_key.get(
+                            keyword_match_key(value),
+                        )
+                        if canonical and _update_simple_property_value(
+                            li, canonical,
+                        ):
+                            self._dirty = True
+                        continue
                     removed.append(value)
                     bag.remove(li)
 
@@ -2252,6 +2294,17 @@ class SidecarEditor:
                     segments = {keyword_match_key(s) for s in value.split("|")}
                     segments.discard("")
                     if segments & remove_keys:
+                        if (
+                            keep_exact
+                            and _li_carries_qualifier(li, parent_map)
+                        ):
+                            # See the flat branch: a qualified
+                            # hierarchical variant carries user
+                            # metadata a plain drop would lose. No
+                            # canonical is available here (segments
+                            # match by key, not by whole path), so
+                            # leave the item entirely alone.
+                            continue
                         removed.append(value)
                         bag.remove(li)
 

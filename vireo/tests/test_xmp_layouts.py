@@ -397,6 +397,84 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_empty_rdf_about_still_wins_alongside_absolute_auxiliary(tmp_path):
+    """A photo Description with empty ``rdf:about'' wins over an auxiliary URI.
+
+    After seeding ``_effective_xml_base'' with the sidecar's
+    document URI, an empty ``rdf:about'' would previously resolve to
+    that document URI -- becoming just another photo-candidate URI
+    beside a non-fragment auxiliary like ``rdf:about="uuid:aux"''.
+    ``_photo_subject'' then saw two candidates and fell back to
+    empty, but ``_top_descriptions'' filter no longer matched the
+    empty-``rdf:about'' Description either. The convention is
+    restored: an empty (or absent) ``rdf:about'' stays in the
+    empty bucket, so the photo's rating and keywords surface even
+    when an auxiliary URI Description sits alongside it.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='uuid:aux'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='1'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+
+    metadata = read_sync_preview_metadata(str(path))
+    # The photo's rating (``4'') surfaces; the auxiliary's ``1'' is
+    # not confused with it.
+    assert metadata["rating"] == "4"
+
+
+def test_remove_keywords_canonicalization_preserves_qualified_variant(tmp_path):
+    """Canonicalization rewrites a qualified variant in place, not drop it.
+
+    ``sync.py::_remove_planned_keywords'' calls ``remove_keywords''
+    with ``keep_exact=True'' before ``add_keywords'' writes the
+    canonical spelling. When the variant is qualified, dropping
+    the ``rdf:li'' silently discards its ``foo:source'' /
+    ``rdf:ID'' / other qualifier metadata. The canonicalization
+    path now updates the nested ``rdf:value'' to the canonical
+    spelling in place -- keeping the qualifier chain -- and the
+    following ``add_keywords'' sees the canonical already present
+    and skips inserting a plain duplicate.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:foo='{foo_ns}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>bird</rdf:value>"
+        f"<foo:source>user</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # Canonicalize "bird" to "Bird" via keep_exact removal (as
+    # sync.py does before its follow-up add_keywords).
+    editor = SidecarEditor(path_str)
+    editor.remove_keywords({"Bird"}, keep_exact=True)
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    items = list(root.iter(f"{{{NS_RDF}}}li"))
+    # One item survives -- the qualified rdf:li with its
+    # ``foo:source'' intact -- and its value is the canonical "Bird".
+    assert len(items) == 1
+    survivor = items[0]
+    assert (survivor.find(f"{{{NS_RDF}}}value").text or "") == "Bird"
+    assert survivor.findtext(f"{{{foo_ns}}}source") == "user"
+
+
 def test_read_keywords_uses_document_uri_resolution(tmp_path):
     """``read_keywords'' honors the same subject resolution as the sync preview.
 
