@@ -870,18 +870,30 @@
   }
 
   function renderGroupWarning(group) {
-    // Three levels of severity:
+    // Severity, high to low:
     //  - all_missing: every file in the group is gone — nothing to keep.
+    //  - all_offline: every copy is on an unreachable volume — state unknown,
+    //      don't propose orphan cleanup or promote a surviving twin.
     //  - winner missing (status-dependent):
     //      • unresolved: Rule 0 promoted a surviving twin into the KEEP slot.
     //      • resolved: the kept row in the DB is fixed; if a loser file still
     //        exists it's the only surviving copy. Trashing it = data loss.
-    //  - any loser missing: informational; trash actions will be no-ops for it.
+    //  - winner offline: KEEP card sits on an unreachable volume; the file may
+    //      well be there. Never phrase this as "missing".
+    //  - any loser missing/offline: informational; trash actions will be no-ops
+    //      for it.
     var allMissing = group.all_missing === true;
+    var allOffline = group.all_offline === true;
     var winner = group.winner || {};
     var losers = group.losers || [];
-    var winnerMissing = winner.exists === false;
-    var anyLoserMissing = losers.some(function(l) { return l.exists === false; });
+    var winnerOffline = winner.volume_offline === true;
+    var winnerMissing = winner.exists === false && !winnerOffline;
+    var anyLoserMissing = losers.some(function(l) {
+      return l.exists === false && l.volume_offline !== true;
+    });
+    var anyLoserOffline = losers.some(function(l) {
+      return l.volume_offline === true;
+    });
     if (group.empty_file_group) {
       return '<div class="group-warning severe">' +
         '<b>Zero-byte image files detected.</b> These are not real duplicate photos; ' +
@@ -895,6 +907,13 @@
         '<b>All files in this group are missing on disk.</b> ' +
         'Nothing to delete — Vireo just needs to clean up the orphaned DB rows. ' +
         'Re-scanning the affected folders will mark these as missing.' +
+        '</div>';
+    }
+    if (allOffline) {
+      return '<div class="group-warning severe">' +
+        '<b>Every copy in this group is on a volume that isn’t reachable right now.</b> ' +
+        'Their state is unknown — reconnect the drive or NAS and rescan before ' +
+        'applying any action here.' +
         '</div>';
     }
     if (winnerMissing) {
@@ -913,10 +932,22 @@
         'A surviving copy was promoted instead — check the KEEP card before applying.' +
         '</div>';
     }
+    if (winnerOffline) {
+      return '<div class="group-warning">' +
+        '<b>Heads up:</b> the KEEP file is on a volume that isn’t reachable right now — ' +
+        'its state is unknown. Reconnect the drive or NAS before applying.' +
+        '</div>';
+    }
     if (anyLoserMissing) {
       return '<div class="group-warning">' +
         'One or more extra copies are already missing on disk. They’ll be ' +
         'rejected in the DB; trash actions will skip them.' +
+        '</div>';
+    }
+    if (anyLoserOffline) {
+      return '<div class="group-warning">' +
+        'One or more extra copies are on a volume that isn’t reachable right now. ' +
+        'Trash actions will skip them until the volume comes back.' +
         '</div>';
     }
     return '';

@@ -662,6 +662,70 @@ def test_duplicate_scan_offline_copy_is_not_a_missing_loser(tmp_path, monkeypatc
     assert prop["losers"][0]["reason"] != "file missing on disk"
 
 
+def test_duplicate_scan_all_offline_is_not_reported_as_all_missing(
+    tmp_path, monkeypatch,
+):
+    """Every copy on an unreachable volume means unknown state, not missing:
+    the proposal must not tell the UI to clean up 'orphaned' DB rows for a
+    NAS that just isn't mounted."""
+    import duplicate_scan
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    nas_a = tmp_path / "nas_a"
+    nas_b = tmp_path / "nas_b"
+    nas_a.mkdir()
+    nas_b.mkdir()
+    a_fid = db.add_folder(str(nas_a))
+    b_fid = db.add_folder(str(nas_b))
+    for fid, name in ((a_fid, "owl.jpg"), (b_fid, "owl-2.jpg")):
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, extension, file_size,"
+            " file_mtime, file_hash, flag) VALUES (?, ?, '.jpg', 1, 100.0, 'H', 'none')",
+            (fid, name),
+        )
+    db.conn.commit()
+    # No files on disk anywhere, but both folders are on offline volumes.
+    monkeypatch.setattr(duplicate_scan, "_volume_offline", lambda path: True)
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
+
+    [prop] = result["proposals"]
+    assert prop["all_missing"] is False, (
+        "offline volumes must not count as missing"
+    )
+    assert prop["all_offline"] is True
+    assert prop["winner"]["volume_offline"] is True
+
+
+def test_duplicate_scan_all_missing_ignores_offline_flag_when_files_gone(
+    tmp_path, monkeypatch,
+):
+    """A truly-missing group on a reachable volume still gets ``all_missing``."""
+    import duplicate_scan
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    a = tmp_path / "a"
+    a.mkdir()
+    fid = db.add_folder(str(a))
+    for name in ("owl.jpg", "owl-2.jpg"):
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, extension, file_size,"
+            " file_mtime, file_hash, flag) VALUES (?, ?, '.jpg', 1, 100.0, 'H', 'none')",
+            (fid, name),
+        )
+    db.conn.commit()
+    # Volume is reachable; the files are just gone.
+    monkeypatch.setattr(duplicate_scan, "_volume_offline", lambda path: False)
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
+
+    [prop] = result["proposals"]
+    assert prop["all_missing"] is True
+    assert prop["all_offline"] is False
+
+
 def test_duplicate_scan_reopen_keeps_hand_rejected_rows_rejected(resolved_pair):
     from duplicate_scan import run_duplicate_scan
 

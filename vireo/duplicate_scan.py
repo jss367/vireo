@@ -136,7 +136,19 @@ def _build_unresolved_proposal(db, group):
         linfo = dict(info_by_id[lid])
         linfo["reason"] = reason
         losers.append(linfo)
-    all_missing = not any(info["exists"] for info in info_by_id.values())
+    # ``all_missing`` is the "nothing on disk to keep" verdict the UI uses to
+    # recommend orphan cleanup. Offline volumes are unknown, not missing —
+    # counting them here would tell the user their archive is gone whenever a
+    # NAS is unplugged. ``all_offline`` lets the UI say "reconnect to check"
+    # instead.
+    all_missing = not any(
+        info["exists"] or info["volume_offline"]
+        for info in info_by_id.values()
+    )
+    all_offline = (
+        not all_missing
+        and not any(info["exists"] for info in info_by_id.values())
+    )
     empty_file_group = _is_empty_file_group(
         group["file_hash"], info_by_id.values(),
     )
@@ -146,6 +158,7 @@ def _build_unresolved_proposal(db, group):
         "winner": info_by_id[winner_id],
         "losers": losers,
         "all_missing": all_missing,
+        "all_offline": all_offline,
         "empty_file_group": empty_file_group,
     }
 
@@ -211,7 +224,16 @@ def _build_resolved_proposal(db, group):
         linfo["reason"] = reasons.get(r["id"], "auto-resolved")
         linfo["rejected"] = True
         losers.append(linfo)
-    all_missing = not any(info["exists"] for info in info_by_id.values())
+    # See ``_build_unresolved_proposal`` for why offline volumes are unknown
+    # rather than missing.
+    all_missing = not any(
+        info["exists"] or info["volume_offline"]
+        for info in info_by_id.values()
+    )
+    all_offline = (
+        not all_missing
+        and not any(info["exists"] for info in info_by_id.values())
+    )
     empty_file_group = _is_empty_file_group(
         group["file_hash"], info_by_id.values(),
     )
@@ -224,6 +246,7 @@ def _build_resolved_proposal(db, group):
         "winner": info_by_id[kept[0]["id"]],
         "losers": losers,
         "all_missing": all_missing,
+        "all_offline": all_offline,
         "empty_file_group": empty_file_group,
     }
 
