@@ -525,6 +525,37 @@ def _property_bag_and_wrappers(prop):
     return None, []
 
 
+def _wrappers_carry_qualifier(prop):
+    """True if the value structure has a sibling qualifier element.
+
+    RDF/XML's qualified property form places the value in ``rdf:value``
+    (or a nested ``rdf:Bag`` inside it) and lists the qualifiers as
+    sibling children alongside it. For example
+    ``<dc:subject rdf:parseType='Resource'><rdf:value>...</rdf:value>
+    <foo:source>camera</foo:source></dc:subject>``: ``foo:source``
+    applies to the ``dc:subject`` value. These qualifiers don't show
+    up as ``xml:*`` attributes anywhere, but they still carry meaning
+    that a merge would silently drop when the duplicate container is
+    removed.
+
+    Walk the wrapper chain from ``prop`` to the bag's parent and
+    return True as soon as any container has a direct child other
+    than the next expected element in the chain. The chain ends at
+    the ``rdf:Bag``; its ``rdf:li`` items are the value, not
+    qualifiers, so we stop before descending into it.
+    """
+    bag, wrappers = _property_bag_and_wrappers(prop)
+    if bag is None:
+        return False
+    chain = [prop, *wrappers]
+    next_in_chain = [*wrappers, bag]
+    for container, expected in zip(chain, next_in_chain):
+        for actual in container:
+            if actual is not expected:
+                return True
+    return False
+
+
 def _photo_scoped_bags(root, tag):
     """Yield each ``rdf:Bag`` under a photo-scoped Description's property.
 
@@ -1036,12 +1067,18 @@ class SidecarEditor:
             # or both) between the property and the bag is also an
             # ancestor of the ``rdf:li`` items, so an ``xml:lang`` or
             # other inherited qualifier on any of them attaches to
-            # every item just as if it were on the bag itself.
+            # every item just as if it were on the bag itself. And a
+            # sibling qualifier element inside the qualified property
+            # (``<dc:subject rdf:parseType='Resource'><rdf:value>...
+            # </rdf:value><foo:source>...</foo:source></dc:subject>``)
+            # also counts: it is not an attribute anywhere, but the
+            # duplicate cannot be removed without silently dropping it.
             return (
                 _has_inherited_qualifier(owner)
                 or _has_inherited_qualifier(prop)
                 or any(_has_inherited_qualifier(w) for w in wrappers)
                 or (bag_el is not None and _has_inherited_qualifier(bag_el))
+                or _wrappers_carry_qualifier(prop)
             )
 
         if found:
@@ -1085,9 +1122,11 @@ class SidecarEditor:
             if extra is elem:
                 continue
             extra_bag, extra_wrappers = _property_bag_and_wrappers(extra)
-            # Container-level qualifiers (an ``xml:lang`` on the owning
-            # Description, the property element, an ``rdf:value`` /
-            # ``rdf:Description`` wrapper, or the ``rdf:Bag`` itself)
+            # Container-level qualifiers -- an ``xml:lang`` on the
+            # owning Description, the property element, an
+            # ``rdf:value`` / ``rdf:Description`` wrapper, or the
+            # ``rdf:Bag`` itself, and any sibling qualifier element
+            # alongside the value inside the qualified property --
             # apply to every item inside the container; folding the
             # items into the target bag would silently drop the
             # qualifier when this duplicate is removed. Leave a
@@ -1103,6 +1142,7 @@ class SidecarEditor:
                     extra_bag is not None
                     and _has_inherited_qualifier(extra_bag)
                 )
+                or _wrappers_carry_qualifier(extra)
             ):
                 continue
             if extra_bag is not None:

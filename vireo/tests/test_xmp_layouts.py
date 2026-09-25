@@ -1560,6 +1560,70 @@ def test_xml_lang_on_rdf_value_wrapper_counts_as_container_qualifier(tmp_path):
     assert unqualified_items == {"Heron", "Kiwi"}
 
 
+def test_element_qualifiers_on_qualified_keyword_bag_survive_merge(tmp_path):
+    """A ``rdf:parseType='Resource'`` bag with a sibling qualifier element
+    is left alone during a keyword addition.
+
+    The qualified property form permits qualifiers as sibling child
+    elements next to ``rdf:value`` (or the bag). They are not
+    attributes, so an attribute-only qualifier check misses them: an
+    ordinary ``add_keywords`` would then merge the duplicate's items
+    into the target and remove the whole element, silently deleting
+    the qualifier. Detect those sibling elements too and leave the
+    qualified container in place.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:foo='{foo_ns}'>"
+        f"<dc:subject rdf:parseType='Resource'>"
+        f"<rdf:value>"
+        f"<rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag>"
+        f"</rdf:value>"
+        f"<foo:source>camera</foo:source>"
+        f"</dc:subject>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+
+    # The qualified `dc:subject` still holds Sparrow and its qualifier.
+    qualified = [
+        s for s in root.iter(SUBJECT)
+        if s.find(f"{{{foo_ns}}}source") is not None
+    ]
+    assert len(qualified) == 1
+    q_items = sorted(
+        li.text for li in qualified[0].iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert q_items == ["Sparrow"]
+    sources = qualified[0].findall(f"{{{foo_ns}}}source")
+    assert len(sources) == 1 and sources[0].text == "camera"
+
+    # The unqualified `dc:subject` picked up the new keyword next to Heron.
+    unqualified = [
+        s for s in root.iter(SUBJECT)
+        if s.find(f"{{{foo_ns}}}source") is None
+    ]
+    u_items = set()
+    for s in unqualified:
+        for li in s.iter(f"{{{NS_RDF}}}li"):
+            if li.text:
+                u_items.add(li.text)
+    assert u_items == {"Heron", "Kiwi"}
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
