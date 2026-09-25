@@ -347,8 +347,11 @@ def test_merge_is_synchronous_and_retried_only_for_the_authorized_tested_head():
 def test_merge_jobs_can_read_the_exact_heads_tests_run():
     workflow = _read(WORKFLOW)
 
+    # ``actions: write`` includes reading the Tests run; the write half lets
+    # the job dispatch the post-merge suite (see
+    # test_every_bot_merge_starts_the_post_merge_suite).
     merge_permissions = (
-        "permissions:\n      actions: read\n      contents: write\n      issues: read\n      pull-requests: write"
+        "permissions:\n      actions: write\n      contents: write\n      issues: read\n      pull-requests: write"
     )
     assert workflow.count(merge_permissions) == 4
 
@@ -705,3 +708,35 @@ def test_fix_main_dispatch_is_gated_until_stored_routine_prompt_is_synced():
     assert any(
         "vars.MAIN_HEALTH_ENABLE_FIX_MAIN != 'true'" in step.get("if", "") for step in steps
     )
+
+
+POST_MERGE_ACTION = ROOT / ".github/actions/post-merge-dispatch/action.yml"
+
+
+def test_every_bot_merge_starts_the_post_merge_suite():
+    # Pushes made with GITHUB_TOKEN start no workflows, so a PR agent merge
+    # would never run Full tests on main. Every job that squash-merges must
+    # dispatch it explicitly (workflow_dispatch is exempt from that rule).
+    jobs = yaml.safe_load(_read(WORKFLOW))["jobs"]
+    merging = {
+        name: job for name, job in jobs.items()
+        if any("gh pr merge" in step.get("run", "") for step in job.get("steps", []))
+    }
+    assert len(merging) == 4
+    for name, job in merging.items():
+        steps = job["steps"]
+        merge_index = next(
+            i for i, step in enumerate(steps) if "gh pr merge" in step.get("run", "")
+        )
+        merge = steps[merge_index]
+        assert merge.get("id") == "merge", name
+        assert 'echo "merged=true"' in merge["run"], name
+        dispatch = steps[merge_index + 1]
+        assert dispatch["uses"] == "./.github/actions/post-merge-dispatch", name
+        assert dispatch["if"] == "steps.merge.outputs.merged == 'true'", name
+        assert job["permissions"]["actions"] == "write", name
+
+    action = _read(POST_MERGE_ACTION)
+    assert 'gh workflow run test-main.yml --repo "$REPO" --ref main' in action
+    assert "deploy-website.yml" in action
+    assert "workflow_dispatch" in _read(FULL_TEST_WORKFLOW)

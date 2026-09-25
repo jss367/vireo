@@ -1,0 +1,40 @@
+name: Start post-merge workflows on main
+description: >-
+  Dispatch the push-triggered main workflows after a merge made with
+  GITHUB_TOKEN. GitHub does not start workflows for pushes made with that
+  token, so without this a bot merge never runs the full suite.
+
+inputs:
+  repo:
+    description: Repository in owner/name form.
+    required: true
+  pr:
+    description: The PR that was just merged.
+    required: true
+  token:
+    description: Token with actions:write and pull-requests:read.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch main workflows
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+      run: |
+        set -euo pipefail
+        # test-main.yml ("Full tests") runs the three-OS suite, enforces the
+        # coverage gate, publishes the test-impact map, and feeds
+        # main-health.yml. workflow_dispatch is exempt from the GITHUB_TOKEN
+        # rule, and its concurrency group collapses back-to-back merges.
+        gh workflow run test-main.yml --repo "$REPO" --ref main
+        echo "Dispatched Full tests on main after merging #${PR}."
+        # deploy-website.yml deploys on pushes that touch website/**.
+        if gh pr view "$PR" --repo "$REPO" --json files \
+            --jq '.files[].path' | grep -q '^website/'; then
+          gh workflow run deploy-website.yml --repo "$REPO" --ref main
+          echo "Dispatched the website deploy: #${PR} changed website/."
+        fi
