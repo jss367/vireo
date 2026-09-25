@@ -2386,6 +2386,96 @@ def test_bag_xml_lang_reset_cancels_property_language_for_reuse(tmp_path):
     assert items == ["Heron", "Owl"]
 
 
+def test_gps_backup_captures_plain_value_not_qualified_sibling(tmp_path):
+    """Backup snapshots the plain occurrence Vireo will overwrite.
+
+    When both a plain GPS occurrence and a differently-valued
+    qualified sibling (``foo:source="camera"'') exist,
+    ``set_gps_location'' used to back up whichever ``_get(attr)''
+    returned -- the qualified value, since it scores higher for
+    reads. But Vireo overwrites only the plain occurrence, so on
+    ``remove_vireo_gps_location'' the restore wrote the qualified
+    coordinate into the plain slot -- the plain's original
+    coordinate was permanently lost. The backup now targets the
+    plain occurrence that will be overwritten.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:exif='{NS_EXIF}' xmlns:foo='{foo_ns}'>"
+        f"<exif:GPSLatitude>10,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude>20,0.0E</exif:GPSLongitude>"
+        f"<exif:GPSLatitude foo:source='camera'>40,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude foo:source='camera'>50,0.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_gps_location(path_str, -33.5, -70.25)
+    remove_vireo_gps_location(path_str)
+
+    root = ET.parse(path_str).getroot()
+    plain_lat = [
+        (lat.text or "").strip()
+        for lat in root.iter(GPS_LATITUDE)
+        if not lat.get(f"{{{foo_ns}}}source")
+    ]
+    plain_lon = [
+        (lon.text or "").strip()
+        for lon in root.iter(GPS_LONGITUDE)
+        if not lon.get(f"{{{foo_ns}}}source")
+    ]
+    qualified_lat = [
+        (lat.text or "").strip()
+        for lat in root.iter(GPS_LATITUDE)
+        if lat.get(f"{{{foo_ns}}}source") == "camera"
+    ]
+    # The plain occurrence's own ``10,0.0N''/``20,0.0E'' is restored,
+    # not the qualified sibling's coordinate; and the qualified
+    # sibling still holds its original ``40,0.0N''/``50,0.0E''.
+    assert plain_lat == ["10,0.0N"]
+    assert plain_lon == ["20,0.0E"]
+    assert qualified_lat == ["40,0.0N"]
+
+
+def test_sync_preview_reads_vireo_plain_gps_while_marker_is_set(tmp_path):
+    """Vireo's own plain GPS is authoritative while the marker is present.
+
+    A pre-existing qualified GPS (``foo:source="camera"'') scores
+    higher than a plain sibling for ``_get_property'' authority.
+    Before this fix, that meant reads after ``set_gps_location''
+    kept returning the old camera coordinate while the sidecar
+    also carried Vireo's ``vireo:gpsSource="assigned"'' marker and
+    a plain occurrence with Vireo's new value. The sync preview
+    now checks the marker and reads the plain occurrence when it
+    is set, so callers see the assignment they just wrote.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:exif='{NS_EXIF}' xmlns:foo='{foo_ns}'>"
+        f"<exif:GPSLatitude foo:source='camera'>40,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude foo:source='camera'>50,0.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_gps_location(path_str, -33.5, -70.25)
+
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["location_source"] == "assigned"
+    assert metadata["location"]["latitude"] == pytest.approx(-33.5)
+    assert metadata["location"]["longitude"] == pytest.approx(-70.25)
+
+
 def test_qualified_only_gps_survives_vireo_write_then_remove_round_trip(tmp_path):
     """A pre-Vireo qualified-only GPS survives a Vireo write-then-remove.
 

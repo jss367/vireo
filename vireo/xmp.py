@@ -1052,6 +1052,65 @@ def _property_occurrence_score(entry, parent_map=None):
     return 1
 
 
+def _is_plain_property_occurrence(entry, parent_map):
+    """True when the ``(owner, child)`` entry is a plain occurrence.
+
+    An attribute-form entry (``child is None``) is plain when its
+    owner Description has no effective inherited ``xml:lang''; a
+    child-element entry is plain when it carries no own qualifier
+    structure or attributes AND no effective inherited ``xml:lang''
+    reaches it.
+    """
+    owner, child = entry
+    if child is None:
+        return not _ancestor_carries_xml_qualifier(owner, parent_map)
+    if _simple_prop_carries_qualifier(child):
+        return False
+    return not _ancestor_carries_xml_qualifier(child, parent_map)
+
+
+def _plain_property_occurrences(root, name):
+    """Return plain occurrences of ``name'', child-element form first.
+
+    Child-element forms are the canonical XMP serialization and
+    every write path targets one first, so callers that need "the
+    plain occurrence Vireo would write to next" iterate this rather
+    than the raw :func:`_property_occurrences` list (which returns
+    attribute-form ahead of child elements per Description).
+    """
+    parent_map = _build_parent_map(root)
+    plain = [
+        entry for entry in _property_occurrences(root, name)
+        if _is_plain_property_occurrence(entry, parent_map)
+    ]
+    plain.sort(key=lambda entry: 0 if entry[1] is not None else 1)
+    return plain
+
+
+def _get_plain_property_value(root, name):
+    """Return the value of the first plain occurrence, or None.
+
+    Callers that need Vireo's own written value -- a coordinate
+    Vireo just assigned via ``_set_plain_property_value'', for
+    instance -- read through this helper instead of
+    :func:`_get_property`. It ignores qualified occurrences another
+    tool authored (which score higher for read authority but don't
+    reflect Vireo's own write), so the sync preview shows what
+    Vireo actually wrote while Vireo owns the property. Child-element
+    plain forms are preferred over attribute forms so the reader
+    stays in sync with the writer's own preference.
+    """
+    plain = _plain_property_occurrences(root, name)
+    if not plain:
+        return None
+    owner, child = plain[0]
+    if child is None:
+        return owner.get(name)
+    if f"{{{NS_RDF}}}value" in child.attrib or len(child):
+        return _qualified_value(child)
+    return (child.text or "").strip()
+
+
 def _get_property(root, name):
     """Return a simple property's value from whichever form stores it."""
     found = _property_occurrences(root, name)
@@ -1219,10 +1278,27 @@ def _parse_gps_coordinate(value):
     return decimal
 
 
-def _sync_preview_gps_pair(root, namespace=NS_EXIF, prefix=""):
-    """Read one current or backed-up GPS pair for sync-review display."""
-    raw_latitude = _get_property(root, f"{{{namespace}}}{prefix}GPSLatitude")
-    raw_longitude = _get_property(root, f"{{{namespace}}}{prefix}GPSLongitude")
+def _sync_preview_gps_pair(root, namespace=NS_EXIF, prefix="", vireo_owns=False):
+    """Read one current or backed-up GPS pair for sync-review display.
+
+    When Vireo owns the current coordinate (``vireo:gpsSource'' is
+    set on the sidecar), read only Vireo's plain occurrence so the
+    preview reflects the value Vireo just wrote -- otherwise a
+    higher-scoring qualified sibling ``foo:source="camera"'' would
+    still be returned as authoritative while Vireo's marker says
+    ``assigned''. When no Vireo marker is present, fall back to the
+    default ranking so a genuinely user-authored qualified value
+    still wins.
+    """
+    def read(name):
+        if vireo_owns:
+            plain = _get_plain_property_value(root, name)
+            if plain is not None:
+                return plain
+        return _get_property(root, name)
+
+    raw_latitude = read(f"{{{namespace}}}{prefix}GPSLatitude")
+    raw_longitude = read(f"{{{namespace}}}{prefix}GPSLongitude")
     if raw_latitude is None and raw_longitude is None:
         return None
     return {
@@ -1297,6 +1373,7 @@ def read_sync_preview_metadata(xmp_path):
 
     pick_to_flag = {"1": "flagged", "0": "none", "-1": "rejected"}
     raw_pick = _get_property(root, f"{{{NS_XMPDM}}}pick")
+    location_source = _get_property(root, f"{{{NS_VIREO}}}gpsSource")
     return {
         "status": "ok",
         "keywords": keywords,
@@ -1304,11 +1381,13 @@ def read_sync_preview_metadata(xmp_path):
         "rating": _get_property(root, f"{{{NS_XMP}}}Rating"),
         "rating_writable": True,
         "flag": pick_to_flag.get(raw_pick, raw_pick),
-        "location": _sync_preview_gps_pair(root),
+        "location": _sync_preview_gps_pair(
+            root, vireo_owns=location_source is not None,
+        ),
         "previous_location": _sync_preview_gps_pair(
             root, namespace=NS_VIREO, prefix="previous",
         ),
-        "location_source": _get_property(root, f"{{{NS_VIREO}}}gpsSource"),
+        "location_source": location_source,
         "location_keywords": _get_property(root, LOCATION_KEYWORDS_MARKER),
         "edit_recipe": _get_property(root, f"{{{NS_VIREO}}}editRecipe"),
     }
@@ -1810,22 +1889,7 @@ class SidecarEditor:
             self._dirty = True
         return removed
 
-    def _is_plain_occurrence(self, entry, parent_map):
-        """True when the ``(owner, child)`` entry is a plain occurrence.
-
-        Same predicate used by :meth:`_delete_plain_property_copies`
-        and :meth:`_restore_plain_property_value`: an attribute form
-        is plain when its owner Description has no effective inherited
-        ``xml:lang''; a child element is plain when it carries no own
-        qualifier structure or attributes AND no effective inherited
-        ``xml:lang'' reaches it.
-        """
-        owner, child = entry
-        if child is None:
-            return not _ancestor_carries_xml_qualifier(owner, parent_map)
-        if _simple_prop_carries_qualifier(child):
-            return False
-        return not _ancestor_carries_xml_qualifier(child, parent_map)
+    _is_plain_occurrence = staticmethod(_is_plain_property_occurrence)
 
     def _set_plain_property_value(self, desc, name, value):
         """Set a simple property's value, landing only on plain occurrences.
@@ -1844,11 +1908,7 @@ class SidecarEditor:
         the tree changed.
         """
         parent_map = _build_parent_map(self._root)
-        found = _property_occurrences(self._root, name)
-        plain = [
-            entry for entry in found
-            if self._is_plain_occurrence(entry, parent_map)
-        ]
+        plain = _plain_property_occurrences(self._root, name)
         changed = False
         if plain:
             owner, child = plain[0]
@@ -2148,13 +2208,23 @@ class SidecarEditor:
             "GPSVersionID": f"{{{NS_EXIF}}}GPSVersionID",
         }
 
-        # First Vireo write: preserve any GPS another app had already written
-        # so clearing the Vireo-assigned location can restore it. Rewrites of
-        # an existing Vireo GPS keep the original backup.
+        # First Vireo write: preserve any GPS another app had already
+        # written so clearing the Vireo-assigned location can restore
+        # it. Rewrites of an existing Vireo GPS keep the original
+        # backup. Back up the PLAIN occurrence's value specifically
+        # (via ``_get_plain_property_value''): that's the occurrence
+        # ``_set_plain_property_value'' will overwrite, so the backup
+        # matches what a later restore needs to write back into it.
+        # A higher-scoring qualified sibling isn't Vireo's to back up
+        # and isn't what the restore path targets; capturing its
+        # value here would leave the plain occurrence's original
+        # coordinate permanently lost after a clear-and-restore.
+        # When no plain occurrence exists Vireo will create one and
+        # a later remove can just delete it -- no backup is needed.
         changed = False
         if self._get(marker) is None:
             for name, attr in exif_attrs.items():
-                existing = self._get(attr)
+                existing = _get_plain_property_value(self._root, attr)
                 if existing is not None:
                     changed |= self._set_properties(
                         desc, {f"{{{NS_VIREO}}}previous{name}": existing},
